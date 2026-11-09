@@ -242,7 +242,7 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
-            crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
         }
     }

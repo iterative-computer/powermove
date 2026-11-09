@@ -60,6 +60,8 @@ pub struct Controller {
     pub opening_name: Option<String>,
     /// The project whose panels haven't published since it landed.
     pub settling: Option<String>,
+    /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
+    pub(crate) open_timer: crate::diag::OpenTimer,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -322,6 +324,10 @@ impl Controller {
                                     v.message = format!("Recovery warning: {message}");
                                     v.errors.borrow_mut().push("Recovery", &message);
                                 }
+                                KernelEvent::Fault { message } => {
+                                    v.message = "Something went wrong; see the Error Log.".into();
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
                                 KernelEvent::Notice { notice, .. } => {
                                     v.message = format!("Kernel notice: {notice:?}")
                                 }
@@ -390,6 +396,7 @@ impl Controller {
             busy: None,
             opening_name: None,
             settling: None,
+            open_timer: Default::default(),
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -1065,6 +1072,7 @@ impl Controller {
         self.busy = Some(crate::platform::Busy::begin("Opening a project"));
         self.message = format!("Opening “{name}”…");
         self.opening_name = Some(name.clone());
+        self.open_timer.begin();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let _operation = operation;
@@ -1127,8 +1135,10 @@ impl Controller {
                         decision,
                         info,
                     })) => {
+                        v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
                         v.adopt(session, decision, info.history_rejected, cx);
+                        v.report_first_frame(cx);
                         if previous_save_failed {
                             v.message.push_str(
                                 " · Previous project could not be saved; its recovery journal is retained",
@@ -1141,7 +1151,11 @@ impl Controller {
                         v.message = String::new();
                         v.focus_project(&project, cx);
                     }
-                    Some(Err(error)) => v.report_open_failure(&name, path, &error, cx),
+                    Some(Err(error)) => {
+                        v.open_timer
+                            .mark("failed", serde_json::json!({"message": error.to_string()}));
+                        v.report_open_failure(&name, path, &error, cx)
+                    }
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
@@ -1149,6 +1163,38 @@ impl Controller {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+    /// `PM_NATIVE_MAIN_TRACE`: when the viewer first presents the opened project.
+    fn report_first_frame(&mut self, cx: &mut Context<Self>) {
+        if !self.open_timer.active() {
+            return;
+        }
+        let Some(doc) = self.published.as_ref().map(|p| p.snapshot.doc_id) else {
+            return;
+        };
+        let timer = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..24_000 {
+                let shown = this.update(cx, |v, _| {
+                    let status = v.viewer.as_ref().map(|v| v.status());
+                    let frame = status.as_ref().and_then(|s| s.frame.as_ref());
+                    if let Some(f) = frame.filter(|f| f.stamp.doc_id == doc && f.gpu_ok) {
+                        v.open_timer.mark("first_frame", serde_json::json!({"cache_hit": f.cache_hit}));
+                        return true;
+                    }
+                    if let Some(error) = status.and_then(|s| s.error) {
+                        v.open_timer.mark("viewer_error", serde_json::json!({"message": error}));
+                        return true;
+                    }
+                    false
+                });
+                if shown.unwrap_or(true) {
+                    break;
+                }
+                timer.timer(std::time::Duration::from_millis(5)).await;
+            }
         })
         .detach();
     }

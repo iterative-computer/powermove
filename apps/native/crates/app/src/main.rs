@@ -93,6 +93,7 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
 }
 
 fn main() -> Result<()> {
+    diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let headless = args
         .first()
