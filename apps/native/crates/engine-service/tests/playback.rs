@@ -124,27 +124,44 @@ fn scene(s: &Snapshot, media: &MediaCatalog) -> Scene {
     }
 }
 
+/// The pixel at output `(x, y)` of a 320 × 180 frame.
+fn at(pixels: &[[f64; 3]], x: usize, y: usize) -> [f64; 3] {
+    pixels[y * 320 + x]
+}
+/// The Media Offline card's ground (neutral) or hatch (red), never the
+/// composition's blue-grey background (#101820).
+fn card(p: [f64; 3]) -> bool {
+    p[0] >= p[2] && p[0] < 0.5
+}
+/// The healthy red layer above the clip (comp x 120, so output x 60).
+fn red(p: [f64; 3]) -> bool {
+    p[0] > 0.4 && p[1] < 0.2
+}
+
 #[test]
-fn an_offline_clip_leaves_the_rest_of_the_frame_on_screen() {
+fn an_offline_clip_draws_its_card_and_leaves_the_rest_of_the_frame_on_screen() {
     let s = project("gone");
     let service = service("isolation");
     let v = service
         .viewer(config(s, catalog("gone", None), output(320, 180)))
         .unwrap();
     v.capture_next().unwrap();
-    let status = wait(&v, "a frame with one failed layer", |s| {
+    let status = wait(&v, "a frame with an offline clip", |s| {
         s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
     });
-    assert_eq!(status.error, None, "one layer never fails the frame");
+    assert_eq!(status.error, None, "an offline clip never fails the frame");
+    // The card names the file, so the clip is not a "Not drawn" layer.
     assert!(
-        status.layer_failures.iter().any(|f| f.layer == "v"),
+        !status.layer_failures.iter().any(|f| f.layer == "v"),
         "{:?}",
         status.layer_failures
     );
     let pixels = status.frame.unwrap().pixels.unwrap();
+    assert!(card(at(&pixels, 310, 170)), "the card fills the clip's box");
+    assert!(card(at(&pixels, 250, 10)), "the card fills the clip's box");
     assert!(
-        pixels.iter().any(|p| p[0] > 0.4 && p[1] < 0.2),
-        "the healthy layer above the offline clip is on screen"
+        red(at(&pixels, 60, 90)),
+        "the healthy layer above stays on screen"
     );
 }
 
@@ -342,6 +359,7 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
             s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
         })
     };
+    v.capture_next().unwrap();
     let status = settled(&v, "Automatic");
     assert!(
         status.layer_failures.is_empty(),
@@ -349,10 +367,27 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 1);
+    let proxy_frame = status.frame.clone().unwrap().pixels;
+    v.capture_next().unwrap();
     v.media_mode(MediaMode::Originals).unwrap();
     let status = settled(&v, "Originals");
-    assert!(status.layer_failures.iter().any(|f| f.layer == "v"));
+    // Offline in Originals: the clip draws its Media Offline card (not a
+    // failed layer), and the healthy layer above stays.
+    assert!(
+        !status.layer_failures.iter().any(|f| f.layer == "v"),
+        "{:?}",
+        status.layer_failures
+    );
     assert_eq!(status.proxied, 0);
+    let card_frame = status.frame.clone().unwrap().pixels.expect("captured");
+    assert!(card(at(&card_frame, 310, 170)));
+    assert!(red(at(&card_frame, 60, 90)));
+    assert_ne!(
+        Some(&card_frame),
+        proxy_frame.as_ref(),
+        "the card replaces the proxy"
+    );
+    v.capture_next().unwrap();
     v.media_mode(MediaMode::ProxyOnly).unwrap();
     let status = settled(&v, "Proxy Only");
     assert!(
@@ -361,6 +396,9 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 1);
+    // Back to a readable file: the card goes away.
+    let back = status.frame.clone().unwrap().pixels.expect("captured");
+    assert_ne!(back, card_frame, "the proxy replaces the card");
 
     let mut both = MediaCatalog::default();
     both.originals.insert("a".into(), "/original.mov".into());
