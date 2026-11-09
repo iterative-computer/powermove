@@ -653,18 +653,23 @@ impl Builtins {
         let pool = RuntimePool::new(
             format!("window:{project}"),
             Config {
-                limits: Limits::default(),
+                limits: Limits {
+                    // A mounted built-in holds about 10 MiB.
+                    initial_heap_bytes: 32 * 1024 * 1024,
+                    ..Limits::default()
+                },
                 watchdog: WatchdogPolicy::default(),
                 kernel: broker.clone(),
                 host: broker.clone(),
                 watchdog_hooks: broker.clone(),
                 engine: Some(broker.clone()),
                 cache: CodeCache::new(4 * 1024 * 1024),
-                // Reserved per isolate at its heap ceiling (64 MiB), for the
-                // plan's 64-isolate budget per window: the nine built-ins and
-                // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
-                // Closed panels park to give theirs back.
-                admission: Admission::new(64 * 64 * 1024 * 1024),
+                // The process's one cage account: each isolate (the nine
+                // built-ins and the user's v4 extensions, §3.4/§3.7) starts
+                // at a 32 MiB slice and grows toward its 64 MiB ceiling only
+                // while every window's isolates together leave room. Closed
+                // panels park to give theirs back.
+                admission: Admission::cage(),
             },
         )?;
         Ok(Self {

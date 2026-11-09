@@ -182,6 +182,10 @@ fn fixture_with(change: impl FnOnce(&mut Config)) -> Fixture {
 fn fixture() -> Fixture {
     fixture_with(|_| {})
 }
+/// What an isolate with default limits reserves when it starts.
+fn slice() -> usize {
+    crate::vm::HeapPlan::new(&Limits::default()).initial()
+}
 fn wait<T>(ticket: Ticket<T>) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -661,10 +665,10 @@ fn async_reload_stages_until_success_and_retains_callable_history() {
     );
     assert_eq!(eval(&r, "storage.n"), "8");
     assert!(f.kernel.revoked.lock().unwrap().contains(&first.generation));
-    assert!(f.admission.used() >= 128 * 1024 * 1024);
+    assert!(f.admission.used() >= 2 * slice());
     drop(pin);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while f.admission.used() > 64 * 1024 * 1024 {
+    while f.admission.used() > slice() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(3));
     }
@@ -932,7 +936,7 @@ fn queued_fetches_wait_for_room_and_never_refuse_the_engine() {
 }
 #[test]
 fn admission_refuses_then_releases_after_owner_disposal() {
-    let f = fixture_with(|c| c.admission = Admission::new(64 * 1024 * 1024));
+    let f = fixture_with(|c| c.admission = Admission::new(slice()));
     let r = f.pool.realm(RealmKind::Compat).unwrap();
     assert!(matches!(
         f.pool.realm(RealmKind::Compiler),
@@ -976,6 +980,102 @@ fn near_heap_callback_terminates_in_subprocess() {
         output.status.success(),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[test]
+fn heaps_grow_from_their_slice_while_the_account_has_room_and_trim_when_idle() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("grows".into()))
+        .unwrap();
+    eval(&r, "1");
+    assert_eq!(f.admission.used(), slice());
+    // 40 MiB that stays alive: past the 16 MiB slice, under the 64 MiB ceiling.
+    eval(
+        &r,
+        "globalThis.kept=[];for(let i=0;i<40;i++)kept.push(new Array(131072).fill(i))",
+    );
+    let grown = f.admission.used();
+    let measured = wait(r.measure().unwrap()).unwrap();
+    assert_eq!(measured[0].memory.reserved_heap_bytes, grown);
+    assert!(grown > slice() + 16 * 1024 * 1024, "{grown}");
+    assert!(grown <= Limits::default().heap_bytes);
+    // Freed and idle: the isolate gives back what it grew past what lives.
+    eval(&r, "globalThis.kept=null");
+    let deadline = Instant::now() + IDLE_WAIT;
+    while f.admission.used() >= grown {
+        assert!(
+            Instant::now() < deadline,
+            "{} never trimmed",
+            f.admission.used()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let trimmed = f.admission.used();
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .reserved_heap_bytes,
+        trimmed
+    );
+    assert!(trimmed >= slice());
+    // It grows again after a trim, and the account stays exact.
+    eval(
+        &r,
+        "globalThis.kept=[];for(let i=0;i<40;i++)kept.push(new Array(131072).fill(i))",
+    );
+    assert!(f.admission.used() > trimmed);
+    close(&r);
+    assert_eq!(f.admission.used(), 0);
+}
+const IDLE_WAIT: Duration = Duration::from_secs(20);
+#[test]
+fn full_account_child() {
+    if std::env::var_os("PM_RUNTIME_SYNTHETIC_ACCOUNT_CHILD").is_none() {
+        return;
+    }
+    // Room for two slices and 24 MiB of growth, shared by two isolates.
+    let f = fixture_with(|c| c.admission = Admission::new(2 * slice() + 24 * 1024 * 1024));
+    let quiet = f
+        .pool
+        .realm(RealmKind::V4Extension("quiet".into()))
+        .unwrap();
+    let hungry = f
+        .pool
+        .realm(RealmKind::V4Extension("hungry".into()))
+        .unwrap();
+    eval(&quiet, "storage.n=3");
+    eval(&hungry, "storage.n=5");
+    assert!(matches!(
+        wait(
+            hungry
+                .eval("globalThis.kept=[];for(;;)kept.push(new Array(65536).fill(1))")
+                .unwrap()
+        ),
+        Err(Error::Quota(HEAP_FULL))
+    ));
+    // Only that extension failed: it recovered from its storage, the other
+    // kept running, and the account is back to the two slices.
+    assert_eq!(eval(&hungry, "storage.n"), "5");
+    assert_eq!(eval(&quiet, "storage.n"), "3");
+    assert_eq!(f.admission.used(), 2 * slice());
+    close(&hungry);
+    close(&quiet);
+    assert_eq!(f.admission.used(), 0);
+}
+#[test]
+fn a_full_account_fails_one_isolate_not_the_process() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::full_account_child", "--nocapture"])
+        .env("PM_RUNTIME_SYNTHETIC_ACCOUNT_CHILD", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -1570,7 +1670,7 @@ fn repeated_reload_accounts_for_history_retirement_and_failed_candidate_effects(
         .pool
         .realm(RealmKind::V4Extension("waves".into()))
         .unwrap();
-    let heap = 64 * 1024 * 1024;
+    let heap = slice();
     let mut history = Vec::new();
     for i in 0..20 {
         eval(
@@ -1694,10 +1794,10 @@ fn last_history_pin_retires_idle_generation_without_another_submission() {
     eval(&r, "globalThis.undo=()=>42");
     let pin = wait(r.pin().unwrap()).unwrap();
     wait(r.reload("1").unwrap()).unwrap();
-    assert_eq!(f.admission.used(), 128 * 1024 * 1024);
+    assert_eq!(f.admission.used(), 2 * slice());
     drop(pin);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while f.admission.used() != 64 * 1024 * 1024 {
+    while f.admission.used() != slice() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(1));
     }

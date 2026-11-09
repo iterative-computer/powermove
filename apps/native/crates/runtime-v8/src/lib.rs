@@ -12,6 +12,7 @@ mod vm;
 pub use cache::{CacheKey, CodeCache, SnapshotKind};
 pub use host::*;
 pub use runtime::*;
+pub use vm::HEAP_FULL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

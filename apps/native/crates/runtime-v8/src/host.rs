@@ -100,7 +100,12 @@ pub trait WatchdogHooks: Send + Sync + 'static {
 }
 #[derive(Debug, Clone)]
 pub struct Limits {
+    /// The isolate's heap ceiling. It is not reserved up front: the isolate
+    /// starts at `initial_heap_bytes` and grows toward this only while the
+    /// shared admission account has room (`Admission::cage`).
     pub heap_bytes: usize,
+    /// The slice reserved when the isolate starts.
+    pub initial_heap_bytes: usize,
     pub external_bytes: usize,
     pub max_source_bytes: usize,
     pub max_host_ops: usize,
@@ -123,6 +128,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             heap_bytes: 64 * 1024 * 1024,
+            initial_heap_bytes: 16 * 1024 * 1024,
             external_bytes: 32 * 1024 * 1024,
             max_source_bytes: 8 * 1024 * 1024,
             max_host_ops: 64,
@@ -251,6 +257,9 @@ pub struct IsolateMemory {
     /// Capacity held while a synchronous native engine call executes.
     pub engine_reserved_bytes: usize,
     pub snapshot_bytes: usize,
+    /// What the isolate holds of its admission account: its current heap
+    /// limit, which grows on demand and shrinks back when it idles.
+    pub reserved_heap_bytes: usize,
 }
 #[derive(Debug, Clone)]
 pub struct GenerationMemory {
