@@ -222,6 +222,27 @@ impl TimelineSurface {
             late: None,
         };
         this.restore_view();
+        // The render bar follows the disk render cache (Render Selection).
+        let changes = crate::render_frames::watch();
+        cx.spawn(async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let alive = this.update(cx, |s, cx| {
+                    let Some(scene) = &s.scene else { return };
+                    let bars = crate::render_frames::bars(s.model.index.comp_id.as_deref());
+                    let mut next = Scene::clone(scene);
+                    next.bars = bars;
+                    let next = Arc::new(next);
+                    s.scene = Some(next.clone());
+                    s.outline.set_scene(Some(next));
+                    s.frame = None;
+                    s.changed(false, cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             // Indexing the document is O(layers): never on the main thread.
             let created = cx
@@ -1575,7 +1596,8 @@ impl ModelPresenter for Presenter {
 }
 fn build(client: &TimelineClient, tokens: &Tokens) -> Option<Built> {
     let published: Arc<Published> = client.kernel.published(&client.project)?;
-    let scene = Scene::from_model(&client.model, &Presenter, tokens, 0.).ok()?;
+    let mut scene = Scene::from_model(&client.model, &Presenter, tokens, 0.).ok()?;
+    scene.bars = crate::render_frames::bars(client.model.index.comp_id.as_deref());
     let graph = (client.model.graph_display != GraphDisplay::DopeSheet)
         .then(|| {
             let mut mirror = QueryMirror::new(&published);

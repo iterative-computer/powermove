@@ -1131,6 +1131,13 @@ impl ProMedia {
         storage_root(&self.inner.profile, &self.preferences())
     }
 
+    /// Storage › Renders' folder for the disk render cache, opened (and
+    /// checked) at the current location. Disk work: call off the main thread.
+    pub fn render_frames(&self) -> Option<(PathBuf, u64)> {
+        self.inner.storage(&self.preferences()).ok()?;
+        Some((self.location().join("Renders").join("frames"), u64::MAX))
+    }
+
     /// Writes Settings › Media's row `id`: checked and applied now, saved on
     /// the file thread.
     pub fn set_preference(&self, id: &str, value: &serde_json::Value) -> Result<(), String> {

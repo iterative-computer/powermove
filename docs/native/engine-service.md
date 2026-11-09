@@ -476,3 +476,22 @@ session was locked, so there are no on-screen rows.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):
 a standalone probe found no latency difference across those settings.
+
+## Disk render cache
+
+- View › Render Selection queues the selected layer's span (or the work area)
+  of the open composition; the engine renders one frame at a time once the
+  viewer has rested 0.5 s, as the paused viewer draws it (RGBA16F at the
+  composition's size), and writes it to Storage › Renders off the engine
+  thread. A Background Tasks row shows frame progress; Cancel stops the queue.
+- Frames are keyed by a fingerprint of the whole composition (canonical
+  document, contributed definitions, media files' path/size/mtime, renderer
+  version; with raster overrides also the session's wrappers). Any edit misses
+  every frame; older frames stay until the quota or Clear… removes them.
+- Playing and scrubbing read a frame on disk instead of rendering it and the
+  present pass samples it as the whole canvas (never upscaled past the
+  composition's size). Paused frames always render.
+- The timeline's render bar shows Rendering, Rendered and Kept stretches.
+  Keep Rendered pins the selection's rendered frames against the quota and
+  Clear…; Delete Rendered Frames removes the composition's frames, kept too.
+

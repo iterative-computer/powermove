@@ -275,6 +275,7 @@ impl Controller {
             }
         }
         self.update_builtins(cx);
+        crate::session::sync_render_storage(&self.pro_media, &self.engine);
         if let Some(tasks) = &self.tasks_window {
             tasks.update(cx, |_, cx| cx.notify());
         }

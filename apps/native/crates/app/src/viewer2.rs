@@ -158,6 +158,9 @@ pub enum Action {
     /// An index of [`crate::colour::CAMERA_LOGS`], or the file's own reading.
     Interpret(Option<usize>),
     CleanAperture,
+    RenderSelection,
+    KeepRendered,
+    DeleteRendered,
 }
 /// View › Viewer Media, in the order of the menu.
 const MEDIA_MODES: [(MediaMode, &str); 4] = [
@@ -167,7 +170,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 21] = [
+    const ALL: [Action; 24] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -189,6 +192,9 @@ impl Action {
         Action::Interpret(Some(4)),
         Action::Interpret(Some(5)),
         Action::CleanAperture,
+        Action::RenderSelection,
+        Action::KeepRendered,
+        Action::DeleteRendered,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -287,6 +293,14 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
                 let item = menu_item(mtm, label, action, &target, "");
                 view.addItem(&item);
                 items.push((action, item));
+            }
+            view.addItem(&NSMenuItem::separatorItem(mtm));
+            for (label, action) in [
+                ("Render Selection", Action::RenderSelection),
+                ("Keep Rendered", Action::KeepRendered),
+                ("Delete Rendered Frames", Action::DeleteRendered),
+            ] {
+                view.addItem(&menu_item(mtm, label, action, &target, ""));
             }
             view.addItem(&NSMenuItem::separatorItem(mtm));
             view.addItem(&menu_item(mtm, "Apply LUT…", Action::ApplyLut, &target, ""));
@@ -405,7 +419,12 @@ pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: b
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
-                    Action::ApplyLut | Action::Interpret(_) | Action::CleanAperture => false,
+                    Action::ApplyLut
+                    | Action::Interpret(_)
+                    | Action::CleanAperture
+                    | Action::RenderSelection
+                    | Action::KeepRendered
+                    | Action::DeleteRendered => false,
                 };
                 item.setState(if on { 1 } else { 0 });
             }
@@ -695,6 +714,9 @@ impl Controller {
                 self.interpret_selection(log, cx);
             }
             Action::CleanAperture => self.crop_selection(cx),
+            Action::RenderSelection => self.render_selection(cx),
+            Action::KeepRendered => self.keep_rendered(cx),
+            Action::DeleteRendered => self.delete_rendered(cx),
         }
     }
     pub fn set_media_mode(&mut self, mode: MediaMode, cx: &mut Context<Self>) {
