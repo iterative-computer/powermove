@@ -3,7 +3,7 @@
   import type { Layer, PowermoveAPI } from 'powermove';
   import SceneField from './SceneField.svelte';
   import type { SceneUiState } from './scene-state.svelte';
-  import { SKY_PRESETS, WORLD_MODES, WORLD_LIGHT_FIELDS, WORLD_SUN_FIELDS, WORLD_FOG_FIELDS, domePoint, domeAngles, environmentSourceChoices, pickEnvironmentImage, sourceKey, sourceFromKey } from './environment-ui';
+  import { SKY_PRESETS, SKY_PRESET_VALUES, WORLD_MODES, WORLD_LIGHT_FIELDS, WORLD_SUN_FIELDS, WORLD_FOG_FIELDS, domePoint, domeAngles, environmentSourceChoices, pickEnvironmentImage, sourceKey, sourceFromKey } from './environment-ui';
 
   /* The composition's World: sky preset, sun on a small dome, an image,
      composition or layer as the environment, and atmosphere. `edit` applies
@@ -64,6 +64,11 @@
     edit({ mode: 'hdri', source: sourceFromKey(String(next)) }, 'Environment source');
   }
   const gradient = (p: typeof SKY_PRESETS[number]) => `linear-gradient(180deg,${p.sky[0]} 0%,${p.sky[1]} 62%,${p.sky[2]} 100%)`;
+  /* Rendered by Studio's sky model; the gradient stands in where it can't be. */
+  const rendered = untrack(() => Object.fromEntries(SKY_PRESETS.map(p => {
+    const v = SKY_PRESET_VALUES[p.id];
+    return [p.id, api.scene3d.studio?.skyThumbnail?.({ elevation: v.elevation!, haze: v.haze!, overcast: v.overcast!, sunIntensity: v.sunIntensity! }, 96) ?? null];
+  })) as Record<string, string | null>);
 </script>
 
 <Section {api} {title} />
@@ -72,10 +77,14 @@
     {@const on = world.mode === 'sky' && world.preset === preset.id}
     <button type="button" role="radio" aria-checked={on} class="preset" class:on title={preset.label} aria-label={preset.label}
       onclick={() => edit({ mode: 'sky', preset: preset.id }, `Sky: ${preset.label}`)}>
-      <span class="thumb" style={`background:${gradient(preset)}`}>
-        {#if preset.sun}<span class="disc" style={`background:${preset.sun};box-shadow:0 0 8px 3px ${preset.sun};bottom:${18 + preset.elevation / 3}%`}></span>{/if}
-        <span class="ground"></span>
-      </span>
+      {#if rendered[preset.id]}
+        <span class="thumb" data-rendered style={`background:center/cover url(${rendered[preset.id]})`}></span>
+      {:else}
+        <span class="thumb" style={`background:${gradient(preset)}`}>
+          {#if preset.sun}<span class="disc" style={`background:${preset.sun};box-shadow:0 0 8px 3px ${preset.sun};bottom:${18 + preset.elevation / 3}%`}></span>{/if}
+          <span class="ground"></span>
+        </span>
+      {/if}
       <span class="name">{preset.label}</span>
     </button>
   {/each}

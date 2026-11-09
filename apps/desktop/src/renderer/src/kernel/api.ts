@@ -483,6 +483,8 @@ export interface Scene3DAPI {
     commitHighlight(lightId: string): void;
     /** A finish rendered by Studio on a sphere (data URL), or null without WebGPU. */
     swatch(presetId: string): Promise<string | null>;
+    /** A sky preset seen toward the sun, from Studio's sky model (PNG data URL), or null without a canvas. */
+    skyThumbnail(sky: { elevation: number; haze: number; overcast: number; sunIntensity: number; intensity?: number }, size?: number): string | null;
   };
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
   convert(layerId: string): EditResult;
