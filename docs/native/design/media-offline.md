@@ -36,13 +36,23 @@ tooltip.
 
 ## Missing extension effect
 
-The layer still draws with the effect bypassed. No card: the timeline clip
-and the Effect Controls row carry the sign (a `danger` exclamation and
-`Missing effect`), never the picture.
+The layer still draws with the effect bypassed, so the picture is the user's
+and nothing is drawn over it (language §10: never cover the image). The
+quieter sign is on the layer's clip: `Missing effect` in `danger` at
+`minimum`, trailing, with the effect's name in its tooltip.
 
 ## Timeline
 
 Clips of missing media (video, image and audio-only layers) use the same
 sign: the clip keeps its shape and name, its fill becomes `colors.viewer` with
-the `danger` hatch, its name is followed by `Offline` in `danger`. Audio-only
-layers have no picture to replace, so this lane treatment is their sign.
+the `danger` hatch (`translucency.offline_hatch`), and `Offline` in `danger`
+leads its name. Audio-only layers have no picture to replace, so this lane
+treatment is their sign. "Offline" means what the viewer can't read in its
+media mode, from the same catalog the engine draws from: a missing original
+with a proxy plays the proxy in Automatic and is not offline there.
+
+## Agent stills
+
+`render_frames` runs as a one-frame preview job: it skips the export's offline
+refusal and isolates failing layers, so stills show the card. Exports (the
+Export panel, `export_video`) never set it.
