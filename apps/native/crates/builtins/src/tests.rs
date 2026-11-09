@@ -2839,7 +2839,7 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
             .unwrap();
     };
     let mut presenter = properties::Properties::default();
-    let mut section = |id: &str, presenter: &mut properties::Properties| {
+    let section = |id: &str, presenter: &mut properties::Properties| {
         select(id);
         let mut model = pm_panel_inspector::Inspector::new(
             kernel.published("synthetic").unwrap(),
