@@ -308,7 +308,7 @@
   },
   {
    "id": "prores422",
-   "media": "../../../../../../apps/desktop/e2e/fixtures/prores422.mov",
+   "media": "../../../../../fixtures/prores422.mov",
    "time": 0.25,
    "reading": {
     "matrix": "bt601",
@@ -321,7 +321,7 @@
   },
   {
    "id": "prores4444-alpha",
-   "media": "../../../../../../apps/desktop/e2e/fixtures/prores4444-alpha.mov",
+   "media": "../../../../../fixtures/prores4444-alpha.mov",
    "time": 0.25,
    "reading": {
     "matrix": "bt601",

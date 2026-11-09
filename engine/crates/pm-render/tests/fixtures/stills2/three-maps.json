@@ -1088,7 +1088,7 @@
   "level1Linear": "60b5affbcb355f2fb4733027b26ce77b40cee7d79e0a143eb881cd9cf69c996e"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still-red.png",
+  "file": "../../../../../fixtures/still-red.png",
   "outcome": "texels",
   "width": 160,
   "height": 90,
@@ -1097,7 +1097,7 @@
   "level1Linear": "7abc24b478ed91b6caefed7bb8fa3266daaf15d2c133f953e3ee4724124b7b34"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still-alpha.png",
+  "file": "../../../../../fixtures/still-alpha.png",
   "outcome": "texels",
   "width": 160,
   "height": 90,
@@ -1106,7 +1106,7 @@
   "level1Linear": "763af7d090df1cce85adf3de6759e2cc9bae01e0abfc927fc36109caa6f5fa8b"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still.webp",
+  "file": "../../../../../fixtures/still.webp",
   "outcome": "texels",
   "width": 160,
   "height": 90,
@@ -1115,7 +1115,7 @@
   "level1Linear": "4b977677dea3f268d10ccd55db15b8533bd8999add39593c500ee7481daacfad"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still.avif",
+  "file": "../../../../../fixtures/still.avif",
   "outcome": "texels",
   "width": 160,
   "height": 90,
@@ -1124,7 +1124,7 @@
   "level1Linear": "7abc24b478ed91b6caefed7bb8fa3266daaf15d2c133f953e3ee4724124b7b34"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still.heic",
+  "file": "../../../../../fixtures/still.heic",
   "outcome": "texels",
   "width": 160,
   "height": 90,
@@ -1133,7 +1133,7 @@
   "level1Linear": "b40be7eaa1e2ed59ed9b597889559bc9c4d9f08d124ba47185befa82fc1b12dc"
  },
  {
-  "file": "../../../../../../apps/desktop/e2e/fixtures/still.tiff",
+  "file": "../../../../../fixtures/still.tiff",
   "outcome": "texels",
   "width": 160,
   "height": 90,
