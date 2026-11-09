@@ -1,13 +1,14 @@
 // Regenerate independent tagged 3D read fixtures. Test-only dependency: zod
-// 4.6.5 (the tag's version). Set PM_ORACLE_MODULE_ROOT to an npm prefix holding
-// that version, or use apps/desktop's installed dependencies. Never run an app.
+// 4.6.5 (the tag's version) in the npm prefix PM_ORACLE_MODULE_ROOT. Never run an app.
 import {evaluate,root} from './tag-oracle.mjs';
 import {execFileSync} from 'node:child_process';
 const tag=file=>execFileSync('git',['show',`b81b94c66:${file}`],{cwd:root,encoding:'utf8'});
 import {createRequire} from 'node:module';
 import path from 'node:path';
 import fs from 'node:fs';
-const require=createRequire(path.join(process.env.PM_ORACLE_MODULE_ROOT??path.join(root,'apps/desktop'),'package.json'));
+const zodRoot=process.env.PM_ORACLE_MODULE_ROOT;
+if(!zodRoot) throw Error('Set PM_ORACLE_MODULE_ROOT to a disposable npm prefix containing the tagged Zod 4.6.5');
+const require=createRequire(path.join(zodRoot,'package.json'));
 const {z}=require('zod');
 if(require('zod/package.json').version!=='4.6.5')throw Error('Tagged zod 4.6.5 required');
 let layers;
