@@ -143,7 +143,12 @@ impl Render for TextField {
             } else {
                 self.tokens.metrics.field
             }))
-            .px(px(self.tokens.metrics.gap))
+            // A well with a unit trades side padding for the value's room.
+            .px(px(if self.unit.is_some() {
+                self.tokens.metrics.inner_radius
+            } else {
+                self.tokens.metrics.gap
+            }))
             .border_1()
             .border_color(rgb(self.tokens.colors.separator))
             .rounded(px(self.tokens.metrics.control_radius))
