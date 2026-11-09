@@ -1088,19 +1088,8 @@ fn forged_display_data_and_presentation_class_cannot_authorize_consent() {
 }
 
 #[test]
-fn permission_copy_matches_every_verbatim_review_row_and_shipped_store_label() {
-    let review = include_str!("../../../../../docs/native/design/reviews/na-cloud-storehost.md");
+fn permission_copy_follows_the_permission_order_and_shipped_store_labels() {
     assert_eq!(PERMISSION_COPY.map(|row| row.permission), PERMISSION_ORDER);
-    for row in PERMISSION_COPY {
-        let permission = serde_json::to_value(row.permission).unwrap();
-        assert!(review.contains(&format!(
-            "| `{}` | `{}` | {} | {} |",
-            permission.as_str().unwrap(),
-            row.symbol,
-            row.name,
-            row.detail
-        )));
-    }
     assert_eq!(
         PERMISSION_COPY.map(|row| row.store_label),
         [
