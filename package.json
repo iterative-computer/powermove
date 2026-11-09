@@ -8,22 +8,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun run --cwd apps/desktop dev",
     "dev:www": "bun run --cwd apps/www dev",
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
-    "typecheck": "bun run --filter '*' typecheck",
-    "check": "bun run --cwd apps/desktop check:builtins",
-    "test:e2e": "bun run --cwd apps/desktop test:e2e",
-    "dist:mac": "bun run --cwd apps/desktop dist:mac",
-    "dist:release": "bun run --cwd apps/desktop dist:release",
-    "build:cli": "bun run --cwd packages/cli build",
-    "serve": "bun run --cwd packages/cli build && node packages/cli/bin/powermove.mjs serve"
+    "typecheck": "bun run --filter '*' typecheck"
   },
   "trustedDependencies": [
     "@anthropic-ai/claude-code",
     "@powermove/macos-haptics",
-    "electron",
     "esbuild"
   ],
   "engines": {

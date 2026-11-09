@@ -46,7 +46,7 @@ console.log(`MARA_REGISTRY_TOKEN=${maraToken}`);
 if (process.argv.includes('--publish')) {
   const health = await fetch('http://localhost:8787/health').catch(() => null);
   if (!health?.ok) throw new Error('Worker is not reachable at http://localhost:8787. Run `bun run dev:local` before `bun run local:seed --publish`.');
-  const desktop = resolve(cloud, '../desktop');
+  const { v1Desktop: desktop } = await import('./lib/v1-ref');
   const publisher = Bun.spawn(['bun', 'scripts/publish-builtins.mjs'], {
     cwd: desktop,
     env: { ...process.env, POWERMOVE_REGISTRY_URL: 'http://localhost:8787', POWERMOVE_REGISTRY_TOKEN: judeToken },

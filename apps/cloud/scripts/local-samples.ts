@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { Pool } from 'pg';
-import { publishExtensions, type ExtensionListing, type ExtensionPlan } from '../../desktop/scripts/lib/publish-builtins';
+import { publishExtensions, type ExtensionListing, type ExtensionPlan } from './lib/publish-builtins';
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
