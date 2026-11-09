@@ -213,8 +213,8 @@ struct Events {
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
     activating: Mutex<Option<String>>,
-    /// A synchronous layout read waiting for the page's answer to its request.
-    measuring: Mutex<Option<(u64, std::sync::mpsc::SyncSender<Value>)>>,
+    /// Synchronous layout reads and the page's answers to them.
+    measuring: Mutex<Measures>,
     /// A read already waited for a page that never started reading.
     page_missed: AtomicBool,
     dom_pending: AtomicBool,
@@ -269,8 +269,10 @@ impl RealmEvents for Arc<Events> {
     /// The owner routes the page's answer here (`Owner::page`) while the
     /// realm waits; the main thread never waits for it.
     fn measure_sync(&self, request: u64) -> Option<Value> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        *self.measuring.lock().unwrap() = Some((request, tx));
+        let rx = match self.measuring.lock().unwrap().wait(request) {
+            Ok(answer) => return Some(answer),
+            Err(rx) => rx,
+        };
         self.dom_ready();
         // A page still loading (the window just opened) answers once it
         // starts reading; a read answered with nothing would be remembered
@@ -288,8 +290,68 @@ impl RealmEvents for Arc<Events> {
         if first && answer.is_none() {
             self.page_missed.store(true, Ordering::Release);
         }
-        self.measuring.lock().unwrap().take();
+        self.measuring.lock().unwrap().waiting = None;
         answer
+    }
+}
+
+/// The first extension entries this process publishes drop the last run's
+/// D11 stops.
+static FIRST_ENTRIES: AtomicBool = AtomicBool::new(true);
+/// Whether D11 Stop turned the extension off for this run.
+pub fn stopped_this_run(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+    entry
+        .source
+        .get("hostRecord")
+        .and_then(|record| record.get("stopped"))
+        .and_then(pm_model::Value::as_bool)
+        == Some(true)
+}
+/// Ends a D11 stop on the entry (Settings, or an extension turning it on).
+pub fn clear_stop(entry: &mut pm_kernel::state::ExtensionEntry) {
+    if let Some(record) = entry
+        .source
+        .as_object_mut()
+        .and_then(|source| source.get_mut("hostRecord"))
+        .and_then(pm_model::Value::as_object_mut)
+    {
+        record.remove("stopped");
+    }
+}
+/// Synchronous layout reads: the read waiting for the page, and answers that
+/// came before their read started waiting (the request goes out with the
+/// realm's batch first, so the page can answer before the wait begins).
+#[derive(Default)]
+struct Measures {
+    waiting: Option<(u64, std::sync::mpsc::SyncSender<Value>)>,
+    early: VecDeque<(u64, Value)>,
+}
+impl Measures {
+    /// The answer, when it is already here; else where it will arrive.
+    fn wait(
+        &mut self,
+        request: u64,
+    ) -> std::result::Result<Value, std::sync::mpsc::Receiver<Value>> {
+        if let Some(index) = self.early.iter().position(|(r, _)| *r == request) {
+            return Ok(self.early.remove(index).unwrap().1);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.waiting = Some((request, tx));
+        Err(rx)
+    }
+    fn answer(&mut self, request: u64, message: &Value) {
+        match &self.waiting {
+            Some((waiting, reply)) if *waiting == request => {
+                let _ = reply.try_send(message.clone());
+            }
+            _ => {
+                // Only the latest few: a read waits for its own, just sent.
+                if self.early.len() >= 8 {
+                    self.early.pop_front();
+                }
+                self.early.push_back((request, message.clone()));
+            }
+        }
     }
 }
 
@@ -377,9 +439,9 @@ impl RasterInbox {
     }
     /// An export's frozen project, from its canonical document text, as the
     /// realm's mirror shows a project. Call off the main thread.
-    /// An export froze its project at `revision`: the realm answers its
-    /// layers from the live project while it is at that revision, and asks
-    /// for the frozen layer otherwise (`RasterHooks::pinned_layer`).
+    /// An export froze its project at `revision`: the realm answers for it
+    /// only while it is at that revision (behind: again; past: the export
+    /// fails rather than mix revisions).
     pub fn pin(&self, job: &str, revision: u64) -> std::result::Result<(), String> {
         self.inbox
             .lock()
@@ -1181,10 +1243,12 @@ impl Owner {
             // the blocked realm directly (and through its queue as usual).
             if message["kind"] == "layout"
                 && let (Some(request), Some(live)) = (message["request"].as_u64(), &self.realm)
-                && let Some((waiting, reply)) = &*live.events.measuring.lock().unwrap()
-                && *waiting == request
             {
-                let _ = reply.try_send(message.clone());
+                live.events
+                    .measuring
+                    .lock()
+                    .unwrap()
+                    .answer(request, &message);
             }
             self.eval(&format!(
                 "__compat.dom.receive({message});__compat.dom.flush()"
@@ -1267,17 +1331,22 @@ impl Owner {
         });
         self.publish_entries();
     }
+    /// The saved preference; turning an extension on also ends a D11 stop.
     fn persist_enabled(&self, id: &str, enabled: bool) {
         let _ = update_state::<String>(&self.config.kernel, |state| {
             Ok(state
                 .extensions
                 .get(id)
-                .filter(|entry| entry.enabled != enabled)
+                .filter(|entry| entry.enabled != enabled || (enabled && stopped_this_run(entry)))
                 .map(|entry| {
-                    vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    let mut entry = pm_kernel::state::ExtensionEntry {
                         enabled,
                         ..entry.clone()
-                    })]
+                    };
+                    if enabled {
+                        clear_stop(&mut entry);
+                    }
+                    vec![StateOp::Extension(entry)]
                 }))
         });
     }
@@ -1310,7 +1379,33 @@ impl Owner {
     }
     fn enabled(&self, id: &str) -> bool {
         let state = self.config.kernel.state();
-        state.extensions.get(id).is_none_or(|entry| entry.enabled)
+        state
+            .extensions
+            .get(id)
+            .is_none_or(|entry| entry.enabled && !stopped_this_run(entry))
+    }
+    /// D11 Stop: off for this run (every window), not in the saved
+    /// preference; Settings shows it off and turning it on clears this.
+    fn stop_for_this_run(&self, id: &str) {
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            Ok(state
+                .extensions
+                .get(id)
+                .filter(|e| !stopped_this_run(e))
+                .map(|entry| {
+                    let mut entry = entry.clone();
+                    if let Some(source) = entry.source.as_object_mut() {
+                        let mut record = source
+                            .get("hostRecord")
+                            .and_then(pm_model::Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        record.insert("stopped", pm_model::Value::Bool(true));
+                        source.insert("hostRecord", pm_model::Value::Object(record));
+                    }
+                    vec![StateOp::Extension(entry)]
+                }))
+        });
     }
     /// Settings and MCP read extensions from kernel state, as they do built-ins.
     fn publish_entries(&self) {
@@ -1325,8 +1420,15 @@ impl Owner {
                         .and_then(|entry| entry.source.as_object())
                         .cloned()
                         .unwrap_or_default();
-                    let summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
+                    // Stopped this run: kept while the app runs, gone at the
+                    // next launch's first publication.
+                    let stopped = !FIRST_ENTRIES.load(Ordering::Acquire)
+                        && previous.is_some_and(stopped_this_run);
+                    let mut summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
                     "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
+                    if stopped {
+                        summary["stopped"] = json!(true);
+                    }
                     source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
                     let next = pm_kernel::state::ExtensionEntry {
                         id: id.to_owned(),
@@ -1340,6 +1442,7 @@ impl Owner {
                 .collect();
             Ok((!ops.is_empty()).then_some(ops))
         });
+        FIRST_ENTRIES.store(false, Ordering::Release);
     }
     /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
     fn follow_state(&mut self) {
@@ -1349,7 +1452,8 @@ impl Owner {
             .iter()
             .filter_map(|record| {
                 let id = record["id"].as_str()?;
-                let enabled = state.extensions.get(id)?.enabled;
+                let entry = state.extensions.get(id)?;
+                let enabled = entry.enabled && !stopped_this_run(entry);
                 (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
             })
             .collect();
@@ -1736,19 +1840,29 @@ impl Owner {
         let transport = live.host.transport();
         let clock = (transport.time(), transport.playing());
         self.retire_realm();
-        self.restarts += 1;
+        // Repeated failures nobody can name stop the realm; a Stop that turns
+        // its culprit off is not a loop.
+        if culprit.is_none() {
+            self.restarts += 1;
+        }
         if let Some(id) = &culprit {
-            self.persist_enabled(id, false);
+            self.stop_for_this_run(id);
+            let mut name = id.clone();
             for record in &mut self.records {
                 if record["id"] == id.as_str() {
                     record["enabled"] = json!(false);
                     record["health"] =
                         json!({"state":"runtime-error","error":"Stopped responding"});
+                    if let Some(n) = record["manifest"]["name"].as_str() {
+                        name = n.to_owned();
+                    }
                 }
             }
-            let id = id.clone();
-            self.shared
-                .update(|p| p.toasts.push(format!("{id} stopped working — check Mods")));
+            self.shared.update(|p| {
+                p.toasts.push(format!(
+                    "“{name}” is off until Powermove restarts. Turn it on in Settings ▸ Extensions."
+                ))
+            });
         }
         if self.restarts > MAX_RESTARTS {
             // Helpers stay; what the realm contributed went with it.
@@ -2415,22 +2529,37 @@ mod tests {
                 })
         });
         assert_eq!(fixture.health("synthetic-good"), "ok");
-        // The stop is persisted, so following state never brings the culprit back
-        // into the rebuilt realm, and the next launch does not run it either.
-        let enabled = |fixture: &Fixture| {
+        // D11 Stop is for this run: the saved preference stays on, and the
+        // stop keeps the culprit out of the rebuilt realm.
+        let entry = |fixture: &Fixture| {
             fixture
                 .kernel
                 .state()
                 .extensions
                 .get("synthetic-hangs")
-                .map(|entry| entry.enabled)
+                .cloned()
+                .unwrap()
         };
-        assert_eq!(enabled(&fixture), Some(false));
+        assert!(entry(&fixture).enabled);
+        assert!(stopped_this_run(&entry(&fixture)));
         let view = fixture.host.view();
         assert_eq!(view, 2, "one rebuild, one new page");
         thread::sleep(Duration::from_millis(1500));
         assert_eq!(fixture.host.view(), view, "no second hang");
         assert_eq!(fixture.health("synthetic-hangs"), "runtime-error");
+        // Turning it on (Settings ▸ Extensions) runs it again: it hangs again,
+        // and the watchdog asks about it again.
+        let mut on = entry(&fixture);
+        clear_stop(&mut on);
+        drop(fixture.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::Extension(on)],
+        }));
+        let asked = fixture.answer_unresponsive(Some("synthetic-hangs"));
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("stopped again", |host| host.view() == 3 && host.is_ready());
+        assert!(entry(&fixture).enabled);
+        let view = fixture.host.view();
         // A hung command with an open entry: the rebuild seals it, so native undo
         // is not left refused behind an entry no one will close.
         extension(
@@ -2454,7 +2583,7 @@ mod tests {
         let again = fixture.answer_unresponsive(Some("synthetic-stuck"));
         assert_eq!(again, asked, "the same task, asked again");
         fixture.host.answer_unresponsive(again, true);
-        fixture.until("second rebuild", |host| host.view() == 3 && host.is_ready());
+        fixture.until("third rebuild", |host| host.view() == 4 && host.is_ready());
         let published = fixture.kernel.published("window").unwrap();
         assert!(published.entry.is_none(), "the open entry was sealed");
     }
@@ -2496,6 +2625,22 @@ mod tests {
                 .iter()
                 .any(|r| r["kind"] == "unresponsive")
         );
+    }
+    /// A page that answers before the read starts waiting is not missed.
+    #[test]
+    fn a_layout_answer_that_comes_before_its_read_waits_is_kept() {
+        let mut measures = Measures::default();
+        measures.answer(7, &json!({"request":7}));
+        assert_eq!(measures.wait(7).ok(), Some(json!({"request":7})));
+        // The usual order: the read waits, then the answer comes.
+        let rx = measures.wait(8).unwrap_err();
+        measures.answer(8, &json!({"request":8}));
+        assert_eq!(rx.try_recv().ok(), Some(json!({"request":8})));
+        // Answers no read waits for don't pile up.
+        for request in 100..120 {
+            measures.answer(request, &json!({}));
+        }
+        assert_eq!(measures.early.len(), 8);
     }
     fn command_of(host: &ExtensionHost, id: &str) -> bool {
         host.contributions().is_some_and(|c| {

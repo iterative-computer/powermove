@@ -426,6 +426,16 @@ impl Backend {
                     .cloned()
                     .ok_or("Unknown extension")?;
                 entry.enabled = action["enabled"] == true;
+                // Turning on an extension D11 stopped this run runs it again.
+                if entry.enabled
+                    && let Some(record) = entry
+                        .source
+                        .as_object_mut()
+                        .and_then(|source| source.get_mut("hostRecord"))
+                        .and_then(pm_model::Value::as_object_mut)
+                {
+                    record.remove("stopped");
+                }
                 Ok(NativeCommand::State(pm_kernel::state::StateTransaction {
                     expected_revision: None,
                     ops: vec![pm_kernel::state::StateOp::Extension(entry)],
