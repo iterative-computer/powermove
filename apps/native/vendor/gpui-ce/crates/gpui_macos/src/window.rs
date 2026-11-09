@@ -39,8 +39,8 @@ use objc2_app_kit::{
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
     NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
     NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindowButton as Objc2NSWindowButton, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -143,7 +143,6 @@ trait Objc2WindowMessages {
     unsafe fn addSubview_(self, view: ObjcId);
     unsafe fn setLevel_(self, level: NSInteger);
     unsafe fn setAcceptsMouseMovedEvents_(self, value: Bool);
-    unsafe fn setCollectionBehavior_(self, value: NSWindowCollectionBehavior);
     unsafe fn drain(self);
     unsafe fn setDelegate_(self, delegate: ObjcId);
     unsafe fn close(self);
@@ -221,9 +220,6 @@ impl Objc2WindowMessages for ObjcId {
     unsafe fn setAcceptsMouseMovedEvents_(self, value: Bool) {
         let _: () = msg_send![self, setAcceptsMouseMovedEvents: value];
     }
-    unsafe fn setCollectionBehavior_(self, value: NSWindowCollectionBehavior) {
-        let _: () = msg_send![self, setCollectionBehavior: value];
-    }
     unsafe fn drain(self) {
         let _: () = msg_send![self, drain];
     }
@@ -295,10 +291,6 @@ const VIEW_HEIGHT_SIZABLE: NSUInteger = 1 << 4;
 // WindowLevel const value ref: https://docs.rs/core-graphics2/0.4.1/src/core_graphics2/window_level.rs.html
 #[allow(non_upper_case_globals)]
 const NSNormalWindowLevel: NSInteger = 0;
-#[allow(non_upper_case_globals)]
-const NSFloatingWindowLevel: NSInteger = 3;
-#[allow(non_upper_case_globals)]
-const NSPopUpWindowLevel: NSInteger = 101;
 #[allow(non_upper_case_globals)]
 const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
 #[allow(non_upper_case_globals)]
@@ -1223,7 +1215,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
-            sheet_parent: requested_parent,
+            parent: requested_parent,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1440,15 +1432,20 @@ impl MacWindow {
             let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let main_window: ObjcId = msg_send![app, mainWindow];
             let mut sheet_parent = None;
+            // Powermove P-SHEET/P-CHILD: the window that asked, if it named one.
+            let requested: ObjcId = match requested_parent {
+                Some(rwh::RawWindowHandle::AppKit(handle)) => {
+                    let view = handle.ns_view.as_ptr() as ObjcId;
+                    msg_send![view, window]
+                }
+                _ => NIL,
+            };
 
             match kind {
                 WindowKind::Normal | WindowKind::Floating => {
-                    if kind == WindowKind::Floating {
-                        // Let the window float keep above normal windows.
-                        native_window.setLevel_(NSFloatingWindowLevel);
-                    } else {
-                        native_window.setLevel_(NSNormalWindowLevel);
-                    }
+                    // Powermove P-CHILD: a floating window is a child window
+                    // (below), never at the global floating level.
+                    native_window.setLevel_(NSNormalWindowLevel);
                     native_window.setAcceptsMouseMovedEvents_(Bool::new(true));
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
@@ -1476,25 +1473,13 @@ impl MacWindow {
                     let _: () =
                         msg_send![native_view, addTrackingArea: tracking_area.autorelease()];
 
-                    native_window.setLevel_(NSPopUpWindowLevel);
                     let _: () = msg_send![
                         native_window,
                         setAnimationBehavior: NSWindowAnimationBehaviorUtilityWindow
                     ];
-                    native_window.setCollectionBehavior_(
-                        NSWindowCollectionBehavior::CanJoinAllSpaces
-                            | NSWindowCollectionBehavior::FullScreenAuxiliary,
-                    );
                 }
                 WindowKind::Dialog => {
                     // Powermove P-SHEET: the window that asked, else the main one.
-                    let requested: ObjcId = match requested_parent {
-                        Some(rwh::RawWindowHandle::AppKit(handle)) => {
-                            let view = handle.ns_view.as_ptr() as ObjcId;
-                            msg_send![view, window]
-                        }
-                        _ => NIL,
-                    };
                     let main_window = if requested.is_null() {
                         main_window
                     } else {
@@ -1513,6 +1498,27 @@ impl MacWindow {
                             msg_send![parent, beginSheet: native_window, completionHandler: NIL];
                         sheet_parent = Some(parent);
                     }
+                }
+            }
+            // Powermove P-CHILD: pop-ups and floating windows belong to their
+            // app: normal level, over the window that asked (else the main
+            // one) as its child, hidden while the app isn't active.
+            if matches!(
+                kind,
+                WindowKind::Floating | WindowKind::PopUp | WindowKind::AnchoredPopup(_)
+            ) {
+                let window = &*(native_window as *const objc2_app_kit::NSWindow);
+                crate::child_window::apply(window);
+                let parent = if requested.is_null() {
+                    main_window
+                } else {
+                    requested
+                };
+                if !parent.is_null() && parent != native_window {
+                    crate::child_window::attach(
+                        window,
+                        &*(parent as *const objc2_app_kit::NSWindow),
+                    );
                 }
             }
 

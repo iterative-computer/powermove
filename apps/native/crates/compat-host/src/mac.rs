@@ -338,6 +338,8 @@ impl Bridge {
             )
         };
         unsafe { window.setReleasedWhenClosed(false) };
+        // Belongs to its app (P-CHILD): normal level, hidden while inactive.
+        window.setHidesOnDeactivate(true);
         window.setTitle(&NSString::from_str("Powermove · Compat popout"));
         window.setContentView(Some(&child));
         if let Some(parent) = web.window() {

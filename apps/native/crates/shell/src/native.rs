@@ -2502,6 +2502,8 @@ impl Popup {
         unsafe {
             window.setReleasedWhenClosed(false);
         }
+        // A child of the editor window while shown, never above other apps (P-CHILD).
+        gpui_macos::child_window::apply(&window);
         window.setTitle(&NSString::from_str(if surface == Surface::Palette {
             "Command Palette"
         } else {
@@ -2725,9 +2727,8 @@ impl Popup {
         ));
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
-            self.parent
-                .addChildWindow_ordered(&self.window, NSWindowOrderingMode::Above);
         }
+        gpui_macos::child_window::attach(&self.window, &self.parent);
         self.window.makeKeyAndOrderFront(None);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);

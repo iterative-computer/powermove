@@ -28,3 +28,6 @@ gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default
 gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
 gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+[[test]]
+name = "child_windows"
+harness = false

@@ -1557,10 +1557,10 @@ impl Window {
             icon,
             #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             tabbing_identifier,
-            sheet_parent,
+            parent,
             ..
         } = options;
-        let sheet_parent = sheet_parent
+        let parent = parent
             .and_then(|parent| cx.windows.get(parent.window_id())?.as_ref())
             .and_then(|parent| parent.platform_window.window_handle().ok())
             .map(|handle| handle.as_raw());
@@ -1588,7 +1588,7 @@ impl Window {
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,
-                sheet_parent,
+                parent,
             },
         )?;
 

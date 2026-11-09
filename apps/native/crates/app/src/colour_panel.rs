@@ -74,6 +74,9 @@ pub fn choose(initial: Option<u32>) -> async_channel::Receiver<Option<String>> {
             Some(panel.as_ref() as &AnyObject),
         );
     }
+    // The system panel floats over every app by default (P-CHILD).
+    panel.setFloatingPanel(false);
+    gpui_macos::child_window::apply(&panel);
     panel.makeKeyAndOrderFront(None);
     rx
 }
