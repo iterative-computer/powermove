@@ -801,11 +801,13 @@ pub fn run_child() -> Result<()> {
             settings.audio,
         );
         // Going without offline clips never drops sound: a clip the export
-        // would hear still stops it by name, as the shipped app's exports did.
+        // would hear stops it by name, as the shipped app's exports did. It is
+        // checked before the offline refusal so Export Without Them is never
+        // offered for a retry that can't succeed.
         let tick = |t: pm_protocol::common::Ticks| {
             t.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64
         };
-        if request.without_offline && settings.audio && !settings.format.is_image() {
+        if !request.preview && settings.audio && !settings.format.is_image() {
             let range = (tick(settings.range.start), tick(settings.range.end));
             if let Some(clip) =
                 pm_export::render::offline_audible_media(&doc, composition.as_str(), &media, range)

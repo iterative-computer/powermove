@@ -447,38 +447,39 @@ fn with_offline_audio() -> String {
         serde_json::json!({"Avoice":{"name":"voice.wav","type":"audio","format":"wav","dur":3}});
     project.to_string()
 }
+/// A clip the export would hear stops it by name on the first attempt and on
+/// Export Without Them alike: going without it can't succeed, so it is never
+/// offered as a MediaOffline refusal.
 #[test]
 fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
-    let dir = tempfile::tempdir().unwrap();
     let project = with_offline_audio();
-    let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
-    request.without_offline = true;
-    let JobSpec::Export { settings, .. } = &mut request.spec else {
-        unreachable!()
-    };
-    settings.format = ExportFormat::ProRes {
-        profile: pm_protocol::priority::ProResProfile::Hq,
-    };
-    settings.color = OutputColor::Rec709QuickTime {
-        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
-    };
-    settings.alpha = AlphaOutput::None;
-    settings.audio = true;
-    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
-        .unwrap()
-        .wait()
-        .unwrap();
-    assert_eq!(status.state, JobState::Failed, "{status:?}");
-    let error = status.error.unwrap();
-    assert!(
-        error
-            .message
-            .contains("Audio media is missing for “Voiceover”"),
-        "{}",
-        error.message
-    );
-    // Not a refusal Export Without Them can answer: it went without already.
-    assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
+    for without_offline in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
+        request.without_offline = without_offline;
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::ProRes {
+            profile: pm_protocol::priority::ProResProfile::Hq,
+        };
+        settings.color = OutputColor::Rec709QuickTime {
+            candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+        };
+        settings.alpha = AlphaOutput::None;
+        settings.audio = true;
+        let status = finish(request);
+        assert_eq!(status.state, JobState::Failed, "{status:?}");
+        let error = status.error.unwrap();
+        assert!(
+            error
+                .message
+                .contains("Audio media is missing for “Voiceover”"),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
+    }
 }
 /// The fixture's first layer with an effect no installed extension provides.
 fn with_uninstalled_effect(on: bool) -> String {
