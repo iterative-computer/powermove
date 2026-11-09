@@ -1724,6 +1724,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 target: due.unwrap_or(0.),
                 requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
                 predicted: plan.map_or(0., |p| p.shown),
+                count_work: recorder.is_some(),
                 ..Default::default()
             }));
             engine.mastering = mastering;
