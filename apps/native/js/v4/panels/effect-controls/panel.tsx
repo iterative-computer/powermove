@@ -293,7 +293,11 @@ export function EffectControls(props: PanelProps) {
                     disabled={p.locked || row.readonly}
                     onClick={(e) => {
                       stop(e);
-                      send({ type: "action", id: row.effect, index: row.index });
+                      send({
+                        type: "action",
+                        id: row.effect,
+                        index: row.index,
+                      });
                     }}
                   />
                 ) : row.kind === "parameter" ? (
@@ -443,10 +447,11 @@ export function EffectControls(props: PanelProps) {
                       </text>
                       {row.missing && (
                         <text
-                          attr={{ symbol: "exclamationmark.triangle.fill" }}
+                          title={`${row.label} isn’t installed. The layer draws without it, and exports stop until it’s installed or removed.`}
                           style={{
-                            color: t("colors.warning"),
+                            color: t("colors.danger"),
                             fontSize: t("typography.minimum"),
+                            paddingLeft: t("metrics.gap"),
                           }}
                         >
                           Not installed
