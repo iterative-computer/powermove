@@ -465,11 +465,18 @@ impl InputScratch {
             }));
         }
         let buffer = self.buffer.as_ref().expect("coverage input buffer");
+        // One staging allocation for all five arrays: wgpu-core makes a
+        // fresh Metal buffer per queue write.
+        let size = wgpu::BufferSize::new(end).expect("coverage inputs are never empty");
+        let mut view = queue
+            .write_buffer_with(buffer, 0, size)
+            .ok_or("coverage input upload rejected")?;
         for (bytes, &(start, _)) in inputs.iter().zip(&ranges) {
-            if !bytes.is_empty() {
-                queue.write_buffer(buffer, start, bytes);
-            }
+            let start = start as usize;
+            view.slice(start..start + bytes.len())
+                .copy_from_slice(bytes);
         }
+        drop(view);
         Ok((buffer, ranges))
     }
 }
