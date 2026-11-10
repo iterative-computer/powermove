@@ -10,6 +10,8 @@ pub enum Surface {
     Codex,
     Claude,
     CodexExec,
+    /// A run on an API or local model (`compatible`), with no runtime process.
+    Compatible,
 }
 #[derive(Debug, PartialEq)]
 pub enum Delivery {

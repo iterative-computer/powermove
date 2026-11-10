@@ -38,6 +38,7 @@ mod media_refresh;
 mod media_sequence;
 mod migration_report;
 mod mixer_panel;
+mod notes_panel;
 mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
@@ -65,6 +66,9 @@ mod store_window;
 mod store_window_tests;
 mod surface_routes;
 mod surfaces;
+#[cfg(test)]
+mod takes_notes_tests;
+mod takes_panel;
 mod tasks_window;
 mod text_host;
 mod ticket;

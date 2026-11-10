@@ -60,6 +60,14 @@ impl Controller {
                 let window = self.account_window(cx);
                 crate::agent_clients::request(id.into(), verb == "agentClientAdd", window, cx)
             }
+            command if command.starts_with("extensionReveal.") => {
+                let id = command["extensionReveal.".len()..].to_owned();
+                self.reveal_extension(id, cx)
+            }
+            command if command.starts_with("extensionArchive.") => {
+                let id = command["extensionArchive.".len()..].to_owned();
+                self.archive_extension(id, cx)
+            }
             "cloudRememberOn" => crate::cloud::set_remember(true, cx),
             "cloudRememberOff" => crate::cloud::set_remember(false, cx),
             "cloudDeleteAccount" => {
@@ -73,6 +81,72 @@ impl Controller {
             _ => return false,
         }
         true
+    }
+    /// Settings › Extensions › Show in Finder: the extension's folder.
+    fn reveal_extension(&mut self, id: String, cx: &mut Context<Self>) {
+        if !pm_compat_runner::manifest::extension_id(&id) {
+            return;
+        }
+        let folder = self.profile.join("extensions").join(&id);
+        let found = cx.background_spawn(async move { folder.is_dir().then_some(folder) });
+        cx.spawn(async move |_, _| {
+            if let Some(folder) = found.await {
+                crate::platform::reveal(&folder);
+            }
+        })
+        .detach();
+    }
+    /// Settings › Extensions › Delete…: asks first (default Cancel), then the
+    /// folder moves to the archive and the extension unloads everywhere.
+    fn archive_extension(&mut self, id: String, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button};
+        let name = self
+            .kernel
+            .state()
+            .extensions
+            .get(&id)
+            .and_then(|e| e.source.get("hostRecord"))
+            .and_then(|r| r.get("name"))
+            .and_then(pm_model::Value::as_str)
+            .map_or_else(|| id.clone(), str::to_owned);
+        let window = self.account_window(cx);
+        let rx = Alert::new(
+            format!("Delete {name}?"),
+            "Its files move to the archive in your Powermove profile, and its settings are kept.",
+            vec![
+                Button::new("Cancel", false).default().cancel(),
+                Button::new("Delete", true).destructive(),
+            ],
+        )
+        .sheet(&window);
+        let (kernel, profile) = (self.kernel.clone(), self.profile.clone());
+        cx.spawn(async move |_, cx| {
+            if rx.recv().await != Ok(Some(true)) {
+                return;
+            }
+            let done = cx
+                .background_spawn(async move {
+                    let result = pm_compat_runner::store_install::archive(&kernel, &profile, &id);
+                    if result.is_ok() {
+                        mark_archived(&kernel, &id);
+                        pm_compat_runner::host::rescan_all();
+                    }
+                    result.map_err(|e| e.to_string())
+                })
+                .await;
+            if let Err(error) = done {
+                cx.update(|_| {
+                    let rx = Alert::new(
+                        format!("{name} couldn’t be deleted."),
+                        error,
+                        vec![Button::new("OK", ()).default()],
+                    )
+                    .sheet(&window);
+                    drop(rx);
+                });
+            }
+        })
+        .detach();
     }
     /// Account sheets attach to Settings when it is open, else to this editor.
     fn account_window(
@@ -335,4 +409,28 @@ fn apply_composition(
         .ok_or(DialogError::Stale)?
         .map_err(|e| DialogError::Kernel(format!("{e:?}")))?;
     Ok(new_id.map(|id| (id, document)))
+}
+
+/// The kernel keeps an archived extension's entry (its saved values live
+/// there); `archived` keeps it out of Settings until a reinstall republishes
+/// a fresh host record.
+fn mark_archived(kernel: &pm_kernel::KernelHandle, id: &str) {
+    let Some(mut entry) = kernel.state().extensions.get(id).cloned() else {
+        return;
+    };
+    if let Some(source) = entry.source.as_object_mut() {
+        let mut record = source
+            .get("hostRecord")
+            .and_then(pm_model::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        record.insert("archived", pm_model::Value::Bool(true));
+        source.insert("hostRecord", pm_model::Value::Object(record));
+    }
+    let _ = kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Extension(entry)],
+        })
+        .wait();
 }

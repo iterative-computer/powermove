@@ -570,8 +570,12 @@ fn registered(editor: &Entity<Editor>, id: &str, cx: &App) -> bool {
 }
 /// Panels drawn by a v4 view (the rest are native: viewer, scopes, the
 /// timeline's surface is inside its view).
+/// Built-in panels drawn by v4 views; the others are native GPUI panels.
 fn builtin_view_expected(id: &str) -> bool {
-    !matches!(id, "viewer" | "scopes") && layout::PANELS.contains(&id)
+    !matches!(
+        id,
+        "viewer" | "scopes" | "perf" | "mixer" | "takes" | "notes"
+    ) && layout::PANELS.contains(&id)
 }
 /// What identifies the panel an action was aimed at: its view and its place.
 /// What identifies the panel an action was aimed at: its view, the realm

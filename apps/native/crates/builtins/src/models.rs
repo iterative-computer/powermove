@@ -586,10 +586,18 @@ impl Backend {
             json!({"id":p.project,"name":name})
         });
         let state = self.kernel.state();
+        let mods =
+            pm_services::surface_backing::projects::mods(&mod_records(&state)).unwrap_or_default();
         let extensions = state
             .extensions
             .values()
+            .filter(|e| !archived(e))
             .map(|e| {
+                let can_archive = mods.iter().any(|m| {
+                    m.id == e.id
+                        && m.actions
+                            .contains(&pm_services::surface_backing::projects::ModAction::Archive)
+                });
                 let host = e.source.get("hostRecord");
                 let text = |key: &str| {
                     host.and_then(|h| h.get(key))
@@ -619,7 +627,7 @@ impl Backend {
                     == Some(true);
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
                     "enabled":e.enabled && !stopped,"about":text("about").unwrap_or_default(),"includes":includes,
-                    "shortcuts":[],"files":[],"variables":[],"canArchive":false})
+                    "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
         let accounts = self.account_rows();
@@ -1484,6 +1492,42 @@ fn prose_rows(message: &Value) -> Vec<&Value> {
         Some(steps) if message["role"] == "trace" => steps.iter().collect(),
         _ => vec![message],
     }
+}
+
+/// The Mods records (S105) of the extensions the kernel knows: built-ins and
+/// what this Mac installed or made, with their health as the host saw it.
+pub(crate) fn mod_records(
+    state: &pm_kernel::state::StateSnapshot,
+) -> pm_services::surface_backing::Records {
+    let entries = state
+        .extensions
+        .values()
+        .filter(|e| !archived(e))
+        .map(|e| {
+            let host = e
+                .source
+                .get("hostRecord")
+                .map(|h| serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(h)))
+                .and_then(Result::ok)
+                .unwrap_or(Value::Null);
+            let stopped = host["stopped"] == true;
+            json!({"id":e.id,"scope":if e.installed { "user" } else { "builtin" },
+                "enabled":e.enabled && !stopped,"health":host["health"],"manifest":{}})
+        })
+        .collect();
+    pm_services::surface_backing::Records {
+        revision: state.revision,
+        entries,
+    }
+}
+/// Deleted from Settings: the folder is in the archive, its values are kept.
+fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+    entry
+        .source
+        .get("hostRecord")
+        .and_then(|r| r.get("archived"))
+        .and_then(pm_model::Value::as_bool)
+        == Some(true)
 }
 
 #[cfg(test)]

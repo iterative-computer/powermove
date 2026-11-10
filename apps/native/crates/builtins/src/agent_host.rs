@@ -145,10 +145,14 @@ impl AgentLink {
             Provider::Chatgpt => "ChatGPT",
             Provider::Claude => "Claude",
             Provider::Compatible => {
-                return (
-                    "unavailable",
-                    "Connect an API, Ollama, or LM Studio in Settings.".into(),
-                );
+                return if self.compatible().is_some() {
+                    ("connected", String::new())
+                } else {
+                    (
+                        "unavailable",
+                        "Connect an API, Ollama, or LM Studio in Settings.".into(),
+                    )
+                };
             }
         };
         let installed = self
@@ -172,6 +176,31 @@ impl AgentLink {
             State::Unavailable => ("unavailable", status.detail.unwrap_or_else(signed_out)),
         }
     }
+    /// The saved API or local model connection (Settings › Accounts).
+    pub fn compatible(&self) -> Option<pm_agents::compatible::Saved> {
+        let host = self
+            .environment
+            .lock()
+            .unwrap()
+            .as_ref()?
+            .compatible
+            .clone()?;
+        host.saved()
+    }
+    /// The connected model's choices, as the account models list them.
+    pub fn compatible_models(&self) -> Vec<pm_agents::account::Model> {
+        self.compatible().map_or_else(Vec::new, |saved| {
+            saved
+                .choices()
+                .into_iter()
+                .map(|id| pm_agents::account::Model {
+                    efforts: pm_agents::compatible::efforts(&id),
+                    label: id.clone(),
+                    id,
+                })
+                .collect()
+        })
+    }
     /// Providers this install can run, and the choices of the given one.
     pub fn catalog(&self, provider: Provider) -> Catalog {
         let environment = self.environment.lock().unwrap();
@@ -187,9 +216,16 @@ impl AgentLink {
             }
         }
         drop(environment);
-        let listed = self
-            .accounts()
-            .map_or_else(Vec::new, |accounts| accounts.models(provider));
+        let compatible = self.compatible_models();
+        if !compatible.is_empty() || provider == Provider::Compatible {
+            providers.push(("compatible".into(), "Connected model".into()));
+        }
+        let listed = if provider == Provider::Compatible {
+            compatible
+        } else {
+            self.accounts()
+                .map_or_else(Vec::new, |accounts| accounts.models(provider))
+        };
         let mut models = vec![(String::new(), "Default".to_owned())];
         let mut efforts = vec![String::new()];
         let mut model_efforts = vec![];

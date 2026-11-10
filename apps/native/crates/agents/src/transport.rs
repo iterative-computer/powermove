@@ -204,6 +204,28 @@ impl Drop for Handle {
         let _ = self.send(Action::Shutdown);
     }
 }
+/// A run without a runtime process (`compatible`): its worker takes the
+/// handle's actions, each with its acceptance reply, and sends its events.
+pub(crate) type Queued = (Action, Option<SyncSender<bool>>);
+pub(crate) fn worker(surface: Surface) -> (Handle, Receiver<Queued>, SyncSender<Event>) {
+    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(128);
+    let (etx, events) = mpsc::sync_channel(256);
+    let (atx, actions) = mpsc::sync_channel(128);
+    thread::spawn(move || {
+        for queued in rx {
+            if atx.send((queued.action, queued.reply)).is_err() {
+                break;
+            }
+        }
+    });
+    let handle = Handle {
+        tx,
+        events,
+        surface,
+        held: Vec::new(),
+    };
+    (handle, actions, etx)
+}
 enum Input {
     Stdout(Vec<u8>),
     Stderr,

@@ -156,10 +156,11 @@ fn providers(link: &AgentLink) -> Vec<Value> {
         .into_iter()
         .map(|p| {
             let connected = link.available(p);
-            let models: Vec<Value> = link
-                .accounts()
-                .filter(|_| p != Provider::Compatible)
-                .map_or_else(Vec::new, |a| a.models(p))
+            let models: Vec<Value> = if p == Provider::Compatible {
+                link.compatible_models()
+            } else {
+                link.accounts().map_or_else(Vec::new, |a| a.models(p))
+            }
                 .into_iter()
                 .map(|m| {
                     let options = m

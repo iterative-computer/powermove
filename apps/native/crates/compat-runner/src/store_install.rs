@@ -259,6 +259,24 @@ pub fn uninstall(kernel: &dyn StoreAuthority, profile: &Path, id: &str) -> Resul
     Ok(())
 }
 
+/// Settings › Extensions › Delete…: a Store install is uninstalled as the
+/// Store does; any other extension folder moves to the archive with its files
+/// (manifest, source, fork provenance). Saved values stay in the profile.
+pub fn archive(kernel: &dyn StoreAuthority, profile: &Path, id: &str) -> Result<()> {
+    let root = profile.join("extensions");
+    if !crate::manifest::extension_id(id) {
+        return Err(Error::Invalid("extension id"));
+    }
+    if crate::store_host::marker(&root.join(id)).is_some() {
+        return uninstall(kernel, profile, id);
+    }
+    match archive_folder(&root, id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(Error::Host("That extension isn’t on this Mac.".into())),
+        Err(e) => Err(Error::Host(e.to_string())),
+    }
+}
+
 /// Where releases come from and the keys that may sign them.
 pub struct Source {
     pub origin: &'static str,
@@ -627,5 +645,24 @@ mod tests {
             b"export default 2"
         );
         assert!(!profile.join("extensions/.archive").exists());
+    }
+    #[test]
+    fn deleting_a_custom_extension_archives_its_folder_and_refuses_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
+        let kernel = Mutex::new(Kernel::new(KernelConfig::default()));
+        let folder = profile.join("extensions/my-glow");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("manifest.json"), "{}").unwrap();
+        super::archive(&kernel, &profile, "my-glow").unwrap();
+        assert!(!folder.exists());
+        let archived: Vec<_> = fs::read_dir(profile.join("extensions/.archive"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert!(archived[0].path().join("manifest.json").is_file());
+        assert!(super::archive(&kernel, &profile, "my-glow").is_err());
+        assert!(super::archive(&kernel, &profile, "../escape").is_err());
     }
 }

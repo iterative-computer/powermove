@@ -206,6 +206,100 @@ impl Host {
     }
 }
 
+/// The saved connection for agent runs (`pm_agents::compatible`): the file,
+/// the Keychain key per address and a streamed chat POST held to its origin.
+#[derive(Debug)]
+pub struct Chat {
+    pub profile: PathBuf,
+}
+impl pm_agents::compatible::ChatHost for Chat {
+    fn saved(&self) -> Option<pm_agents::compatible::Saved> {
+        let bytes = std::fs::read(self.profile.join("agent-provider.json")).ok()?;
+        serde_json::from_slice::<pm_agents::compatible::Saved>(&bytes)
+            .ok()
+            .filter(|saved| !saved.model.is_empty() && !saved.base_url.is_empty())
+    }
+    fn key(&self, endpoint: &str) -> Option<String> {
+        let bytes = Keychain::named("Model Provider", endpoint).read().ok()??;
+        String::from_utf8(bytes).ok()
+    }
+    fn stream(
+        &self,
+        url: &str,
+        key: Option<&str>,
+        body: Vec<u8>,
+        stop: &std::sync::atomic::AtomicBool,
+        sink: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+    ) -> Result<u16, String> {
+        use pm_compat_runner::net::{self, Reach, Streamed};
+        use std::sync::{atomic::Ordering, mpsc};
+        let origin = url::Url::parse(url)
+            .map(|u| u.origin().ascii_serialization())
+            .map_err(|e| e.to_string())?;
+        let mut headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
+        if let Some(key) = key {
+            headers.push(("Authorization".into(), format!("Bearer {key}")));
+        }
+        let (tx, chunks) = mpsc::channel();
+        let mut request = net::stream(
+            pm_runtime_v8::FetchRequest {
+                url: url.into(),
+                method: "POST".into(),
+                headers,
+                body,
+                max_response_bytes: 4 * 1024 * 1024,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            },
+            Reach::Origin(origin_static(origin)),
+            tx,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut status = None;
+        loop {
+            if stop.load(Ordering::Acquire) {
+                request.cancel();
+                return Err("Stopped.".into());
+            }
+            match chunks.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(Streamed::Status(code)) => status = Some(code),
+                Ok(Streamed::Data(bytes)) => {
+                    if status.is_some_and(|s| (200..300).contains(&s))
+                        && let Err(error) = sink(&bytes)
+                    {
+                        request.cancel();
+                        return Err(error);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(done) = request.poll() {
+                        // Bytes sent before completion are still queued.
+                        while let Ok(chunk) = chunks.try_recv() {
+                            match chunk {
+                                Streamed::Status(code) => status = Some(code),
+                                Streamed::Data(bytes)
+                                    if status.is_some_and(|s| (200..300).contains(&s)) =>
+                                {
+                                    sink(&bytes)?
+                                }
+                                Streamed::Data(_) => {}
+                            }
+                        }
+                        let response = done.map_err(|e| e.to_string())?;
+                        return Ok(status.unwrap_or(response.status));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let response = request
+                        .poll()
+                        .unwrap_or_else(|| Err(pm_runtime_v8::Error::Host("ended".into())))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(status.unwrap_or(response.status));
+                }
+            }
+        }
+    }
+}
+
 /// The connection types the sheet offers: (label, endpoint).
 pub const TYPES: [(&str, &str); 4] = [
     ("OpenAI API", "https://api.openai.com/v1"),
@@ -581,4 +675,102 @@ pub fn disconnect(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Chat;
+    use pm_agents::compatible::{ChatHost, Stream};
+    use std::{
+        io::BufRead,
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+    /// The fake OpenAI-compatible server; killed on drop.
+    struct Fake(std::process::Child, u16);
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn fake() -> Fake {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../builtins/fixtures/fake-openai.py");
+        let mut child = std::process::Command::new(script)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port = line.trim().parse().unwrap();
+        Fake(child, port)
+    }
+    fn body(prompt: &str) -> Vec<u8> {
+        serde_json::json!({"model":"fixture-model","stream":true,
+            "messages":[{"role":"user","content":prompt}]})
+        .to_string()
+        .into_bytes()
+    }
+    #[test]
+    fn the_saved_connection_streams_its_reply_as_it_arrives_and_stops() {
+        let profile = tempfile::tempdir().unwrap();
+        let server = fake();
+        let base = format!("http://127.0.0.1:{}/v1", server.1);
+        std::fs::write(
+            profile.path().join("agent-provider.json"),
+            serde_json::json!({"baseUrl":base,"model":"fixture-model","vision":false,
+                "hasKey":false,"models":["fixture-model"]})
+            .to_string(),
+        )
+        .unwrap();
+        let chat = Chat {
+            profile: profile.path().into(),
+        };
+        let saved = chat.saved().unwrap();
+        assert_eq!(saved.model, "fixture-model");
+        let url = format!("{base}/chat/completions");
+        // A whole reply, through the same SSE reader runs use.
+        let mut stream = Stream::default();
+        let stop = AtomicBool::new(false);
+        let status = chat
+            .stream(&url, None, body("Hello"), &stop, &mut |bytes| {
+                stream.push(bytes).map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(stream.finish().unwrap().content, "Saw: Hello");
+        // A slow reply arrives a fragment at a time; Stop ends it at once.
+        let started = Instant::now();
+        let mut first = None;
+        let stop = AtomicBool::new(false);
+        let result = chat.stream(&url, None, body("slow"), &stop, &mut |bytes| {
+            if String::from_utf8_lossy(bytes).contains("token0") {
+                first.get_or_insert(started.elapsed());
+                stop.store(true, Ordering::Release);
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err(), "Stopped.");
+        assert!(first.unwrap() < Duration::from_secs(5), "{first:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // A refused address reports its status and feeds nothing to the reader.
+        let mut fed = false;
+        let status = chat
+            .stream(
+                &format!("{base}/missing"),
+                None,
+                body("x"),
+                &AtomicBool::new(false),
+                &mut |_| {
+                    fed = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(status, 404);
+        assert!(!fed);
+    }
 }
