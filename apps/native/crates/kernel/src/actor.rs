@@ -54,11 +54,59 @@ pub struct Pending<T> {
     inner: Arc<OneShot<T>>,
 }
 
-struct Resolver<T> {
+struct Resolver<T: 'static> {
     inner: Arc<OneShot<T>>,
 }
 
-fn oneshot<T>() -> (Resolver<T>, Pending<T>) {
+thread_local! {
+    /// On the kernel thread: answers a panicking turn dropped, closed only
+    /// once the panic is contained (`run`), so a caller that sees `None`
+    /// also sees the project stopped.
+    static UNANSWERED: std::cell::RefCell<Option<Vec<Box<dyn FnOnce()>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn close<T>(inner: &OneShot<T>) {
+    let waker = {
+        let mut slot = inner.slot.lock().unwrap_or_else(|e| e.into_inner());
+        slot.closed = true;
+        slot.waker.take()
+    };
+    inner.ready.notify_all();
+    if let Some(w) = waker {
+        w.wake();
+    }
+}
+
+/// A caller's reply callback: dropped unanswered by a panicking turn, it is
+/// dropped only once the panic is contained, like a [`Resolver`].
+struct Unanswered<F: Send + 'static>(Option<F>);
+
+impl<F: Send + 'static> Drop for Unanswered<F> {
+    fn drop(&mut self) {
+        let Some(f) = self.0.take() else { return };
+        if std::thread::panicking() {
+            let mut f = Some(f);
+            UNANSWERED.with(|u| {
+                if let Some(v) = u.borrow_mut().as_mut() {
+                    let f = f.take();
+                    v.push(Box::new(move || drop(f)));
+                }
+            });
+            drop(f);
+        }
+    }
+}
+
+/// Closes the answers the last turn's panic dropped.
+fn close_unanswered() {
+    let closers = UNANSWERED.with(|u| u.borrow_mut().as_mut().map(std::mem::take));
+    for closer in closers.into_iter().flatten() {
+        closer();
+    }
+}
+
+fn oneshot<T: 'static>() -> (Resolver<T>, Pending<T>) {
     let inner = Arc::new(OneShot {
         slot: Mutex::new(Slot {
             value: None,
@@ -75,7 +123,7 @@ fn oneshot<T>() -> (Resolver<T>, Pending<T>) {
     )
 }
 
-impl<T> Resolver<T> {
+impl<T: 'static> Resolver<T> {
     fn resolve(self, value: T) {
         let waker = {
             let mut slot = self.inner.slot.lock().expect("oneshot");
@@ -89,17 +137,20 @@ impl<T> Resolver<T> {
     }
 }
 
-impl<T> Drop for Resolver<T> {
+impl<T: 'static> Drop for Resolver<T> {
     fn drop(&mut self) {
-        let waker = {
-            let mut slot = self.inner.slot.lock().expect("oneshot");
-            slot.closed = true;
-            slot.waker.take()
-        };
-        self.inner.ready.notify_all();
-        if let Some(w) = waker {
-            w.wake();
+        if std::thread::panicking() {
+            let inner = self.inner.clone();
+            let deferred = UNANSWERED.with(|u| {
+                u.borrow_mut()
+                    .as_mut()
+                    .map(|v| v.push(Box::new(move || close(&inner))))
+            });
+            if deferred.is_some() {
+                return;
+            }
         }
+        close(&self.inner);
     }
 }
 
@@ -343,6 +394,12 @@ enum Msg {
     Sync {
         reply: Reply<()>,
     },
+    /// `KernelHandle::arm_fault`: arms a panic on this actor only.
+    #[cfg(any(test, feature = "fault-injection"))]
+    ArmFault {
+        stage: crate::fault_injection::Stage,
+        project: String,
+    },
     Shutdown,
 }
 
@@ -554,6 +611,16 @@ impl KernelHandle {
         let _ = self.tx.send(msg);
     }
 
+    /// Tests: this actor's next call on `project` that reaches `stage`
+    /// panics, once (calls sent after this one see it armed).
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn arm_fault(&self, stage: crate::fault_injection::Stage, project: &str) {
+        self.send(Msg::ArmFault {
+            stage,
+            project: project.to_owned(),
+        });
+    }
+
     /// Runs `request` on `project`; resolves with the acknowledgement.
     pub fn call(&self, project: &str, request: Request) -> Pending<Result<Ack, KernelFailure>> {
         let (r, p) = oneshot();
@@ -573,7 +640,9 @@ impl KernelHandle {
         // stays there. The call it answers has already committed, and the
         // rest of its turn (events, realm messages, deferred answers) runs.
         let shared = self.shared.clone();
+        let mut reply = Unanswered(Some(reply));
         let reply = move |answer| {
+            let reply = reply.0.take().expect("answered once");
             if let Err(panic) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reply(answer)))
             {
@@ -826,11 +895,14 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::Recover { .. }
         | Msg::Sync { .. }
         | Msg::Shutdown => Scope::Nothing,
+        #[cfg(any(test, feature = "fault-injection"))]
+        Msg::ArmFault { .. } => Scope::Nothing,
     }
 }
 
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     let mut turns = Turns::default();
+    UNANSWERED.with(|u| *u.borrow_mut() = Some(Vec::new()));
     for msg in rx {
         let shutdown = matches!(msg, Msg::Shutdown);
         let scope = scope(&msg);
@@ -849,6 +921,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
         if let Err(panic) = turn {
             contain(&mut kernel, &shared, &mut turns, scope, panic.as_ref());
         }
+        close_unanswered();
         if shutdown {
             break;
         }
@@ -1329,6 +1402,8 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             kernel.sync_all();
             reply(());
         }
+        #[cfg(any(test, feature = "fault-injection"))]
+        Msg::ArmFault { stage, project } => crate::fault_injection::arm(stage, project),
         Msg::Shutdown => {}
     }
 }

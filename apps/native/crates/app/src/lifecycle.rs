@@ -547,7 +547,7 @@ mod tests {
             ),
         )
         .unwrap();
-        pm_kernel::fault_injection::arm(pm_kernel::fault_injection::Stage::AfterApply, "test");
+        k.arm_fault(pm_kernel::fault_injection::Stage::AfterApply, "test");
         assert!(
             k.call(
                 "test",

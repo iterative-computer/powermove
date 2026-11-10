@@ -12,7 +12,7 @@ use pm_model::json::Value;
 
 use crate::Origin;
 use crate::actor::{KernelActor, KernelEvent, KernelHandle};
-use crate::fault_injection::{Stage, arm};
+use crate::fault_injection::Stage;
 use crate::persistence::DiskFormat;
 use crate::session::{RecoveryDecision, SessionHandle, SessionSource, ShellCall, ShellReply};
 use crate::tx::{Call, Caller, HistoryCall, RealmMessage, Reply, Request, Writer};
@@ -148,7 +148,7 @@ fn panic_at(stage: Stage, committed: bool) {
     assert_eq!(layer_opacity(&before_doc), 40.0);
     let events = kernel.subscribe();
 
-    arm(stage, &id);
+    kernel.arm_fault(stage, &id);
     let answer = kernel
         .call(&id, Request::new(Caller::native(), opacity(70.0)))
         .wait();
@@ -283,6 +283,40 @@ fn panic_in_publication_recovers_the_whole_edit() {
     panic_at(Stage::InPublish, true);
 }
 
+/// A caller that learns its call got no answer (its reply dropped) already
+/// sees the project stopped: the answer goes only after the panic is
+/// contained, never while the project still looks editable.
+#[test]
+fn an_unanswered_caller_already_sees_the_project_stopped() {
+    struct Guard(KernelHandle, mpsc::Sender<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let stopped = self
+                .0
+                .published("unanswered")
+                .is_some_and(|p| p.fault.is_some());
+            let _ = self.1.send(stopped);
+        }
+    }
+    let root = Temp::new("unanswered");
+    let (_actor, kernel, _session) = fixture(&root.0, "unanswered");
+    let (tx, rx) = mpsc::channel();
+    let guard = Guard(kernel.clone(), tx);
+    kernel.arm_fault(Stage::AfterApply, "unanswered");
+    kernel.call_with(
+        "unanswered",
+        Request::new(Caller::native(), opacity(70.0)),
+        move |_| drop(guard),
+    );
+    let stopped = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the reply went");
+    assert!(
+        stopped,
+        "the project was flagged before its caller heard nothing"
+    );
+}
+
 /// Other open projects keep working when one stops.
 #[test]
 fn a_stopped_project_leaves_the_others_editable() {
@@ -296,7 +330,7 @@ fn a_stopped_project_leaves_the_others_editable() {
             electron_profile: None,
         },
     ));
-    arm(Stage::AfterApply, "stopped");
+    kernel.arm_fault(Stage::AfterApply, "stopped");
     assert!(
         kernel
             .call("stopped", Request::new(Caller::native(), opacity(70.0)))
@@ -341,7 +375,7 @@ fn deferred_answers_fail_when_their_project_stops() {
     );
     let envelope = mailbox.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(matches!(envelope.message, RealmMessage::RunExternal { .. }));
-    arm(Stage::AfterApply, "deferred");
+    kernel.arm_fault(Stage::AfterApply, "deferred");
     assert!(
         kernel
             .call("deferred", Request::new(Caller::native(), opacity(70.0)))

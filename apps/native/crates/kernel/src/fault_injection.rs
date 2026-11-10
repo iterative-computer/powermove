@@ -21,20 +21,19 @@ pub enum Stage {
 mod armed {
     use super::Stage;
     use std::cell::RefCell;
-    use std::sync::Mutex;
 
-    static ARMED: Mutex<Vec<(Stage, String)>> = Mutex::new(Vec::new());
-
+    // Both live on the kernel actor's own thread: a panic armed for one
+    // actor (`KernelHandle::arm_fault`) is never taken by another actor in
+    // the same process that happens to edit a project of the same id.
     thread_local! {
+        static ARMED: RefCell<Vec<(Stage, String)>> = const { RefCell::new(Vec::new()) };
         static CURRENT: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
-    /// The next call on `project` that reaches `stage` panics (once).
-    pub fn arm(stage: Stage, project: &str) {
-        ARMED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((stage, project.to_owned()));
+    /// On the actor thread: its next call on `project` that reaches `stage`
+    /// panics (once).
+    pub(crate) fn arm(stage: Stage, project: String) {
+        ARMED.with(|a| a.borrow_mut().push((stage, project)));
     }
 
     pub(crate) fn enter(project: Option<&str>) {
@@ -66,19 +65,19 @@ mod armed {
         if from_env(stage) {
             panic!("injected fault at {stage:?}");
         }
-        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = armed.iter().position(|(s, p)| *s == stage && *p == project) {
-            armed.remove(i);
-            drop(armed);
+        let armed = ARMED.with(|a| {
+            let mut a = a.borrow_mut();
+            let i = a.iter().position(|(s, p)| *s == stage && *p == project)?;
+            Some(a.remove(i))
+        });
+        if armed.is_some() {
             panic!("injected fault at {stage:?}");
         }
     }
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
-pub use armed::arm;
-#[cfg(any(test, feature = "fault-injection"))]
-pub(crate) use armed::{enter, hit};
+pub(crate) use armed::{arm, enter, hit};
 
 #[cfg(not(any(test, feature = "fault-injection")))]
 #[inline(always)]
