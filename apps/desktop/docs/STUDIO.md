@@ -5,54 +5,269 @@ is a path tracer: light bounces between surfaces the way it does in a real
 studio, so reflections, soft shadows, glass and glowing screens look
 physically right. The design and roadmap are in `docs/3d-studio-redesign.md`.
 
-## What you see
+## User guide
 
-The viewer's toolbar, for a composition with 3D layers, left to right:
+This section is for people making 3D motion graphics in Powermove. Names in
+**bold** are the exact words in the app. If you know After Effects, most
+things are where you expect them; the differences are called out.
 
-- **Camera / Free view:** look through the shot's camera, or around the scene
-  without changing the shot.
-- **Tools:** Move, Rotate and Scale the selection; Orbit, Pan and Zoom the
-  view; Light (below). Each says in its tooltip what a drag does. Move,
-  Rotate and Scale add a **Scene axes / Object axes** switch: whether the
-  handles line up with the scene or with the object, however it is turned.
-- **Frame:** fit the selection, or everything when nothing is selected
-  (F, Home).
-- **Fast / Quality:** both use Studio. Fast keeps the low-resolution Live
-  preview; Quality refines the image when you pause. Exports and agent
-  frames use Final quality. The choice is remembered. These controls are
-  in the viewer footer; navigation tools remain in the header.
-- **View layout:** 1 View, 2 Views (side by side) or 4 Views, in the
-  footer as in After Effects. Each pane chooses Active Camera, Front, Left,
-  Top, Back, Right, Bottom or Custom View from its corner label; a side
-  view opens framed on the scene. The selected pane is outlined and is the
-  viewer itself: gizmos, picking, navigation and refine work there. The
-  other panes are Studio Live pictures from their own sessions, redrawn
-  round-robin (about 20 a second in total) only when what they show
-  changes, so the selected pane keeps its frame rate. One click in another
-  pane selects that pane and the layer under the pointer. Layout, selected pane
-  and pane views are saved per composition and support Undo/Redo. Orbiting the
-  free view remains navigation and does not add undo steps.
+### Adding 3D
 
-Studio has three rendering tiers:
+- **An empty composition** offers **3D Layer** beside Text, Shape, Solid and
+  Null in the Timeline.
+- **Right-click** the composition or an empty part of the Timeline and choose
+  **Add 3D Layer**, or search the command palette for it.
 
-- **Live** while you drag, scrub or play: half resolution, one sample per
-  pixel, denoised. Depth of field is off while things move.
-- **Refine** when nothing has changed for a moment: the view sharpens a few
-  samples per frame until it is clean. The pill in the viewer's corner shows
-  the progress ("Refining · 62%", then "Clean").
-- **Final** for exports and agent captures uses the composition's saved render
-  quality. Final is the rendering tier; **Final (Max)** is the most expensive
-  quality preset. Old projects open at **Production**. Refine uses the same
-  sample, bounce, caustics and denoising policy.
+The **Add 3D Layer** menu has three groups:
 
-### Saved render quality and export overrides
+| Group | Items |
+|---|---|
+| **Shapes** | Cube, Sphere, Plane, Cylinder, Cone, Torus, Capsule, Icosphere, **Import 3D Model…** |
+| **Environment** | **World** (pick a sky), **Terrain**, **Scatter**, **Fog Volume** |
+| **Lights and Camera** | **Sun Light**, **Point Light**, **Spot Light**, **Softbox Light**, **Ambient Light**, **Environment Light**, **Camera** |
+
+Every 3D thing is an ordinary layer: it has a Timeline row, keyframes,
+parenting (**Link Layers**), Undo, and the same icon in the menu, the Timeline
+and the Properties header. **Scatter** stays disabled until there is a model to
+copy and a Terrain to cover; the menu says which one is missing.
+
+After Effects equivalents: **Sun Light** is a Parallel light, **Softbox Light**
+is an area light (AE has none), and **World** combines AE's environment light
+with a sky and sun.
+
+### Importing a model
+
+**Import 3D Model…** (or drop a file on the composition) accepts GLB,
+self-contained glTF, OBJ (select the OBJ together with its MTL and images),
+FBX, STEP/STP, IGES/IGS, BREP and Gaussian splats (PLY, .splat).
+
+- The **first model in an empty composition arrives in a finished studio**:
+  resting on the floor, framed by a camera, lit by softboxes, on a seamless
+  set. One Undo removes all of it.
+- **From File** (model properties) keeps the materials stored in the file;
+  turn it off to give the whole model one editable material.
+- A file that can't be read says so in plain words, for example "Couldn’t
+  import Broken.glb. The file isn’t a readable GLB model — it may be damaged
+  or incomplete." Nothing is added, and nothing else changes.
+
+See [Large models and CAD](#large-models-and-cad) for sizes and limits.
+
+### 3D text and shapes
+
+Select a text or shape layer. **Geometry Options** ▸ **Extrude** makes it real
+3D geometry (it also turns on the layer's 3D switch, in one Undo). Then:
+
+- **Extrusion Depth**, **Bevel Style** (None, Angular, Concave, Convex),
+  **Bevel Depth**, **Hole Bevel Depth** and **Geometry Quality**, all
+  animatable like AE's Geometry Options.
+- **Material Options** lists **Front**, **Bevel**, **Side** and **Back**. Each
+  has its own material, and **Use Front for All** copies Front to the rest.
+
+Extruded text needs the font's outlines, so **the font must be installed on
+this Mac**. If it isn't, Geometry Options says "“Font name” isn’t installed
+on this Mac, so this text can’t be extruded" — choose an installed font, or
+install it and reopen the project. (Flat 2D text falls back to a similar
+font; geometry can't.)
+
+### Materials and finishes
+
+Select a model. **Material** shows a shelf of **finishes** (hover for each
+name): Anodized aluminium, Brushed metal, Polished steel, Gold, Clear glass,
+Frosted glass, Gloss lacquer, Soft-touch plastic, Glazed ceramic, Matte rubber
+and Display under glass. A finish is a starting point; the fields below refine
+it: **Color**, **Roughness**, **Metalness**, **Emission**, **Emission
+Strength**, **Opacity**, **Clear Coat**, **Coat Roughness**, **Transmission**,
+**Index of Refraction**, **Specular**, **Sheen**, **Thin Film**,
+**Dispersion**, **Water Droplets**, **Brushed** and **Subsurface**.
+
+**Image Maps** take a **Color Map**, **Normal Map**, **Roughness Map**,
+**Metalness Map**, **Emissive Map** and **Occlusion Map**. A material's
+**Base Color** or **Emission** can also be a composition or a layer —
+including a group of 2D artwork — so a screen can play your animation (see
+[Artwork as a material](#artwork-as-a-material)). If a source is deleted, the
+picker says **Missing image**, **Missing comp** or **Missing layer** and the
+model shows its original material until you choose another.
+
+**Material Options** use After Effects' names: **Casts Shadows**, **Accepts
+Shadows**, **Accepts Lights** and **Appears in Reflections**.
+
+### Lights
+
+| Light | Use | Main properties |
+|---|---|---|
+| **Sun Light** | Parallel light from far away | Intensity, Color, Casts Shadows |
+| **Point Light** | A bare bulb | Intensity, Color, Falloff Distance, Falloff, Casts Shadows |
+| **Spot Light** | A cone of light | as Point, plus Cone Angle, Cone Feather |
+| **Softbox Light** | Soft studio light and reflections | Intensity, Color, Width, Height, Casts Shadows |
+| **Ambient Light** | Even light from everywhere | Intensity, Color |
+| **Environment Light** | Light from a sky or image all around | Intensity, Color, Environment |
+
+**Ambient Light**, **Environment Light** and **World** light the whole scene
+from everywhere, so they have no position: no Transform, no gizmo, no **Link
+Layers**, and the viewer's tool strip says "Lights the whole scene · no
+position" instead of offering Move, Rotate and Scale.
+
+**Light by pointing.** Choose **Light** in the viewer's tool strip. The panel
+picks what to add (**Softbox**, **Spot**, **Point**, **Sun**) and how it aims:
+**Reflect** (the highlight lands where you click), **Direct** (the light faces
+where you click) or **Orbit** (drag to circle the light around its target).
+Click a model to place the light; drag to slide the highlight. Each placement
+is one Undo. See [The light tool](#the-light-tool).
+
+### Camera and depth of field
+
+Add a **Camera** to set the shot. Its properties, in AE's words:
+**Projection**, **Angle of View** (perspective) or **Zoom** (orthographic),
+**Near Clip**, **Far Clip**, **F-Stop** and
+**Focus Distance**. **Lens** shapes the out-of-focus highlights: **Iris
+Shape** (Round or 3–10 blades), **Iris Rotation**, **Iris Roundness** and
+**Iris Aspect Ratio**. **Render Quality** on the camera names the
+composition's quality; click it to change it (see below).
+
+The camera also offers **Set Up Studio** (frame, light and set the scene in
+one Undo), **Studio Set** (a seamless backdrop with a floor that only shows
+shadows) and **Background**.
+
+### World, sky and sun
+
+**Add 3D Layer ▸ World** and choose a sky: **Clear noon**, **Golden hour**,
+**Overcast**, **Blue hour** or **Night**. Select the World layer to change it:
+
+- Drag the sun on the **Sun position** dome, or type **Sun Height** and **Sun
+  Direction**; **Sun Strength** sets its brightness.
+- **Haze**, **Clouds**, **Ground Color** and the **Fog** settings (**Fog
+  Color**, **Fog Falloff**, **Fog Base**) shape the air.
+- **Environment** chooses what lights the scene: the generated **Sky**, or an
+  image (an HDRI panorama). **Visible to Camera** shows or hides it as the
+  background.
+
+A composition has one World. With a World, **Add 3D Layer ▸ World** selects it.
+
+### Terrain, Scatter and Fog Volume
+
+1. **Terrain** adds ground. Choose its shape in the shape grid, or **Shape
+   From** a height image instead of **Generated** noise; **Width**, **Depth**,
+   **Height**, **Feature Size**, **Detail** and **Ridges** shape it, and
+   regions color it by slope (**Steeper Than**, **Flatter Than**) or height.
+2. **Scatter ▸ Copies of** a model **▸ Over** a surface covers the terrain
+   with copies. The model being copied is hidden in the same Undo so only the
+   copies show. **Count**, **Smallest**/**Largest**, **Turn From**/**Turn to**,
+   **Flatter Than**/**Steeper Than** control placement; **New Variation**
+   reshuffles it.
+3. **Fog Volume** adds a box or sphere of fog: **Shape**, **Width**,
+   **Height**, **Depth**, **Density**, **Color** and **Forward Glow** (how
+   much it glows when you look toward a light).
+
+### The viewer
+
+- **Move**, **Rotate**, **Scale** and **Light** (header), with **Global** or
+  **Local** axes. Ctrl snaps; Shift is fine adjustment; Escape cancels. Each
+  drag is one Undo.
+- **Fast** / **Quality** (footer): Fast keeps the Live picture; Quality
+  refines when you pause.
+- **Active Camera** / **Free View**: look through the shot, or look around
+  without changing it. Middle-drag or Option-drag orbits; Shift adds pan.
+- **View layout**: **1 View**, **2 Views** or **4 Views**, as in AE. Each
+  pane's corner label picks Active Camera, Front, Left, Top, Back, Right,
+  Bottom or Custom View. The outlined pane is the one you work in; click
+  another pane to work there. Side panes say what they show in their corner:
+  **Rendering…**, **Updating…** (after an edit), **Live**, or **Can’t draw**.
+  Side panes stay at Live quality; only the selected view refines.
+- The **3D navigation** menu: Orbit, Pan, Dolly, Frame Selection (F), Frame
+  All (Home), and look from Front, Left, Top, Back, Right or Bottom.
+
+### Live, Refine and Final
+
+Studio draws 3D in three tiers:
+
+- **Live** while you drag, scrub or play: fast and slightly soft.
+- **Refine** when you pause: the picture sharpens toward the composition's
+  **Render Quality**.
+- **Final** for exports and agent frames: the full Render Quality (or the
+  export's override).
+
+The pill in the viewer's corner says where it is: **Preparing 1.2M
+triangles** (a big model getting ready), **Live**, **Refining · 62%**, then
+**Refined · Production** (the quality it reached). Hover it for details.
+
+### Render Quality
+
+With nothing selected, a composition that has 3D shows **Render Quality** in
+its properties. Pick a preset; the line below it says what it is for and how
+long a frame can take on this Mac.
+
+| Preset | For | Time per frame, at most |
+|---|---|---|
+| **Draft** | Blocking out motion and timing. Fast and grainy. | about 0.5 s |
+| **Preview** | Reviews and quick drafts to share. | about 2 s |
+| **Production** | Delivery; clean, with light focused through glass. The default. | about 3 s |
+| **Final** | Hero shots and stills. The cleanest and slowest. | about 20 s |
+| **Custom** | Your own settings, starting from the current preset. | your **Time per Frame** |
+
+Times are upper limits: simple scenes finish sooner, and denoising adds a
+little. **Custom** reveals the settings:
+
+| Setting | What it does |
+|---|---|
+| **Max Samples** | The most light paths traced per pixel in each frame. |
+| **Min Samples** | Paths traced before Studio checks whether a pixel is clean enough to stop. |
+| **Noise Threshold** | Stop a pixel once its noise is below this. Lower is cleaner and slower; 0 always traces Max Samples. |
+| **Time per Frame** | The longest Studio traces one frame. 0 means no limit. |
+| **Max Bounces** | How many times light can bounce. More shows deeper glass and interiors. |
+| **Caustics** | Light focused through glass and off mirrors onto other surfaces. |
+| **Denoise** | Remove the remaining grain after tracing. |
+| **Blur Samples** | Moments in the shutter blended for 3D motion blur. 1 turns 3D motion blur off. |
+
+Render Quality is saved with each composition; every change is one Undo.
+The full numbers are in [Render quality reference](#render-quality-reference).
+
+### Shots, turntables and exploded views
+
+- **Shots** (model properties) animate the camera in one Undo:
+  **Turntable**, **Push-in**, **Orbit reveal**, **Hero tilt** and **Rack
+  focus**. **Turntable** and **Drop to Floor** are also one-click buttons.
+- A **group of models** gets **Exploded View** (with **Spread**: A little,
+  Medium or Far apart) and **Turntable** in its properties.
+- **Parts** (imported models with named parts) lets you move or animate
+  each part on its own; **Whole Model** selects the model again and **Reset**
+  returns a part to where it was.
+
+### Exporting
+
+**Export** works as for 2D, plus:
+
+- **3D Render Quality** (under Rendering): **Composition · Production** uses
+  the composition's saved quality; choose a preset or **Custom…** to override
+  it for this export only (it is never saved to the project). The line below
+  estimates the whole export, for example "Up to about 15 min for 300 frames".
+- **Render Passes**: choose **Images**, then **PNG sequence**, and tick
+  **Beauty**, **Depth**, **Normal**, **Albedo**, **Object ID**, **Material
+  ID** and **Shadow** for 16-bit PNG images per pass. With a video format the
+  row stays visible but unavailable, and says how to get passes.
+
+### When something goes wrong
+
+| You see | What it means | What to do |
+|---|---|---|
+| "Couldn’t import *file*. The file isn’t a readable … model" | The file is damaged, incomplete or not that format. | Re-export it from the source app; for glTF, pack it into a single GLB. |
+| "“*Font*” isn’t installed on this Mac, so this text can’t be extruded" | Extruded text needs the font's outlines. | Choose an installed font, or install it and reopen. |
+| **Missing image** / **Missing comp** / **Missing layer** in a material | The material's source was deleted. | Choose another source, or Original. |
+| **3D can’t render** in the viewer's corner | Studio can't draw this scene; hover for why. Usually the scene is too large for the GPU. | Simplify models, lower the Scatter count, or export at a smaller size. Undo the last change if it just happened. |
+| "The 3D renderer restarted on its backup" | The Mac's native renderer stopped; Studio carried on with its backup. Your work is safe. | Keep working; reopen the project to use the native renderer again. |
+| **Can’t draw** on a side view | That view failed; the selected view and your export are unaffected. | Switch that pane to another view, or back to 1 View. |
+
+Each 3D action is named in Undo history (for example "Add Terrain", "Change
+World", "Render Quality"), including changes made by agents.
+
+## Render quality reference
+
 
 | Preset | Noise threshold | Min / max samples per frame | Tracing limit | Bounces | Caustics | Denoise | Shutter samples |
 |---|---:|---:|---:|---:|---|---|---:|
 | Draft | .12 | 4 / 16 | .5 s | 4 | Off | On, fast GPU filter | 1 |
 | Preview | .06 | 16 / 64 | 2 s | 6 | Off | On, fast OIDN on native | 2 |
 | Production | .03 | 32 / 256 | 3 s | 8 | On | On, balanced OIDN on native | 2 |
-| Final (Max) | .015 | 512 / 1024 | 20 s | 8 | On | On, high OIDN on native | 2 |
+| Final | .015 | 512 / 1024 | 20 s | 8 | On | On, high OIDN on native | 2 |
 
 **Custom** exposes `noiseThreshold` (0–1), `minSamples` / `maxSamples`
 (1–4096, min must not exceed max), `timeLimitSeconds` (0–3600),
@@ -114,8 +329,8 @@ There is no three.js picture-rendering mode.
 - **Import a model into an empty composition** and it arrives in a finished
   studio: resting on the floor, framed by a camera, lit by key, fill and rim
   softboxes, on the seamless set. One Undo removes all of it.
-- **Set up studio** (camera inspector) does the same for any composition.
-- **Studio set** (camera inspector) turns the background into a seamless
+- **Set Up Studio** (camera inspector) does the same for any composition.
+- **Studio Set** (camera inspector) turns the background into a seamless
   backdrop (`#F6F5F8` unless a background color is set) with a floor at the
   lowest model that shows only the shadows models cast on it.
 - **Finishes** (model inspector): anodized aluminium, brushed metal,
@@ -127,7 +342,7 @@ There is no three.js picture-rendering mode.
   its Color or Emission source. Sources update at the frame's time. Emission
   intensity controls screen brightness. Existing Studio screen links still
   render, and the `screen` field remains available to agents.
-- **Drop to floor** (model inspector) rests a model on the floor.
+- **Drop to Floor** (model inspector) rests a model on the floor.
 
 ## Artwork as a material
 
@@ -222,7 +437,7 @@ Put light where you point (after Light Wrangler for Blender). Choose
   lands exactly there (Studio mirrors the camera's view about the surface).
 - **Direct:** the light faces the spot you click, lighting it straight on.
 - **Orbit:** drag to circle the light around what it points at.
-- **Add** (with Softbox, Spotlight, Bulb or Sun): the next click adds that
+- **Add** (with Softbox, Spot, Point or Sun): the next click adds that
   light there. With no light selected, a click adds one too.
 - Keep dragging to slide the light; release commits the move as one Undo.
 - The panel's **Brightness, Size, Distance** and a spotlight's **Spread**
@@ -381,7 +596,7 @@ for every physical-material combination.
   solid, footage, text, shape and pre-comp layer; extruded text and shapes
   show them with Front/Bevel/Side/Back.
 - **Lens** (camera panel): Iris shape, rotation, roundness and aspect ratio.
-- **Shots** (group of models): Exploded view with a spread, and Turntable.
+- **Shots** (group of models): Exploded View with a Spread, and Turntable.
 - **Views**: the viewer's navigation menu looks from the Front, Left, Top,
   Back, Right or Bottom (Free View; the shot is unchanged).
 - **Export ▸ Images ▸ PNG sequence ▸ Render passes**: Beauty, Depth, Normal,

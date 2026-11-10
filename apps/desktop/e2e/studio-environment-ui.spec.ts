@@ -207,7 +207,7 @@ test('The Free View looks from the Front, Top or Right like After Effects 3D vie
   expect(await view()).toBe('camera');
 });
 
-test('A group of models has Exploded view and Turntable in its panel', async ({ session }) => {
+test('A group of models has Exploded View and Turntable in its panel', async ({ session }) => {
   test.setTimeout(90_000);
   await session.openEditor();
   const page = session.page;
@@ -220,7 +220,7 @@ test('A group of models has Exploded view and Turntable in its panel', async ({ 
     PM.Edit.apply({ type: 'group_layers', targets: ['base', 'top'], name: 'Product' });
     PM.selectLayers([PM.proj.layers.find((l: any) => l.type === 'group').id]);
   });
-  await page.getByRole('button', { name: 'Exploded view' }).click();
+  await page.getByRole('button', { name: 'Exploded View' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.L('top').p['position.y'].kf.length)).toBe(2);
   await shot(page, '15-group-exploded-view');
 });

@@ -120,7 +120,7 @@
       <div class="shots" role="group" aria-label="World"><button type="button" class="chip" onclick={()=>{addWorld(api);api.selection.select([layerId]);}}>Add Sky</button></div>
     {/if}
     <Section {api} title="Shot" />
-    <div class="shots" role="group" aria-label="Studio"><button type="button" class="chip" onclick={()=>studioEdit({operation:'auto_studio'},'Set up studio')}>Set up studio</button></div>
+    <div class="shots" role="group" aria-label="Studio"><button type="button" class="chip" onclick={()=>studioEdit({operation:'auto_studio'},'Set Up Studio')}>Set Up Studio</button></div>
     <div class="shots" role="group" aria-label="Shots">{#each studio.shots.filter(shot=>shot.id!=='turntable') as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
     <!-- Render quality belongs to the composition (After Effects' Composition Settings ▸ 3D Renderer); point there instead of keeping a second sample picker. -->
     <Row {api} label="Render Quality"><button type="button" class="chip" data-render-quality-link title="Render Quality is saved with the composition and applies to Refine and export. Click to change it in the composition's properties" onclick={()=>api.selection.select([])}>{api.scene3d.renderQuality.describe().label}</button></Row>
