@@ -1345,6 +1345,10 @@ impl Builtins {
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
         std::mem::take(&mut *self.broker.platform.shared())
     }
+    /// A script asked the host for something (a menu, a picker) not yet taken.
+    pub fn platform_pending(&self) -> bool {
+        !self.broker.platform.lock().unwrap().is_empty()
+    }
     pub fn status(&self) -> Vec<Value> {
         let entries = self.broker.entries.shared().clone();
         entries.into_iter().map(|(id,e)|{let e=e.shared();json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.shared().service_revision})}).collect()

@@ -132,6 +132,9 @@ pub struct MediaCatalog {
     /// Always Play Original: these assets never play a proxy or optimized
     /// media, in any mode.
     pub play_original: std::collections::BTreeSet<String>,
+    /// Assets the app is still resolving (just imported or relinked): the
+    /// viewer draws nothing for them until they land, never Media Offline.
+    pub resolving: std::collections::BTreeSet<String>,
 }
 /// What the viewer plays for each clip (View › Media). Exports read
 /// originals whatever this says; only an explicit draft export uses proxies.
@@ -154,7 +157,10 @@ impl MediaCatalog {
         if draft {
             paths.extend(self.proxies.clone());
         }
-        pm_export::render::MediaPaths { paths }
+        pm_export::render::MediaPaths {
+            paths,
+            ..Default::default()
+        }
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
@@ -512,6 +518,7 @@ impl Viewer {
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         v.paths = Arc::new(pm_export::render::MediaPaths {
             paths: media.viewer_paths(v.media_mode),
+            resolving: media.resolving.clone(),
         });
         v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
@@ -536,6 +543,7 @@ impl Viewer {
         v.media_mode = mode;
         v.paths = Arc::new(pm_export::render::MediaPaths {
             paths: v.config.media.viewer_paths(mode),
+            resolving: v.config.media.resolving.clone(),
         });
         v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
@@ -979,6 +987,7 @@ impl EngineService {
         };
         let paths = Arc::new(pm_export::render::MediaPaths {
             paths: config.media.viewer_paths(MediaMode::default()),
+            resolving: config.media.resolving.clone(),
         });
         let proxied = config.media.proxied(MediaMode::default());
         state.views.insert(

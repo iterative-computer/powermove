@@ -184,10 +184,24 @@ async fn until(
     limit: Duration,
     ready: impl Fn(&Entity<Controller>, &Entity<Editor>, &App) -> bool,
 ) -> Result<bool> {
+    until_with(call, target, cx, limit, None, ready).await
+}
+/// `until` that also checks again when the action's menu is resolved.
+async fn until_with(
+    call: &Call,
+    target: &Target,
+    cx: &mut AsyncApp,
+    limit: Duration,
+    menus: Option<&MenuWatch>,
+    ready: impl Fn(&Entity<Controller>, &Entity<Editor>, &App) -> bool,
+) -> Result<bool> {
     let deadline = Instant::now() + limit;
     loop {
         call.live()?;
         let (tx, changed) = async_channel::bounded::<()>(1);
+        if let Some(menus) = menus {
+            *menus.wake.borrow_mut() = Some(tx.clone());
+        }
         let (done, _subscriptions) = target.settled(cx, |c, editor, _, cx| {
             let wake = |tx: async_channel::Sender<()>| {
                 move || {
@@ -385,26 +399,37 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             })
         }
         "interact_panel" => {
-            let (before, published) = target.settled(cx, |c, editor, window, cx| {
+            // A click's value names the item of the menu it opens.
+            let want = (args["action"] == "click")
+                .then(|| args["value"].as_str().map(str::to_owned))
+                .flatten();
+            let (before, published, menus) = target.settled(cx, |c, editor, window, cx| {
                 let (view, id) = observed(windows, c, editor, &panel, args, cx)?;
                 let stamp = stamp(c, editor, &panel, cx);
                 let published = shown(c, &panel, cx);
-                view.update(cx, |v, cx| v.agent_act(id, args, window, cx))
-                    .map_err(Error::invalid)?;
-                Ok((stamp, published))
+                let menus = MenuWatch::new(c, want, cx);
+                view.update(cx, |v, cx| {
+                    v.wake_idle = true;
+                    v.agent_act(id, args, window, cx)
+                })
+                .map_err(Error::invalid)?;
+                Ok((stamp, published, menus))
             })?;
+            menus.handled(call, &target, &panel, cx).await?;
             until(call, &target, cx, ACTION, |c, _, cx| {
                 shown(c, &panel, cx) != published
             })
             .await?;
             settle(call, &target, cx).await?;
-            target.settled(cx, |c, editor, _, cx| {
+            let mut out = target.settled(cx, |c, editor, _, cx| {
                 if stamp(c, editor, &panel, cx) != before {
                     return Ok(json!({"panelId":panel,"actionSent":true,"panelChanged":true,
                         "note":"The action was sent, then the panel changed or closed. Do not repeat it automatically. Read get_panel_layout and inspect the project to check its outcome."}));
                 }
                 read_panel(windows, c, editor, &panel, cx)
-            })
+            })?;
+            menus.report(&mut out);
+            Ok(out)
         }
         "capture_panel" => {
             settle(call, &target, cx).await?;
@@ -419,6 +444,9 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             "The Agent popover takes interact_panel actions by control ref; pointer input reaches docked panels only.",
         )),
         "computer_use_panel" => {
+            let want = (args["action"] == "click")
+                .then(|| args["text"].as_str().map(str::to_owned))
+                .flatten();
             let (before, steps, published) = target.with(cx, |c, editor, window, cx| {
                 let rect = visible_rect(c, editor, &panel, cx)?;
                 let points = input_points(args, rect)?;
@@ -441,6 +469,12 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                     input_steps(args, &points),
                     shown(c, &panel, cx),
                 ))
+            })?;
+            let menus = target.with(cx, |c, _, _, cx| {
+                if let Some(view) = c.read(cx).builtins.views.get(&panel).cloned() {
+                    view.update(cx, |v, _| v.wake_idle = true);
+                }
+                Ok(MenuWatch::new(c, want, cx))
             })?;
             let mut pressed: Option<Point<Pixels>> = None;
             let mut outcome = Ok(());
@@ -495,6 +529,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 });
             }
             outcome?;
+            menus.handled(call, &target, &panel, cx).await?;
             until(call, &target, cx, ACTION, |c, _, cx| {
                 shown(c, &panel, cx) != published
             })
@@ -503,11 +538,94 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             let grab = target.with(cx, |c, editor, window, cx| {
                 grab(c, editor, &panel, window, cx)
             })?;
-            cx.background_executor()
+            let mut out = cx
+                .background_executor()
                 .spawn(async move { grab.encode() })
-                .await
+                .await?;
+            if let Some(mut facts) = out[0]["text"]
+                .as_str()
+                .and_then(|t| serde_json::from_str::<Value>(t).ok())
+            {
+                menus.report(&mut facts);
+                out[0]["text"] = facts.to_string().into();
+            }
+            Ok(out)
         }
         other => Err(Error::invalid(format!("Unknown Powermove tool: {other}"))),
+    }
+}
+
+/// How long an action waits for its panel's script to handle it (and serve
+/// any menu it asks for) before the panel is read.
+const HANDLED: Duration = Duration::from_secs(2);
+/// The menus an agent's panel action opens on its window (`agent_menu`): never
+/// shown, the named item chosen or the items returned.
+struct MenuWatch {
+    scope: pm_shell::agent_menu::Scope,
+    named: bool,
+    late: Option<Value>,
+    /// The waiting `until_with`'s wake, run when the menu is resolved.
+    wake: Rc<RefCell<Option<async_channel::Sender<()>>>>,
+}
+impl MenuWatch {
+    fn new(c: &Entity<Controller>, want: Option<String>, cx: &App) -> Self {
+        let key = &*c.read(cx).host.borrow().window as *const _ as usize;
+        let late = pm_shell::agent_menu::take_late(key);
+        let named = want.as_deref().is_some_and(|w| !w.trim().is_empty());
+        let wake: Rc<RefCell<Option<async_channel::Sender<()>>>> = Rc::default();
+        let waiter = wake.clone();
+        let scope = pm_shell::agent_menu::begin(key, want, move || {
+            if let Some(tx) = waiter.borrow().as_ref() {
+                let _ = tx.try_send(());
+            }
+        });
+        Self {
+            scope,
+            named,
+            late,
+            wake,
+        }
+    }
+    /// Waits until the action's menu is resolved, or the panel's script has
+    /// handled every event and the host has served what it asked for (a
+    /// script answers a click, then asks for its menu).
+    async fn handled(
+        &self,
+        call: &Call,
+        target: &Target,
+        panel: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        until_with(call, target, cx, HANDLED, Some(self), |c, _, cx| {
+            let c = c.read(cx);
+            self.scope.outcome().is_some()
+                || (c
+                    .builtins
+                    .views
+                    .get(panel)
+                    .is_none_or(|v| v.read(cx).idle())
+                    && c.builtins.requests.is_empty()
+                    && !c
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| r.platform_pending()))
+        })
+        .await?;
+        Ok(())
+    }
+    fn report(&self, out: &mut Value) {
+        match self.scope.outcome() {
+            Some(menu) => out["menu"] = menu,
+            None if self.named => {
+                out["menu"] = json!({"opened": false,
+                    "note": "The action opened no menu, so no item was chosen."})
+            }
+            None => {}
+        }
+        if let Some(late) = &self.late {
+            out["earlierMenu"] = late.clone();
+        }
     }
 }
 

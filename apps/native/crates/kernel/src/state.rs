@@ -64,34 +64,41 @@ pub struct StateSnapshot {
     pub registries: Arc<BTreeMap<String, Vec<Registration>>>,
     pub extensions: Arc<BTreeMap<String, ExtensionEntry>>,
 }
-/// The kernel's own effect providers. They sit first in the stack, so an
+/// The kernel's own effect and transition providers (v1 registered its
+/// built-in transitions at boot too). They sit first in the stack, so an
 /// extension registering the same id wins and disposal reveals the built-in.
 fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
     static SEED: std::sync::OnceLock<Arc<BTreeMap<String, Vec<Registration>>>> =
         std::sync::OnceLock::new();
     SEED.get_or_init(|| {
+        let register =
+            |registry: &str, kind: &str, definition: &pm_fx_defs::Definition| StateOp::Register {
+                registry: registry.into(),
+                entry: Registration {
+                    token: format!("builtin.{kind}.{}", definition.id),
+                    owner: crate::tx::Caller::native().writer,
+                    id: definition.id.clone(),
+                    definition: parse(&serde_json::to_string(definition).expect("JSON definition"))
+                        .expect("JSON definition"),
+                },
+            };
         let ops = pm_fx_defs::catalog::main_effects()
             .effects
             .iter()
-            .map(|definition| StateOp::Register {
-                registry: "effects".into(),
-                entry: Registration {
-                    token: format!("builtin.effect.{}", definition.id),
-                    owner: crate::tx::Caller::native().writer,
-                    id: definition.id.clone(),
-                    definition: parse(
-                        &serde_json::to_string(definition).expect("JSON effect definition"),
-                    )
-                    .expect("JSON effect definition"),
-                },
-            })
+            .map(|d| register("effects", "effect", d))
+            .chain(
+                pm_fx_defs::builtins()
+                    .transitions
+                    .iter()
+                    .map(|d| register("transitions", "transition", d)),
+            )
             .collect();
         let (seeded, _) = StateSnapshot::default()
             .stage(StateTransaction {
                 expected_revision: None,
                 ops,
             })
-            .expect("built-in effect registrations");
+            .expect("built-in effect and transition registrations");
         seeded.registries
     })
     .clone()

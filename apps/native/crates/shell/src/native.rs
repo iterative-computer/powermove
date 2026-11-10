@@ -2012,6 +2012,18 @@ impl Host {
     /// Shown on the next run-loop turn so menu tracking never nests inside
     /// GPUI's event dispatch.
     pub fn context_menu(&self, items: &[MenuEntry], x: f32, y: f32) {
+        // An agent's panel action never leaves a menu on screen.
+        let model = menu_model(items);
+        if let Some(choice) = crate::agent_menu::claim(&agent_menu_windows(&self.window), &model) {
+            if let Some(entry) = choice.and_then(|i| entry_at(items, i)) {
+                self._target.send(Command {
+                    name: entry.command.clone(),
+                    args: vec![],
+                    token: None,
+                });
+            }
+            return;
+        }
         let mtm = MainThreadMarker::new().unwrap();
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
@@ -3365,6 +3377,40 @@ pub fn system_accent(scheme: Scheme) -> Option<u32> {
     out.get()
 }
 
+/// The window keys an agent's panel action registers under: a menu's own
+/// window and the editor window it is a child of.
+pub fn agent_menu_windows(window: &NSWindow) -> Vec<usize> {
+    let mut keys = vec![window as *const NSWindow as usize];
+    if let Some(parent) = window.parentWindow() {
+        keys.push(Retained::as_ptr(&parent) as usize);
+    }
+    keys
+}
+/// Context-menu rows as `agent_menu` items (preorder, separators included).
+fn menu_model(items: &[MenuEntry]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|e| {
+            serde_json::json!({"label": e.label, "enabled": e.enabled, "checked": e.checked,
+                "children": menu_model(&e.children)})
+        })
+        .collect()
+}
+fn entry_at(items: &[MenuEntry], index: usize) -> Option<&MenuEntry> {
+    fn find<'a>(items: &'a [MenuEntry], index: usize, next: &mut usize) -> Option<&'a MenuEntry> {
+        for item in items {
+            if *next == index {
+                return Some(item);
+            }
+            *next += 1;
+            if let Some(found) = find(&item.children, index, next) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    find(items, index, &mut 0)
+}
 fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: MainThreadMarker) {
     for entry in items {
         if entry.label.is_empty() {
@@ -3386,6 +3432,36 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
             item.setSubmenu(Some(&submenu));
         }
         menu.addItem(&item);
+    }
+}
+
+#[cfg(test)]
+mod agent_menu_tests {
+    use super::{MenuEntry, entry_at, menu_model};
+    use crate::agent_menu;
+
+    #[test]
+    fn an_agent_picks_context_menu_rows_by_label_including_submenus() {
+        let items = vec![
+            MenuEntry::item("Rename", "layer:rename"),
+            MenuEntry::separator(),
+            MenuEntry::submenu(
+                "Move to Dock",
+                vec![
+                    MenuEntry::item("Left", "dock:left"),
+                    MenuEntry::item("Right", "dock:right"),
+                ],
+            ),
+        ];
+        for (want, command) in [
+            ("Rename", "layer:rename"),
+            ("Move to Dock ▸ Right", "dock:right"),
+        ] {
+            let scope = agent_menu::begin(11, Some(want.into()), || {});
+            let choice = agent_menu::claim(&[11], &menu_model(&items)).unwrap();
+            assert_eq!(entry_at(&items, choice.unwrap()).unwrap().command, command);
+            drop(scope);
+        }
     }
 }
 

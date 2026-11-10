@@ -64,6 +64,7 @@ fn export_png(
         },
         media: Arc::new(MediaPaths {
             paths: media.paths.clone(),
+            ..Default::default()
         }),
         destination: destination.clone(),
         overwrite: pm_export::Overwrite::Replace,

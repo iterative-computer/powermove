@@ -1,4 +1,5 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
+pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod integration;
 pub mod keyboard;
@@ -34,6 +35,7 @@ pub use macos::{
 pub(crate) use macos::{open_editor_tab, open_settings};
 #[cfg(target_os = "macos")]
 pub use native::{
-    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, document_subtitle, popover_frame,
-    send_menu_command, system_accent, viewer_window, window_backdrop, zoom_limit,
+    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
+    document_subtitle, popover_frame, send_menu_command, system_accent, viewer_window,
+    window_backdrop, zoom_limit,
 };

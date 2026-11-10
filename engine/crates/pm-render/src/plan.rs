@@ -1443,6 +1443,10 @@ fn native_content_quad<'d>(
                 return Ok(None);
             };
             let Some(path) = b.assets.path(&asset_id, Some(record)) else {
+                // Not offline yet: its file is still being looked up.
+                if b.assets.resolving(&asset_id) {
+                    return Ok(None);
+                }
                 // Frames that isolate failing layers (the viewer, agent
                 // stills) draw the Media Offline card in the layer's box;
                 // exports never do (the job refuses offline originals).
