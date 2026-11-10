@@ -671,16 +671,12 @@ impl Renderer {
             set.missing.retain(|m| *m != definition.id);
             set.definitions.push(definition.clone());
         }
-        let known = |ty: &str| {
-            set.definitions
-                .iter()
-                .any(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect && d.id.as_str() == ty)
-        };
-        self.missing_effects = document
-            .root()
-            .and_then(crate::capability::open_composition_id)
-            .map(|open| crate::effects::versions::missing_effects(document, &open, &known))
-            .unwrap_or_default();
+        let known: std::collections::HashSet<String> = set
+            .definitions
+            .iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect)
+            .map(|d| d.id.as_str().to_owned())
+            .collect();
         let failures = self.set_definitions(&set).map_err(|e| e.to_string())?;
         let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
             matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
@@ -690,6 +686,18 @@ impl Renderer {
         }
         self.effects.versioned_builtins = true;
         self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
+        let effects = &self.effects;
+        let unavailable = |ty: &str, version: Option<&pm_model::Node>| {
+            if !known.contains(ty) {
+                return Some(None);
+            }
+            effects.unavailable_revision(ty, version).map(Some)
+        };
+        self.missing_effects = document
+            .root()
+            .and_then(crate::capability::open_composition_id)
+            .map(|open| crate::effects::versions::missing_effects(document, &open, &unavailable))
+            .unwrap_or_default();
         refused.extend(own);
         Ok(refused)
     }
@@ -1399,8 +1407,9 @@ impl Renderer {
     /// Viewer frames: a layer this renderer cannot draw becomes a
     /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
     /// this: a delivered file refuses to omit a layer.
-    /// An effect whose provider isn't installed is bypassed on its layer
-    /// too ([`Renderer::missing_effects`] names them).
+    /// An effect whose provider isn't installed, or whose saved revision this
+    /// build doesn't have, is bypassed on its layer too
+    /// ([`Renderer::missing_effects`] names them).
     pub fn set_isolate_layers(&mut self, on: bool) {
         self.isolate_layers = on;
         self.effects.bypass_missing = on;
@@ -1425,8 +1434,17 @@ impl Renderer {
         document: &Document,
         composition: &str,
     ) -> Vec<crate::effects::versions::MissingEffect> {
-        let known = |ty: &str| self.effects.get(pm_protocol::definitions::DefinitionKind::Effect, ty).is_some();
-        crate::effects::versions::missing_effects(document, composition, &known)
+        let unavailable = |ty: &str, version: Option<&pm_model::Node>| {
+            if self
+                .effects
+                .get(pm_protocol::definitions::DefinitionKind::Effect, ty)
+                .is_none()
+            {
+                return Some(None);
+            }
+            self.effects.unavailable_revision(ty, version).map(Some)
+        };
+        crate::effects::versions::missing_effects(document, composition, &unavailable)
     }
 
     /// Changes whenever a frame a scrub render asked for has decoded: a
