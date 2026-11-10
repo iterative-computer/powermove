@@ -14,7 +14,9 @@
 //! ([`CompatAnswer::Missing`]): the frame then fails with
 //! [`crate::RenderError::CompatPending`] naming what it needs, and the
 //! caller asks the renderer and renders it again (the decision 19 fallback
-//! runner's pattern). Rasters are drawn exactly like a text raster: an
+//! runner's pattern). An override that threw ([`CompatAnswer::Failed`]) is a
+//! failing layer: it draws nothing and is reported with the override's
+//! message (the viewer isolates it; exports refuse). Rasters are drawn exactly like a text raster: an
 //! E-encoded premultiplied image (a canvas's backing store), sampled through
 //! the layer's quad, so effects, masks, mattes, transforms, and blending
 //! apply to them as to the layer's own raster.
@@ -56,6 +58,9 @@ pub enum CompatAnswer {
     Native,
     /// Not answered yet.
     Missing,
+    /// The override threw or returned what cannot be drawn: the layer fails
+    /// with this message, never waited for.
+    Failed(String),
 }
 
 /// The compatibility rasters of one session (the interactive engine's
@@ -207,9 +212,8 @@ fn upload_bytes(
             return (wgpu::TextureFormat::Rgba32Float, bytes, 16);
         }
         static VALUES: OnceLock<[[u8; 2]; 256]> = OnceLock::new();
-        let values = VALUES.get_or_init(|| {
-            std::array::from_fn(|v| f16_bits(v as f32 / 255.0).to_le_bytes())
-        });
+        let values = VALUES
+            .get_or_init(|| std::array::from_fn(|v| f16_bits(v as f32 / 255.0).to_le_bytes()));
         let mut bytes = Vec::with_capacity(channels * 2);
         for &value in raster.data.iter().take(channels) {
             bytes.extend_from_slice(&values[value as usize]);

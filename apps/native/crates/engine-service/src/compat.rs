@@ -223,9 +223,10 @@ struct Answers {
     by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
     /// Asked of the realm and not answered yet, and when.
     asked: HashMap<NeedKey, Instant>,
-    /// Needs whose override failed: their frames fail (as main's compositor
-    /// throws) and are not asked again until the revision or wrappers change.
-    failed: HashSet<NeedKey>,
+    /// Needs whose override failed, with its message: the layer fails in
+    /// their frames (drawn as nothing and reported, never waited for) and is
+    /// not asked again until the revision or wrappers change.
+    failed: HashMap<NeedKey, String>,
     /// The frame being drawn: how it treats late layers, and which it drew
     /// from a nearest answer.
     late: Late,
@@ -300,7 +301,7 @@ impl Answers {
             .filter(|need| {
                 let key = need_key(need);
                 !self.map.contains_key(&key)
-                    && !self.failed.contains(&key)
+                    && !self.failed.contains_key(&key)
                     && self
                         .asked
                         .get(&key)
@@ -318,8 +319,8 @@ pub type CompatSink = Arc<dyn Fn(u64, u64, Vec<CompatNeed>) + Send + Sync>;
 /// What the realm answered for one need.
 pub enum Reply {
     Draw(CompatAnswer),
-    /// The override threw or returned what cannot be drawn.
-    Failed,
+    /// The override threw or returned what cannot be drawn (its message).
+    Failed(String),
     /// The realm had not seen the revision yet.
     Retry,
 }
@@ -543,11 +544,11 @@ impl CompatStore {
             answers.asked.remove(&key);
             let answer = match reply {
                 Reply::Draw(answer) => answer,
-                Reply::Failed => {
+                Reply::Failed(message) => {
                     if answers.failed.len() >= MAX_ENTRIES {
                         answers.failed.clear();
                     }
-                    answers.failed.insert(key);
+                    answers.failed.insert(key, message);
                     drew = true;
                     continue;
                 }
@@ -653,8 +654,11 @@ impl CompatRasters for CompatStore {
         if let Some(answer) = answers.map.get(&key) {
             return answer.clone();
         }
-        // A failed override fails its frames, as main's compositor throws.
-        if answers.late == Late::Wait || answers.failed.contains(&key) {
+        // A failed override fails its layer: reported, not waited for.
+        if let Some(message) = answers.failed.get(&key) {
+            return CompatAnswer::Failed(message.clone());
+        }
+        if answers.late == Late::Wait {
             return CompatAnswer::Missing;
         }
         let stand_in = match (answers.nearest(composition, layer, ticks), answers.late) {
@@ -786,13 +790,15 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
     }
     #[test]
-    fn a_failed_override_fails_its_frames_without_asking_again() {
+    fn a_failed_override_fails_its_layer_without_asking_again() {
         let store = CompatStore::default();
         let asked = asking(&store);
         store.set_state(true, 7, 1);
         store.request(vec![need("x")]);
-        store.answer_all(7, 1, vec![(need("x"), Reply::Failed)]);
-        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        store.answer_all(7, 1, vec![(need("x"), Reply::Failed("boom".into()))]);
+        // The layer fails with the override's message; the frame does not
+        // wait for an answer that will never come.
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Failed(m) if m == "boom"));
         store.request(vec![need("x")]);
         assert_eq!(asked.lock().unwrap().len(), 1);
         // A realm that had not caught up is asked again.
@@ -845,10 +851,13 @@ mod tests {
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
         assert!(store.end_frame().is_empty());
-        // A failed override still fails its frames.
-        store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed)]);
+        // A failed override still fails its layer, playing or not.
+        store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed("boom".into()))]);
         store.begin_frame(Moment::Playing);
-        assert!(matches!(answer_at(&store, "x", 3.), CompatAnswer::Missing));
+        assert!(matches!(
+            answer_at(&store, "x", 3.),
+            CompatAnswer::Failed(_)
+        ));
         store.end_frame();
         // An edit keeps the last revision's answers as stand-ins only.
         store.set_state(true, 8, 1);

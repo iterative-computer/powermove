@@ -1948,6 +1948,14 @@ fn compat_quad<'d>(
             }
             Ok(Some(None))
         }
+        CompatAnswer::Failed(message) => {
+            b.failures.push(LayerFailure {
+                composition: comp_id,
+                layer: id,
+                message: format!("raster override failed: {message}"),
+            });
+            Ok(Some(None))
+        }
     }
 }
 

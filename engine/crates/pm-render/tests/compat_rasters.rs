@@ -155,6 +155,58 @@ fn a_missing_answer_holds_the_frame_and_names_what_it_needs_at_today_s_density()
     }
 }
 
+/// An override that threw is a failing layer, not an answer still to come:
+/// the frame draws without it (the viewer isolates failing layers) and names
+/// the override's error, instead of waiting forever.
+#[test]
+fn a_failed_override_fails_its_layer_instead_of_holding_the_frame() {
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_isolate_layers(true);
+    let empty = {
+        // An override that draws nothing (`hidden`: a transparent pixel).
+        let hidden = CompatAnswer::Raster(raster(1, 1, [0; 4], [1.0, 1.0], [0.0, 0.0]));
+        renderer.set_compat_rasters(Some(Producer::new(true, hidden)));
+        let doc = load(&doc(100.0));
+        let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+        let frame = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                ticks(0.5),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        renderer.read_rgba(&frame).unwrap()
+    };
+    renderer.set_compat_rasters(Some(Producer::new(
+        true,
+        CompatAnswer::Failed("Typewriter needs the native text raster canvas".into()),
+    )));
+    let doc = load(&doc(100.0));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    let frame = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.5),
+            &request,
+            &MapResolver::default(),
+        )
+        .expect("a failed override does not hold the frame");
+    assert_eq!(frame.failures.len(), 1, "{:?}", frame.failures);
+    assert_eq!(frame.failures[0].layer, "box");
+    assert_eq!(
+        frame.failures[0].message,
+        "raster override failed: Typewriter needs the native text raster canvas"
+    );
+    assert_eq!(
+        renderer.read_rgba(&frame).unwrap(),
+        empty,
+        "the layer draws nothing"
+    );
+}
+
 #[test]
 fn a_producer_s_raster_replaces_the_layer_on_its_own_quad_through_the_layer_s_transform() {
     let mut renderer = Renderer::headless().unwrap();

@@ -84,7 +84,7 @@ fn answer_of(answer: RasterAnswer) -> Reply {
         RasterAnswer::Native => Reply::Draw(CompatAnswer::Native),
         RasterAnswer::Hidden => Reply::Draw(hidden_raster()),
         RasterAnswer::Retry | RasterAnswer::Moved => Reply::Retry,
-        RasterAnswer::Failed(_) => Reply::Failed,
+        RasterAnswer::Failed(message) => Reply::Failed(message),
         RasterAnswer::Raster {
             width,
             height,
