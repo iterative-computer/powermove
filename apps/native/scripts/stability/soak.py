@@ -147,9 +147,12 @@ def sample(pid):
     m = re.search(r'phys_footprint:\s+([\d.]+)\s*([KMG])B', fp)
     if m:
         out['footprint_mb'] = round(float(m.group(1)) * {'K': 1 / 1024, 'M': 1, 'G': 1024}[m.group(2)])
-    m = re.search(r'([\d.]+)\s*([KMG])B\s+[\d.]+\s*[KMG]B\s+[\d.]+\s*[KMG]B\s+\d+\s+IOAccelerator', fp)
-    if m:
-        out['gpu_mb'] = round(float(m.group(1)) * {'K': 1 / 1024, 'M': 1, 'G': 1024}[m.group(2)])
+    # Graphics: IOSurfaces, IOAccelerator and owned graphics memory.
+    gpu = 0.0
+    for size, unit in re.findall(r'^\s*([\d.]+)\s*([KMG]?)B\s+[\d.]+\s*[KMG]?B\s+[\d.]+\s*[KMG]?B\s+\d+\s+'
+                                 r'(?:IOSurface|.*\(graphics\))\s*$', fp, re.M):
+        gpu += float(size) * {'': 1 / 1024 ** 2, 'K': 1 / 1024, 'M': 1, 'G': 1024}[unit]
+    out['gpu_mb'] = round(gpu)
     vm = subprocess.run(['vmmap', '-summary', str(pid)], capture_output=True, text=True).stdout
     zones = vm[vm.find('MALLOC ZONE'):]
     m = re.search(r'^TOTAL\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+([\d.]+)([KMG])', zones, re.M)
