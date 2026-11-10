@@ -251,6 +251,7 @@ fn control_label(control: &Control, nested: bool) -> &'static str {
             (_, TransportCommand::Step { .. }) => "step",
             (_, TransportCommand::PlayAround { .. }) => "play-around",
             (_, TransportCommand::AudioScrub { .. }) => "audio-scrub",
+            (_, TransportCommand::Grain { .. }) => "grain",
         },
         Control::Project(..) => "project",
         Control::Solo(..) => "solo",
@@ -3122,7 +3123,9 @@ impl RenderThread {
                 }
             }
             if let Some(g) = seg.grain {
-                for (i, s) in (seg.start..seg.start + seg.frames as i64).enumerate() {
+                // Output frame `i` plays sample `start + i × rate`.
+                for i in 0..seg.frames {
+                    let s = seg.start + i as i64 * seg.rate;
                     let gain = self.transport.grain_gain(g, s);
                     for c in &mut planar {
                         c[i] *= gain;

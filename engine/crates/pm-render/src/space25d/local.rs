@@ -66,6 +66,17 @@ pub fn density<'d>(
     Ok((cap(du, scale.0, w), cap(dv, scale.1, h)))
 }
 
+/// `density` raised to the next quarter octave (2^(k/4)), within
+/// [`MAX_RASTER`] for a raster `size` content units long: a plane turning in
+/// 3D asks for a slightly different density every frame, and a raster at
+/// the step above keeps (with its glyph and raster caches) until the plane
+/// needs the next step, never drawn below the density it needs.
+pub fn stepped(density: f64, size: f64) -> f64 {
+    let step = 2f64.powf(((density.log2() * 4.0) - 1e-9).ceil() / 4.0);
+    let step = if step.is_finite() { step } else { density };
+    step.min(MAX_RASTER / size.max(1.0)).max(1e-6)
+}
+
 /// The plane of a layer's content coordinates (before the size anchor
 /// offset) in target pixels, or `None` for a flat layer.
 pub fn content_plane<'d>(
@@ -211,5 +222,24 @@ mod tests {
     fn the_unbounded_clip_contains_negative_coordinates() {
         let r = super::unbounded();
         assert!(r.x < -1_000_000 && r.right() > 1_000_000);
+    }
+
+    #[test]
+    fn a_turning_plane_keeps_its_density_step_and_never_draws_below_it() {
+        // A plane turning over a second: 0.931 to 0.914 content units.
+        let steps: Vec<f64> = (0..24)
+            .map(|i| 0.931 - 0.017 * f64::from(i) / 23.0)
+            .map(|d| super::stepped(d, 210.0))
+            .collect();
+        assert!(steps.iter().all(|s| *s == steps[0]), "{steps:?}");
+        for d in [0.3, 0.5, 0.914, 0.931, 1.0, 1.4929, 2.0, 7.3] {
+            let s = super::stepped(d, 210.0);
+            assert!(s >= d && s < d * 2f64.powf(0.25) + 1e-12, "{d} -> {s}");
+        }
+        // Exact steps stay; the raster cap still holds.
+        assert_eq!(super::stepped(1.0, 210.0), 1.0);
+        assert_eq!(super::stepped(2.0, 210.0), 2.0);
+        let cap = super::MAX_RASTER / 1000.0;
+        assert_eq!(super::stepped(cap * 0.99, 1000.0), cap);
     }
 }

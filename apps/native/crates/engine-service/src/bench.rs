@@ -5,7 +5,9 @@
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
 //! `--from=SECONDS` starts the run there instead of at the start;
+//! `--loop=SECONDS` loops that much of it for the whole run;
 //! `--quality=full|half|quarter` pins the resolution (Auto by default);
+//! `--skim=SPEED` sets the skim sweep's media seconds per second (1);
 //! `--fill=DIR` first renders the played range into a disk render cache in
 //! `DIR` (Render Selection's child) and reports its bytes and read cost.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
@@ -24,11 +26,24 @@ fn arg(name: &str, default: &str) -> String {
         .unwrap_or(default.into())
 }
 
+/// Media seconds a skim sweep covers.
+const SKIM_SPAN_SECONDS: f64 = 2.;
+
+/// Pointer events (60 Hz) for a skim sweep over `span` media seconds at
+/// `speed` media seconds per wall second: the sweep takes `span / speed`.
+fn skim_events(speed: f64, span: f64) -> usize {
+    ((span / speed.max(1e-3)) * 60.).round().max(1.) as usize
+}
+
 fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
     sorted
         .get(((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1))
         .copied()
 }
+
+/// How long the kernel took to open `--project` (µs): what a window waits
+/// for before its first frame, without media extraction.
+static OPEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The fixture or the project copy named by `--project`, with its media.
 #[cfg(feature = "kernel")]
@@ -44,8 +59,13 @@ fn scene() -> anyhow::Result<(
         let snapshot = pm_kernel::document::DocumentStore::new_untitled(value).snapshot();
         return Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30));
     }
+    let opening = Instant::now();
     let opened = pm_kernel::open_project(std::path::Path::new(&project), Default::default())?;
     let store = pm_kernel::document::DocumentStore::open(opened);
+    OPEN_US.store(
+        opening.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let media_dir = scratch_dir();
     std::fs::create_dir_all(&media_dir)?;
     let mut media = MediaCatalog::default();
@@ -152,6 +172,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     // `--quality=full|half|quarter` pins the resolution (Auto by default),
     // so two builds compare the same frames under different machine load.
+    viewer.adapt_drags(true)?;
     viewer.quality(match arg("quality", "auto").as_str() {
         "full" => pm_engine_service::policy::Quality::Full,
         "half" => pm_engine_service::policy::Quality::Half,
@@ -172,8 +193,12 @@ pub fn run() -> anyhow::Result<()> {
         (0. ..duration).contains(&from),
         "--from is outside the composition"
     );
+    // `--loop=SECONDS` plays a shorter range over and over for the whole run
+    // (memory over a long playback); by default the range is the run.
+    let span: f64 = arg("loop", &seconds.to_string()).parse()?;
     let start = Ticks::from_whole_seconds(from.floor() as i32);
-    let end = Ticks::from_whole_seconds((from.floor() + seconds).min(duration).ceil() as i32);
+    let end =
+        Ticks::from_whole_seconds((from.floor() + span.min(seconds)).min(duration).ceil() as i32);
     if start != Ticks::ZERO {
         viewer.scrub(start)?;
     }
@@ -300,10 +325,94 @@ pub fn run() -> anyhow::Result<()> {
     let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
     let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
     let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
+    // The playhead stops: its frame is drawn exact, at the requested
+    // resolution (Auto drags a slow project at reduced resolution).
+    let requested = match arg("quality", "auto").as_str() {
+        "half" => 0.5,
+        "quarter" => 0.25,
+        _ => 1.,
+    };
+    let last = Ticks::new(scrub_from + 3 * frame)?;
+    let stopped = Instant::now();
+    let settle_ms = loop {
+        pm_text::host::serve(&mut font_service, fonts.take_asks());
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        let status = viewer.status();
+        if status.effective_quality == requested
+            && status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == last && f.completion_host_seconds.is_some())
+        {
+            break stopped.elapsed().as_secs_f64() * 1000.;
+        }
+        anyhow::ensure!(
+            stopped.elapsed() < Duration::from_secs(10),
+            "the stopped frame was never drawn at the requested quality"
+        );
+        std::thread::sleep(Duration::from_micros(100));
+    };
+    // Skimming: pointer events at 60 Hz move the skimmer at `--skim` media
+    // seconds per wall second over two media seconds forward, then back over
+    // them; each frame shown counts from the event that asked for its time.
+    let skim_speed: f64 = arg("skim", "1").parse()?;
+    let mut skim_pass = |forward: bool| -> anyhow::Result<Vec<f64>> {
+        let events = skim_events(skim_speed, SKIM_SPAN_SECONDS);
+        let span = (SKIM_SPAN_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
+        let mut asked: std::collections::HashMap<i64, f64> = Default::default();
+        let mut out = Vec::new();
+        let mut seen = None;
+        let started = Instant::now();
+        let collect = |out: &mut Vec<f64>,
+                       asked: &std::collections::HashMap<i64, f64>,
+                       seen: &mut Option<(i64, u64)>| {
+            if let Some(f) = viewer.status().frame
+                && let Some(done) = f.completion_host_seconds
+                && seen != &Some((f.time.get(), f.stamp.sequence))
+            {
+                *seen = Some((f.time.get(), f.stamp.sequence));
+                if let Some(input) = asked.get(&f.time.get()) {
+                    out.push((done - input) * 1000.);
+                }
+            }
+        };
+        for i in 0..=events {
+            let due = started + Duration::from_secs_f64(i as f64 / 60.);
+            while Instant::now() < due {
+                pm_text::host::serve(&mut font_service, fonts.take_asks());
+                viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+                collect(&mut out, &asked, &mut seen);
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            let along = i as f64 / events as f64;
+            let offset = (along * span as f64) as i64;
+            let t = if forward {
+                scrub_from + offset
+            } else {
+                scrub_from + span - offset
+            };
+            let at = Ticks::new(t.max(0) / frame * frame)?;
+            let input = pm_engine_service::trace::now();
+            asked.entry(at.get()).or_insert(input);
+            viewer.skim(Some(at), input)?;
+        }
+        let rest = Instant::now();
+        while rest.elapsed() < Duration::from_millis(400) {
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            collect(&mut out, &asked, &mut seen);
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        out.sort_by(f64::total_cmp);
+        Ok(out)
+    };
+    let skim_forward = skim_pass(true)?;
+    let skim_back = skim_pass(false)?;
+    viewer.skim(None, pm_engine_service::trace::now())?;
     let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
-        "output":[width,height],"first_frame_s":first_frame_s,
+        "output":[width,height],"open_s":OPEN_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,"first_frame_s":first_frame_s,
         "samples":costs.len(),
         "worker_to_completion_ms":{"p50":percentile(&costs,0.5),"p95":percentile(&costs,0.95),"max":costs.last()},
         "headroom_budget_ms":500./hz,"gpu_failures":failures,
@@ -311,8 +420,8 @@ pub fn run() -> anyhow::Result<()> {
         "stand_in_frames":stand_ins,"lowest_effective_quality":lowest_quality,
         "layer_failures":status.layer_failures.len(),
         "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
-        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"budget_120hz":9.333},
-        "fill":fill,
+        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"settle_exact":settle_ms,"budget_120hz":9.333},
+        "skim_ms":{"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
@@ -417,4 +526,21 @@ fn walk_frames(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// The sweep moves at the reported speed (review: `--skim=1` covered
+    /// two media seconds in one wall second, then rested).
+    #[test]
+    fn a_skim_sweep_moves_at_its_reported_speed() {
+        for speed in [0.5, 1., 2., 4.] {
+            let events = super::skim_events(speed, super::SKIM_SPAN_SECONDS);
+            let wall = events as f64 / 60.;
+            assert!(
+                (super::SKIM_SPAN_SECONDS / wall - speed).abs() < 0.05,
+                "{speed}: {events} events"
+            );
+        }
+    }
 }

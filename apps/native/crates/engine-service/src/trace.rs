@@ -14,6 +14,10 @@ pub struct Trace {
     /// The render thread's own CPU time from render start to submission
     /// (ms): the frame's CPU cost without time spent preempted.
     pub render_cpu_ms: f64,
+    /// Whether this frame counts its work (only a traced viewer does).
+    pub count_work: bool,
+    /// The render's work counters (`pm_perf`, the render thread's own).
+    pub work: pm_perf::Counters,
     pub drawable_asked: f64,
     pub drawable_acquired: f64,
     pub encode_end: f64,

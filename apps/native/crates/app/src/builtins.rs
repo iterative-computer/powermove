@@ -1288,6 +1288,18 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
+    fn skim(&self, seconds: Option<f64>, cx: &mut App) {
+        let input = crate::skimming::input();
+        let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
+    }
+    fn skimming(&self, cx: &App) -> bool {
+        crate::skimming::on(&self.0, cx)
+    }
+    fn skimmer_shown(&self, cx: &App) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|c| c.read(cx).skimming.at.is_some())
+    }
     fn seek(&self, seconds: f64, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             v.seek(seconds);

@@ -44,6 +44,14 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             continue;
         }
         #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/skim/") {
+            let editors = cx.default_global::<Entries>().editors.clone();
+            if let Some((editor, _)) = editors.first() {
+                crate::skimming::review_sweep(editor.clone(), rest, cx);
+            }
+            continue;
+        }
+        #[cfg(debug_assertions)]
         if let Some(rest) = raw.strip_prefix("powermove://review/library-row/") {
             review_library_row(rest, cx);
             continue;

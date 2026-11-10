@@ -125,11 +125,19 @@ const UNDER: f64 = 0.2;
 const FIRST_HOLD: u32 = 120;
 const LAST_HOLD: u32 = 1920;
 
+/// A dragged playhead waits this long without moving before its frame is
+/// drawn again exact (After Effects' adaptive resolution).
+pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
+
 /// The Auto ladder: measured worker-to-completion cost against the frame
 /// budget, full resolution down to [`AUTO_FLOOR`] and back with hysteresis.
+/// Scrubbing has its own step: a full-resolution still that took longer than
+/// a refresh puts the dragged frames at [`AUTO_FLOOR`] until an exact frame
+/// fits a refresh again.
 #[derive(Debug, Clone)]
 pub struct AutoQuality {
     scale: f64,
+    slow_stills: bool,
     recent: std::collections::VecDeque<bool>,
     quiet: u32,
     hold: u32,
@@ -139,6 +147,7 @@ impl Default for AutoQuality {
     fn default() -> Self {
         Self {
             scale: 1.,
+            slow_stills: false,
             recent: Default::default(),
             quiet: 0,
             hold: FIRST_HOLD,
@@ -152,6 +161,19 @@ impl AutoQuality {
     }
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+    /// A paused or dragged frame drawn at `scale` took `cost_ms` against a
+    /// refresh of `interval_ms`. A full one over the refresh is slow; a
+    /// reduced one far enough under it predicts a full one inside it.
+    pub fn record_still(&mut self, cost_ms: f64, interval_ms: f64, scale: f64) {
+        if !cost_ms.is_finite() || !interval_ms.is_finite() || interval_ms <= 0. {
+            return;
+        }
+        if scale >= 1. {
+            self.slow_stills = cost_ms > interval_ms;
+        } else if cost_ms < UNDER * interval_ms {
+            self.slow_stills = false;
+        }
     }
     pub fn record(&mut self, cost_ms: f64, budget_ms: f64) {
         if !cost_ms.is_finite() || !budget_ms.is_finite() || budget_ms <= 0. {
@@ -199,6 +221,7 @@ impl Quality {
     pub fn scale(self, auto: &AutoQuality, moment: Moment) -> f64 {
         match self {
             Self::Auto if moment == Moment::Playing => auto.scale(),
+            Self::Auto if moment == Moment::Scrub && auto.slow_stills => AUTO_FLOOR,
             Self::Auto | Self::Full => 1.,
             Self::Half => 0.5,
             Self::Quarter => 0.25,
@@ -214,6 +237,46 @@ mod tests {
         for _ in 0..frames {
             auto.record(cost, 16.67);
         }
+    }
+
+    #[test]
+    fn a_slow_still_drags_at_half_and_stops_exact() {
+        let mut auto = AutoQuality::default();
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
+        auto.record_still(41., 16.67, 1.);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), AUTO_FLOOR);
+        auto.record_still(12., 16.67, AUTO_FLOOR);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            AUTO_FLOOR,
+            "still slow at half"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Paused),
+            1.,
+            "a stop is exact"
+        );
+        assert_eq!(
+            Quality::Full.scale(&auto, Moment::Scrub),
+            1.,
+            "Full means full"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Playing),
+            1.,
+            "playback has its own ladder"
+        );
+        auto.record_still(9., 16.67, 1.);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            1.,
+            "a cheap place drags exact"
+        );
+        // One slow still (a first frame compiling its programs) costs one
+        // reduced drag frame: that one is cheap enough to go back to full.
+        auto.record_still(300., 16.67, 1.);
+        auto.record_still(0.8, 16.67, AUTO_FLOOR);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
     }
 
     #[test]
