@@ -8,7 +8,8 @@
 
 use std::collections::HashSet;
 
-use pm_model::{Map, Value};
+use pm_model::patch::PathPart;
+use pm_model::{Map, Op, Value};
 
 use super::properties::{self, SetProperty};
 use super::values::{self, property};
@@ -961,7 +962,7 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
 /// `addLayer(command)`.
 fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
     let mut layer = build_layer(cx, c)?;
-    let layers = cx.layers(c.comp.as_deref());
+    let layers = cx.layer_heads(c.comp.as_deref());
     if let Some(pid) = &c.parent {
         let parent = layers
             .iter()
@@ -1207,7 +1208,7 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         return Err(CommandError::Invalid("No layers to delete".into()));
     }
     for (comp, ids) in by_comp {
-        let layers = cx.layers(comp.as_deref());
+        let layers = cx.layer_heads(comp.as_deref());
         let base: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let expanded = expand_groups(&layers, &base);
         let find = |id: &str| layers.iter().find(|l| values::text(l, "id") == Some(id));
@@ -1244,18 +1245,27 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         // `PM.removeLayers`: expand again, drop, unparent survivors.
         let again: HashSet<&str> = remove.iter().map(String::as_str).collect();
         let gone: HashSet<String> = expand_groups(&layers, &again).into_iter().collect();
-        let next: Vec<Value> = layers
-            .iter()
-            .filter(|l| !values::text(l, "id").is_some_and(|i| gone.contains(i)))
-            .cloned()
-            .map(|mut l| {
-                if values::text(&l, "parent").is_some_and(|p| gone.contains(p)) {
-                    values::obj(&mut l).insert("parent", Value::Null);
-                }
-                l
-            })
-            .collect();
-        write_layers(cx, comp.as_deref(), next)?;
+        // Survivors parented to a deleted layer are unparented first (their
+        // indexes still hold), then each deleted layer goes by id.
+        let path = cx.layers_path(comp.as_deref());
+        for (index, l) in layers.iter().enumerate() {
+            let id = values::text(l, "id");
+            if !id.is_some_and(|i| gone.contains(i))
+                && values::text(l, "parent").is_some_and(|p| gone.contains(p))
+            {
+                let mut at = path.clone();
+                at.extend([PathPart::Index(index as f64), "parent".into()]);
+                cx.set(at, Value::Null)?;
+            }
+        }
+        for l in &layers {
+            if let Some(id) = values::text(l, "id").filter(|i| gone.contains(*i)) {
+                cx.write(Op::Delete {
+                    path: path.clone(),
+                    id: id.into(),
+                })?;
+            }
+        }
     }
     Ok(())
 }

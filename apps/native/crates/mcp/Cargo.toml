@@ -18,6 +18,15 @@ icu_collator = "2"
 async-channel = "2"
 sha2 = "0.10"
 
+[features]
+# Synthetic large projects for the scale bench (pm_kernel::synthetic).
+synthetic = ["pm-kernel/synthetic"]
+
+[[bench]]
+name = "apply_scale"
+harness = false
+required-features = ["synthetic"]
+
 [[bin]]
 name = "powermove-mcp"
 path = "src/main.rs"

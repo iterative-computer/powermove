@@ -906,10 +906,10 @@ impl TimelineSurface {
             return;
         }
         let slop = ((m.hit - m.keyframe) as f64 / 2.).max(0.);
-        if let Some((_, key)) = frame.hit_key(x, y, slop)
-            && let Some((layer, channel, _)) = self.model.index.key(&key)
+        if let Some((on, key)) = frame.hit_layer_key(x, y, slop)
+            && let Some((layer, channel, _)) = self.model.index.key_on(&on, &key)
         {
-            let selected = self.model.selection.keys().contains(&key);
+            let selected = self.model.selection.key_selected(&on, &key);
             let (layer, channel) = (layer.id.clone(), channel.path.clone());
             self.queue.push_back(Job::SelectKey {
                 layer: layer.clone(),
@@ -1059,7 +1059,11 @@ impl TimelineSurface {
             return;
         }
         if let Some(key) = hit("graph-key:")
-            && let Some((layer, channel, _)) = self.model.index.key(&key)
+            && let Some((layer, channel, _)) = self
+                .graph
+                .as_ref()
+                .and_then(|g| g.key_layer(&key))
+                .and_then(|on| self.model.index.key_on(on, &key))
         {
             self.queue.push_back(Job::SelectKey {
                 layer: layer.id.clone(),
@@ -1138,7 +1142,12 @@ impl TimelineSurface {
                 );
                 let readout = matches!(spec, Spec::Property { .. });
                 let handle = match &spec {
-                    Spec::Handle { key, .. } => self.model.index.key(key).map(|(l, _, _)| l.from),
+                    Spec::Handle { key, .. } => self
+                        .graph
+                        .as_ref()
+                        .and_then(|g| g.key_layer(key))
+                        .and_then(|on| self.model.index.key_on(on, key))
+                        .map(|(l, _, _)| l.from),
                     _ => None,
                 };
                 let time = self.delegate.time(cx);
@@ -1275,7 +1284,7 @@ impl TimelineSurface {
         } else {
             vec![]
         };
-        let plan = session.update(&self.model, keys, layers);
+        let plan = session.update(keys, layers);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
@@ -1298,8 +1307,7 @@ impl TimelineSurface {
                 let moved = f32::from(delta.x).abs().max(f32::from(delta.y).abs())
                     >= self.tokens.metrics.drag_threshold;
                 if moved {
-                    self.queue
-                        .push_back(Job::Apply(session.finish(&self.model)));
+                    self.queue.push_back(Job::Apply(session.finish()));
                 } else {
                     self.queue.push_back(Job::Apply(Plan {
                         calls: vec![SelectionCall::Clear.into()],

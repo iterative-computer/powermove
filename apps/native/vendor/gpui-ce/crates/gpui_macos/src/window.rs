@@ -1644,6 +1644,12 @@ unsafe fn present(native_window: ObjcId, key: bool) {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        // The accessibility adapter retains the window's content view (and
+        // its action handler the GPUI view), while the view holds this
+        // state: a cycle that kept every closed window's view, layer and
+        // drawables alive. Released after the lock, as AX callbacks never
+        // take it.
+        let accessibility = this.accesskit_adapter.take();
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -1670,6 +1676,8 @@ impl Drop for MacWindow {
                 }
             })
             .detach();
+        drop(this);
+        drop(accessibility);
     }
 }
 

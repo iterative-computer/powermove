@@ -1,41 +1,42 @@
 //! Scroll-independent marquee selection, timeline.ts:4110–4190.
 use crate::{Plan, TimelineModel, unique_ids};
 use pm_kernel::SelectionCall;
+/// Keys are `(layer, key)`: key ids may repeat across layers.
 #[derive(Clone, Debug)]
 pub struct MarqueeSession {
-    keys: Vec<String>,
+    keys: Vec<(String, String)>,
     layers: Vec<String>,
     additive: bool,
     graph: bool,
-    picked: Vec<String>,
+    picked: Vec<(String, String)>,
 }
 impl MarqueeSession {
     pub fn begin(model: &TimelineModel, additive: bool, graph: bool) -> Self {
         Self {
-            keys: model.selection.keys().to_vec(),
+            keys: model.selected_key_pairs(),
             layers: model.selection.layers().to_vec(),
             additive,
             graph,
             picked: Vec::new(),
         }
     }
-    pub fn update(
-        &mut self,
-        model: &TimelineModel,
-        picked: Vec<String>,
-        layers: Vec<String>,
-    ) -> Plan {
-        self.picked = unique_ids(picked);
+    pub fn update(&mut self, picked: Vec<(String, String)>, layers: Vec<String>) -> Plan {
+        self.picked.clear();
+        for pair in picked {
+            if !self.picked.contains(&pair) {
+                self.picked.push(pair);
+            }
+        }
         let mut keys = if self.additive || self.graph {
             self.keys.clone()
         } else {
             Vec::new()
         };
-        for id in &self.picked {
-            if self.additive && keys.contains(id) {
-                keys.retain(|k| k != id);
-            } else if !keys.contains(id) {
-                keys.push(id.clone());
+        for pair in &self.picked {
+            if self.additive && keys.contains(pair) {
+                keys.retain(|k| k != pair);
+            } else if !keys.contains(pair) {
+                keys.push(pair.clone());
             }
         }
         let mut selected_layers = if self.additive {
@@ -43,11 +44,9 @@ impl MarqueeSession {
         } else {
             Vec::new()
         };
-        for id in &keys {
-            if let Some((layer, _, _)) = model.index.key(id)
-                && !selected_layers.contains(&layer.id)
-            {
-                selected_layers.push(layer.id.clone());
+        for (layer, _) in &keys {
+            if !selected_layers.contains(layer) {
+                selected_layers.push(layer.clone());
             }
         }
         if keys.is_empty() {
@@ -59,7 +58,7 @@ impl MarqueeSession {
         }
         selection(selected_layers, keys)
     }
-    pub fn finish(&self, model: &TimelineModel) -> Plan {
+    pub fn finish(&self) -> Plan {
         if !self.graph || self.additive {
             return Plan::default();
         }
@@ -68,10 +67,7 @@ impl MarqueeSession {
         } else {
             self.picked.clone()
         };
-        let layers = unique_ids(
-            keys.iter()
-                .filter_map(|id| model.index.key(id).map(|(l, _, _)| l.id.clone())),
-        );
+        let layers = unique_ids(keys.iter().map(|(layer, _)| layer.clone()));
         selection(layers, keys)
     }
     pub fn cancel(&self) -> Plan {
@@ -82,7 +78,7 @@ impl MarqueeSession {
         }
     }
 }
-fn selection(layers: Vec<String>, keys: Vec<String>) -> Plan {
+fn selection(layers: Vec<String>, keys: Vec<(String, String)>) -> Plan {
     Plan {
         calls: vec![
             SelectionCall::Layers {
@@ -90,7 +86,7 @@ fn selection(layers: Vec<String>, keys: Vec<String>) -> Plan {
                 add: false,
             }
             .into(),
-            SelectionCall::Keys(keys).into(),
+            SelectionCall::LayerKeys(keys).into(),
         ],
         ..Default::default()
     }

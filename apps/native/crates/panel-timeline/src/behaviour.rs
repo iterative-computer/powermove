@@ -122,9 +122,20 @@ pub fn composition_tabs(ids: &[String], active: &str) -> Vec<CompositionTab> {
 
 impl TimelineModel {
     pub fn expand_scale_keys(&self, ids: &[String]) -> Vec<String> {
+        self.expand_scale(ids, |id| self.index.key(id))
+    }
+    /// [`expand_scale_keys`](Self::expand_scale_keys) for keys on `layer`.
+    pub fn expand_scale_keys_on(&self, layer: &str, ids: &[String]) -> Vec<String> {
+        self.expand_scale(ids, |id| self.index.key_on(layer, id))
+    }
+    fn expand_scale<'a>(
+        &'a self,
+        ids: &[String],
+        resolve: impl Fn(&str) -> Option<(&'a crate::Layer, &'a crate::Channel, &'a crate::Key)>,
+    ) -> Vec<String> {
         let mut result = ids.to_vec();
         for id in ids {
-            if let Some((l, c, k)) = self.index.key(id)
+            if let Some((l, c, k)) = resolve(id)
                 && (c.path == "scale.x"
                     || c.path == "scale.y"
                     || (!l.separate_dimensions && c.path.starts_with("position.")))
@@ -837,6 +848,7 @@ impl TimelineModel {
                 .layers
                 .iter()
                 .filter(|l| selected.contains(&l.id))
+                .map(|l| &**l)
                 .collect()
         } else {
             vec![source]

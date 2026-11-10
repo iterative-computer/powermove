@@ -58,7 +58,9 @@ const ORCHESTRATION_TOOLS: &[&str] = &[
     "thread_unwatch",
 ];
 struct Transaction {
-    snapshot: Value,
+    /// The document as the run found it (shared with the kernel's
+    /// publication, never copied), restored by a rollback.
+    snapshot: pm_kernel::Snapshot,
     mark: ActorHistoryMark,
     revision: u64,
     changed: bool,
@@ -324,7 +326,7 @@ impl McpSession {
                 let revision = host.revision(id)?;
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
-                        snapshot: host.read_document(id)?,
+                        snapshot: host.view(id)?.snapshot,
                         mark: host.history_mark(id, self.writer)?,
                         revision,
                         changed: false,
@@ -357,7 +359,7 @@ impl McpSession {
                     .map_err(|_| Error::unavailable("headless host stopped"))?;
                 let revision = host.revision(id)?;
                 if let Some(tx) = session.transaction.as_mut() {
-                    tx.changed |= tx.snapshot["revision"].as_u64() != Some(revision);
+                    tx.changed |= tx.snapshot.revision != revision;
                     tx.revision = revision;
                 }
             }
@@ -768,7 +770,14 @@ impl McpSession {
                     .chars()
                     .take(80)
                     .collect::<String>();
-                let p = host.read_document(&id)?;
+                // Whole-document JSON only for the planners that read it;
+                // apply_commands plans on the published snapshot.
+                let view = host.view(&id)?;
+                let p = if name == "apply_commands" {
+                    Value::Null
+                } else {
+                    host.read_document(&id)?
+                };
                 let selection = host.selection(&id)?["layers"]
                     .as_array()
                     .unwrap()
@@ -801,8 +810,8 @@ impl McpSession {
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
                 } else if strips.is_none() && video.is_none() {
-                    Some(commands::plan_cleaned_with_definitions(
-                        &p,
+                    Some(commands::plan_snapshot(
+                        &view.snapshot,
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
@@ -813,7 +822,7 @@ impl McpSession {
                 };
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
-                        snapshot: p.clone(),
+                        snapshot: view.snapshot.clone(),
                         mark: host.history_mark(&id, self.writer)?,
                         revision,
                         changed: false,
@@ -1051,8 +1060,7 @@ impl McpSession {
                 return Ok(json!({"changed":session.committed}));
             };
             if session.panel_actions {
-                let changed =
-                    tx.changed || tx.snapshot["revision"].as_u64() != Some(host.revision(&id)?);
+                let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
                 if !commit && changed {
                     return Err(Error::invalid(
                         "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
@@ -1237,7 +1245,7 @@ fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -
         if tx.changed {
             tx.interleaved = true;
         } else {
-            tx.snapshot = host.read_document(id)?;
+            tx.snapshot = host.view(id)?.snapshot;
             tx.mark = host.history_mark(id, writer)?;
         }
         tx.revision = revision;
@@ -1266,8 +1274,13 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     if !tx.changed {
         return Ok(());
     }
-    host.restore(id, tx.snapshot.clone(), tx.revision, writer)?;
-    tx.snapshot = host.read_document(id)?;
+    host.restore(
+        id,
+        crate::automation::document_json(&tx.snapshot)?,
+        tx.revision,
+        writer,
+    )?;
+    tx.snapshot = host.view(id)?.snapshot;
     tx.revision = host.revision(id)?;
     tx.mark = host.history_mark(id, writer)?;
     tx.changed = false;

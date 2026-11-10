@@ -698,39 +698,46 @@ fn normalize_compositions(project: &mut Value) {
     }
 }
 
-/// Known logical history can be re-exported without an archive. Dictionaries,
-/// refused histories and metadata the logical stack cannot represent must be
-/// retained when a later edit changes that stack.
+/// A saved history needs an archive before an edit replaces it unless this
+/// kernel imports it losslessly: nothing refused, trimmed or dropped, and its
+/// re-export equal in content to what the file holds (unpacked, for main's
+/// dictionary form, which this kernel writes for large histories). Anything
+/// else (newer metadata, unknown operations, entries over the byte budget)
+/// is kept as `nativeHistoryArchive`.
 pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
-    if History::from_saved(raw, open).is_none() {
+    let Ok(history) = History::import(raw, open) else {
         return true;
-    }
-    let unknown = |value: &Value, known: &[&str]| {
-        value.as_object().is_none_or(|map| {
-            map.keys()
-                .any(|key| !key.as_str().is_some_and(|key| known.contains(&key)))
-        })
     };
-    if unknown(raw, &["version", "paths", "index", "entries"]) {
-        return true;
-    }
-    raw.get("entries")
-        .and_then(Value::as_array)
-        .is_none_or(|entries| {
-            entries.iter().any(|entry| {
-                unknown(entry, &["label", "forward", "backward"])
-                    || ["forward", "backward"].into_iter().any(|side| {
+    // Unpacking keeps only the keys it reads: anything else in the
+    // dictionary itself or its items would be lost, so judge those first.
+    if raw.get("format").is_some() {
+        let unknown = |value: &Value, known: &[&str]| {
+            value.as_object().is_none_or(|map| {
+                map.keys()
+                    .any(|key| !key.as_str().is_some_and(|key| known.contains(&key)))
+            })
+        };
+        let items_unknown = raw
+            .get("history")
+            .and_then(|h| h.get("entries"))
+            .and_then(Value::as_array)
+            .is_none_or(|entries| {
+                entries.iter().any(|entry| {
+                    ["forward", "backward"].into_iter().any(|side| {
                         entry
                             .get(side)
                             .and_then(Value::as_array)
-                            .is_none_or(|patches| {
-                                patches
-                                    .iter()
-                                    .any(|patch| unknown(patch, &["path", "exists", "value"]))
+                            .is_none_or(|items| {
+                                items.iter().any(|item| unknown(item, &["patch", "refs"]))
                             })
                     })
-            })
-        })
+                })
+            });
+        if unknown(raw, &["format", "version", "records", "history"]) || items_unknown {
+            return true;
+        }
+    }
+    crate::history::unpack(raw).is_none_or(|unpacked| history.snapshot().to_saved() != unpacked)
 }
 
 /// Asset ids reachable from a *stored* project and its saved history

@@ -84,7 +84,7 @@ impl TimelineModel {
         let selection_changed = self.selection.layers() != published.selection.layers();
         self.selection = published.selection.clone();
         if changed {
-            self.index = Arc::new(TimelineIndex::from_snapshot(&published.snapshot));
+            self.index = Arc::new(self.index.updated(&published.snapshot));
             self.rebuild_rows();
         }
         if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
@@ -133,6 +133,7 @@ impl TimelineModel {
             .map(|i| (i, 0))
             .collect();
         let mut seen = HashSet::new();
+        let query = self.search.trim().to_lowercase();
         while let Some((i, depth)) = stack.pop() {
             if !seen.insert(i) {
                 continue;
@@ -140,6 +141,23 @@ impl TimelineModel {
             let layer = &self.index.layers[i];
             let disclosure = self.reveal.layers.get(&layer.id);
             let collapsed = disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed);
+            let group_closed = disclosure
+                .map(|d| d.group_collapsed)
+                .unwrap_or(layer.group_collapsed);
+            let kids = (!group_closed || !self.search.is_empty())
+                .then(|| children.get(&Some(layer.id.clone())))
+                .flatten();
+            // A closed layer with no search shows its row alone.
+            if collapsed && query.is_empty() {
+                self.rows.push(Row {
+                    id: RowId::Layer(layer.id.clone()),
+                    depth,
+                });
+                if let Some(kids) = kids {
+                    stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
+                }
+                continue;
+            }
             let mut properties = Vec::new();
             let has_scale = layer.channels.iter().any(|c| c.path == "scale.x")
                 && layer.channels.iter().any(|c| c.path == "scale.y");
@@ -195,7 +213,6 @@ impl TimelineModel {
                     );
                 }
             }
-            let query = self.search.trim().to_lowercase();
             let matching: Vec<_> = properties
                 .iter()
                 .filter(|path| {
@@ -231,12 +248,7 @@ impl TimelineModel {
                     }
                 }
             }
-            let group_closed = disclosure
-                .map(|d| d.group_collapsed)
-                .unwrap_or(layer.group_collapsed);
-            if (!group_closed || !self.search.is_empty())
-                && let Some(kids) = children.get(&Some(layer.id.clone()))
-            {
+            if let Some(kids) = kids {
                 stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
             }
         }
@@ -379,21 +391,21 @@ impl TimelineModel {
         {
             return Err(ModelError::UnknownId("key".into()));
         }
-        let expanded = self.expand_scale_keys(hit);
-        let hit = expanded.as_slice();
-        let before = self.selection.keys();
-        let all = hit.iter().any(|id| before.contains(id));
-        let mut next = if additive || all {
-            before.to_vec()
-        } else {
-            Vec::new()
-        };
+        // Keys by (layer, key): key ids may repeat across layers.
+        let hit: Vec<(String, String)> = self
+            .expand_scale_keys_on(layer, hit)
+            .into_iter()
+            .map(|id| (layer.to_owned(), id))
+            .collect();
+        let before = self.selected_key_pairs();
+        let all = hit.iter().any(|pair| before.contains(pair));
+        let mut next = if additive || all { before } else { Vec::new() };
         if additive && !dragging && all {
-            next.retain(|id| !hit.contains(id));
+            next.retain(|pair| !hit.contains(pair));
         } else {
-            for id in hit {
-                if !next.contains(id) {
-                    next.push(id.clone());
+            for pair in hit {
+                if !next.contains(&pair) {
+                    next.push(pair);
                 }
             }
         }
@@ -410,8 +422,17 @@ impl TimelineModel {
             );
         }
         calls.push(SelectionCall::Channel(Some(channel.into())).into());
-        calls.push(SelectionCall::Keys(next).into());
+        calls.push(SelectionCall::LayerKeys(next).into());
         Ok(calls)
+    }
+
+    /// The selected keys as `(layer, key)`.
+    pub fn selected_key_pairs(&self) -> Vec<(String, String)> {
+        self.index
+            .selected_keys(&self.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.clone(), k.id.clone()))
+            .collect()
     }
 
     /// Semantic marquee: caller supplies intersected IDs after hit testing. Never seeks.

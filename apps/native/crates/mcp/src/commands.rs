@@ -1,6 +1,11 @@
 //! Legacy command JSON -> typed kernel commands. A scratch store resolves
 //! names, $selection and 1-based references after each preceding command.
 //! The real kernel receives the complete batch once, with a revision guard.
+//!
+//! The scratch store shares the published snapshot's tree and the planner
+//! reads it through [`Doc`] (the open composition's layer nodes; one layer as
+//! JSON when a result needs it), so a call costs what its commands touch, not
+//! the project's size.
 use crate::{Error, Result, json_value, model};
 use pm_kernel::commands::{
     captions::{AddCaptions, CaptionCommand, CaptionEdit, CaptionFormat, CueSource},
@@ -226,15 +231,58 @@ fn comp_patch(v: &Value) -> Result<CompPatch> {
         export_defaults: None,
     })
 }
-fn realized(store: &DocumentStore) -> Value {
-    json_value(&pm_model::canonical::realize_project(
-        store.snapshot().document.to_value().unwrap(),
-    ))
+/// The planning document at one point of a batch, read where the realized
+/// project would be: the open composition's layers (`layers`), markers and
+/// the project's library. Holding the snapshot keeps it readable after the
+/// scratch store moves on.
+struct Doc(pm_kernel::Snapshot);
+impl Doc {
+    fn of(store: &DocumentStore) -> Doc {
+        Doc(store.snapshot())
+    }
+    fn root(&self) -> Option<&pm_model::Node> {
+        self.0.document.root()
+    }
+    fn comp(&self) -> Option<&pm_model::Node> {
+        let root = self.root()?;
+        pm_kernel::model::comp_node(root, pm_kernel::model::open_comp_id(root).as_deref())
+    }
+    fn layers(&self) -> impl Iterator<Item = &pm_model::Node> {
+        self.comp()
+            .into_iter()
+            .flat_map(pm_kernel::model::layers_of)
+    }
+    fn layer_node(&self, id: &str) -> Option<&pm_model::Node> {
+        self.layers().find(|l| text_of(l.get("id")) == Some(id))
+    }
+    /// One layer of the open composition as JSON.
+    fn layer(&self, id: &str) -> Option<Value> {
+        self.layer_node(id).map(|l| json_value(&l.to_value()))
+    }
+    fn layer_ids(&self) -> std::collections::HashSet<&str> {
+        self.layers().filter_map(|l| text_of(l.get("id"))).collect()
+    }
+    fn comp_field(&self, key: &str) -> Value {
+        self.comp()
+            .and_then(|c| c.get(key))
+            .map_or(Value::Null, |v| json_value(&v.to_value()))
+    }
+    fn root_field(&self, key: &str) -> Value {
+        self.root()
+            .and_then(|r| r.get(key))
+            .map_or(Value::Null, |v| json_value(&v.to_value()))
+    }
 }
-fn resolve(v: &Value, p: &Value, selection: &[String]) -> Result<String> {
-    let layers = p["layers"]
-        .as_array()
-        .ok_or_else(|| Error::invalid("Missing layers"))?;
+fn text_of(node: Option<&pm_model::Node>) -> Option<&str> {
+    match node?.kind() {
+        pm_model::NodeKind::String(s) => s.as_str(),
+        _ => None,
+    }
+}
+fn resolve(v: &Value, p: &Doc, selection: &[String]) -> Result<String> {
+    if p.comp().is_none() {
+        return Err(Error::invalid("Missing layers"));
+    }
     if v == "$selection" {
         return selection
             .first()
@@ -242,34 +290,31 @@ fn resolve(v: &Value, p: &Value, selection: &[String]) -> Result<String> {
             .ok_or_else(|| Error::invalid("No selected layer"));
     }
     if let Some(n) = v.as_u64() {
-        return layers
-            .get(n.wrapping_sub(1) as usize)
-            .and_then(|l| l["id"].as_str())
+        return p
+            .layers()
+            .nth(n.wrapping_sub(1) as usize)
+            .and_then(|l| text_of(l.get("id")))
             .map(str::to_owned)
             .ok_or_else(|| Error::invalid("Layer index not found"));
     }
     let s = v
         .as_str()
         .ok_or_else(|| Error::invalid("Layer target is required"))?;
-    let mut matches = layers.iter().filter(|l| l["id"] == s);
-    if let Some(l) = matches.next() {
-        return Ok(l["id"].as_str().unwrap().into());
+    if p.layer_node(s).is_some() {
+        return Ok(s.into());
     }
-    let matches = layers
-        .iter()
-        .filter(|l| {
-            l["name"]
-                .as_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case(s))
-        })
-        .collect::<Vec<_>>();
-    if matches.len() == 1 {
-        Ok(matches[0]["id"].as_str().unwrap().into())
-    } else {
-        Err(Error::invalid(format!("Layer not found or ambiguous: {s}")))
+    let mut matches = p
+        .layers()
+        .filter(|l| match l.get("name").map(pm_model::Node::kind) {
+            Some(pm_model::NodeKind::String(n)) => n.to_string_lossy().eq_ignore_ascii_case(s),
+            _ => false,
+        });
+    match (matches.next(), matches.next()) {
+        (Some(l), None) => Ok(text_of(l.get("id")).unwrap_or_default().into()),
+        _ => Err(Error::invalid(format!("Layer not found or ambiguous: {s}"))),
     }
 }
-fn targets(c: &Value, p: &Value, selection: &[String]) -> Result<Vec<String>> {
+fn targets(c: &Value, p: &Doc, selection: &[String]) -> Result<Vec<String>> {
     if let Some(a) = c["targets"].as_array() {
         a.iter().map(|v| resolve(v, p, selection)).collect()
     } else if let Some(t) = c.get("target") {
@@ -352,7 +397,39 @@ pub(crate) fn plan_cleaned_with_definitions(
     time: f64,
     state: Option<&pm_kernel::state::StateSnapshot>,
 ) -> Result<Batch> {
-    let mut scratch = DocumentStore::new_untitled(model(project));
+    plan_on(
+        DocumentStore::new_untitled(model(project)),
+        selection,
+        cleaned,
+        time,
+        state,
+    )
+}
+
+/// Plans against the kernel's published snapshot (shared, never copied).
+pub(crate) fn plan_snapshot(
+    snapshot: &pm_kernel::Snapshot,
+    selection: &[String],
+    cleaned: &[Value],
+    time: f64,
+    state: Option<&pm_kernel::state::StateSnapshot>,
+) -> Result<Batch> {
+    plan_on(
+        DocumentStore::scratch(snapshot),
+        selection,
+        cleaned,
+        time,
+        state,
+    )
+}
+
+fn plan_on(
+    mut scratch: DocumentStore,
+    selection: &[String],
+    cleaned: &[Value],
+    time: f64,
+    state: Option<&pm_kernel::state::StateSnapshot>,
+) -> Result<Batch> {
     if let Some(state) = state {
         scratch.set_runtime_state(state.clone(), None);
     }
@@ -364,7 +441,7 @@ pub(crate) fn plan_cleaned_with_definitions(
     };
     for mut c in cleaned.iter().cloned() {
         let kind = c["type"].as_str().unwrap().to_owned();
-        let p = realized(&scratch);
+        let p = Doc::of(&scratch);
         let target = || resolve(&c["target"], &p, &batch.selection);
         let mut data = Value::Null;
         let cmd: Command = match kind.as_str() {
@@ -683,16 +760,12 @@ pub(crate) fn plan_cleaned_with_definitions(
             }
             "ungroup_layers" => {
                 let group_ids = targets(&c, &p, &batch.selection)?;
-                let members = p["layers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
+                let members = p
+                    .layers()
                     .filter(|l| {
-                        l["group"]
-                            .as_str()
-                            .is_some_and(|g| group_ids.iter().any(|id| id == g))
+                        text_of(l.get("group")).is_some_and(|g| group_ids.iter().any(|id| id == g))
                     })
-                    .map(|l| l["id"].clone())
+                    .filter_map(|l| text_of(l.get("id")))
                     .collect::<Vec<_>>();
                 data = json!({"ids":members});
                 GroupCommand::Ungroup { group_ids, time }.into()
@@ -759,12 +832,9 @@ pub(crate) fn plan_cleaned_with_definitions(
                 {
                     return Err(Error::invalid("Unsupported effect field"));
                 }
-                let instance = p["layers"]
+                let layer = p.layer(&id).unwrap_or_default();
+                let instance = layer["fx"]
                     .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|l| l["id"] == id)
-                    .and_then(|l| l["fx"].as_array())
                     .and_then(|a| {
                         a.iter()
                             .find(|fx| fx["id"] == c["effect"] || fx["type"] == c["effect"])
@@ -846,7 +916,8 @@ pub(crate) fn plan_cleaned_with_definitions(
             }
             "remove_marker" => {
                 let idx = index(&c, "index")?;
-                data = p["markers"]
+                data = p
+                    .comp_field("markers")
                     .get(idx)
                     .cloned()
                     .ok_or_else(|| Error::invalid("Marker not found"))?;
@@ -885,7 +956,7 @@ pub(crate) fn plan_cleaned_with_definitions(
         scratch
             .execute(cmd.clone(), Origin::Mcp)
             .map_err(Error::kernel)?;
-        let after = realized(&scratch);
+        let after = Doc::of(&scratch);
         if kind == "group_layers" {
             batch.selection = vec![data["id"].as_str().unwrap().into()];
         }
@@ -899,14 +970,10 @@ pub(crate) fn plan_cleaned_with_definitions(
         }
         if kind == "remove_effect" {
             let id = data["id"].as_str().unwrap();
-            let count = |value: &Value| {
-                value["layers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|l| l["id"] == id)
-                    .and_then(|l| l["fx"].as_array())
-                    .map_or(0, Vec::len)
+            let count = |doc: &Doc| {
+                doc.layer(id)
+                    .and_then(|l| l["fx"].as_array().map(Vec::len))
+                    .unwrap_or(0)
             };
             data = json!({"id":id,"removed":count(&p)-count(&after)});
         }
@@ -963,9 +1030,8 @@ pub(crate) fn plan_cleaned_with_definitions(
         }
 
         let id = data["id"].as_str().unwrap_or("").to_owned();
-        let layer = after["layers"]
-            .as_array()
-            .and_then(|a| a.iter().find(|l| l["id"] == id));
+        let layer = after.layer(&id);
+        let layer = layer.as_ref();
         if kind == "add_layer" || kind == "add_captions" {
             let l = layer.unwrap();
             data = if kind == "add_captions" {
@@ -996,7 +1062,8 @@ pub(crate) fn plan_cleaned_with_definitions(
             }
         }
         if kind == "add_marker" {
-            data = after["markers"]
+            data = after
+                .comp_field("markers")
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1016,17 +1083,17 @@ pub(crate) fn plan_cleaned_with_definitions(
         }
         if kind == "update_section" {
             data["versions"] = json!(
-                after["library"]["sections"]
+                after.root_field("library")["sections"]
                     .as_array()
                     .and_then(|a| a.iter().find(|s| s["id"] == id))
                     .and_then(|s| s["versions"].as_array())
                     .map_or(0, Vec::len)
             );
         }
-        let existing = after["layers"].as_array().unwrap();
-        batch
-            .selection
-            .retain(|id| existing.iter().any(|l| l["id"] == *id));
+        if !batch.selection.is_empty() {
+            let existing = after.layer_ids();
+            batch.selection.retain(|id| existing.contains(id.as_str()));
+        }
         batch.descriptions.push(describe(&c));
         batch.results.push(json!({"command":c,"data":data}));
         batch.commands.push(cmd);
@@ -1112,10 +1179,10 @@ fn caption_text(value: &Value) -> String {
             .join(","),
     }
 }
-fn reserve_insert_ids(command: &mut Value, project: &Value, layer: &str) {
-    let existing = project["layers"]
-        .as_array()
-        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
+fn reserve_insert_ids(command: &mut Value, project: &Doc, layer: &str) {
+    let existing = project
+        .layer(layer)
+        .as_ref()
         .and_then(|l| l["d"]["cues"].as_array())
         .map(|c| {
             c.iter()
@@ -1262,9 +1329,9 @@ fn parameters(definition: &Value) -> Result<Vec<pm_kernel::commands::effects::Pa
         })
         .collect()
 }
-fn tracks(project: &Value) -> Result<Vec<(String, String, Value)>> {
-    let mut store = DocumentStore::new_untitled(model(project));
-    let canonical = json_value(&store.snapshot().document.to_value().unwrap());
+fn tracks(project: &Doc) -> Result<Vec<(String, String, Value)>> {
+    let mut store = DocumentStore::scratch(&project.0);
+    let canonical = json_value(&project.0.document.to_value().unwrap());
     let mut out = vec![];
     let comps = canonical["comps"]
         .as_object()
@@ -1316,4 +1383,50 @@ fn tracks(project: &Value) -> Result<Vec<(String, String, Value)>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    /// Planning on the published snapshot gives what planning on the whole
+    /// project's JSON gave: names, indexes and $selection resolve the same
+    /// after each command, and results read the same layers and markers.
+    #[test]
+    fn planning_on_the_snapshot_matches_planning_on_project_json() {
+        let layer = |id: &str, name: &str| {
+            json!({"id":id,"type":"shape","name":name,"from":0,"dur":2,"on":true,
+                "p":{"opacity":{"v":100,"kf":[],"expr":null}}})
+        };
+        let project = json!({"id":"P","name":"Plan","compId":"C","compName":"Main","w":320,"h":180,
+            "fps":30,"dur":4,"bg":"#000000","assets":{},"comps":{},
+            "markers":[{"id":"m1","t":1,"name":"Beat"}],
+            "layers":[layer("a","Title"),layer("b","Logo"),layer("c","Back")]});
+        let commands: Vec<Value> = vec![
+            json!({"type":"set_property","target":"title","path":"opacity","value":50}),
+            json!({"type":"set_layer","target":2,"patch":{"name":"Mark"}}),
+            json!({"type":"add_layer","id":"n1","layerType":"solid","name":"New"}),
+            json!({"type":"set_layer","target":"$selection","patch":{"name":"Picked"}}),
+            json!({"type":"delete_layers","targets":["mark"]}),
+            json!({"type":"remove_marker","index":0}),
+        ];
+        let cleaned = super::clean_commands(&commands).unwrap();
+        let store = pm_kernel::DocumentStore::new_untitled(crate::model(&project));
+        let from_json =
+            super::plan_cleaned_with_definitions(&project, &["c".into()], &cleaned, 0., None)
+                .unwrap();
+        let from_snapshot =
+            super::plan_snapshot(&store.snapshot(), &["c".into()], &cleaned, 0., None).unwrap();
+        assert_eq!(from_snapshot.results, from_json.results);
+        assert_eq!(from_snapshot.descriptions, from_json.descriptions);
+        assert_eq!(from_snapshot.selection, from_json.selection);
+        assert_eq!(from_snapshot.selection, ["n1"]);
+        let data = |i: usize| &from_snapshot.results[i]["data"];
+        assert_eq!(data(0)["id"], "a", "by name, any case");
+        assert_eq!(data(1)["id"], "b", "by 1-based index");
+        assert_eq!(data(2)["layer"]["name"], "New", "the added layer as JSON");
+        assert_eq!(data(3)["id"], "n1", "$selection follows the add");
+        assert_eq!(data(4)["ids"], json!(["b"]), "by the name set earlier");
+        assert_eq!(data(5)["name"], "Beat", "the open composition's marker");
+    }
 }

@@ -408,6 +408,19 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
     }
     out
 }
+/// Whether [`validate_layer`] has anything to check on a stored layer: only
+/// 3D object, light and camera layers do. Read on the tree, so a transaction's
+/// validation never copies the other layers of a large composition.
+pub(crate) fn is_scene3d_layer(layer: &pm_model::Node) -> bool {
+    matches!(
+        layer
+            .get("d")
+            .and_then(|d| d.get("definition"))
+            .and_then(crate::model::str_of),
+        Some(schema::OBJECT | schema::LIGHT | schema::CAMERA)
+    )
+}
+
 pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
     let definition = layer
         .get("d")
