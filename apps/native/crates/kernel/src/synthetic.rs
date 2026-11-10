@@ -164,7 +164,8 @@ fn layer(out: &mut String, id: &str, n: usize) {
     // Every 50th layer is a null the next 49 may parent to.
     let anchor = n - n % 50;
     let prefix = id.trim_end_matches(char::is_numeric);
-    let parent = (n % 50 != 0 && n % 3 == 0).then(|| format!("{prefix}{anchor}"));
+    let parent =
+        (!n.is_multiple_of(50) && n.is_multiple_of(3)).then(|| format!("{prefix}{anchor}"));
     let kind = match (n % 50, n % 7) {
         (0, _) => "null",
         (_, 0) => "text",
@@ -172,7 +173,7 @@ fn layer(out: &mut String, id: &str, n: usize) {
         _ => "shape",
     };
     common(out, id, kind, n, parent);
-    let fx = if n % 4 == 0 {
+    let fx = if n.is_multiple_of(4) {
         format!(
             r#"[{{"id":"fx{n}","type":"blur","on":true,"p":{{"amount":{{"v":{},"kf":[],"expr":null}}}}}}]"#,
             n % 20

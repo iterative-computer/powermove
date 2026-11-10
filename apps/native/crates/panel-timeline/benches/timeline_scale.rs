@@ -159,7 +159,7 @@ fn main() {
         sizes
     };
     // `wait` refuses the process's main thread (the app's rule): bench on a worker.
-    let ok = std::thread::spawn(move || sizes.into_iter().fold(true, |ok, n| run(n) && ok))
+    let ok = std::thread::spawn(move || sizes.into_iter().filter(|n| !run(*n)).count() == 0)
         .join()
         .unwrap();
     if !ok {
