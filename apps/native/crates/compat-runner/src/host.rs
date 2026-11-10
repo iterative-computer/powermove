@@ -98,6 +98,37 @@ fn folder_presence(folder: &Path) -> Presence {
     }
 }
 
+/// The folder an installed, not archived (Delete…) entry was published from.
+fn recorded_folder(e: &pm_kernel::state::ExtensionEntry) -> Option<&str> {
+    let record = e.source.get("hostRecord")?;
+    let archived = record.get("archived").and_then(pm_model::Value::as_bool) == Some(true);
+    (e.installed && !archived)
+        .then(|| record.get("folder")?.as_str())
+        .flatten()
+}
+/// Removes each entry in `forget` (id → the folder found gone) only while
+/// `state` still records that folder for it, no root of this host provides
+/// it, and the folder is still positively gone.
+fn forget_ops(
+    state: &pm_kernel::state::StateSnapshot,
+    forget: &BTreeMap<String, String>,
+    provided: &BTreeMap<String, PathBuf>,
+) -> Vec<StateOp> {
+    forget
+        .iter()
+        .filter(|(id, folder)| {
+            !provided.contains_key(*id)
+                && state
+                    .extensions
+                    .get(*id)
+                    .and_then(recorded_folder)
+                    .is_some_and(|f| f == folder.as_str())
+                && folder_presence(Path::new(folder.as_str())) == Presence::Gone
+        })
+        .map(|(id, _)| StateOp::RemoveExtension { id: id.clone() })
+        .collect()
+}
+
 /// Every running host's inbox; a closed one drops out on the next send.
 static HOSTS: Mutex<Vec<Sender<Input>>> = Mutex::new(Vec::new());
 /// Extensions changed on disk (an agent published, Undo restored): every
@@ -612,7 +643,7 @@ impl ExtensionHost {
             router: None,
             records: vec![],
             folders: BTreeMap::new(),
-            vanishing: BTreeSet::new(),
+            vanishing: BTreeMap::new(),
             canvases: BTreeMap::new(),
             dom_waiting: VecDeque::new(),
             deferred: VecDeque::new(),
@@ -940,7 +971,7 @@ struct Owner {
     folders: BTreeMap<String, PathBuf>,
     /// Entries whose folder the last check found positively gone; a second
     /// check in a row forgets them (a volume briefly away never removes one).
-    vanishing: BTreeSet<String>,
+    vanishing: BTreeMap<String, String>,
     canvases: BTreeMap<(u64, String), u64>,
     /// Batches taken from the realm that the page queue has no room for yet.
     dom_waiting: VecDeque<Value>,
@@ -1647,29 +1678,18 @@ impl Owner {
     /// Archived entries (Delete…) stay.
     fn forget_vanished(&mut self) {
         let state = self.config.kernel.state();
-        let mut gone = BTreeSet::new();
+        let mut gone = BTreeMap::new();
         let mut unreachable = BTreeSet::new();
         for e in state.extensions.values() {
-            if !e.installed || self.folders.contains_key(&e.id) {
+            if self.folders.contains_key(&e.id) {
                 continue;
             }
-            let record = e.source.get("hostRecord");
-            if record
-                .and_then(|r| r.get("archived"))
-                .and_then(pm_model::Value::as_bool)
-                == Some(true)
-            {
-                continue;
-            }
-            let Some(folder) = record
-                .and_then(|r| r.get("folder"))
-                .and_then(pm_model::Value::as_str)
-            else {
+            let Some(folder) = recorded_folder(e) else {
                 continue;
             };
             match folder_presence(Path::new(folder)) {
                 Presence::Gone => {
-                    gone.insert(e.id.clone());
+                    gone.insert(e.id.clone(), folder.to_owned());
                 }
                 Presence::Unreachable => {
                     unreachable.insert(e.id.clone());
@@ -1677,26 +1697,30 @@ impl Owner {
                 Presence::Present => {}
             }
         }
-        let forget: BTreeSet<String> = gone.intersection(&self.vanishing).cloned().collect();
-        self.vanishing = gone.difference(&forget).cloned().collect();
-        let vanishing = &self.vanishing;
+        // Gone on two checks in a row, from the same recorded folder.
+        let forget: BTreeMap<String, String> = gone
+            .iter()
+            .filter(|(id, folder)| self.vanishing.get(*id) == Some(folder))
+            .map(|(id, folder)| (id.clone(), folder.clone()))
+            .collect();
+        gone.retain(|id, _| !forget.contains_key(id));
+        self.vanishing = gone;
+        let (vanishing, provided) = (&self.vanishing, &self.folders);
         let _ = update_state::<String>(&self.config.kernel, |state| {
-            let mut ops: Vec<StateOp> = forget
-                .iter()
-                .filter(|id| state.extensions.contains_key(*id))
-                .map(|id| StateOp::RemoveExtension { id: id.clone() })
-                .collect();
+            // Decided again on the state this attempt writes over: another
+            // window may have republished the id from a restored folder.
+            let mut ops = forget_ops(state, &forget, provided);
             // Unavailable while its folder can't be reached or is about to be
             // forgotten; publish_entries clears the mark when it comes back.
             for e in state.extensions.values() {
-                let mark = unreachable.contains(&e.id) || vanishing.contains(&e.id);
+                let mark = unreachable.contains(&e.id) || vanishing.contains_key(&e.id);
                 let marked = e
                     .source
                     .get("hostRecord")
                     .and_then(|r| r.get("unavailable"))
                     .and_then(pm_model::Value::as_bool)
                     == Some(true);
-                if !mark || marked || forget.contains(&e.id) {
+                if !mark || marked || forget.contains_key(&e.id) {
                     continue;
                 }
                 let mut entry = e.clone();
@@ -2535,6 +2559,97 @@ mod tests {
         fixture.until("available again", |_| {
             entry("away-mod").is_some_and(|e| !unavailable(&e) && !e.enabled)
         });
+    }
+    #[test]
+    fn a_retried_forget_never_removes_an_entry_republished_from_a_restored_folder() {
+        use crate::store_kernel::{StoreAuthority, update_state};
+        use pm_kernel::state::{ExtensionEntry, StateSnapshot, StateTransaction};
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        fs::create_dir_all(&extensions).unwrap();
+        let (old, restored) = (extensions.join("glow"), extensions.join("glow-restored"));
+        fs::create_dir_all(&restored).unwrap();
+        // As `publish_entries` writes an entry.
+        let entry = |folder: &Path| {
+            ExtensionEntry {
+            id: "glow".into(),
+            installed: true,
+            enabled: true,
+            version: "1.0.0".into(),
+            source: pm_model::json::parse(
+                &json!({"hostRecord":{"name":"Glow","trust":"local","folder":folder.to_string_lossy()}})
+                    .to_string(),
+            )
+            .unwrap(),
+        }
+        };
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(entry(&old))],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        /// Window B republishes the id from its restored folder between this
+        /// host's read and its first write.
+        struct Racing(KernelHandle, Mutex<Option<StateOp>>);
+        impl StoreAuthority for Racing {
+            fn state(&self) -> Arc<StateSnapshot> {
+                self.0.state()
+            }
+            fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+                if let Some(op) = self.1.lock().unwrap().take() {
+                    StoreAuthority::transact(
+                        &self.0,
+                        StateTransaction {
+                            expected_revision: None,
+                            ops: vec![op],
+                        },
+                    )?;
+                }
+                StoreAuthority::transact(&self.0, tx)
+            }
+            fn project(&self, _: &str) -> Option<(u64, pm_model::Value)> {
+                None
+            }
+        }
+        let racing = Racing(
+            kernel.clone(),
+            Mutex::new(Some(StateOp::Extension(entry(&restored)))),
+        );
+        let forget = BTreeMap::from([("glow".to_owned(), old.to_string_lossy().into_owned())]);
+        let mut attempts = 0;
+        update_state::<String>(&racing, |state| {
+            attempts += 1;
+            let ops = forget_ops(state, &forget, &BTreeMap::new());
+            Ok((!ops.is_empty()).then_some(ops))
+        })
+        .unwrap();
+        assert_eq!(attempts, 2, "the first write lost the race and was rebuilt");
+        let kept = kernel
+            .state()
+            .extensions
+            .get("glow")
+            .cloned()
+            .expect("B's entry was removed");
+        assert_eq!(
+            recorded_folder(&kept),
+            Some(restored.to_string_lossy().as_ref())
+        );
+        // With nothing in the way the same decision does remove it.
+        let gone = BTreeMap::from([("glow".to_owned(), restored.to_string_lossy().into_owned())]);
+        fs::remove_dir_all(&restored).unwrap();
+        assert_eq!(
+            forget_ops(&kernel.state(), &gone, &BTreeMap::new()).len(),
+            1
+        );
+        // ...unless this host's roots provide the id again.
+        let provided = BTreeMap::from([("glow".to_owned(), restored.clone())]);
+        assert!(forget_ops(&kernel.state(), &gone, &provided).is_empty());
     }
     #[test]
     fn a_folder_is_gone_only_when_its_parent_lists_without_it() {
