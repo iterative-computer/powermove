@@ -125,6 +125,10 @@ pub struct Controller {
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// What this window's close (or the app's quit) is waiting for, once
+    /// the person has answered: shown in the status line over any other
+    /// message, and named by a second Quit's prompt.
+    pub closing_note: Option<String>,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
     pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
@@ -319,6 +323,9 @@ impl Controller {
     /// Status bar copy (language §14): a pending message or error, else
     /// `Saved`/`Edited` with layer and keyframe counts.
     pub fn status_text(&self) -> String {
+        if let Some(note) = &self.closing_note {
+            return note.clone();
+        }
         // "Saved" is the state word the computed line already starts with.
         if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
             return self.message.clone();
@@ -513,6 +520,7 @@ impl Controller {
             job_overrides: Default::default(),
             window_key: 0,
             close_pending: false,
+            closing_note: None,
             close_window: None,
             close_operation: None,
             gizmo_lines: vec![],
