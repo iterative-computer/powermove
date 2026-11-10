@@ -831,7 +831,8 @@ This lane adds data, engine, export and agent APIs; visual controls are separate
 Native normal depth sets share one frame-local shutter accumulation and one
 OIDN finish. Styled boundaries and WebGPU retain per-time filtering. A tracing
 limit can preempt the noise floor; it does not include filtering, scene setup,
-readback or encoding. Fog uses shorter GPU submissions. Production's stable
+readback or encoding. Saved quality uses one-sample GPU submissions and
+explicit floors override the legacy caustic minimum. Production's stable
 photon prepass allows adaptive pixels to finish without a hidden 512-sample
 floor; Final (Max) keeps progressive photon sampling. Scene changes invalidate
 the map. Export temporal image reuse is disabled.

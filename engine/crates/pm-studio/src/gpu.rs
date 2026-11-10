@@ -196,6 +196,7 @@ pub struct Renderer {
     pub last_surface:Option<u64>,
     pub resampled_lighting:bool,
     photons_emitted: f32,
+    photon_bounces: u32,
     present: Option<Present>,
 }
 
@@ -465,6 +466,7 @@ impl Renderer {
             query:None,
             resampling, resampled_lighting: std::env::var_os("STUDIO_NO_RIS").is_none(),
             photons_emitted: 0.0,
+            photon_bounces: 0,
             present: None,
         };
         Ok(r)
@@ -753,10 +755,14 @@ impl Renderer {
     /// Override the packed world's adaptive policy for a quality request. This
     /// also covers the Electron binary upload path, which bypasses Scene.world.
     pub fn set_adaptive_sampling(&mut self, settings: crate::environment::AdaptiveSampling) {
+        self.set_adaptive_sampling_with_floor(settings, false);
+    }
+    /// Saved quality owns its floor; legacy callers retain the caustic safety floor.
+    pub fn set_adaptive_sampling_with_floor(&mut self, settings: crate::environment::AdaptiveSampling, explicit_floor: bool) {
         self.adaptive_enabled = settings.enabled;
         let row = 4 * self.light_count as u64 + 9 * self.instance_count as u64 + 5;
         if self.scene_buffers[3].size() >= (row + 1) * 16 {
-            let values = [u32::from(settings.enabled) as f32, settings.min_samples as f32, settings.relative_error, settings.absolute_error];
+            let values = [if settings.enabled {if explicit_floor {2.} else {1.}} else {0.}, settings.min_samples as f32, settings.relative_error, settings.absolute_error];
             self.queue.write_buffer(&self.scene_buffers[3], row * 16, bytemuck::cast_slice(&values));
         }
     }
@@ -783,6 +789,7 @@ impl Renderer {
             if !self.live { self.frame = self.seed_salt.wrapping_mul(4099); }
             if !self.precompute_caustics { self.photons_emitted = 0.0; }
         }
+        if self.photon_bounces != bounces {self.photons_emitted=0.;self.photon_bounces=bounces;}
         let photons = self.caustics && self.caustics_enabled && !self.live && self.light_count > 0;
         let mut left = spp;
         let mut first = true;

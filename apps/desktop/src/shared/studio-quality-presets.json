@@ -22,7 +22,7 @@
   "production": {
     "noiseThreshold": 0.03,
     "minSamples": 32,
-    "maxSamples": 128,
+    "maxSamples": 256,
     "timeLimitSeconds": 3,
     "maxBounces": 8,
     "caustics": true,

@@ -223,9 +223,9 @@ export class StudioTarget {
   private caustics = false;
   causticsEnabled = true;
   precomputeCaustics = false;
-  private hasMedia = false;
   guideSamples = 64;
   private photonsEmitted = 0;
+  private photonBounces = 0;
   private bounds: [number, number, number, number] = [0, 0, 0, 1];
   private display: any[];
   private packed: any;
@@ -299,7 +299,6 @@ export class StudioTarget {
     this.instanceCount = scene.instanceCount;
     // Caustics only where something can focus light: glass or polished metal.
     const m = scene.materials;
-    this.hasMedia = !!scene.world?.atmosphere?.density || !!scene.world?.volumes?.length;
     this.caustics = false;
     for (let i = 0; i + STUDIO_MATERIAL_FLOATS <= m.length; i += STUDIO_MATERIAL_FLOATS) {
       if (m[i + 7]! * (1 - m[i + 3]!) > 0.5 || (m[i + 3]! > 0.5 && m[i + 4]! < 0.25)) { this.caustics = true; break; }
@@ -363,10 +362,10 @@ export class StudioTarget {
 
   setPrecomputedCaustics(enabled: boolean): void {if(this.precomputeCaustics!==enabled)this.photonsEmitted=0;this.precomputeCaustics=enabled;}
 
-  setAdaptiveSampling(enabled: boolean, minSamples = 64, noiseThreshold = .015): void {
+  setAdaptiveSampling(enabled: boolean, minSamples = 64, noiseThreshold = .015, explicitFloor = false): void {
     const row = this.lightCount * 4 + this.instanceCount * 9 + 5;
     if (this.sceneBuffers[3]?.size >= (row + 1) * 16)
-      device.queue.writeBuffer(this.sceneBuffers[3], row * 16, new Float32Array([enabled ? 1 : 0, minSamples, noiseThreshold, .0005]));
+      device.queue.writeBuffer(this.sceneBuffers[3], row * 16, new Float32Array([enabled ? explicitFloor ? 2 : 1 : 0, minSamples, noiseThreshold, .0005]));
   }
 
   /** Bound tracing between submissions; the deadline may preempt the noise floor. */
@@ -376,7 +375,7 @@ export class StudioTarget {
     if (reset) this.samples = 0;
     while (this.samples < goal) {
       if (signal?.aborted) throw new Error('Studio frame cancelled');
-      this.trace(Math.min(this.hasMedia ? 1 : 4, goal - this.samples), bounces, first && reset, 64, salt);
+      this.trace(Math.min(budgetMs > 0 ? 1 : 4, goal - this.samples), bounces, first && reset, 64, salt);
       await device.queue.onSubmittedWorkDone();
       first = false;
       if (budgetMs > 0 && performance.now() - started >= budgetMs) break;
@@ -397,6 +396,7 @@ export class StudioTarget {
     if (reset && !this.live) this.frame = Math.imul(salt >>> 0, 4099) >>> 0;
     if (reset && !this.precomputeCaustics) this.photonsEmitted = 0;
     // Caustics: photons from the lights through glass and mirrors (Refine, Final, stills).
+    if(this.photonBounces!==bounces){this.photonsEmitted=0;this.photonBounces=bounces;}
     const photons = studioOptions.caustics && this.causticsEnabled && this.caustics && !this.live && this.lightCount > 0;
     if (photons && this.gridSize < GRID_SLOTS * 32) {
       this.grid.destroy();

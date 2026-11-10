@@ -663,7 +663,7 @@ impl Host {
                 );
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
-                renderer.budget_batch_samples=if pm_studio::environment::packed_has_media(&prepared.sdata,prepared.lights.len(),instances) {1} else {4};
+                renderer.budget_batch_samples=if min_samples.is_some() || pm_studio::environment::packed_has_media(&prepared.sdata,prepared.lights.len(),instances) {1} else {4};
                 if let Some(s)=&shutter {renderer.begin_shutter(s.index==0,shutter_samples,(time*9600.).round() as u32);}else{renderer.end_shutter();target.shutter=None;}
                 renderer.caustics_enabled = caustics.unwrap_or(true);
                 renderer.set_precomputed_caustics(min_samples.is_some() && noise_threshold.is_some_and(|n|n>=0.025));
@@ -682,9 +682,9 @@ impl Host {
                 renderer.set_straight_output(true);
                 renderer.set_time_seed((time * 9600.).round() as u32);
                 let adaptive = adaptive && !is_live && shutter.is_none();
-                renderer.set_adaptive_sampling(pm_studio::environment::AdaptiveSampling {
+                renderer.set_adaptive_sampling_with_floor(pm_studio::environment::AdaptiveSampling {
                     enabled: adaptive, min_samples: min_samples.unwrap_or(64), relative_error: noise_threshold.unwrap_or(0.015), absolute_error: 0.0005,
-                });
+                }, min_samples.is_some());
                 let spp = if let Some(s)=shutter.as_ref().filter(|s|s.index>0) {shutter_samples/s.index} else if goal && !changed && !reset && (adaptive || time_budget_ms>0) && tier == "final" {
                     // The first request already completed its bounded quality
                     // render. Layer masks must reuse that same finished trace.

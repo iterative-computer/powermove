@@ -38,7 +38,7 @@ export async function* renderStudioPasses(PM:any,time:number,width:number,height
         const quality=qualityForComposition(PM);
         target.causticsEnabled=quality.caustics;target.setPrecomputedCaustics(quality.noiseThreshold>=.025);
         target.guideSamples=quality.noiseThreshold>=.06?8:quality.noiseThreshold>=.025?32:64;
-        target.setAdaptiveSampling(quality.noiseThreshold>0,quality.minSamples,quality.noiseThreshold);
+        target.setAdaptiveSampling(quality.noiseThreshold>0,quality.minSamples,quality.noiseThreshold,true);
         await target.traceQuality(quality.maxSamples,true,Math.round(time*9600),quality.timeLimitSeconds*1000,undefined,quality.minSamples,quality.maxBounces);
         target.resolve(0,quality.denoise);pixels=await target.readBeauty();
         for(let i=0;i<pixels.length;i+=4){const alpha=pixels[i+3]!;if(alpha>0)for(let j=0;j<3;j++)pixels[i+j]!/=alpha;}

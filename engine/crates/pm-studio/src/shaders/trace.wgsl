@@ -1775,8 +1775,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // 128 spp leaves bright patches while others continue converging. Keep
     // sampling them to 512 spp (or the request's ceiling/time budget).
     // A fixed precomputed map (mode 2) has no per-batch drift. The user floor
-    // then controls all paths, including lens and volume samples.
-    let minimum=max(settings.y,select(0.,512.,P.caustic.z>.5 && P.caustic.z<1.5));
+    // then controls all paths, including lens and volume samples. Explicit
+    // saved quality (enabled=2) also owns its floor with progressive caustics.
+    let minimum=max(settings.y,select(0.,512.,settings.x<1.5 && P.caustic.z>.5 && P.caustic.z<1.5));
     if(settings.x>0.5 && a.w>=minimum && a.w>1.){
       let mean=dot(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
@@ -1974,7 +1975,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
   flux *= f32(count);
   var specular = 0;
   var band = -1;
-  for (var b = 0; b < 8; b++) {
+  for (var b = 0u; b < min(8u,P.counts.y); b++) {
     let h = intersect(ro, rd, BIG, false);
     let tf = floor_t(ro, rd);
     if (tf < h.t) {
