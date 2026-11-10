@@ -202,9 +202,9 @@
     "owner": "L4",
     "reason": "3D surfaces and composition",
     "checks": [
-      "3D opaque: rest fraction within 1 0.998247986136; rest max 34; fraction within 2 0.998576388889; max outside edges 34; SSIM Some(0.9999466401938474)"
+      "3D opaque: rest fraction within 1 0.998245053483; rest max 34; fraction within 2 0.998550347222; max outside edges 34; SSIM Some(0.9997594752287824)"
     ],
-    "measurement_sha256": "519f71a1a21d2e7313243d3ed51266369e6bb44271586f4b59a559514101cd94"
+    "measurement_sha256": "96b98e7dc84a02ae8b55ead465a45a39b2c0a91cd218340ca5bd879d456b1cd0"
   },
   {
     "frame": "2d1e93523efa4ca45e1ea6c072950c98e07d9e42abb8813764a1b012c5b73c77",
@@ -1534,9 +1534,9 @@
     "owner": "L4",
     "reason": "3D surfaces and composition",
     "checks": [
-      "3D alpha: outside max 57.462158203 CV; fraction within 2 0.998402777778; max outside edges 57; SSIM Some(0.9999466334562312)"
+      "3D alpha: outside max 57.586669922 CV; fraction within 2 0.998381076389; max outside edges 57; SSIM Some(0.9997607701589881)"
     ],
-    "measurement_sha256": "da5417d9ee21969c800cd8e82ca7caca94943ed3db800a50bedbe5173a00d0aa"
+    "measurement_sha256": "efa6aaac637684cc5fb32d5d6f3f83d6fbcf3183244e5cbeb3cdcce453829e20"
   },
   {
     "frame": "f7b063ff3285eb295690b0340f52c1b4e0fb9c13f7e46a6ba331fa7011558854",
