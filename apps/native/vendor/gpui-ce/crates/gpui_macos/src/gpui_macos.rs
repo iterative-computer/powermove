@@ -43,4 +43,5 @@ pub(crate) use platform::*;
 pub(crate) use text_system::*;
 pub(crate) use window::*;
 
+pub use gpui_apple::feel;
 pub use platform::MacPlatform;

@@ -467,10 +467,11 @@ impl Viewer {
     }
     /// Attach an event origin before dispatching an asynchronous kernel edit.
     /// Keep it pending until a new revision; playback of the old revision
-    /// must not consume the edit's measurement token.
+    /// must not consume the edit's measurement token. The oldest pending
+    /// input wins: the next revision's frame is the first to show it.
     pub fn input_event(&self, input: f64) {
         if let Some(v) = self.shared.state.lock().unwrap().views.get_mut(&self.id) {
-            v.pending_input = Some(input);
+            v.pending_input.get_or_insert(input);
         }
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {

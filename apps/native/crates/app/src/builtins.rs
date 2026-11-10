@@ -1495,6 +1495,13 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn input(&self, at: f64, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            viewer.input_event(at);
+        }
+    }
     fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App) {
         let host = self.0.clone();
         let Some(controller) = self.0.upgrade() else {

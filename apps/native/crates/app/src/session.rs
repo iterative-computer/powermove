@@ -20,6 +20,11 @@ struct CompositionView {
     viewer: pm_model::Value,
 }
 
+thread_local! {
+    /// The time of an input the app dispatches itself (MCP `computer_use_panel`),
+    /// which `event_time` reports instead of AppKit's last real event.
+    pub(crate) static DISPATCHING: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
 pub struct Controller {
     pub builtins: crate::builtins::Host,
     pub extensions: crate::extensions::Extensions,
@@ -1013,6 +1018,9 @@ impl Controller {
             .map_or(0., |c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64)
     }
     pub(crate) fn event_time() -> f64 {
+        if let Some(t) = DISPATCHING.get() {
+            return t;
+        }
         objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap())
             .currentEvent()
             .map(|e| e.timestamp())

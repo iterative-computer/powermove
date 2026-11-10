@@ -737,6 +737,24 @@ impl MetalRenderer {
             .copy();
             drawable.add_presented_handler(&handler);
         }
+        if let Some((input, kind)) = crate::feel::take() {
+            let draw = crate::feel::now();
+            let target = crate::feel::target();
+            let frame = crate::feel::frame_start();
+            let path = match (self.presents_with_transaction, supplied.is_some()) {
+                (true, _) => "transaction",
+                (false, true) => "link",
+                (false, false) => "queued",
+            };
+            let handler = ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                crate::feel::write(&format!(
+                    r#"{{"ui":"{kind}","path":"{path}","input":{input:.6},"frame":{frame:.6},"draw":{draw:.6},"target":{target:.6},"presented":{:.6}}}"#,
+                    d.presented_time()
+                ));
+            })
+            .copy();
+            drawable.add_presented_handler(&handler);
+        }
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer = match measure_native("GPUI encode", || {
             self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size)

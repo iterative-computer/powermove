@@ -370,6 +370,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 if !registered(editor, &panel, cx) {
                     return Err(Error::invalid("Unknown panel ID."));
                 }
+                gpui_macos::feel::note(gpui_macos::feel::now(), "panel");
                 c.read(cx)
                     .host
                     .borrow()
@@ -499,9 +500,25 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                                 }
                                 _ => {}
                             }
+                            // The feel probe (`PM_FEEL_TRACE`): this input's
+                            // time, for the next frame that paints it.
+                            let kind = match &event {
+                                PlatformInput::MouseDown(_) => "down",
+                                PlatformInput::MouseUp(_) => "up",
+                                PlatformInput::MouseMove(_) if pressed.is_some() => "drag",
+                                PlatformInput::ScrollWheel(_) => "scroll",
+                                _ => "",
+                            };
+                            let now = gpui_macos::feel::now();
+                            if !kind.is_empty() {
+                                gpui_macos::feel::note(now, kind);
+                            }
+                            crate::session::DISPATCHING.set(Some(now));
                             window.dispatch_event(event, cx);
+                            crate::session::DISPATCHING.set(None);
                         }
                         Step::Key(keystroke) => {
+                            gpui_macos::feel::note(gpui_macos::feel::now(), "key");
                             window.dispatch_keystroke(keystroke, cx);
                         }
                     }

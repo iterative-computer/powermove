@@ -2982,6 +2982,12 @@ unsafe extern "C" fn handle_key_event(
         handled
     };
 
+    // Powermove P-FEEL: input-to-photon probe (`PM_FEEL_TRACE`).
+    #[cfg(not(feature = "wgpu"))]
+    if gpui_apple::feel::enabled() && matches!(event, PlatformInput::KeyDown(_)) {
+        let t: f64 = unsafe { msg_send![native_event, timestamp] };
+        gpui_apple::feel::note(t, "key");
+    }
     match event {
         PlatformInput::KeyDown(key_down_event) => {
             // For certain keystrokes, macOS will first dispatch a "key equivalent" event.
@@ -3134,6 +3140,22 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
                 | PlatformInput::Pinch(_)
         ) {
             lock.cursor_visible.store(true, Ordering::Relaxed);
+        }
+        // Powermove P-FEEL: input-to-photon probe (`PM_FEEL_TRACE`).
+        #[cfg(not(feature = "wgpu"))]
+        if gpui_apple::feel::enabled() {
+            let kind = match &event {
+                PlatformInput::MouseDown(_) => "down",
+                PlatformInput::MouseUp(_) => "up",
+                PlatformInput::MouseMove(m) if m.pressed_button.is_some() => "drag",
+                PlatformInput::ScrollWheel(_) => "scroll",
+                PlatformInput::Pinch(_) => "pinch",
+                _ => "",
+            };
+            if !kind.is_empty() {
+                let t: f64 = unsafe { msg_send![native_event, timestamp] };
+                gpui_apple::feel::note(t, kind);
+            }
         }
 
         match &mut event {
@@ -3605,6 +3627,7 @@ unsafe extern "C" fn metal_display_link_step(
             .renderer
             .set_display_link_drawable(Some(drawable));
         let target: f64 = msg_send![update, targetPresentationTimestamp];
+        gpui_apple::feel::set_target(target);
         if std::env::var_os("PM_FRAME_PACING").is_some() {
             let deadline: f64 = msg_send![update, targetTimestamp];
             println!(
@@ -3636,6 +3659,7 @@ extern "C" fn step(view: *mut c_void) {
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
             drop(lock);
+            gpui_apple::feel::set_frame_start();
             callback(request);
             window_state.lock().request_frame_callback = Some(callback);
         }

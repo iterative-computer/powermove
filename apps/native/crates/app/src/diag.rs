@@ -128,7 +128,8 @@ impl Drop for Span {
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
             if ms >= 1. {
-                line(serde_json::json!({"span":self.label,"ms":ms}));
+                // `end`: host seconds, the clock of input events and frames.
+                line(serde_json::json!({"span":self.label,"ms":ms,"end":gpui_macos::feel::now()}));
             }
         }
     }

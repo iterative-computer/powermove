@@ -145,6 +145,9 @@ pub trait Host: 'static {
     /// The right-click menu over `layer`, or over empty canvas.
     fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
+    /// A drag step is on its way to the kernel; `at` is the oldest pointer
+    /// event it carries (host seconds), for the viewer's input-to-photon trace.
+    fn input(&self, _at: f64, _: &mut App) {}
     /// The Shape tool's variant.
     fn shape_variant(&self, _: &App) -> String {
         "rect".into()
@@ -239,6 +242,8 @@ pub struct GizmoSurface {
     queue: VecDeque<Job>,
     gesture: Option<u64>,
     busy: bool,
+    /// The oldest pointer event behind the queued drag steps (`Host::input`).
+    step_input: Option<f64>,
     latest: u64,
     /// Press waiting on a pick; the drag starts on its answer if still held.
     picking: Option<Point<Pixels>>,
@@ -493,6 +498,7 @@ impl GizmoSurface {
             queue: VecDeque::new(),
             gesture: None,
             busy: false,
+            step_input: None,
             latest: 0,
             picking: None,
             picks: 0,
@@ -1039,6 +1045,8 @@ impl GizmoSurface {
             cx.notify();
         }
         self.queue.push_back(Job::Step(commands, true));
+        self.step_input
+            .get_or_insert_with(crate::session::Controller::event_time);
         self.pump(cx);
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -1189,6 +1197,11 @@ impl GizmoSurface {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
+        if matches!(job, Job::Step(..))
+            && let Some(at) = self.step_input.take()
+        {
+            self.host.input(at, cx);
+        }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         cx.spawn(async move |this, cx| {
             let result = cx
