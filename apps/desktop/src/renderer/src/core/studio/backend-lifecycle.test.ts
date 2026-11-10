@@ -91,10 +91,10 @@ describe('Studio backend lifecycle',()=>{
   const {PM,draw}=fixture();PM._studioShutterSamples=2;
   draw();await studioIdle(PM);draw();await studioIdle(PM);
   expect(requests[0]).toMatchObject({tier:'final',adaptive:true,timeBudgetMs:1500,temporal:false,minSamples:16,noiseThreshold:.03,maxBounces:8,caustics:true});
-  expect(requests[0].samples).toBe(64);
+  expect(requests[0].samples).toBe(128);
   PM._studioFinal=false;PM._studioStill=true;
   draw(1);await studioIdle(PM);draw(1);await studioIdle(PM);
-  expect(requests.at(-1)).toMatchObject({tier:'final',samples:128,adaptive:true,timeBudgetMs:3000,temporal:false});
+  expect(requests.at(-1)).toMatchObject({tier:'final',samples:256,adaptive:true,timeBudgetMs:3000,temporal:false});
   disposeSceneRuntimes(PM);
  });
  it('recovers a native initialization failure with in-page WebGPU',async()=>{

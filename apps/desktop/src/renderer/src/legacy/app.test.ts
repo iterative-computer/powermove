@@ -411,7 +411,7 @@ describe('legacy app install', () => {
     const source = { ...PM.proj, comps: { old: {...PM.proj}, custom: {...PM.proj,studioQuality:{preset:'draft',maxSamples:12}} } };
     delete source.studioQuality;delete source.comps.old.studioQuality;
     const restored=PM.hydrateProject(source);
-    expect(restored.studioQuality).toMatchObject({preset:'production',minSamples:32,maxSamples:128});
+    expect(restored.studioQuality).toMatchObject({preset:'production',minSamples:32,maxSamples:256});
     expect(restored.comps.old.studioQuality).toEqual(restored.studioQuality);
     expect(restored.comps.custom.studioQuality).toMatchObject({preset:'custom',minSamples:4,maxSamples:12});
     expect(PM.hydrateProject({...source,studioQuality:{maxSamples:-1}}).studioQuality).toEqual(restored.studioQuality);

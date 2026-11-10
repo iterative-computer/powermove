@@ -707,17 +707,18 @@ introduced by this engine change.
 
 Native quality requests explicitly set noise threshold, floor, ceiling, bounce
 limit, caustics, denoise and tracing deadline. The deadline now preempts the
-noise floor. Fog uses one-sample submissions so a four-sample dispatch cannot
-consume several seconds before checking that deadline. Pixel error needs at
-least two observations; raw/unlimited references retain their requested budget.
+noise floor. Saved quality uses one-sample submissions so a four-sample
+dispatch cannot consume several seconds before checking that deadline. Explicit
+Custom floors also override the legacy progressive-caustic safety minimum.
+Pixel error needs at least two observations; raw/unlimited references retain their requested budget.
 Layer masks reuse the completed bounded trace with error stopping on or off.
 Custom long tracing limits receive a matching transport watchdog.
 
 Production uses a fixed, hardware-traced photon prepass before camera samples.
 This removes the drifting-map reason for DN2's per-pixel 512-sample floor.
 Camera-only changes retain that scene-dependent map; geometry, materials,
-lighting, bounds and texture changes invalidate it. Final (Max) retains the
-progressive high-quality photon estimator. Scenes with no qualifying caustic
+lighting, bounds, bounce limits and texture changes invalidate it. Final (Max)
+retains the progressive high-quality photon estimator. Scenes with no qualifying caustic
 materials skip the photon work. No prior output image is reused temporally.
 
 Eligible native shutter frames keep scene/BLAS state, distribute a common

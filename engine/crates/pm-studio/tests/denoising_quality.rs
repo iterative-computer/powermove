@@ -286,4 +286,11 @@ fn quiet_pixels_stop_at_the_requested_floor_and_end_the_frame_early() {
     r.set_adaptive_sampling(AdaptiveSampling{enabled:false,..Default::default()});
     r.trace(32,8,true,64);
     assert!(r.sample_counts().iter().all(|&n|n==32.));
+    // Even with the progressive photon mode active, an explicit saved floor
+    // controls error stopping. A black emitter keeps this empty image quiet.
+    scene.lights.push(pm_studio::scene::Softbox {center:v3(0.,5.,0.),u:v3(1.,0.,0.),v:v3(0.,0.,1.),radiance:Vec3::ZERO});
+    r.set_scene(&scene,&scene.prepare());assert!(r.caustics);
+    r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.03,absolute_error:0.0005},true);
+    r.trace_budgeted_interruptible(512,8,true,64,8,0,&||false);
+    assert!(r.samples<512 && r.sample_counts().iter().all(|&n|n>=8. && n<=12.),"saved floors must override the legacy caustic minimum");
 }

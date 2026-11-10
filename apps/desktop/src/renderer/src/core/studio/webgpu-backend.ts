@@ -91,7 +91,7 @@ export class WebGpuStudioBackend implements StudioBackend {
     t.setPrecomputedCaustics(request.minSamples !== undefined && (request.noiseThreshold ?? 0)>=.025);
     t.guideSamples = (request.noiseThreshold ?? 0) >= .06 ? 8 : (request.noiseThreshold ?? 0) >= .025 ? 32 : 64;
     const goal = Math.max(1, Math.min(4096, Math.ceil(request.samples)));
-    t.setAdaptiveSampling(adaptive, request.minSamples, request.noiseThreshold);
+    t.setAdaptiveSampling(adaptive, request.minSamples, request.noiseThreshold, request.minSamples !== undefined);
     const finish = (): StudioFrame => {
       const denoise = request.denoise !== false;
       if (entry!.resolved !== t.samples || entry!.denoise !== denoise) {

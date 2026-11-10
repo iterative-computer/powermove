@@ -51,7 +51,7 @@ Studio has three rendering tiers:
 |---|---:|---:|---:|---:|---|---|---:|
 | Draft | .12 | 4 / 16 | .5 s | 4 | Off | On, fast GPU filter | 1 |
 | Preview | .06 | 16 / 64 | 2 s | 6 | Off | On, fast OIDN on native | 2 |
-| Production | .03 | 32 / 128 | 3 s | 8 | On | On, balanced OIDN on native | 2 |
+| Production | .03 | 32 / 256 | 3 s | 8 | On | On, balanced OIDN on native | 2 |
 | Final (Max) | .015 | 512 / 1024 | 20 s | 8 | On | On, high OIDN on native | 2 |
 
 **Custom** exposes `noiseThreshold` (0–1), `minSamples` / `maxSamples`
@@ -61,8 +61,10 @@ Zero noise threshold disables error stopping; zero seconds removes the tracing
 cap. The minimum is the noise test's starting point. The time cap can finish
 before it; a running GPU batch and filtering/readback can extend wall time.
 All sample and tracing budgets are for the output frame, divided across its
-shutter times. Enabling motion blur on layers remains a separate composition
-choice. Draft disables shutter blur by using one time sample.
+shutter times within each Studio depth set. Styled boundaries and nested Studio
+compositions may require several bounded traces; this is a tracing limit, not
+an overall export timeout. Enabling motion blur on layers remains a separate
+composition choice. Draft disables shutter blur by using one time sample.
 
 The saved value is `composition.studioQuality`. Changes use normal Undo/Redo,
 save/reopen, composition isolation and revision guards. The old camera
