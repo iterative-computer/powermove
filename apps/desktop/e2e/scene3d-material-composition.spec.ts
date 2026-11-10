@@ -107,14 +107,15 @@ test('a material comp prepares video at the model source time and can switch to 
     const source=PM.Comps.create({name:'Video screen',w:64,h:64,fps:10,dur:2},{open:true});
     const media=await PM.assets.add(new File([new Uint8Array(video)],'screen-video.webm',{type:'video/webm'}),{silent:true});
     PM.Edit.apply({type:'add_layer',id:'video-screen',layerType:'video',content:{asset:media.id,w:64,h:64,fit:'stretch'}});
-    PM.Edit.apply(['position.x','position.y','anchor.x','anchor.y'].map(path=>({type:'set_property',target:'video-screen',path,value:0})));
+    PM.Edit.apply(['position.x','position.y'].map(path=>({type:'set_property',target:'video-screen',path,value:32})));
+    PM.Edit.apply(['anchor.x','anchor.y'].map(path=>({type:'set_property',target:'video-screen',path,value:0})));
     PM.Comps.open(main);api.scene3d.edit({operation:'add_camera',camera:{p:{x:0,y:0,z:3}}});
     await PM.cmd('3d.import-obj',new File([new Uint8Array(model)],'screen.glb',{type:'model/gltf-binary'}));
     const layer=PM.proj.layers.find((l:any)=>l.d?.data?.object),id=layer.id;
     PM.Edit.apply([{type:'set_layer',target:id,patch:{from:.5}},{type:'set_content',target:id,patch:{speed:2}}]);
     for(const slot of ['color','emissive']){const applied=api.scene3d.setMaterialMap(id,0,slot,{compositionId:source});if(!applied.ok)throw new Error(applied.message);}
     const capture=async(time:number)=>{
-      await PM.prepareFrame(time,{mblur:false});
+      await PM.prepareFrame(time,{width:320,height:180,mblur:false});
       const pixels=PM.GL.renderToPixels(time,320,180,{transparent:true,mblur:false});
       return [...pixels.slice((90*320+160)*4,(90*320+160)*4+4)];
     };
@@ -128,5 +129,6 @@ test('a material comp prepares video at the model source time and can switch to 
   expect(result.red[0],JSON.stringify(result)).toBeGreaterThan(result.red[1]+30);
   expect(result.green[1],JSON.stringify(result)).toBeGreaterThan(result.green[0]+30);
   expect(result.blue[2],JSON.stringify(result)).toBeGreaterThan(result.blue[0]+30);
+  expect(result.red[3]).toBe(255);expect(result.green[3]).toBe(255);
   expect(typeof result.stored.color).toBe('string');expect(session.diagnostics.pageErrors).toEqual([]);
 });

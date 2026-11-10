@@ -664,7 +664,7 @@ impl Host {
                         if is_live { 3 } else { 8 },
                         reset || changed || is_live,
                         if is_live { 12 } else { 64 },
-                        if adaptive { 128.min(samples) } else { 0 },
+                        if adaptive { 256.min(samples) } else { 0 },
                         if adaptive { time_budget_ms.min(120_000) } else { 0 },
                         &cancelled,
                     )
@@ -1095,7 +1095,7 @@ mod tests {
         let request = json!({"op":"render","width":48,"height":32,"tier":"final","samples":1024,"adaptive":true,"timeBudgetMs":1,"goal":true,"denoise":true});
         let (first, _) = host.handle(serde_json::from_value(request.clone()).unwrap(), &[]).unwrap();
         let samples = first["samples"].as_u64().unwrap();
-        assert!(samples >= 128 && samples < 1024, "bounded Final must sample before its budget: {first}");
+        assert!(samples >= 256 && samples < 1024, "bounded Final must sample before its budget: {first}");
         let mut masked = request; masked["layer"] = json!(0);
         let (second, _) = host.handle(serde_json::from_value(masked).unwrap(), &[]).unwrap();
         assert_eq!(second["samples"], first["samples"], "a layer mask cannot multiply the Final budget");

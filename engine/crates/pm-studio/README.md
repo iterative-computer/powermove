@@ -109,14 +109,18 @@ cargo run --release -p pm-studio --features oidn --bin studio-spike -- --out /tm
 This writes `<scene>-final-oidn.png` beside `<scene>-final.png`; the CLI's
 explicit sample count is a diagnostic override. Desktop exports raise legacy
 8–16 spp settings to a 512–1024 sample budget divided among shutter images,
-with a dispatch floor of 128 samples per shutter image. Individual pixels may
-stop after 64 samples (128 for lens, caustic or fog scenes). Agent stills use a
-256-sample ceiling. Unprepared legacy synchronous preview readbacks retain
-their four-sample fast path; prepared agent/export captures use these quality
+with a dispatch floor of 256 samples per shutter image (bounded by that image's
+ceiling). Individual pixels may stop after 64 samples (128 for lens or fog
+scenes). A filling caustic photon
+map needs 512 samples before per-pixel stopping is trusted; the frame's sample
+ceiling and time budget still apply. Offscreen stills use a
+256-sample ceiling; exports and agent captures use Final. Unprepared legacy
+synchronous preview readbacks retain their four-sample fast path;
+prepared agent/export captures use these quality
 budgets on both native and WebGPU backends.
 Quality requests enable per-pixel relative/absolute-error stopping; a time
-budget is checked between GPU submissions after the sample floor (8 seconds
-for an export shutter image, 4 seconds for an agent still). Refine remains
+budget is checked between GPU submissions after the sample floor (20 seconds
+for a Final shutter image, 10 seconds for an offscreen still). Refine remains
 interruptible. Masks reuse the completed trace instead of extending the budget.
 
 Sequential exports can reproject the denoised result, with depth/normal/object
@@ -134,6 +138,11 @@ materials and room-fog corpus scenes, and records SSIM, ΔE00, timings, frozen-
 scene temporal RMS, and comparison crops outside Git. The small GPU tests in
 `tests/denoising_quality.rs` guard refracted detail against 2048 spp, guide
 transport in both traversal paths and rejection of glass temporal history.
+References use an independent random stream. Room fog uses 16384 raw samples:
+its 2048-sample reference still contains scattering noise, which penalizes a
+clean image's SSIM. The quality thresholds stay the same. Raw references above
+4096 samples accumulate in equal 4096-sample requests; no denoising or adaptive
+stopping is applied to them.
 
 Scenes: `hero` (flat lay with stylus), `edge` (thin silhouette turning to
 face the camera), `macro` (shallow focus across the display corner), `back`

@@ -367,7 +367,7 @@ export class StudioTarget {
       this.trace(Math.min(32, goal - this.samples), 8, first && reset, 64, salt);
       await device.queue.onSubmittedWorkDone();
       first = false;
-      if (budgetMs > 0 && this.samples >= Math.min(128, goal) && performance.now() - started >= budgetMs) break;
+      if (budgetMs > 0 && this.samples >= Math.min(256, goal) && performance.now() - started >= budgetMs) break;
     }
   }
 

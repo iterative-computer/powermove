@@ -360,7 +360,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   // size is the final output size; do not halve it a second time in the page.
   const lowResolution=tier==='live' && job.backend.id==='webgpu';
   const rw = lowResolution ? Math.max(2, width >> 1) : width, rh = lowResolution ? Math.max(2, height >> 1) : height;
-  const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise, adaptive: !synchronous && tier !== 'live' && studioOptions.denoise, timeBudgetMs: synchronous ? 0 : final ? 8000 : still ? 4000 : 0, temporal: final && !still, inputAt:job.changedAt };
+  const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise, adaptive: !synchronous && tier !== 'live' && studioOptions.denoise, timeBudgetMs: synchronous ? 0 : final ? 20000 : still ? 10000 : 0, temporal: final && !still, inputAt:job.changedAt };
   const key = `${objectId}:${tier}:${bottom}:${job.sceneKey}:${viewKey}:${samples}:${rw}x${rh}`;
   const frame = requestFrame(PM, job, request, key,capture,captureKey);
   if (!final && !still && !slot) schedule(PM);

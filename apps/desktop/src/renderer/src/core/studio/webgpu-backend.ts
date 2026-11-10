@@ -81,7 +81,7 @@ export class WebGpuStudioBackend implements StudioBackend {
     if (entry.revision !== this.revision) { t.setScene(this.scene, this.maps); entry.revision = this.revision; entry.viewKey = ''; entry.resolved = -1; entry.completedGoal = -1; }
     const adaptive = request.adaptive === true && request.tier !== 'live';
     const temporal = request.temporal === true && request.tier === 'final' && request.denoise !== false;
-    if (!temporal || this.time < entry.time || this.time - entry.time > .1 || t.qualityTemporal !== temporal) t.invalidateHistory?.();
+    if ((request.tier !== 'live' && !temporal) || this.time < entry.time || this.time - entry.time > .1 || t.qualityTemporal !== temporal) t.invalidateHistory?.();
     t.qualityTemporal = temporal;
     const changed = entry.viewKey !== this.viewKey || entry.time !== this.time || entry.adaptive !== adaptive;
     if (changed) { t.setView({ ...this.view, camera: { ...this.view.camera, aspect: width / height } }); entry.viewKey = this.viewKey; entry.time = this.time; entry.resolved = -1; entry.completedGoal = -1; entry.adaptive = adaptive; }

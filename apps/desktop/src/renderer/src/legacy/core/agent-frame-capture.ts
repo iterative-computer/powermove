@@ -46,6 +46,8 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
     };
     // Keep the original ten-second ceiling, including one fresh-decoder retry.
     const deadline = setTimeout(() => controller.abort(new VideoFrameDecodeError()), 10_000);
+    let studioDeadline: ReturnType<typeof setTimeout> | undefined;
+    let preparingStudio = false;
     let ownedFrames: Map<string, HTMLCanvasElement> | undefined;
     PM.pause(); PM.agentFrameCapture = true;
     try {
@@ -53,12 +55,18 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
       const prepare = () => prepareFrame(PM, time, project, {
         width: Math.max(2, Math.round(project.w * scale)), height: Math.max(2, Math.round(project.h * scale)),
         mblur: false, signal: controller.signal, videoFrameTimeoutMs: 5_000, videoForCapture,
-        onVideoFrame: canvas => canvases.add(canvas)
+        onVideoFrame: canvas => canvases.add(canvas),
+        onStudioPrepare: () => {
+          // Video decoding has finished. Final tracing and denoising have a
+          // separate bound, matching the native renderer's request deadline.
+          clearTimeout(deadline);preparingStudio = true;
+          studioDeadline = setTimeout(() => controller.abort(new Error('Studio frame capture timed out')), 120_000);
+        }
       });
       try { await prepare(); }
       catch (error) {
         captureAborted(controller.signal);
-        if (!(error instanceof VideoFrameDecodeError)) throw error;
+        if (!(error instanceof VideoFrameDecodeError) || preparingStudio) throw error;
         // A decoder that errored or stopped producing frames cannot recover by
         // waiting longer on the same element. Retry once with a clean resource.
         disposeDecoders(); await prepare();
@@ -67,7 +75,7 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
       ownedFrames = PM.preparedVideoFrames;
       return exporter.snapshot(time, maxWidth);
     } finally {
-      clearTimeout(deadline); disposeDecoders();
+      clearTimeout(deadline);clearTimeout(studioDeadline);disposeDecoders();
       for (const canvas of canvases) { canvas.width = 0; canvas.height = 0; }
       if (ownedFrames && PM.preparedVideoFrames === ownedFrames) PM.preparedVideoFrames = null;
       if (ownedFrames && PM.preparedVideoExactInputs?.frames === ownedFrames) PM.preparedVideoExactInputs = null;

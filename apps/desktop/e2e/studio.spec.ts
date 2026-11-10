@@ -49,15 +49,24 @@ test('Studio renders 3D layers and keeps each layer separate in Fast and Quality
 test('Live reuses the previous frame while the camera moves', async ({ session }) => {
   test.setTimeout(120_000);
   await session.openEditor();
+  // These counters belong to the portable history buffer. MetalFX owns its
+  // own history, so select the fallback explicitly instead of racing it.
+  await session.app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('studio-native:request');
+    ipcMain.handle('studio-native:request', () => { throw new Error('Testing WebGPU history'); });
+  });
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM, api = PM.Kernel.api('studio-temporal');
+    PM.pause();PM.AutomaticPreview?.cancel();PM.Studio?.setPreview('fast');
     api.scene3d.edit({ operation: 'add_camera', id: 'cam', camera: { p: { x: 0, y: 1, z: 5, targetX: 0, targetY: 0, targetZ: 0 } } });
     api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, material: { p: { color: '#C0C4CA', metalness: 1, roughness: 0.35 } } } });
     api.scene3d.edit({ operation: 'add_light', light: { id: 'key', type: 'area', p: { x: -2, y: 3, z: 3, intensity: 6, width: 2, height: 1.2 } } });
     PM.invalidate();
   });
   await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().backend)).toBe('webgpu');
+  await page.evaluate(() => (window as any).PM.Studio.setPreview('fast'));
   const history = await page.evaluate(async () => {
     const PM = (window as any).PM, cam = PM.L('cam');
     const stats: any[] = [];

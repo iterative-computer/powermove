@@ -64,9 +64,20 @@ class Host:
 
     def render(self, w, h, samples, *, denoise=True, adaptive=False, temporal=False, t=0., budget=0):
         start = time.perf_counter()
-        result, pixels = self.request(dict(op='render', width=w, height=h, tier='final', samples=samples,
-                                          reset=True, denoise=denoise, adaptive=adaptive, temporal=temporal,
-                                          time=t, timeBudgetMs=budget, background=True, sharedTexture=False))
+        batch = min(samples, 4096)
+        if samples > 4096 and (denoise or adaptive or samples % batch):
+            raise ValueError('Raw references above 4096 spp must be multiples of 4096')
+        timings = {}
+        for offset in range(0, samples, batch):
+            result, pixels = self.request(dict(op='render', width=w, height=h, tier='final', samples=batch,
+                                              reset=offset == 0, goal=False, denoise=denoise, adaptive=adaptive,
+                                              temporal=temporal, time=t, timeBudgetMs=budget,
+                                              background=True, sharedTexture=False))
+            for key, value in result.get('timings', {}).items():
+                timings[key] = timings.get(key, 0) + value
+        if not adaptive and result['samples'] != samples:
+            raise RuntimeError(f'Reference accumulation reset: expected {samples}, got {result["samples"]}')
+        result['timings'] = timings
         return np.frombuffer(pixels, np.uint8).reshape(h, w, 4)[..., :3].copy(), dict(result, wallSeconds=time.perf_counter() - start)
 
     def close(self):
@@ -109,6 +120,8 @@ def main():
     p.add_argument('--corpus', nargs='*', default=['chrome', 'materials', 'env-room'])
     p.add_argument('--size', default='256x144')
     p.add_argument('--reference-spp', type=int, default=2048)
+    p.add_argument('--fog-reference-spp', type=int, default=16384,
+                   help='Higher raw reference budget for the room with multiple-scattering fog')
     p.add_argument('--final-spp', type=int, default=512)
     p.add_argument('--budget-ms', type=int, default=0)
     p.add_argument('--sequence', type=int, default=8)
@@ -116,7 +129,9 @@ def main():
     args = p.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     w, h = map(int, args.size.split('x'))
-    assert 16 <= w <= 1920 and 16 <= h <= 1080 and 1 <= args.reference_spp <= 4096
+    assert 16 <= w <= 1920 and 16 <= h <= 1080
+    for samples in [args.reference_spp, args.fog_reference_spp]:
+        assert 1 <= samples <= 65536 and (samples <= 4096 or samples % 4096 == 0)
     scenes = [(f'glass-{i}', file) for i, file in enumerate(args.capture)] + [(name, None) for name in args.corpus]
     results = []
     for name, capture in scenes:
@@ -129,10 +144,13 @@ def main():
                 else:
                     host.request(dict(op='preset', name=name, finish='starlight', time=0.))
             before, timing_before = previous.render(w, h, 16)
-            reference, timing_reference = current.render(w, h, args.reference_spp, denoise=False)
+            reference_spp = max(args.reference_spp, args.fog_reference_spp) if name == 'env-room' else args.reference_spp
+            # Keep the reference's random stream independent of the candidate.
+            # The evaluated geometry/camera remain frozen; time only seeds rays.
+            reference, timing_reference = current.render(w, h, reference_spp, denoise=False, t=13.)
             after, timing_after = current.render(w, h, args.final_spp, adaptive=True, budget=args.budget_ms)
             compare_image(name, before, after, reference, args.out)
-            result = dict(scene=name, size=[w, h], referenceSpp=args.reference_spp,
+            result = dict(scene=name, size=[w, h], referenceSpp=reference_spp,
                           before=quality(before, reference), after=quality(after, reference),
                           timings=dict(before=timing_before, after=timing_after, reference=timing_reference))
             if args.sequence > 1:
@@ -154,7 +172,7 @@ def main():
         finally:
             previous.close()
             current.close()
-    rows = ['# Denoising verification', '', f'Raw {args.reference_spp} spp reference; {args.final_spp} spp adaptive ceiling at {w}×{h}.', '',
+    rows = ['# Denoising verification', '', f'Independent raw {args.reference_spp} spp references ({args.fog_reference_spp} spp for fog); {args.final_spp} spp adaptive ceiling at {w}×{h}.', '',
             '| Scene | SSIM before → after | ΔE00 before → after | Flicker RMS before → after | Final seconds/frame |',
             '|---|---|---|---|---|']
     for r in results:

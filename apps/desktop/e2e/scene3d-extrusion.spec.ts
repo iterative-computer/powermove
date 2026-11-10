@@ -129,7 +129,9 @@ test('extrusions, model meshes and legacy 3D planes share camera depth across th
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 test('extruded motion blur renders distinct samples and exports a PNG through the normal export path',async({session})=>{
-  test.setTimeout(60000);await setup(session);await lights(session.page);
+  // Eight prepared shutter images plus a Final export each keep their quality
+  // sample floor and time budget before output can be checked.
+  test.setTimeout(180000);await setup(session);await lights(session.page);
   await session.page.evaluate(()=>{
     const PM=(window as any).PM,api=(window as any).extrusionAPI;api.setExtrusion('title',{enabled:true,depth:45,bevelStyle:'convex',bevelDepth:4});
     PM.Edit.apply([{type:'set_layer',target:'title',patch:{motionBlur:true}},{type:'replace_keyframes',target:'title',path:'position.x',keyframes:[{time:0,value:-1000},{time:1,value:2000}]}]);PM.time=.5;PM.touch();

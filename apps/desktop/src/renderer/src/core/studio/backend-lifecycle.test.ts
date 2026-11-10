@@ -55,6 +55,18 @@ describe('Studio backend lifecycle',()=>{
   expect(requests).toHaveLength(1);expect(requests[0]).toMatchObject({tier:'final',layer:'model',background:true});
   registerStudioBackend(null);draw();expect(dispose).toHaveBeenCalledOnce();
  });
+ it('uses bounded adaptive quality by default for exports and offscreen stills',async()=>{
+  const requests:any[]=[];
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>{requests.push(r);return {source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:'quality'};},dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,draw}=fixture();PM._studioShutterSamples=2;
+  draw();await studioIdle(PM);draw();await studioIdle(PM);
+  expect(requests[0]).toMatchObject({tier:'final',adaptive:true,timeBudgetMs:20000,temporal:true});
+  expect(requests[0].samples).toBeGreaterThanOrEqual(256);
+  PM._studioFinal=false;PM._studioStill=true;
+  draw(1);await studioIdle(PM);draw(1);await studioIdle(PM);
+  expect(requests.at(-1)).toMatchObject({tier:'final',samples:256,adaptive:true,timeBudgetMs:10000,temporal:false});
+  disposeSceneRuntimes(PM);
+ });
  it('recovers a native initialization failure with in-page WebGPU',async()=>{
   const dispose=vi.fn();registerStudioBackend(()=>({id:'broken-native',initialize:async()=>{throw new Error('host unavailable');},dispose} as unknown as StudioBackend));
   const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);const frame=draw();

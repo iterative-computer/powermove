@@ -93,6 +93,31 @@ it('bounds recovery by the original deadline and permits a later successful requ
   await expect(captureAgentFrame(PM, exporter, 2)).resolves.toBe('jpeg');
 });
 
+it('allows Final rendering to finish after video decoding without retrying a decoder', async () => {
+  vi.useFakeTimers();const { PM, exporter } = fixture();
+  prepare.mockImplementation(async (_pm, _time, _project, options) => {
+    options!.onStudioPrepare!();
+    await withCaptureSignal(new Promise<void>(resolve => setTimeout(resolve, 25_000)), options!.signal);
+  });
+  const pending = captureAgentFrame(PM, exporter, 1);
+  await vi.advanceTimersByTimeAsync(25_000);
+  await expect(pending).resolves.toBe('jpeg');
+  expect(prepare).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+});
+
+it('bounds stalled Studio rendering separately and releases the capture', async () => {
+  vi.useFakeTimers();const { PM, exporter } = fixture();
+  prepare.mockImplementation((_pm, _time, _project, options) => {
+    options!.onStudioPrepare!();
+    return withCaptureSignal(new Promise(() => {}), options!.signal);
+  });
+  const pending = captureAgentFrame(PM, exporter, 1);
+  const failed = expect(pending).rejects.toThrow('Studio frame capture timed out');
+  await vi.advanceTimersByTimeAsync(120_000);await failed;
+  expect(prepare).toHaveBeenCalledOnce();expect(PM.agentFrameCapture).toBe(false);
+  expect(exporter.snapshot).not.toHaveBeenCalled();expect(vi.getTimerCount()).toBe(0);
+});
+
 it('cancels queued caller requests without touching a decoder or rendering them', async () => {
   const { PM, exporter } = fixture(); const controller = new AbortController();
   let release!: () => void;

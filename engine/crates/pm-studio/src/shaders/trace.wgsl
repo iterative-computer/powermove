@@ -1770,10 +1770,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let idx = gid.y * w + gid.x;
   if(P.opts.x==0u && P.counts.z==0u && world_on()){
     let settings=world_row(5u);let a=accum[idx];
-    // The photon estimator evolves as the grid fills. Lens and
-    // specular/caustic scenes need a larger floor before trusting variance.
-    let hard=P.cam_pos.w>0. || P.caustic.z>.5 || medium_majorant()>0.;
-    let minimum=max(settings.y,select(0.,128.,hard));
+    // A filling photon grid is a correlated estimator: a quiet early pixel
+    // can still change as neighbouring bins fill. Stopping those pixels at
+    // 128 spp leaves bright patches while others continue converging. Keep
+    // sampling them to 512 spp (or the request's ceiling/time budget).
+    let hard=P.cam_pos.w>0. || medium_majorant()>0.;
+    let minimum=max(settings.y,max(select(0.,128.,hard),select(0.,512.,P.caustic.z>.5)));
     if(settings.x>0.5 && a.w>=minimum){
       let mean=dot(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));

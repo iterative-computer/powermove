@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
-const gpu = vi.hoisted(() => ({ generation: 1, ready: true, allocations: 0, destroyed: 0, quality: vi.fn(), init: vi.fn() }));
+const gpu = vi.hoisted(() => ({ generation: 1, ready: true, allocations: 0, destroyed: 0, quality: vi.fn(), init: vi.fn(), invalidateHistory: vi.fn() }));
 vi.mock('./gpu', () => ({
   initStudioGpu: async () => { gpu.init(); gpu.ready = true; gpu.generation++; return {}; },
   studioGpuReady: () => gpu.ready,
@@ -9,9 +9,10 @@ vi.mock('./gpu', () => ({
   studioGpuFailure: () => gpu.ready ? null : 'WebGPU device lost',
   StudioTarget: class {
     samples = 0;
+    qualityTemporal = false;
     constructor() { gpu.allocations++; }
     destroy() { gpu.destroyed++; }
-    setAdaptiveSampling() {} invalidateHistory() {}
+    setAdaptiveSampling() {} invalidateHistory() { gpu.invalidateHistory(); }
     async traceQuality() { gpu.quality(); this.samples = 128; }
     setScene() {} setView() {} trace(n: number) { this.samples += n; } resolve() {} present() { return {}; }
   }
@@ -19,7 +20,7 @@ vi.mock('./gpu', () => ({
 import { WebGpuStudioBackend } from './webgpu-backend';
 import { extractScene } from './extract';
 
-beforeEach(() => { gpu.allocations = 0; gpu.destroyed = 0; gpu.generation = 1; gpu.ready = true; gpu.init.mockClear(); gpu.quality.mockClear(); });
+beforeEach(() => { gpu.allocations = 0; gpu.destroyed = 0; gpu.generation = 1; gpu.ready = true; gpu.init.mockClear(); gpu.quality.mockClear(); gpu.invalidateHistory.mockClear(); });
 function backend() {
   const backend = new WebGpuStudioBackend(), graph = new THREE.Scene();
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); mesh.userData.sceneId = 'box'; graph.add(mesh);
@@ -67,5 +68,15 @@ it('keeps unprepared synchronous readback synchronous with adaptive GPU stopping
   expect(frame).not.toBeInstanceOf(Promise);
   expect(frame).toMatchObject({ samples: 256 });
   expect(gpu.quality).not.toHaveBeenCalled();
+  b.dispose();
+});
+
+it('preserves Live history across adjacent frames and resets it on a seek', () => {
+  const b = backend();
+  b.render(request());
+  for (let i = 1; i <= 12; i++) { b.setTime(i / 30); b.render(request()); }
+  expect(gpu.invalidateHistory).not.toHaveBeenCalled();
+  b.setTime(2); b.render(request());
+  expect(gpu.invalidateHistory).toHaveBeenCalledOnce();
   b.dispose();
 });

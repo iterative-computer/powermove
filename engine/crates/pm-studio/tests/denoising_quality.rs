@@ -1,7 +1,7 @@
 //! Small real-GPU image regressions. No saved renders or external project needed.
 #![cfg(feature = "oidn")]
 use pm_studio::{
-    environment::{EnvironmentMap, World},
+    environment::{AdaptiveSampling, EnvironmentMap, World},
     gpu::Renderer,
     math::{Vec3, v3},
     mesh::{self, Mesh},
@@ -242,4 +242,30 @@ fn oidn_guides_include_the_diffuse_shadow_catcher() {
         );
         Ok(())
     });
+}
+
+#[test]
+fn adaptive_caustics_preserve_the_fixed_budget_image() {
+    // A partially filled photon map can look locally quiet while its estimate
+    // is still changing. Early per-pixel stopping used to freeze bright floor
+    // patches here, even though the frame continued to its sample ceiling.
+    let scene = pm_studio::scene::preset("chrome", "starlight", 0.).unwrap();
+    let (w, h) = (320, 180);
+    let mut r = Renderer::new(w, h).expect("GPU");
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(512, 8, true, 64);
+    let fixed = r.finish(0).0;
+    r.set_adaptive_sampling(AdaptiveSampling {
+        enabled: true,
+        min_samples: 64,
+        relative_error: 0.015,
+        absolute_error: 0.0005,
+    });
+    r.trace(512, 8, true, 64);
+    let adaptive = r.finish(0).0;
+    let score = tile_ssim(&adaptive, &fixed, w as usize, h as usize);
+    assert!(
+        score > 0.98,
+        "adaptive caustics changed the converged image: SSIM={score}"
+    );
 }

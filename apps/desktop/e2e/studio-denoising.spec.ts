@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { expect, test } from './helpers/app';
 
 /** Opt-in capture of a local project. No project or images enter Git.
@@ -30,7 +30,21 @@ test('captures Studio denoising inputs and optionally the glass verification cli
       if (command.op === 'render' && command.tier === 'final' && (globalThis as any).__denoiseCapture) {
         fs.writeFileSync(`${out}/glass-${command.time.toFixed(6)}.pms`, Buffer.concat(inputs.get(key)!));
       }
-      return original(event, key, command, binary);
+      const reply = await original(event, key, command, binary);
+      if (command.op === 'render' && command.tier === 'final' && (globalThis as any).__denoiseExporting) {
+        const renders = (globalThis as any).__denoiseExportStats ??= [];
+        renders.push({
+          time: command.time, width: command.width, height: command.height,
+          requestedSamples: command.samples, adaptive: command.adaptive, timeBudgetMs: command.timeBudgetMs,
+          ...reply.result, roundTripMs: reply.roundTripMs,
+        });
+        fs.writeFileSync(`${out}/glass-export-progress.json`, JSON.stringify({
+          seconds: (Date.now() - (globalThis as any).__denoiseExportStart) / 1000,
+          renders: renders.length, time: command.time, samples: reply.result.samples,
+          width: command.width, height: command.height,
+        }));
+      }
+      return reply;
     });
   }, { project: path.resolve(process.env.PM_DENOISE_PROJECT!), out });
   await session.page.evaluate(async () => { const PM = (window as any).PM; await PM.openProject(); PM.pause(); PM.AutomaticPreview?.cancel(); PM.Studio?.setPreview('fast'); });
@@ -47,13 +61,19 @@ test('captures Studio denoising inputs and optionally the glass verification cli
   }
   await session.app.evaluate(() => { (globalThis as any).__denoiseCapture = false; });
   if (process.env.PM_DENOISE_CLIP) {
+    await session.app.evaluate(() => { (globalThis as any).__denoiseExporting = true; (globalThis as any).__denoiseExportStart = Date.now(); });
     const start = Date.now();
     const result = await session.page.evaluate(async () => {
       const PM = (window as any).PM; PM.proj.work = [16, 20];
       return PM.Export.run({ format: 'mp4', scale: 1, fps: 30, range: 'work', quality: 'max', audio: false, alpha: false, mblur: true, mbSamples: 2, reportPath: true });
     });
-    await writeFile(path.join(out, 'glass-export.json'), JSON.stringify({ seconds: (Date.now() - start) / 1000, frames: 120, result }, null, 2));
+    const seconds = (Date.now() - start) / 1000;
+    const renders = await session.app.evaluate(() => (globalThis as any).__denoiseExportStats ?? []);
+    await writeFile(path.join(out, 'glass-export.json'), JSON.stringify({ seconds, frames: 120, secondsPerFrame: seconds / 120, result, renders }, null, 2));
     expect(result.error).toBeUndefined(); expect(result.cancelled).toBe(false);
+    expect((await stat(path.join(out, 'glass-after.mp4'))).size).toBeGreaterThan(0);
+    expect(renders.length).toBeGreaterThanOrEqual(120);
+    expect(renders.every((r: any) => r.adaptive && r.timeBudgetMs > 0 && r.samples >= 256 && r.denoiser === 'oidn')).toBe(true);
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -81,6 +81,7 @@ export type FramePreparationOptions = {
   /** Export decodes supported clips in order instead of seeking for every frame. */
   sequentialDecoders?: ExportVideoDecoders;
   onVideoFrame?: (canvas: HTMLCanvasElement) => void;
+  onStudioPrepare?: () => void;
 };
 type VideoRequest = { key?: string; layer: any; asset: any; time: number; at: number; frame?: HTMLCanvasElement };
 const concurrentVideoDecoders = 4;
@@ -244,5 +245,6 @@ export async function prepareFrame(PM:any,time:number,project=PM.proj,options: F
     await (options.videoForCapture ? withCaptureSignal(prepareFonts(PM,project),options.signal) : prepareFonts(PM,project));if(cancelled())throw new EffectInputError('Layer input frame preparation cancelled');}
   catch(error){for(const frame of new Set(frames.values())){frame.width=0;frame.height=0;}throw error;}
   PM.preparedVideoFrames=frames;PM.preparedVideoExactInputs=exact?{project:PM.proj,frames}:null;PM.preparedVideoVersion=(PM.preparedVideoVersion||0)+1;
+  options.onStudioPrepare?.();
   await PM.GL?.prepareStudioFrame?.(project,time,options);
 }
