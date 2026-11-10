@@ -147,7 +147,11 @@ impl Store {
         };
         let unopened =
             |e: std::io::Error| format!("The transcription models folder couldn’t be opened: {e}");
-        std::fs::create_dir_all(root).map_err(unopened)?;
+        // Nothing is created until a model or a setting is saved: the app
+        // opens this before the first-launch copy, which needs a fresh profile.
+        if root.exists() && !root.is_dir() {
+            return Err(unopened(std::io::Error::other("not a folder")));
+        }
         let settings: Value = match std::fs::read(root.join("settings.json")) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
@@ -338,6 +342,8 @@ impl Store {
     }
     /// Writes the settings file; the caller publishes them only once it is saved.
     fn persist(&self, active: Option<&str>, language: &str) -> Result<(), String> {
+        std::fs::create_dir_all(&self.root)
+            .map_err(|e| format!("Transcription settings couldn’t be saved: {e}"))?;
         let file = self.root.join("settings.json");
         let staged = self
             .root
@@ -651,6 +657,7 @@ fn completed_at() -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -658,6 +665,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    /// Opening the store creates nothing: the app opens it before the
+    /// first-launch copy, which refuses a profile that isn't fresh.
+    #[test]
+    fn opening_creates_no_folders_until_a_setting_is_saved() {
+        let base = scratch("lazy-root");
+        let root = base.join("models").join("transcription");
+        let store = Store::open(&root, Vec::new(), Arc::new(|| {})).unwrap();
+        assert!(!base.join("models").exists());
+        store.persist(None, "auto").unwrap();
+        assert!(root.join("settings.json").is_file());
     }
     fn fixture(dir: &Path, bytes: &[u8]) -> Model {
         let source = dir.join("source.gguf");
