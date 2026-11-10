@@ -58,12 +58,14 @@ struct Resolver<T: 'static> {
     inner: Arc<OneShot<T>>,
 }
 
+/// Closers for answers a panicking turn dropped (`None` off the kernel thread).
+type Closers = Option<Vec<Box<dyn FnOnce()>>>;
+
 thread_local! {
     /// On the kernel thread: answers a panicking turn dropped, closed only
     /// once the panic is contained (`run`), so a caller that sees `None`
     /// also sees the project stopped.
-    static UNANSWERED: std::cell::RefCell<Option<Vec<Box<dyn FnOnce()>>>> =
-        const { std::cell::RefCell::new(None) };
+    static UNANSWERED: std::cell::RefCell<Closers> = const { std::cell::RefCell::new(None) };
 }
 
 fn close<T>(inner: &OneShot<T>) {
