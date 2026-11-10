@@ -194,6 +194,10 @@ pub enum RasterAnswer {
     Moved,
     /// The override threw or returned what cannot be drawn: the frame fails.
     Failed(String),
+    /// The realm could not answer this time (its canvas could not be read
+    /// back, the canvas went with a restarted realm, the answer could not be
+    /// delivered): not the override's doing, so it is asked again.
+    Unavailable(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
     /// store), the quad's size, anchor and `uv`.
     Raster {
@@ -724,6 +728,9 @@ mod tests {
                         crate::RasterAnswer::Retry => json!([batch, "retry"]),
                         crate::RasterAnswer::Moved => json!([batch, "moved"]),
                         crate::RasterAnswer::Failed(error) => json!([batch, "failed", error]),
+                        crate::RasterAnswer::Unavailable(error) => {
+                            json!([batch, "unavailable", error])
+                        }
                         crate::RasterAnswer::Raster {
                             width,
                             height,
@@ -866,6 +873,29 @@ mod tests {
         let painted = painted.lock().unwrap().clone();
         assert!(painted.contains(&json!(["replaced", "synthetic-comp", true])));
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
+    }
+    /// An override's own throw is deterministic; an answer the realm could
+    /// not read back or deliver is not, and is reported as such so the viewer
+    /// asks again instead of leaving the layer out until the next edit.
+    #[test]
+    fn only_an_overrides_throw_is_a_failure_the_rest_is_unavailable() {
+        let (runner, _, answered, _) = raster_runner();
+        runner
+            .eval(
+                "runtime.engine('compat.answers',{batch:9,answers:[
+                   {error:'broken wrapper',threw:true},
+                   {error:'The answers could not be delivered'},
+                   {surface:'a-canvas-of-a-restarted-realm',w:1,h:1}]})",
+            )
+            .unwrap();
+        assert_eq!(
+            *answered.lock().unwrap(),
+            vec![
+                json!([9, "failed", "broken wrapper"]),
+                json!([9, "unavailable", "The answers could not be delivered"]),
+                json!([9, "unavailable", "The override's canvas is gone"]),
+            ]
+        );
     }
     #[test]
     fn a_capture_asks_its_waiting_realm_for_overrides_inline() {

@@ -223,7 +223,8 @@ globalThis.__compat = {
           if (!result) return { hidden: true };
           if (realm.isBaseRaster(result, need)) return { native: true };
           const surface = this.nativeSurfaceOf?.(result.cv);
-          if (!surface) return { error: "The override returned a canvas the engine cannot read" };
+          if (!surface)
+            return { error: "The override returned a canvas the engine cannot read", threw: true };
           return {
             surface,
             w: result.w,
@@ -234,7 +235,8 @@ globalThis.__compat = {
           };
         } catch (error) {
           this.reportFailure(error);
-          return { error: failure(error) };
+          // The override's own throw: the same revision throws again.
+          return { error: failure(error), threw: true };
         } finally {
           realm.rasterContext = null;
         }

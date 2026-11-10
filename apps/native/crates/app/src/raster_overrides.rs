@@ -85,6 +85,7 @@ fn answer_of(answer: RasterAnswer) -> Reply {
         RasterAnswer::Hidden => Reply::Draw(hidden_raster()),
         RasterAnswer::Retry | RasterAnswer::Moved => Reply::Retry,
         RasterAnswer::Failed(message) => Reply::Failed(message),
+        RasterAnswer::Unavailable(message) => Reply::Unavailable(message),
         RasterAnswer::Raster {
             width,
             height,
@@ -348,7 +349,7 @@ impl JobOverrides {
                 .map(|answer| match answer {
                     RasterAnswer::Native => Ok(CompatReply::Native),
                     RasterAnswer::Hidden => Ok(CompatReply::Hidden),
-                    RasterAnswer::Failed(error) => Err(error),
+                    RasterAnswer::Failed(error) | RasterAnswer::Unavailable(error) => Err(error),
                     RasterAnswer::Retry | RasterAnswer::Moved => Err(
                         "The project's extensions could not answer for the export's revision"
                             .into(),
