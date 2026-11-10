@@ -1,3 +1,4 @@
+import { resolveStudioQuality } from '../../../../shared/studio-quality';
 import { materialOptionsSchema,validateEnvironmentNode } from '../../core/scene3d/environment-data';
 import { parseStoredViews } from '../../core/scene3d/view-state';
 import { contentSlot } from './content-properties';
@@ -144,7 +145,7 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain'], ['views3d']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain'], ['views3d'], ['studioQuality']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker' || type === 'remove_marker') return [['markers']];
@@ -672,9 +673,10 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain', 'views3d']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain', 'views3d', 'studioQuality']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
+  if (patch.studioQuality != null) p.studioQuality = resolveStudioQuality(patch.studioQuality,resolveStudioQuality(p.studioQuality));
   if (patch.views3d != null) p.views3d = parseStoredViews(patch.views3d);
   if (patch.colorDepth != null) {
     if (![8, 16, 32].includes(patch.colorDepth)) throw new Error('Color depth must be 8, 16, or 32');

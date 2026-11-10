@@ -817,3 +817,27 @@ confirms the corrected 128-byte material / 96-byte triangle layout and OIDN.
 
 The Python host smoke and FBX measurement defaults now use this checkout's
 verified `resources/studio` helper rather than an unrelated shared Cargo binary.
+
+## Saved render quality and faster exports (Lane Q)
+
+Render quality now persists per composition with migration to Production,
+Undo/Redo, revision guards and temporary export/capture overrides. The API is
+`scene3d.renderQuality` and `edit_3d.set_render_quality`; see
+[Studio settings](../../apps/desktop/docs/STUDIO.md#saved-render-quality-and-export-overrides)
+for Draft / Preview / Production / Final (Max) defaults and Custom bounds.
+Existing explicit camera sample edits update the composition's Custom budget.
+This lane adds data, engine, export and agent APIs; visual controls are separate.
+
+Native normal depth sets share one frame-local shutter accumulation and one
+OIDN finish. Styled boundaries and WebGPU retain per-time filtering. A tracing
+limit can preempt the noise floor; it does not include filtering, scene setup,
+readback or encoding. Fog uses shorter GPU submissions. Production's stable
+photon prepass allows adaptive pixels to finish without a hidden 512-sample
+floor; Final (Max) keeps progressive photon sampling. Scene changes invalidate
+the map. Export temporal image reuse is disabled.
+
+The overall production decision remains **not ready to ship**. The new presets
+make quality selectable; they do not waive the native-resolution appearance,
+moving-sequence, quiet-machine timing or full-editor acceptance gates. Detailed
+preset measurements and limitations are recorded in
+[native host measurements](native-host.md#saved-quality-and-frame-budgets-lane-q).

@@ -1,3 +1,4 @@
+import { flushStudioShutters } from './index';
 // @vitest-environment happy-dom
 import * as THREE from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -89,11 +90,11 @@ describe('Studio backend lifecycle',()=>{
   registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>{requests.push(r);return {source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:'quality'};},dispose:()=>{}} as unknown as StudioBackend));
   const {PM,draw}=fixture();PM._studioShutterSamples=2;
   draw();await studioIdle(PM);draw();await studioIdle(PM);
-  expect(requests[0]).toMatchObject({tier:'final',adaptive:true,timeBudgetMs:20000,temporal:true});
-  expect(requests[0].samples).toBeGreaterThanOrEqual(256);
+  expect(requests[0]).toMatchObject({tier:'final',adaptive:true,timeBudgetMs:1500,temporal:false,minSamples:16,noiseThreshold:.03,maxBounces:8,caustics:true});
+  expect(requests[0].samples).toBe(64);
   PM._studioFinal=false;PM._studioStill=true;
   draw(1);await studioIdle(PM);draw(1);await studioIdle(PM);
-  expect(requests.at(-1)).toMatchObject({tier:'final',samples:256,adaptive:true,timeBudgetMs:10000,temporal:false});
+  expect(requests.at(-1)).toMatchObject({tier:'final',samples:128,adaptive:true,timeBudgetMs:3000,temporal:false});
   disposeSceneRuntimes(PM);
  });
  it('recovers a native initialization failure with in-page WebGPU',async()=>{
@@ -142,4 +143,25 @@ describe('Studio backend lifecycle',()=>{
   draw(0);await studioIdle(PM);draw(0);await studioIdle(PM);draw(1);await studioIdle(PM);
   expect(release).toHaveBeenCalledOnce();
  });
+});
+
+it('plans all combined shutter times before resolving and denoises one shared frame',async()=>{
+  vi.stubGlobal('OffscreenCanvas',class{width:number;height:number;constructor(w:number,h:number){this.width=w;this.height=h;}getContext(){return {drawImage:vi.fn()};}});
+  const render=vi.fn(),batch=vi.fn(async(samples:any[])=>({source:document.createElement('canvas'),width:64,height:64,samples:samples.reduce((n,s)=>n+s.request.samples,0),version:'integrated'}));
+  registerStudioBackend(()=>({id:'native-test',shutterAccumulation:true,initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render,renderShutter:batch,dispose:()=>{}} as unknown as StudioBackend));
+  const PM:any={proj:{layers:[{id:'a'},{id:'b'}]},time:0,_studioFinal:true,_studioPreparing:true,_studioShutterSamples:2,invalidate:vi.fn(),store:{get:()=> 'quality'}};
+  const runtime=new SceneRuntime(),scene=createScene();scene.objects=[createObject('a'),createObject('b')];runtime.sync(scene);
+  const draw=(time:number)=>studioLayer(PM,runtime,64,64,'a',new Set(['a','b']),true,runtime.camera,undefined,time);
+  beginStudioCapture(PM);draw(0);await studioIdle(PM);
+  draw(0);draw(.01);flushStudioShutters(PM);await studioIdle(PM);
+  expect(batch).toHaveBeenCalledOnce();expect(batch.mock.calls[0]![0].map((s:any)=>s.time)).toEqual([0,.01]);
+  expect(render).not.toHaveBeenCalled();expect(PM.Studio.status().declined).toBe('');PM._studioPreparing=false;
+  expect(draw(0)?.canvas).toBeTruthy();expect(draw(.01)?.canvas).toBeTruthy();
+  // Reusing one composition twice at distinct source times must not mix the
+  // two instances into one four-stratum image.
+  batch.mockClear();render.mockImplementation(async(r:any)=>({source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:'separate'}));
+  PM._studioPreparing=true;beginStudioCapture(PM);
+  for(const time of [0,.01,.02,.03])draw(time);flushStudioShutters(PM);await studioIdle(PM);
+  expect(batch).not.toHaveBeenCalled();expect(render).toHaveBeenCalledTimes(4);
+  disposeSceneRuntimes(PM);runtime.dispose();
 });

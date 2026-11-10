@@ -32,7 +32,7 @@ import {layerMaterialMaps,materialGroupHas3D} from '../../core/scene3d/material-
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
-import { beginStudioCapture, beginStudioCapturePass, studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
+import { beginStudioCapture, beginStudioCapturePass, flushStudioShutters, studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
 import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
 
 /* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
@@ -2248,7 +2248,7 @@ const prepareStudioFrame = async (project:any,time:number,options:any={}) => {
       PM._studioPreparing=preparing;
       if(options.thumbnailVideo){if(hadFrames)PM.preparedVideoFrames=oldFrames;else delete PM.preparedVideoFrames;if(hadVersion)PM.preparedVideoVersion=oldVersion;else delete PM.preparedVideoVersion;}
     }
-    free(f);await studioIdle(PM);
+    free(f);flushStudioShutters(PM);await studioIdle(PM);
     // An edit can arrive while a native image is in flight. Its capture key
     // belongs to the old document, so prepare the new revision before readback.
     if(PM.animVersion?.()!==revision)continue;

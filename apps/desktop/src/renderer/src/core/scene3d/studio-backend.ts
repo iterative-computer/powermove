@@ -86,12 +86,15 @@ export type StudioRenderRequest = {
   /** Accumulate from the previous refine request; scene/camera/time edits reset it. */
   accumulate?: boolean; denoise?: boolean; signal?: AbortSignal;
   /** Quality rendering: per-pixel error stopping, bounded after the sample floor. */
-  adaptive?: boolean; timeBudgetMs?: number;
+  adaptive?: boolean; timeBudgetMs?: number; minSamples?: number; noiseThreshold?: number; maxBounces?: number; caustics?: boolean;
   /** Reproject denoised export history; arbitrary agent frames leave this off. */
   temporal?: boolean;
   /** Renderer clock when this evaluated input first requested a new image. */
   inputAt?:number;
+  /** Internal frame-local strata. Only combined depth sets may accumulate. */
+  shutter?: {key:string;index:number;count:number};
 };
+export type StudioShutterSample = {scene:StudioScene; maps:StudioTextureSource[]; view:StudioView; time:number; request:StudioRenderRequest};
 export type StudioFrame = {
   source: CanvasImageSource; width: number; height: number;
   samples: number; version: string; release?: () => void;
@@ -113,6 +116,8 @@ export interface StudioBackend {
   setTime(seconds: number): StudioResult<void>;
   setCamera(camera: StudioCameraDescription, options: StudioCameraOptions): StudioResult<void>;
   render(request: StudioRenderRequest): StudioResult<StudioFrame>;
+  readonly shutterAccumulation?:boolean;
+  renderShutter?(samples: StudioShutterSample[], key:string): Promise<StudioFrame>;
   /** Normalized frame coordinates, top-left (0,0), bottom-right (1,1). */
   pick?(x: number, y: number): StudioResult<StudioPick | null>;
   bounds?(layer?: string): StudioResult<StudioBounds | null>;

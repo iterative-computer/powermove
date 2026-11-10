@@ -1774,9 +1774,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // can still change as neighbouring bins fill. Stopping those pixels at
     // 128 spp leaves bright patches while others continue converging. Keep
     // sampling them to 512 spp (or the request's ceiling/time budget).
-    let hard=P.cam_pos.w>0. || medium_majorant()>0.;
-    let minimum=max(settings.y,max(select(0.,128.,hard),select(0.,512.,P.caustic.z>.5)));
-    if(settings.x>0.5 && a.w>=minimum){
+    // A fixed precomputed map (mode 2) has no per-batch drift. The user floor
+    // then controls all paths, including lens and volume samples.
+    let minimum=max(settings.y,select(0.,512.,P.caustic.z>.5 && P.caustic.z<1.5));
+    if(settings.x>0.5 && a.w>=minimum && a.w>1.){
       let mean=dot(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
       let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*settings.z);
@@ -1939,8 +1940,9 @@ fn caustic_at(p: vec3f, n: vec3f) -> vec3f {
 // kept: those are the caustics a camera path rarely finds.
 @compute @workgroup_size(64)
 fn photons(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= u32(P.caustic.w) || P.counts.x == 0u) { return; }
-  seed = pcg(gid.x ^ pcg(u32(P.caustic.y) * 7919u + P.dims.z * 104729u + 17u));
+  let photon_id=gid.x+gid.y*262144u;
+  if (photon_id >= u32(P.caustic.w) || P.counts.x == 0u) { return; }
+  seed = pcg(photon_id ^ pcg(u32(P.caustic.y) * 7919u + P.dims.z * 104729u + 17u));
   let count = P.counts.x;
   let li = min(u32(rnd() * f32(count)), count - 1u);
   let l = light_at(li);

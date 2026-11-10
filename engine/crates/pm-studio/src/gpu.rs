@@ -174,6 +174,16 @@ pub struct Renderer {
     pub quality_temporal: bool,
     /// Trace photons for caustics (glass or polished metal in the scene; not Live).
     pub caustics: bool,
+    /// Per-render switch; capability detection stays attached to the scene.
+    pub caustics_enabled: bool,
+    /// Build a fixed photon estimate before camera sampling, so error stopping
+    /// cannot freeze pixels at different stages of a filling map.
+    pub precompute_caustics: bool,
+    /// OIDN auxiliary ray budget (prefiltering still runs once per frame).
+    pub guide_samples: u32,
+    adaptive_enabled: bool,
+    pub budget_batch_samples: u32,
+    shutter_guides: bool,
     /// Use hardware ray tracing when the GPU has it (Apple M3 and later
     /// accelerate it; M1/M2 run Metal's ray queries in software).
     pub hardware_rt: bool,
@@ -441,6 +451,12 @@ impl Renderer {
             live: false,
             quality_temporal: false,
             caustics: false,
+            caustics_enabled: true,
+            precompute_caustics: false,
+            guide_samples: 64,
+            adaptive_enabled: false,
+            budget_batch_samples: 4,
+            shutter_guides: false,
             hardware_rt: true,
             rt,
             #[cfg(all(feature="metalfx",target_os="macos"))] metalfx:None,
@@ -480,6 +496,7 @@ impl Renderer {
 
     /// The display composition, sRGB RGBA8.
     pub fn set_screen(&mut self, rgba: &[u8], w: u32, h: u32) {
+        self.photons_emitted = 0.;
         self.screen = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -500,6 +517,7 @@ impl Renderer {
 
     /// Upload a scene (geometry, materials, lights, camera). Resets accumulation.
     pub fn set_scene(&mut self, scene: &Scene, prepared: &Prepared) {
+        self.photons_emitted = 0.;
         let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
             let data: Vec<u8> = if data.is_empty() { vec![0u8; std::mem::size_of::<crate::scene::GpuMaterial>()] } else { data.to_vec() };
@@ -542,6 +560,7 @@ impl Renderer {
     pub fn set_instanced_scene(&mut self, scene: &Scene, prepared: &Prepared,
         geometries: &[RtGeometry], placements: &[RtPlacement], top_nodes: usize,
         geometry_changed: bool) {
+        self.photons_emitted = 0.;
         if geometry_changed || self.scene_buffers.is_empty() {
             self.set_scene(scene, prepared);
         } else {
@@ -734,6 +753,7 @@ impl Renderer {
     /// Override the packed world's adaptive policy for a quality request. This
     /// also covers the Electron binary upload path, which bypasses Scene.world.
     pub fn set_adaptive_sampling(&mut self, settings: crate::environment::AdaptiveSampling) {
+        self.adaptive_enabled = settings.enabled;
         let row = 4 * self.light_count as u64 + 9 * self.instance_count as u64 + 5;
         if self.scene_buffers[3].size() >= (row + 1) * 16 {
             let values = [u32::from(settings.enabled) as f32, settings.min_samples as f32, settings.relative_error, settings.absolute_error];
@@ -751,7 +771,8 @@ impl Renderer {
     pub fn trace_interruptible(&mut self,spp:u32,bounces:u32,reset:bool,clamp:u32,cancelled:&dyn Fn()->bool)->f64 {
         self.trace_budgeted_interruptible(spp, bounces, reset, clamp, 0, 0, cancelled)
     }
-    /// A budget is checked between submissions, after the minimum sample floor.
+    /// The tracing deadline is checked between submissions. The sample minimum
+    /// controls error stopping; the deadline can preempt it.
     /// No extra image buffers or GPU allocations are needed for adaptive work.
     pub fn trace_budgeted_interruptible(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool)->f64 {
         let (w, h) = (self.width, self.height);
@@ -760,15 +781,15 @@ impl Renderer {
         // Seeds follow the sample index, so a scene and view render the same every time.
         if reset {
             if !self.live { self.frame = self.seed_salt.wrapping_mul(4099); }
-            self.photons_emitted = 0.0;
+            if !self.precompute_caustics { self.photons_emitted = 0.0; }
         }
-        let photons = self.caustics && !self.live && self.light_count > 0;
+        let photons = self.caustics && self.caustics_enabled && !self.live && self.light_count > 0;
         let mut left = spp;
         let mut first = true;
         while left > 0 {
             if cancelled(){break;}
-            if !first && budget_ms > 0 && self.samples >= min_samples && start.elapsed().as_millis() >= budget_ms as u128 { break; }
-            let n = left.min(4);
+            if !first && budget_ms > 0 && start.elapsed().as_millis() >= budget_ms as u128 { break; }
+            let n = left.min(if budget_ms>0 {self.budget_batch_samples.clamp(1,4)} else {4});
             self.frame = self.frame.wrapping_add(1);
             let mut p = self.base;
             p.dims = [w, h, self.frame, n];
@@ -776,15 +797,16 @@ impl Renderer {
             p.opts = [u32::from(self.live), self.base.opts[1], self.instance_count, self.base.opts[3]];
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
-            if photons {
+            if photons && (!self.precompute_caustics || self.photons_emitted == 0.) {
                 // Photons first, so this batch's camera paths see them.
-                if reset && first {
+                if reset && first || self.photons_emitted == 0. {
                     enc.clear_buffer(&self.grid, 0, None);
                 }
                 // Bootstrap the map before the first camera sample. Sparse
                 // first maps otherwise survive in every accumulated estimate.
-                let photon_count = if reset && first { PHOTONS_PER_PASS * 4 } else { PHOTONS_PER_PASS };
+                let photon_count = if self.precompute_caustics { PHOTONS_PER_PASS * 32 } else if reset && first { PHOTONS_PER_PASS * 4 } else { PHOTONS_PER_PASS };
                 p.caustic = [self.bounds[3] / 160.0, self.photons_emitted, 1.0, photon_count as f32];
+                if self.precompute_caustics {p.dims[2]=1;}
                 self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
                 {
                     let mut pass = enc.begin_compute_pass(&Default::default());
@@ -796,13 +818,15 @@ impl Renderer {
                         _ => pass.set_pipeline(&self.photons),
                     }
                     pass.set_bind_group(0, &group, &[]);
-                    pass.dispatch_workgroups(photon_count.div_ceil(64), 1, 1);
+                    pass.dispatch_workgroups(photon_count.div_ceil(64).min(4096), photon_count.div_ceil(64 * 4096), 1);
                 }
                 self.queue.submit([enc.finish()]);
                 enc = self.device.create_command_encoder(&Default::default());
                 self.photons_emitted += photon_count as f32;
                 p.caustic[1] = self.photons_emitted;
             }
+            p.dims[2]=self.frame;
+            if photons && self.precompute_caustics { p.caustic = [self.bounds[3] / 160., self.photons_emitted, 2., 0.]; }
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             let use_reservoirs=self.live && self.resampled_lighting && self.uses_hardware_rt();
             let reservoirs=use_reservoirs.then(||self.reservoir_group());
@@ -827,6 +851,11 @@ impl Renderer {
             self.samples += n;
             left -= n;
             first = false;
+            // Pixels keep their actual counts when the shared shader stops
+            // them. A bounded occasional read avoids dispatching the entire
+            // remaining ceiling after every pixel has converged.
+            if self.adaptive_enabled && self.samples >= min_samples && self.samples % 32 == 0
+                && self.sample_counts().iter().all(|&count|count <= (self.samples-4) as f32) { break; }
         }
         start.elapsed().as_secs_f64() * 1000.0
     }
@@ -987,6 +1016,46 @@ impl Renderer {
         self.post(passes, false, None, None).1
     }
 
+    fn encode_guides(&self, enc:&mut wgpu::CommandEncoder, shutter:Option<u32>) {
+        let (w,h)=(self.width,self.height);let groups=(w.div_ceil(8),h.div_ceil(8));
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aov"),
+            layout: &self.aov_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.aov.as_entire_binding() }],
+        });
+        let mut p = self.base;
+        p.dims = [w, h, 0, 1];
+        p.caustic[3] = -(self.guide_samples.clamp(1, 64) as f32);
+        p.opts = [0, self.base.opts[1], self.instance_count, self.base.opts[3]];
+        p.counts = [self.light_count, 6, if shutter.is_some() {2} else {1}, 64];
+        p.dims[2]=shutter.unwrap_or(0);
+        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+        let trace_group = self.trace_group.clone().expect("traced before finishing");
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &trace_group, &[]);
+            if self.uses_hardware_rt() {
+                let rt = self.rt.as_ref().unwrap();
+                pass.set_pipeline(&rt.aovs);
+                pass.set_bind_group(1, rt.group.as_ref(), &[]);
+                pass.set_bind_group(2, &group, &[]);
+            } else {
+                pass.set_pipeline(&self.aovs);
+                pass.set_bind_group(1, &group, &[]);
+            }
+            pass.dispatch_workgroups(groups.0, groups.1, 1);
+        }
+    }
+    pub fn begin_shutter(&mut self, first:bool, previous_samples:u32, salt:u32) {
+        if first {self.shutter_guides=false;}
+        self.samples=previous_samples;self.frame=salt.wrapping_mul(4099);self.seed_salt=salt;
+    }
+    pub fn end_shutter(&mut self) {self.shutter_guides=false;}
+    pub fn accumulate_shutter_guides(&mut self,index:u32) {
+        let mut enc=self.device.create_command_encoder(&Default::default());
+        self.encode_guides(&mut enc,Some(index));self.queue.submit([enc.finish()]);self.wait();self.shutter_guides=true;
+    }
+
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
@@ -1011,31 +1080,7 @@ impl Renderer {
         run(&mut enc, &self.resolve, 1, 0, 1, &mut slot);
         if let Some(denoise) = denoise {
             // Guides, then read back, denoise on the CPU and upload the result.
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("aov"),
-                layout: &self.aov_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.aov.as_entire_binding() }],
-            });
-            let mut p = self.base;
-            p.dims = [w, h, 0, 1];
-            p.opts = [0, self.base.opts[1], self.instance_count, self.base.opts[3]];
-            p.counts = [self.light_count, 6, 1, 64];
-            self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
-            let trace_group = self.trace_group.clone().expect("traced before finishing");
-            {
-                let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_bind_group(0, &trace_group, &[]);
-                if self.uses_hardware_rt() {
-                    let rt = self.rt.as_ref().unwrap();
-                    pass.set_pipeline(&rt.aovs);
-                    pass.set_bind_group(1, rt.group.as_ref(), &[]);
-                    pass.set_bind_group(2, &group, &[]);
-                } else {
-                    pass.set_pipeline(&self.aovs);
-                    pass.set_bind_group(1, &group, &[]);
-                }
-                pass.dispatch_workgroups(groups.0, groups.1, 1);
-            }
+            if !self.shutter_guides {self.encode_guides(&mut enc,None);}
             self.queue.submit([std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default())).finish()]);
             let pixels = (w * h) as usize;
             let mut color = self.read_f32(&self.display[0], pixels as u64 * 16);
@@ -1142,7 +1187,8 @@ impl Renderer {
         let slice=self.readback.slice(..);slice.map_async(wgpu::MapMode::Read,|_|{});self.wait();let bytes=slice.get_mapped_range().expect("mapped native frame").to_vec();self.readback.unmap();
         (bytes,start.elapsed().as_secs_f64()*1000.)
     }
-    pub fn set_scene_bounds(&mut self,bounds:[f32;4]){self.bounds=bounds;self.base.bounds=bounds;}
+    pub fn set_scene_bounds(&mut self,bounds:[f32;4]){if self.bounds!=bounds {self.photons_emitted=0.;}self.bounds=bounds;self.base.bounds=bounds;}
+    pub fn set_precomputed_caustics(&mut self, enabled:bool) {if self.precompute_caustics!=enabled {self.photons_emitted=0.;}self.precompute_caustics=enabled;}
     pub fn set_projection(&mut self, orthographic:bool) {self.base.opts[3]=u32::from(orthographic);}
     pub fn set_clip_planes(&mut self,near:Option<f32>,far:Option<f32>) {
         if let (Some(near),Some(far))=(near,far) {
@@ -1167,6 +1213,7 @@ impl Renderer {
 
     /// Texture-array data uses the same layer indices as Rust GpuMaterial.maps.
     pub fn set_maps(&mut self, rgba:&[u8], width:u32, height:u32, layers:u32) {
+        self.photons_emitted = 0.;
         self.screen=self.device.create_texture_with_data(&self.queue,&wgpu::TextureDescriptor {
             label:Some("studio material maps"),size:wgpu::Extent3d{width,height,depth_or_array_layers:layers},
             mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba8Unorm,
@@ -1175,6 +1222,7 @@ impl Renderer {
         self.trace_group=None;self.samples=0;self.history_valid=false;
     }
     pub fn update_map(&mut self, rgba:&[u8], width:u32, height:u32, layer:u32) {
+        self.photons_emitted=0.;
         self.queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&self.screen,mip_level:0,origin:wgpu::Origin3d{x:0,y:0,z:layer},aspect:wgpu::TextureAspect::All},
             rgba,wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(width*4),rows_per_image:Some(height)},wgpu::Extent3d{width,height,depth_or_array_layers:1});
         self.samples=0;self.history_valid=false;

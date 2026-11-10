@@ -269,3 +269,21 @@ fn adaptive_caustics_preserve_the_fixed_budget_image() {
         "adaptive caustics changed the converged image: SSIM={score}"
     );
 }
+
+#[test]
+fn quiet_pixels_stop_at_the_requested_floor_and_end_the_frame_early() {
+    let mut scene=glass_detail();scene.objects.clear();scene.shadow_catcher=false;
+    let mut r=Renderer::new(48,32).unwrap();r.set_scene(&scene,&scene.prepare());
+    r.set_adaptive_sampling(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.03,absolute_error:0.0005});
+    r.trace_budgeted_interruptible(512,8,true,64,8,0,&||false);
+    let counts=r.sample_counts();
+    assert!(r.samples<512,"a quiet image must finish before its ceiling");
+    assert!(counts.iter().all(|&n|n>=8. && n<=12.),"no hidden 128/256/512 sample floor: {counts:?}");
+    r.set_adaptive_sampling(AdaptiveSampling{enabled:true,min_samples:1,relative_error:0.03,absolute_error:0.0005});
+    r.budget_batch_samples=1;
+    r.trace_budgeted_interruptible(512,8,true,64,1,100000,&||false);
+    assert!(r.sample_counts().iter().all(|&n|n==2.),"one observation cannot estimate variance");
+    r.set_adaptive_sampling(AdaptiveSampling{enabled:false,..Default::default()});
+    r.trace(32,8,true,64);
+    assert!(r.sample_counts().iter().all(|&n|n==32.));
+}

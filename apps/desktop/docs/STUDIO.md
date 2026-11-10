@@ -40,17 +40,67 @@ Studio has three rendering tiers:
 - **Refine** when nothing has changed for a moment: the view sharpens a few
   samples per frame until it is clean. The pill in the viewer's corner shows
   the progress ("Refining · 62%", then "Clean").
-- **Final** for exports and agent captures: a fixed number of samples per
-  frame, set per composition on the camera (Final quality: Draft 16,
-  Standard 64, High 256, Best 1024). Motion blur divides those samples
-  across its shutter samples, so blurred exports cost no more. Each frame is
-  seeded by its time: re-rendering a frame gives the same pixels, and each
-  frame (and each shutter sample) gets its own noise, so grain never sits on
-  the screen while the picture moves under it. Final and stills are then
-  denoised (`denoise.wgsl`): an edge-avoiding filter guided by the surfaces'
-  albedo, normals, distance and coverage (`aov.wgsl`) and by each pixel's own
-  measured noise, which smooths light, screens, shallow-focus blur and the
-  floor's shadows while edges, paint and the backdrop stay exact.
+- **Final** for exports and agent captures uses the composition's saved render
+  quality. Final is the rendering tier; **Final (Max)** is the most expensive
+  quality preset. Old projects open at **Production**. Refine uses the same
+  sample, bounce, caustics and denoising policy.
+
+### Saved render quality and export overrides
+
+| Preset | Noise threshold | Min / max samples per frame | Tracing limit | Bounces | Caustics | Denoise | Shutter samples |
+|---|---:|---:|---:|---:|---|---|---:|
+| Draft | .12 | 4 / 16 | .5 s | 4 | Off | On, fast GPU filter | 1 |
+| Preview | .06 | 16 / 64 | 2 s | 6 | Off | On, fast OIDN on native | 2 |
+| Production | .03 | 32 / 128 | 3 s | 8 | On | On, balanced OIDN on native | 2 |
+| Final (Max) | .015 | 512 / 1024 | 20 s | 8 | On | On, high OIDN on native | 2 |
+
+**Custom** exposes `noiseThreshold` (0–1), `minSamples` / `maxSamples`
+(1–4096, min must not exceed max), `timeLimitSeconds` (0–3600),
+`maxBounces` (1–32), `caustics`, `denoise`, and `motionBlurSamples` (1–64).
+Zero noise threshold disables error stopping; zero seconds removes the tracing
+cap. The minimum is the noise test's starting point. The time cap can finish
+before it; a running GPU batch and filtering/readback can extend wall time.
+All sample and tracing budgets are for the output frame, divided across its
+shutter times. Enabling motion blur on layers remains a separate composition
+choice. Draft disables shutter blur by using one time sample.
+
+The saved value is `composition.studioQuality`. Changes use normal Undo/Redo,
+save/reopen, composition isolation and revision guards. The old camera
+`environment.samples` field remains readable; an explicit `set_environment`
+sample edit also updates the composition's Custom sample ceiling.
+
+The controls API is `api.scene3d.renderQuality`: `presets`, `get()`,
+`set(presetOrPatch, editMeta?)`, and `onChange(listener)` returning a disposable.
+Presets are `draft`, `preview`, `production`, `final`; a patch starts from the
+current quality unless it supplies a preset. Individual field edits become
+Custom. A preset selection resets its fields to the table above.
+
+Agents can use:
+
+```js
+edit_3d({operation:'set_render_quality', preset:'production'})
+edit_3d({operation:'set_render_quality', patch:{timeLimitSeconds:2, minSamples:16}})
+export_video({format:'mp4', studioQuality:'draft'})
+render_frames({times:[1,2], studioQuality:{preset:'production', denoise:false}})
+```
+
+`get_3d_scene` returns the saved quality. Exports and agent frames accept a
+`studioQuality` preset or partial settings override without changing the saved
+composition. Internal exports use `PM.Export.run({studioQuality:...})`;
+`PM.Export.snapshotAsync(time,width,{studioQuality:...})` supports the same
+capture override. Overrides also reach nested Studio compositions and are
+restored after completion, cancellation or failure.
+
+Native prepared captures combine eligible normal 3D depth sets into one linear
+shutter accumulation, average path-following guides, then run OIDN once for the
+frame. Each stratum takes the same sample count. Styled layers, mixed blur
+switches and compositing boundaries keep separate pictures; WebGPU retains
+its portable per-time filtering. Adaptive per-pixel stopping is disabled inside
+shared shutter accumulation so quiet pixels cannot miss later motion times.
+Unblurred Final/Refine still use the noise threshold. Caustic-free scenes skip
+photons; Production builds a stable photon estimate before tracing and keeps
+it through camera-only changes, invalidating it on scene or texture edits.
+Temporal image reuse is disabled for exports.
 
 Perspective and orthographic cameras both use Studio, including camera zoom
 and near/far clipping. The macOS app uses a native Metal renderer through

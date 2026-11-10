@@ -21,6 +21,9 @@ struct Request {
     #[serde(flatten)]
     command: Command,
 }
+#[derive(Clone, Deserialize)]
+struct Shutter { key:String, index:u32, count:u32 }
+
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Command {
@@ -90,6 +93,16 @@ enum Command {
         adaptive: bool,
         #[serde(rename="timeBudgetMs", default)]
         time_budget_ms: u64,
+        #[serde(rename="minSamples", default)]
+        min_samples: Option<u32>,
+        #[serde(rename="noiseThreshold", default)]
+        noise_threshold: Option<f32>,
+        #[serde(rename="maxBounces", default)]
+        max_bounces: Option<u32>,
+        #[serde(default)]
+        caustics: Option<bool>,
+        #[serde(default)]
+        shutter: Option<Shutter>,
         #[serde(default)]
         temporal: bool,
         #[serde(default)]
@@ -142,6 +155,9 @@ struct Target {
     quality_adaptive: bool,
     quality_temporal: bool,
     quality_budget_ms: u64,
+    quality_policy: String,
+    shutter: Option<(String,u32,u32,u32)>,
+    shutter_policy:String,
     tier: String,
     time: f64,
 }
@@ -288,7 +304,7 @@ impl Host {
                 json!({"released":frame})
             }
             Command::Hello => {
-                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","preparedUpload","instanceParts","cancelRefine","environments"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","preparedUpload","instanceParts","cancelRefine","environments","renderQuality","shutterAccumulation"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -517,7 +533,7 @@ impl Host {
                 tier,
                 samples,
                 adaptive,
-                time_budget_ms,
+                time_budget_ms, min_samples, noise_threshold, max_bounces, caustics, shutter,
                 temporal,
                 reset,
                 goal,
@@ -538,6 +554,12 @@ impl Host {
                     return Err("samples must be 1–4096".into());
                 }
                 let is_live = tier == "live";
+                if min_samples.is_some_and(|n| n == 0 || n > 4096) || max_bounces.is_some_and(|n| n == 0 || n > 32)
+                    || noise_threshold.is_some_and(|n| !n.is_finite() || !(0.0..=1.0).contains(&n)) || time_budget_ms > 3_600_000 {
+                    return Err("invalid render quality settings".into());
+                }
+                if shutter.as_ref().is_some_and(|s|s.key.len()>256 || s.count<2 || s.count>64 || s.index>=s.count || layer.is_some() || is_live || temporal) {return Err("invalid shutter accumulation".into());}
+                let policy = format!("{min_samples:?}:{noise_threshold:?}:{max_bounces:?}:{caustics:?}");
                 let cancellation=self.cancel_revision.clone();let generation=self.request_generation;
                 let cancelled=||tier=="refine"&&cancellation.load(Ordering::Relaxed)!=generation;
                 if cancelled(){return Ok((json!({"cancelled":true}),vec![]));}
@@ -605,6 +627,9 @@ impl Host {
                         quality_adaptive: false,
                         quality_temporal: false,
                         quality_budget_ms: 0,
+                        quality_policy: String::new(),
+                        shutter: None,
+                        shutter_policy:String::new(),
                         tier: String::new(),
                         time: f64::NAN,
                     });
@@ -618,7 +643,16 @@ impl Host {
                     || target.quality_adaptive != adaptive
                     || target.quality_temporal != temporal
                     || target.quality_budget_ms != time_budget_ms
+                    || target.quality_policy != policy
                     || tier == "final" && target.quality_samples != samples;
+                let post_policy=if let Some(p)=&self.packed {format!("{}:{:?}:{}:{}",p.view.exposure,p.view.backdrop,p.view.backdrop_opaque,p.view.shadow_catcher)}
+                    else {let r=self.resident.as_ref().unwrap();format!("{}:{:?}:{}",r.scene.exposure,r.scene.backdrop,r.scene.shadow_catcher)};
+                let frame_policy=format!("{policy}:{tier}:{samples}:{width}:{height}:{denoise}:{time_budget_ms}:{post_policy}");
+                let shutter_samples=if let Some(s)=&shutter {
+                    if s.index==0 {0} else {
+                        match &target.shutter {Some((key,index,count,samples)) if key==&s.key && *index+1==s.index && *count==s.count && target.shutter_policy==frame_policy=>*samples,_=>return Err("shutter samples must arrive in order".into())}
+                    }
+                } else {0};
                 sync_target(
                     target,
                     self.resident.as_ref(),
@@ -629,6 +663,12 @@ impl Host {
                 );
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
+                renderer.budget_batch_samples=if pm_studio::environment::packed_has_media(&prepared.sdata,prepared.lights.len(),instances) {1} else {4};
+                if let Some(s)=&shutter {renderer.begin_shutter(s.index==0,shutter_samples,(time*9600.).round() as u32);}else{renderer.end_shutter();target.shutter=None;}
+                renderer.caustics_enabled = caustics.unwrap_or(true);
+                renderer.set_precomputed_caustics(min_samples.is_some() && noise_threshold.is_some_and(|n|n>=0.025));
+                renderer.guide_samples = match noise_threshold { Some(n) if n >= 0.06 => 8, Some(n) if n >= 0.025 => 32, _ => 64 };
+                if let Some(s)=&shutter {renderer.guide_samples=(renderer.guide_samples*2).div_ceil(s.count).clamp(1,64);}
                 renderer.quality_temporal = temporal && tier == "final" && denoise;
                 // Cuts, seeks and switching quality modes must not reuse history.
                 if !target.time.is_finite() || time < target.time || time - target.time > 0.1 || target.quality_temporal != temporal {
@@ -641,11 +681,11 @@ impl Host {
                 renderer.set_output_mask(layer, background);
                 renderer.set_straight_output(true);
                 renderer.set_time_seed((time * 9600.).round() as u32);
-                let adaptive = adaptive && !is_live;
+                let adaptive = adaptive && !is_live && shutter.is_none();
                 renderer.set_adaptive_sampling(pm_studio::environment::AdaptiveSampling {
-                    enabled: adaptive, min_samples: 64, relative_error: 0.015, absolute_error: 0.0005,
+                    enabled: adaptive, min_samples: min_samples.unwrap_or(64), relative_error: noise_threshold.unwrap_or(0.015), absolute_error: 0.0005,
                 });
-                let spp = if goal && !changed && !reset && adaptive && tier == "final" {
+                let spp = if let Some(s)=shutter.as_ref().filter(|s|s.index>0) {shutter_samples/s.index} else if goal && !changed && !reset && (adaptive || time_budget_ms>0) && tier == "final" {
                     // The first request already completed its bounded quality
                     // render. Layer masks must reuse that same finished trace.
                     0
@@ -661,15 +701,20 @@ impl Host {
                 } else {
                     renderer.trace_budgeted_interruptible(
                         spp,
-                        if is_live { 3 } else { 8 },
-                        reset || changed || is_live,
+                        if is_live { 3 } else { max_bounces.unwrap_or(8) },
+                        shutter.as_ref().map_or(reset || changed || is_live,|s|s.index==0),
                         if is_live { 12 } else { 64 },
-                        if adaptive { 256.min(samples) } else { 0 },
-                        if adaptive { time_budget_ms.min(120_000) } else { 0 },
+                        min_samples.unwrap_or(if adaptive { 256 } else { 0 }).min(samples),
+                        if is_live || shutter.as_ref().is_some_and(|s|s.index>0) { 0 } else { time_budget_ms },
                         &cancelled,
                     )
                 };
                 if cancelled(){return Ok((json!({"cancelled":true}),vec![]));}
+                if let Some(s)=&shutter {
+                    if denoise {renderer.accumulate_shutter_guides(s.index);}
+                    target.shutter=Some((s.key.clone(),s.index,s.count,renderer.samples));target.shutter_policy=frame_policy;
+                    if s.index+1<s.count {return Ok((json!({"deferred":true,"samples":renderer.samples,"width":w,"height":h,"hardwareRt":renderer.uses_hardware_rt(),"timings":{"traceMs":trace_ms,"postMs":0.,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),vec![]));}
+                }
                 renderer.last_surface = None;
                 let mut denoiser = target.denoiser;
                 let mut frame_size = (w, h);
@@ -704,12 +749,16 @@ impl Host {
                     renderer.frame_pixels()
                 // Final divides its total budget across shutter times. Keep
                 // requested denoising on those smaller batches as well.
-                } else if denoise && !is_live && (renderer.samples >= 16 || tier == "final" && renderer.samples >= 4) {
+                } else if denoise && !is_live && noise_threshold.is_some_and(|n| n >= 0.1) {
+                    denoiser = "atrous";
+                    renderer.finish(3)
+                } else if denoise && !is_live {
                     if self.oidn.is_none() {
                         self.oidn = Some(pm_studio::oidn::Denoiser::new()?);
                     }
                     denoiser = "oidn";
                     let d = self.oidn.as_ref().unwrap();
+                    d.set_quality(match noise_threshold { Some(n) if n>=0.06 => pm_studio::oidn::Quality::Fast, Some(n) if n>=0.025 => pm_studio::oidn::Quality::Balanced, _ => pm_studio::oidn::Quality::High });
                     renderer.finish_with_layers(&|c, shade, a, n| d.run_layers_interruptible(&mut [c,shade],a,n,4,w as usize,h as usize,if tier=="refine"{Some((&cancellation,generation))}else{None}))
                 } else {
                     denoiser = if is_live && denoise { "atrous" } else { "none" };
@@ -734,6 +783,7 @@ impl Host {
                 target.quality_adaptive = adaptive;
                 target.quality_temporal = temporal;
                 target.quality_budget_ms = time_budget_ms;
+                target.quality_policy = policy;
                 target.time = time;
                 target.tier = tier.clone();
                 let gpu_bytes=renderer.allocated_gpu_bytes();self.peak_gpu_bytes=self.peak_gpu_bytes.max(gpu_bytes.unwrap_or(0));
@@ -1080,6 +1130,46 @@ mod tests {
         assert!(h.handle(Command::Textures{width:1,height:1,layers:257,layer:None},&[]).is_err());
     }
 
+    #[cfg(feature="oidn")]
+    #[test]
+    fn shutter_strata_share_one_accumulation_and_one_denoise() {
+        let mut h=Host::new();h.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        let mut command=json!({"op":"render","width":64,"height":48,"tier":"final","samples":8,"minSamples":4,"noiseThreshold":0.03,
+            "adaptive":true,"maxBounces":4,"caustics":false,"denoise":true,"goal":true,"reset":true,
+            "shutter":{"key":"frame-1","index":0,"count":2}});
+        let (first,pixels)=h.handle(serde_json::from_value(command.clone()).unwrap(),&[]).unwrap();
+        assert_eq!(first["deferred"],true);assert!(pixels.is_empty());assert_eq!(first["samples"],8);
+        command["shutter"]["index"]=json!(1);command["time"]=json!(1./30.);
+        let (last,pixels)=h.handle(serde_json::from_value(command.clone()).unwrap(),&[]).unwrap();
+        assert_eq!(last["samples"],16);assert_eq!(last["denoiser"],"oidn");assert_eq!(pixels.len(),64*48*4);
+        command["shutter"]["key"]=json!("wrong-frame");
+        assert!(h.handle(serde_json::from_value(command).unwrap(),&[]).is_err());
+    }
+
+    #[test]
+    fn explicit_quality_floor_and_policy_changes_are_honored() {
+        let mut h=Host::new();
+        h.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        let command=json!({"op":"render","width":48,"height":32,"tier":"final","samples":128,
+            "minSamples":8,"noiseThreshold":0.03,"timeBudgetMs":1,"maxBounces":4,"caustics":false,"adaptive":true,"denoise":false,"goal":true});
+        let (first,_)=h.handle(serde_json::from_value(command.clone()).unwrap(),&[]).unwrap();
+        assert!(first["samples"].as_u64().unwrap()>=1 && first["samples"].as_u64().unwrap()<128);
+        let (same,_)=h.handle(serde_json::from_value(command.clone()).unwrap(),&[]).unwrap();
+        assert_eq!(same["timings"]["traceMs"],0.);
+        let mut changed=command.clone();changed["maxBounces"]=json!(6);
+        let (changed,_)=h.handle(serde_json::from_value(changed).unwrap(),&[]).unwrap();
+        assert!(changed["timings"]["traceMs"].as_f64().unwrap()>0.);
+        let mut timed=command.clone();timed["adaptive"]=json!(false);timed["noiseThreshold"]=json!(0.);
+        let (timed_first,_)=h.handle(serde_json::from_value(timed.clone()).unwrap(),&[]).unwrap();
+        timed["layer"]=json!(0);
+        let (timed_mask,_)=h.handle(serde_json::from_value(timed).unwrap(),&[]).unwrap();
+        assert_eq!(timed_mask["samples"],timed_first["samples"]);assert_eq!(timed_mask["timings"]["traceMs"],0.);
+        for (key,value) in [("minSamples",json!(0)),("maxBounces",json!(33)),("noiseThreshold",json!(-1.))] {
+            let mut invalid=command.clone();invalid[key]=value;
+            assert!(h.handle(serde_json::from_value(invalid).unwrap(),&[]).is_err());
+        }
+    }
+
     #[test]
     fn rejects_bad_render_sizes() {
         assert!(dimensions(0, 10).is_err());
@@ -1089,13 +1179,13 @@ mod tests {
 
     #[cfg(feature = "oidn")]
     #[test]
-    fn bounded_final_keeps_its_sample_floor_and_reuses_it_for_layer_masks() {
+    fn bounded_final_honors_the_deadline_and_reuses_it_for_layer_masks() {
         let mut host = Host::new();
         host.handle(Command::Preset { name: "chrome".into(), finish: blue(), time: 0. }, &[]).unwrap();
         let request = json!({"op":"render","width":48,"height":32,"tier":"final","samples":1024,"adaptive":true,"timeBudgetMs":1,"goal":true,"denoise":true});
         let (first, _) = host.handle(serde_json::from_value(request.clone()).unwrap(), &[]).unwrap();
         let samples = first["samples"].as_u64().unwrap();
-        assert!(samples >= 256 && samples < 1024, "bounded Final must sample before its budget: {first}");
+        assert!(samples >= 1 && samples < 1024, "time limit must win over a noise-stopping floor: {first}");
         let mut masked = request; masked["layer"] = json!(0);
         let (second, _) = host.handle(serde_json::from_value(masked).unwrap(), &[]).unwrap();
         assert_eq!(second["samples"], first["samples"], "a layer mask cannot multiply the Final budget");

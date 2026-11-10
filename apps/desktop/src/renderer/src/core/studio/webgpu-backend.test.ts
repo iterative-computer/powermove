@@ -12,7 +12,7 @@ vi.mock('./gpu', () => ({
     qualityTemporal = false;
     constructor() { gpu.allocations++; }
     destroy() { gpu.destroyed++; }
-    setAdaptiveSampling() {} invalidateHistory() { gpu.invalidateHistory(); }
+    setPrecomputedCaustics() {} setAdaptiveSampling() {} invalidateHistory() { gpu.invalidateHistory(); }
     async traceQuality() { gpu.quality(); this.samples = 128; }
     setScene() {} setView() {} trace(n: number) { this.samples += n; } resolve() {} present() { return {}; }
   }

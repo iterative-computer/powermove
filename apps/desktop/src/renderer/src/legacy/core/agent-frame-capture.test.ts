@@ -129,3 +129,13 @@ it('cancels queued caller requests without touching a decoder or rendering them'
   release(); await first;
   expect(prepare).toHaveBeenCalledOnce(); expect(exporter.snapshot).toHaveBeenCalledOnce();
 });
+
+it('scopes render quality overrides to the capture, including a failed preparation',async()=>{
+  const {PM,exporter}=fixture();PM.proj.studioQuality={preset:'preview'};
+  prepare.mockImplementationOnce(async()=>{expect(PM._studioQualityOverride).toMatchObject({preset:'draft',maxSamples:16});});
+  await captureAgentFrame(PM,exporter,1,480,{studioQuality:'draft'});
+  expect(PM._studioQualityOverride).toBeUndefined();expect(PM.proj.studioQuality.preset).toBe('preview');
+  prepare.mockRejectedValueOnce(new Error('Render failed'));
+  await expect(captureAgentFrame(PM,exporter,1,480,{studioQuality:{denoise:false}})).rejects.toThrow('Render failed');
+  expect(PM._studioQualityOverride).toBeUndefined();expect(PM.agentFrameCapture).toBe(false);
+});

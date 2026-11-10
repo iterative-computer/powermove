@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { install } from './exporter';
 
-function exporter(overrides: any = {}): any {
+function exporter(overrides: any = {}, observe?: (PM:any)=>void): any {
   (globalThis as any).window = globalThis;
   const PM: PMRegistry = {
     version: 'test',
@@ -18,6 +18,7 @@ function exporter(overrides: any = {}): any {
     GL: { canvas: { width: 2, height: 2 }, resize() {}, render() {} },
   };
   Object.assign(PM, overrides);
+  observe?.(PM);
   install(PM);
   return PM.Export;
 }
@@ -99,4 +100,13 @@ describe('export lifecycle', () => {
     expect(attempts).toBe(2);
     expect(X.busy).toBe(false);
   });
+});
+
+it('restores a per-export quality override when rendering fails',async()=>{
+  let PM:any;
+  const X=exporter({proj:{name:'Quality',w:64,h:64,dur:1,fps:30,layers:[],studioQuality:{preset:'preview'}},
+    pause(){},setTime(){},h(){expect(PM._studioQualityOverride).toMatchObject({preset:'draft'});throw new Error('Render setup failed');}
+  },value=>PM=value);
+  expect((await X.run({format:'webm',studioQuality:'draft'})).error).toBe('Render setup failed');
+  expect(PM._studioQualityOverride).toBeUndefined();expect(PM.proj.studioQuality.preset).toBe('preview');
 });

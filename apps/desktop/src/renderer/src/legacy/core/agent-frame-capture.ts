@@ -1,3 +1,4 @@
+import { resolveStudioQuality, type StudioQualityInput } from '../../../../shared/studio-quality';
 import { prepareFrame } from './frame-preparation';
 import { captureAborted, VideoFrameDecodeError, withCaptureSignal } from './video-frame-decode';
 
@@ -7,7 +8,7 @@ const queues = new WeakMap<object, Queue>();
 /** Agent reviews own disposable decoders. Viewer scrubbing, proxy installation
  * and a new project's media registry must never move their decoder time. */
 export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth = 480,
-  options: { signal?: AbortSignal } = {}): Promise<string> {
+  options: { signal?: AbortSignal; studioQuality?: StudioQualityInput } = {}): Promise<string> {
   const project = PM.proj, composition = project.compId, revision = project.revision;
   let queue = queues.get(PM);
   if (!queue) { queue = { tail: Promise.resolve(), pending: 0 }; queues.set(PM, queue); }
@@ -49,8 +50,10 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
     let studioDeadline: ReturnType<typeof setTimeout> | undefined;
     let preparingStudio = false;
     let ownedFrames: Map<string, HTMLCanvasElement> | undefined;
+    const previousQuality = PM._studioQualityOverride;
     PM.pause(); PM.agentFrameCapture = true;
     try {
+      if (options.studioQuality !== undefined) PM._studioQualityOverride = resolveStudioQuality(options.studioQuality, resolveStudioQuality(project.studioQuality));
       const scale = Math.min(1, maxWidth / project.w);
       const prepare = () => prepareFrame(PM, time, project, {
         width: Math.max(2, Math.round(project.w * scale)), height: Math.max(2, Math.round(project.h * scale)),
@@ -60,7 +63,8 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
           // Video decoding has finished. Final tracing and denoising have a
           // separate bound, matching the native renderer's request deadline.
           clearTimeout(deadline);preparingStudio = true;
-          studioDeadline = setTimeout(() => controller.abort(new Error('Studio frame capture timed out')), 120_000);
+          const seconds = resolveStudioQuality(PM._studioQualityOverride ?? project.studioQuality).timeLimitSeconds;
+          studioDeadline = setTimeout(() => controller.abort(new Error('Studio frame capture timed out')), seconds > 0 ? Math.max(120_000, seconds * 1000 + 60_000) : 3_600_000);
         }
       });
       try { await prepare(); }
@@ -80,6 +84,7 @@ export function captureAgentFrame(PM: any, exporter: any, time: number, maxWidth
       if (ownedFrames && PM.preparedVideoFrames === ownedFrames) PM.preparedVideoFrames = null;
       if (ownedFrames && PM.preparedVideoExactInputs?.frames === ownedFrames) PM.preparedVideoExactInputs = null;
       PM.agentFrameCapture = false;
+      if (previousQuality === undefined) delete PM._studioQualityOverride; else PM._studioQualityOverride = previousQuality;
       PM.invalidate('render');
       if (wasPlaying && PM.proj === project && project.compId === composition) PM.play();
     }

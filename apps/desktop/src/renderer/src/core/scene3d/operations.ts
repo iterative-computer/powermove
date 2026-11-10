@@ -1,3 +1,4 @@
+import { resolveStudioQuality } from '../../../../shared/studio-quality';
 import {BUILTIN_NATURE} from './nature-defaults';
 import { worldSchema,materialOptionsSchema } from './environment-data';
 import { extrusionEligible, parseExtrusion } from './extrusion-data';
@@ -13,7 +14,7 @@ import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 import { studioCommands, type StudioEdit } from '../studio/operations';
 
 export interface Scene3DEdit {
-  operation: 'set_world'|'add_fog'|'update_fog'|'add_terrain'|'update_terrain'|'add_scatter'|'update_scatter'|'set_material_options'|'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|StudioEdit['operation'];
+  operation: 'set_render_quality'|'set_world'|'add_fog'|'update_fog'|'add_terrain'|'update_terrain'|'add_scatter'|'update_scatter'|'set_material_options'|'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|StudioEdit['operation'];
   world?:any;fog?:any;terrain?:any;scatter?:any;
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
   /** set_part: the part's key from listParts; patch null removes its offsets. */
@@ -39,6 +40,12 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
+  if (args.operation === 'set_render_quality') {
+    if (Object.keys(args).some(k => !['operation','preset','patch'].includes(k))) throw new Error('Unknown render quality edit field');
+    const comp = PM.curComp?.() || PM.proj;
+    const quality = resolveStudioQuality({ ...args.patch, ...(args.preset ? { preset: args.preset } : {}) }, resolveStudioQuality(comp.studioQuality));
+    return { commands: [{ type: 'set_composition', patch: { studioQuality: quality } }] };
+  }
   if (['apply_material','light_highlight','shot','set_studio','explode','drop_to_floor','place_on','auto_studio','soften'].includes(args.operation)) return studioCommands(PM, args as unknown as StudioEdit, (a, m) => sceneCommands(PM, a, m ?? meta));
   if(args.operation==='set_world' || /^add_(fog|terrain|scatter)$/.test(args.operation)){
     const comp=PM.curComp?.() || PM.proj;
@@ -57,6 +64,12 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
+  // Existing camera controls and older agents still send an explicit sample
+  // count here. Carry that choice into the saved composition policy.
+  if(args.operation==='set_environment' && args.patch?.samples!==undefined){
+    const quality=resolveStudioQuality((PM.curComp?.() || PM.proj).studioQuality);
+    commands.push({type:'set_composition',patch:{studioQuality:resolveStudioQuality({maxSamples:args.patch.samples,minSamples:Math.min(quality.minSamples,args.patch.samples)},quality)}});
+  }
   const uid=(role:string)=>String(PM.uid?.(role) || `${role}_${crypto.randomUUID().replaceAll('-','')}`);
   const add=(role:'object'|'light'|'camera',node:any, suppliedId?:string)=>{
     const id=suppliedId || uid(role);

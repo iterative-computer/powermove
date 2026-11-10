@@ -1,7 +1,7 @@
 //! Intel Open Image Denoise for Final frames: a minimal binding to the C API
 //! (only what the RT filter needs).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,8 +41,12 @@ unsafe extern "C" {
     );
 }
 
+#[derive(Clone, Copy)]
+pub enum Quality { Fast, Balanced, High }
+
 pub struct Denoiser {
     device: Device,
+    quality: Cell<i32>,
     filter: RefCell<Option<Filters>>,
 }
 
@@ -83,11 +87,16 @@ impl Denoiser {
         unsafe { oidnCommitDevice(device) };
         let d = Denoiser {
             device,
+            quality: Cell::new(QUALITY_HIGH),
             filter: RefCell::new(None),
         };
         d.check()?;
         Ok(d)
     }
+
+    /// Balanced OIDN is available for bounded movie presets. Final retains
+    /// the high-quality network; both still prefilter stochastic auxiliaries.
+    pub fn set_quality(&self, quality: Quality) { self.quality.set(match quality { Quality::Fast=>4, Quality::Balanced=>5, Quality::High=>QUALITY_HIGH }); }
 
     fn check(&self) -> Result<(), String> {
         let mut message: *const c_char = std::ptr::null();
@@ -220,7 +229,7 @@ impl Denoiser {
             bind(filter, parameter, input.as_ptr() as *mut f32, stride);
             bind(filter, "output", output.as_mut_ptr(), 3);
             unsafe {
-                oidnSetFilterInt(filter, name("quality").as_ptr(), QUALITY_HIGH);
+                oidnSetFilterInt(filter, name("quality").as_ptr(), self.quality.get());
             }
             execute(filter)?;
         }
@@ -230,7 +239,7 @@ impl Denoiser {
         unsafe {
             oidnSetFilterBool(f.beauty, name("hdr").as_ptr(), true);
             oidnSetFilterBool(f.beauty, name("cleanAux").as_ptr(), true);
-            oidnSetFilterInt(f.beauty, name("quality").as_ptr(), QUALITY_HIGH);
+            oidnSetFilterInt(f.beauty, name("quality").as_ptr(), self.quality.get());
             // NaN explicitly requests OIDN's HDR autoexposure. Color is linear
             // scene radiance, before the renderer's display exposure/tone map.
             oidnSetFilterFloat(f.beauty, name("inputScale").as_ptr(), f32::NAN);
@@ -256,6 +265,21 @@ impl Drop for Denoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_quality_on_cached_filters_matches_a_fresh_filter() {
+        let (w,h)=(32,24);
+        let input:Vec<f32>=(0..w*h).flat_map(|i|[0.2+(i%11) as f32*0.01,0.4,0.6,1.]).collect();
+        let albedo=vec![0.6;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
+        let reused=Denoiser::new().unwrap();
+        for quality in [Quality::Fast,Quality::Balanced,Quality::High] {
+            reused.set_quality(quality);let mut actual=input.clone();
+            reused.run(&mut actual,&albedo,&normal,4,w,h).unwrap();
+            let fresh=Denoiser::new().unwrap();fresh.set_quality(quality);let mut expected=input.clone();
+            fresh.run(&mut expected,&albedo,&normal,4,w,h).unwrap();
+            assert!(actual.iter().zip(expected).all(|(a,b)|(a-b).abs()<1e-6));
+        }
+    }
 
     #[test]
     fn it_removes_noise_from_a_flat_image() {

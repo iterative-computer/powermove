@@ -1,3 +1,4 @@
+import { resolveStudioQuality } from '../../../../shared/studio-quality';
 import { renderStudioPasses,validatePasses } from '../../core/studio/passes';
 import { captureAgentFrame } from './agent-frame-capture';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
@@ -349,11 +350,15 @@ let sequenceDirectory: any = null;
 async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
   if (PM.agentFrameCapture) return PM.toast('Wait for the current frame capture to finish.');
+  const previousQuality = PM._studioQualityOverride;
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
   try {
     const p = PM.proj;
+    if (opts.studioQuality != null) PM._studioQualityOverride = resolveStudioQuality(opts.studioQuality, resolveStudioQuality(p.studioQuality));
+    const quality = resolveStudioQuality(PM._studioQualityOverride ?? p.studioQuality);
+    if ([p,...Object.values<any>(p.comps || {})].some(comp=>comp.layers?.some((l:any) => l.threeD || l.d?.data?.object || l.d?.data?.camera || l.d?.data?.scene))) opts = { ...opts, mbSamples: Math.min(quality.maxSamples,opts.mbSamples ?? quality.motionBlurSamples) };
     if (opts.format !== 'json') {
       const pending = [p], checked = new Set<any>();
       while (pending.length) {
@@ -405,6 +410,7 @@ async function run(opts: any) {
       destinationToken = null;
       sequenceDirectory = null;
       PM.captionsHidden = false;
+      if (previousQuality === undefined) delete PM._studioQualityOverride; else PM._studioQualityOverride = previousQuality;
       X.busy = false;
     }
   }
@@ -465,8 +471,8 @@ async function runPrepared(opts: any) {
   if (opts.format === 'still') {
     const wasPlaying=PM.playing,at=PM.time;PM.pause();
     const capture: AlphaCapture | undefined = opts.alpha ? { canvas: window.document.createElement('canvas') } : undefined;
-    try{await prepareExportFrame(PM,at,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
-      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur, capture, fastAlphaCapture(W, H)) : PM.renderFrameTo(at, W, H);
+    try{await prepareExportFrame(PM,at,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.mbSamples ?? (opts.alpha?20:16),shutter:PM.proj.shutter||.5});
+      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur, capture, fastAlphaCapture(W, H), opts.mbSamples) : PM.renderFrameTo(at, W, H, {mblur:opts.mblur, ...(opts.mbSamples === undefined ? {} : {mbSamples:opts.mbSamples})});
       const blob=await new Promise<Blob>((resolve,reject)=>cv.toBlob((b:Blob|null)=>b?resolve(b):reject(new Error('Could not encode frame'))));
       if (!await deliver(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`)) return { cancelled: true };
       PM.toast('Frame exported');return {cancelled:false};
@@ -559,10 +565,10 @@ async function writeCaptionSidecars(opts: any, t0: number, t1: number): Promise<
   return written;
 }
 
-function renderInto(T: any, W: any, H: any, mblur: any) {
+function renderInto(T: any, W: any, H: any, mblur: any, mbSamples = 20) {
   PM.quality = 1;
   PM.GL.resize(W, H);
-  PM.GL.render(T, { mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
+  PM.GL.render(T, { mblur, mbSamples, shutter: PM.proj.shutter || .5 });
   return PM.GL.canvas;
 }
 
@@ -575,7 +581,7 @@ function releaseAlphaReadback(target?: AlphaCapture) {
   target?.readback?.session?.dispose();
   if (target) target.readback = undefined;
 }
-function alphaFrame(T: any, W: any, H: any, mblur: any, target?: AlphaCapture, fast = false) {
+function alphaFrame(T: any, W: any, H: any, mblur: any, target?: AlphaCapture, fast = false, mbSamples = 20) {
   const depth = PM.proj.colorDepth === 32 ? 32 : 16;
   if (target?.readback && (!fast || target.readback.width !== W || target.readback.height !== H || target.readback.depth !== depth
       || target.readback.project !== PM.proj || target.readback.gl !== PM.GL.gl)) releaseAlphaReadback(target);
@@ -583,7 +589,7 @@ function alphaFrame(T: any, W: any, H: any, mblur: any, target?: AlphaCapture, f
     session: (depth === 32 ? PM.GL.createFloatReadback?.(W, H) : PM.GL.createHalfReadback?.(W, H)) || null };
   const session = target?.readback?.session;
   const px = captureFramePixels(PM, T, W, H, {
-    transparent: true, mblur: mblur !== false, mbSamples: 20, shutter: PM.proj.shutter || .5,
+    transparent: true, mblur: mblur !== false, mbSamples, shutter: PM.proj.shutter || .5,
   }, session ? options => session.capture(T, options) : undefined);
   return finishAlphaFrame(px, W, H, target);
 }
@@ -723,7 +729,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
     };
     const prepare = (frame: number, time: number) => {
       stats.stage = 'decoding';
-      return stats.time('decode', frame, () => prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:opaqueShutterSamples,shutter:PM.proj.shutter||.5}));
+      return stats.time('decode', frame, () => prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.mbSamples ?? (opts.alpha?20:opaqueShutterSamples),shutter:PM.proj.shutter||.5}));
     };
     const prepareNativeFrame = async (frame: number, time: number) => {
       retention.key(time); let allowed = artworkEligible();
@@ -811,7 +817,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
               try {
                 if (!opts.alpha) PM.quality = 1;
                 ticket = readback.begin(T, opts.alpha
-                  ? { transparent: true, mblur: motionBlur, mbSamples: 20, shutter: PM.proj.shutter || .5 }
+                  ? { transparent: true, mblur: motionBlur, mbSamples: opts.mbSamples ?? 20, shutter: PM.proj.shutter || .5 }
                   : { mblur: motionBlur, mbSamples: motionBlur ? opaqueShutterSamples : 1,
                     shutter: PM.proj.shutter || .5, opaque: true, topDownOpaque: true });
               } finally { if (!opts.alpha) PM.quality = quality; stats.add('render', i, window.performance.now() - renderStarted); }
@@ -885,7 +891,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
           const renderStarted = window.performance.now();
           const captured = opts.alpha ? null : renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur, mbSamples: opaqueShutterSamples });
           const cv = captured ? preview : alphaFrame(T, W, H, opts.mblur, alphaCapture,
-            fastAlphaCapture(W, H, retention.key(T) === null ? total : 0));
+            fastAlphaCapture(W, H, retention.key(T) === null ? total : 0), opts.mbSamples);
           // Cached static bytes own their pixels; repeats no longer need the
           // raw readback or its GPU target. Keep unavailable factories cached.
           if (key !== null && (i + 1 >= total || retention.key(t0 + (i + 1) / opts.fps) === key)
@@ -973,9 +979,9 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     let cv: any;
     if (key === null || key !== lastKey || !retained) {
       retained?.close(); retained = null;
-      await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
+      await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.mbSamples ?? (opts.format==='png'&&!opts.alpha?16:20),shutter:PM.proj.shutter||.5});
       if (X.cancel) break;
-      cv = renderInto(T, W, H, opts.mblur);
+      cv = renderInto(T, W, H, opts.mblur, opts.mbSamples);
     }
     const frame: VideoFrame = new window.VideoFrame(retained || cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
     try {
@@ -1055,8 +1061,8 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
     for (let i: any = 0; i < total; i++) {
       if (X.cancel) break;
       const T: any = t0 + i / opts.fps;
-    await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
-      const cv: any = renderInto(T, W, H, opts.mblur);
+    await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.mbSamples ?? (opts.format==='png'&&!opts.alpha?16:20),shutter:PM.proj.shutter||.5});
+      const cv: any = renderInto(T, W, H, opts.mblur, opts.mbSamples);
       if (track.requestFrame) track.requestFrame();
       const target: any = start + i * frameDur;
       const wait: any = target - window.performance.now();
@@ -1147,13 +1153,13 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
       blob = key !== null && key === lastKey ? retained : null;
       reused = blob !== null;
       if (!blob) {
-        await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
+        await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.mbSamples ?? (opts.format==='png'&&!opts.alpha?16:20),shutter:PM.proj.shutter||.5});
         if (X.cancel) break;
         const cacheKey = retention.key(T);
-        if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur, alphaCapture, fastAlphaCapture(W, H, cacheKey === null ? total : 0));
+        if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur, alphaCapture, fastAlphaCapture(W, H, cacheKey === null ? total : 0), opts.mbSamples);
         if (cacheKey !== null && (i + 1 >= total || retention.key(t0 + (i + 1) / opts.fps) === cacheKey)
             && alphaCapture?.readback?.session) releaseAlphaReadback(alphaCapture);
-        if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur }, captureCanvas);
+        if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur, ...(opts.mbSamples === undefined ? {} : {mbSamples:opts.mbSamples}) }, captureCanvas);
         capturedKey = retention.key(T); capturedRevision = retention.revision;
         capturedFontsReady = frameFontsReady(PM);
         blob = await new Promise<Blob>((resolve, reject) => cv.toBlob((encoded: Blob | null) =>
@@ -1206,7 +1212,7 @@ X.muxWebM = muxWebM;
 X.renderPasses=(time:number,width:number,height:number,passes:unknown)=>renderStudioPasses(PM,time,width,height,validatePasses(passes));
 
 /* Await source decoding before an agent reviews a video frame. */
-X.snapshotAsync = (time: number, maxWidth = 480, options: { signal?: AbortSignal } = {}) =>
+X.snapshotAsync = (time: number, maxWidth = 480, options: { signal?: AbortSignal; studioQuality?: import('../../../../shared/studio-quality').StudioQualityInput } = {}) =>
   captureAgentFrame(PM, X, time, maxWidth, options);
 
 /* Fast still capture used by the agent's `look` tool. */
