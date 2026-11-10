@@ -30,12 +30,21 @@ pub trait CloudFiles: Send + Sync {
 /// through to the end makes its File Provider download it.
 struct Platform;
 const SF_DATALESS: u32 = 0x4000_0000;
+/// The file `path` resolves to (through any symlinks) and its `st_flags`:
+/// a link to a placeholder is a placeholder, whatever the link's own flags.
+fn target_flags(path: &Path) -> Option<(PathBuf, u32)> {
+    use std::os::macos::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    meta.is_file().then(|| {
+        let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        (resolved, meta.st_flags())
+    })
+}
 impl CloudFiles for Platform {
     fn provider(&self, path: &Path) -> Option<String> {
-        use std::os::macos::fs::MetadataExt;
-        let meta = std::fs::symlink_metadata(path).ok()?;
-        (meta.is_file() && meta.st_flags() & SF_DATALESS != 0).then(|| {
-            if path
+        let (resolved, flags) = target_flags(path)?;
+        (flags & SF_DATALESS != 0).then(|| {
+            if resolved
                 .to_string_lossy()
                 .contains("/Library/Mobile Documents/")
             {
@@ -357,8 +366,31 @@ impl Controller {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Cloud, CloudFiles, Fixture, prompt};
+    use super::{Cloud, CloudFiles, Fixture, prompt, target_flags};
     use std::path::PathBuf;
+
+    #[test]
+    fn a_symlinked_original_is_judged_by_the_file_it_points_to() {
+        // No test can make a real placeholder (only a File Provider sets
+        // SF_DATALESS), so a flag only the target carries stands in for it.
+        const UF_HIDDEN: u32 = 0x8000;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("Mobile Documents").join("clip.mov");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"clip").unwrap();
+        let status = std::process::Command::new("/usr/bin/chflags")
+            .arg("hidden")
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let link = dir.path().join("link.mov");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (resolved, flags) = target_flags(&link).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&target).unwrap());
+        assert_ne!(flags & UF_HIDDEN, 0, "the link's own flags were read");
+        assert!(target_flags(dir.path()).is_none(), "a folder is never a cloud file");
+    }
 
     #[test]
     fn the_fixture_cloud_downloads_with_progress_and_fails_what_it_names() {
