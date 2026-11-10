@@ -59,10 +59,10 @@ function options() {
 }
 async function installProbe(page) {
  await page.evaluate(()=>{
-  const PM=window.PM,gl=PM.GL.gl,probe={active:null,presentations:[],inputs:[],tasks:[],pending:[],polling:false};window.__studioPerf=probe;
+  const PM=window.PM,gl=PM.GL.gl,probe={active:null,presentations:[],inputs:[],tasks:[],sceneTasks:[],pending:[],polling:false};window.__studioPerf=probe;
   if(typeof gl.fenceSync!=='function')throw new Error('WebGL2 completion fences are required');
   const poll=()=>{for(let i=probe.pending.length-1;i>=0;i--){const item=probe.pending[i],result=gl.clientWaitSync(item.sync,0,0);if(result===gl.ALREADY_SIGNALED||result===gl.CONDITION_SATISFIED||result===gl.WAIT_FAILED){gl.deleteSync(item.sync);probe.pending.splice(i,1);if(result===gl.WAIT_FAILED)item.row.pixelError='GPU fence failed';else item.row.pixelAt=performance.now();}}if(probe.pending.length)requestAnimationFrame(poll);else probe.polling=false;};
-  probe.observer=new PerformanceObserver(list=>{for(const task of list.getEntries())probe.tasks.push({at:task.startTime,ms:task.duration,name:task.name});});probe.observer.observe({type:'longtask',buffered:false});
+  probe.observer=new PerformanceObserver(list=>{for(const task of list.getEntries()){const row={at:task.startTime,ms:task.duration,name:task.name};probe.tasks.push(row);probe.sceneTasks.push(row);}});probe.observer.observe({type:'longtask',buffered:false});
   PM.bus.on('preview:presented',frame=>{
    if(!probe.active)return;const status=PM.Studio?.status();if(!status)return;
    const jobs=(PM.Studio.diagnostics?.()??[]).filter(j=>j.version),signature=jobs.length?jobs.map(j=>`${j.slot}:${j.version}`).sort().join('|'):String(status.frames);
@@ -76,7 +76,7 @@ async function installProbe(page) {
 }
 async function resetScene(page,name) {
  await page.evaluate(name=>{
-  const PM=window.PM;window.__studioPerf.tasks=[];window.__studioPerf.sceneStarted=performance.now();PM.pause();PM.AutomaticPreview?.cancel();PM.assets.clear();PM.replaceProject(PM.mkProject({name:`Studio acceptance: ${name}`,w:1920,h:1080,fps:60,dur:90}));PM.setTime(0);PM.ProjectsScreen.hide();PM.Studio?.setPreview('quality');PM.perf.auto=false;PM.quality=1;PM.selectLayers([]);PM.Kernel.api('studio-perf').scene3d.views.setLayout(1);
+  const PM=window.PM;window.__studioPerf.tasks=[];window.__studioPerf.sceneTasks=[];window.__studioPerf.sceneStarted=performance.now();PM.pause();PM.AutomaticPreview?.cancel();PM.assets.clear();PM.replaceProject(PM.mkProject({name:`Studio acceptance: ${name}`,w:1920,h:1080,fps:60,dur:90}));PM.setTime(0);PM.ProjectsScreen.hide();PM.Studio?.setPreview('quality');PM.perf.auto=false;PM.quality=1;PM.selectLayers([]);PM.Kernel.api('studio-perf').scene3d.views.setLayout(1);
  },name);
 }
 async function author(page,name,config) {
@@ -238,6 +238,9 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     const release=await page.evaluate(()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');const start=performance.now();PM.setTime(0);PM.invalidate('render');return start;});
     await page.waitForFunction(release=>(window.PM.Studio.diagnostics?.()??[]).some(j=>!j.slot&&j.version&&j.inputAt>=release&&j.native?.host?.tier==='refine'&&j.native.host.samples>=32),release,{timeout:120000});
     row.refineViewer=await page.evaluate(release=>({seconds:(performance.now()-release)/1000,frames:window.PM.Studio.diagnostics(),longTasks:window.__studioPerf.tasks.filter(t=>t.at+t.ms>release)}),release);
+    // Keep cold/warmup/idle palette and thumbnail work, even when interval()
+    // resets its own task list. It still counts toward editor responsiveness.
+    row.editingLongTasks=distribution(await page.evaluate(()=>{const p=window.__studioPerf;return p.sceneTasks.filter(t=>t.at+t.ms>p.sceneStarted).map(t=>t.ms);}));
     await page.screenshot({path:path.join(config.evidence,`${name}-refine-editor.png`)});
     row.refineMachine=measurementState(pid);if(!config.diagnostic)assert(row.refineMachine.quiet,'Another lane became active before Refine');
     row.refine=await page.evaluate(async()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');PM.Studio.setPreview('quality');PM.agentFrameCapture=true;const start=performance.now();try{
@@ -324,7 +327,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   report.peakGpuMiB=Math.max(0,report.stress?.peakGpuMiB??0,...report.memory.map(s=>s.gpuMiB??0),...hosts.map(h=>h.peakGpuMiB??0),...report.rows.flatMap(r=>r.runs.flatMap(run=>[run.drag.peakGpuMiB,run.playback.peakGpuMiB])));report.gpuMemory='Metal currentAllocatedSize high-water per host; overlaps unified RSS and is not added to it';
   report.swapGrowthMiB=swapMiB(safeCommand('/usr/sbin/sysctl',['vm.swapusage']))-swapMiB(initial.swap);
   report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
-  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]),complete=report.acceptanceEligible&&row.runs.length>=3&&row.runs.every(r=>r.warmupPresentations>=30)&&intervals.every(r=>r.seconds>=30);row.protocol={liveComplete:complete,finalWarmFramesComplete:row.finalSeconds?.count>=30};row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&complete&&intervals.every(r=>r.pass),input:!row.error&&complete&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&complete&&intervals.every(r=>(r.longTasks.max??0)<=50)&&(row.coldLongTasks?.max??0)<=50&&(row.refineViewer?.longTasks??[]).every(t=>t.ms<=50),refine:limit?report.acceptanceEligible&&!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?report.acceptanceEligible&&!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
+  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]),complete=report.acceptanceEligible&&row.runs.length>=3&&row.runs.every(r=>r.warmupPresentations>=30)&&intervals.every(r=>r.seconds>=30);row.protocol={liveComplete:complete,finalWarmFramesComplete:row.finalSeconds?.count>=30};row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&complete&&intervals.every(r=>r.pass),input:!row.error&&complete&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&complete&&(row.editingLongTasks?.max??0)<=50&&intervals.every(r=>(r.longTasks.max??0)<=50)&&(row.coldLongTasks?.max??0)<=50&&(row.refineViewer?.longTasks??[]).every(t=>t.ms<=50),refine:limit?report.acceptanceEligible&&!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?report.acceptanceEligible&&!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
   await save();
  }finally{
   clearInterval(watchdog);
