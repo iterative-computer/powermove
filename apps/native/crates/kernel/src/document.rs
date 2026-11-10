@@ -2411,8 +2411,10 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
         };
         let mut ids = HashSet::with_capacity(items.len());
         for layer in items.iter() {
-            crate::commands::scene3d::validate_layer(&layer.to_value())
-                .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            if crate::commands::scene3d::is_scene3d_layer(layer) {
+                crate::commands::scene3d::validate_layer(&layer.to_value())
+                    .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            }
             let id = layer.get("id").and_then(model::str_of);
             match id {
                 Some(id) if !id.is_empty() => {
