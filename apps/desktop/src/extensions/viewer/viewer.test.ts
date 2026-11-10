@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   selectionOutlineColor,
   anchorMoveValues,
+  panBehindPositionAxes,
   calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
   createViewerRuntime, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
@@ -391,6 +392,14 @@ describe('viewer runtime', () => {
       [0, 2, -3, 0], { x: 10, y: 20 }, { x: 100, y: 200 }, { x: 130, y: 220 },
       { moveLayer: false },
     )).toEqual({ anchor: { x: 20, y: 10 }, position: { x: 100, y: 200 } });
+  });
+
+  it('never lets Pan Behind edit animated Position', () => {
+    const prop = (extra: any = {}) => ({ v: 0, kf: [], ...extra });
+    expect(panBehindPositionAxes({ p: { 'position.x': prop(), 'position.y': prop() } })).toEqual(['x', 'y']);
+    expect(panBehindPositionAxes({ p: { 'position.x': prop({ kf: [{ t: 0, v: 1 }] }), 'position.y': prop() } })).toEqual(['y']);
+    expect(panBehindPositionAxes({ p: { 'position.x': prop(), 'position.y': prop({ expr: 'wiggle(2, 10)' }) } })).toEqual(['x']);
+    expect(panBehindPositionAxes({ p: { 'position.x': prop({ kf: [{ t: 0, v: 1 }] }), 'position.y': prop({ kf: [{ t: 0, v: 1 }] }) } })).toEqual([]);
   });
 
   it('renders fitted high-resolution compositions near their displayed pixel size', () => {

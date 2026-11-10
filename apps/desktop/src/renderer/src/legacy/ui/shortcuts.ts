@@ -166,9 +166,14 @@ def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => 
     commands.push(
       { type: 'set_property', target: layer.id, path: 'anchor.x', value: nextX, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
       { type: 'set_property', target: layer.id, path: 'anchor.y', value: nextY, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
-      { type: 'set_property', target: layer.id, path: 'position.x', value: positionX + matrix[0] * dx + matrix[2] * dy, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
-      { type: 'set_property', target: layer.id, path: 'position.y', value: positionY + matrix[1] * dx + matrix[3] * dy, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
     );
+    // Like the Anchor Point tool, never edit animated Position.
+    const nextPosition: any = { x: positionX + matrix[0] * dx + matrix[2] * dy, y: positionY + matrix[1] * dx + matrix[3] * dy };
+    for (const axis of ['x', 'y']) {
+      const prop: any = layer.p?.['position.' + axis];
+      if (prop?.kf?.length || prop?.expr) continue;
+      commands.push({ type: 'set_property', target: layer.id, path: 'position.' + axis, value: nextPosition[axis], time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' });
+    }
   }
   if (!commands.length) return false;
   return PM.Edit.apply(commands, { label: 'Center anchor point', origin: 'command' });

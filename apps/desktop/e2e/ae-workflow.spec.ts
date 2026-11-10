@@ -96,6 +96,47 @@ test.describe('@ae-workflow After Effects workflow', () => {
     expect((await anchor())[0]).toBeGreaterThan(moved[0]);
   });
 
+  test('the Anchor Point tool never changes Position keyframes', async ({ session }) => {
+    await session.openEditor();
+    const { page } = session;
+    const id = await textProject(page);
+    const marker = await page.evaluate((layerId) => {
+      const PM = (window as any).PM;
+      PM.Edit.apply([
+        { type: 'set_property', target: layerId, path: 'position.x', value: 700, time: 0, mode: 'keyframe' },
+        { type: 'set_property', target: layerId, path: 'position.y', value: 500, time: 0, mode: 'keyframe' },
+        { type: 'set_property', target: layerId, path: 'position.x', value: 1300, time: 4, mode: 'keyframe' },
+        { type: 'set_property', target: layerId, path: 'position.y', value: 700, time: 4, mode: 'keyframe' },
+      ], { label: 'Animate Position', origin: 'interface' });
+      PM.setTime(2);
+      PM.cmd('toolAnchor');
+      const layer = PM.L(layerId), t = PM.time;
+      const viewer = PM.Kernel.services.get('viewer'), inner = viewer.inner.getBoundingClientRect(), world = PM.worldMatrix(layer, t);
+      const ax = PM.ev(layer, 'anchor.x', t), ay = PM.ev(layer, 'anchor.y', t);
+      return { x: inner.left + (world[0] * ax + world[2] * ay + world[4]) * viewer.shown, y: inner.top + (world[1] * ax + world[3] * ay + world[5]) * viewer.shown };
+    }, id);
+    const state = () => page.evaluate((layerId) => {
+      const PM = (window as any).PM, layer = PM.L(layerId);
+      return {
+        keys: ['position.x', 'position.y'].map((path) => JSON.stringify(layer.p[path].kf.map((key: any) => [key.t, key.v]))),
+        anchor: PM.ev(layer, 'anchor.x', PM.time),
+      };
+    }, id);
+    const before = await state();
+    await expect(async () => {
+      await page.mouse.move(marker.x, marker.y);
+      await page.mouse.down();
+      await page.mouse.move(marker.x + 60, marker.y + 30, { steps: 6 });
+      await page.mouse.up();
+      expect((await state()).anchor).not.toBe(before.anchor);
+    }).toPass();
+    expect((await state()).keys).toEqual(before.keys);
+
+    // Double-clicking the tool centers the anchor, also without keying Position.
+    await page.evaluate(() => (window as any).PM.cmd('centerAnchor'));
+    expect((await state()).keys).toEqual(before.keys);
+  });
+
   test('timeline layer switches turn on 3D and Continuously Rasterize, and Release Pre-comp keeps the picture', async ({ session }) => {
     await session.openEditor();
     const { page } = session;

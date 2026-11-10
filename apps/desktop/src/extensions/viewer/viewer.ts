@@ -302,6 +302,15 @@ export function anchorMoveValues(
   };
 }
 
+/** Pan Behind never edits animated Position. An axis with keyframes or an
+    expression keeps its animation; only a static axis is compensated. */
+export function panBehindPositionAxes(layer: any): Array<'x' | 'y'> {
+  return (['x', 'y'] as const).filter((axis) => {
+    const prop = layer?.p?.['position.' + axis];
+    return !(prop?.kf?.length || prop?.expr);
+  });
+}
+
 export interface SelectionGeometry {
   mode: 'single' | 'common';
   layers: any[];
@@ -2465,7 +2474,8 @@ function anchorUnderPointer(point: Point): SelectionGeometry | null {
    another layer selects it; a click stops there, and a drag carries its
    anchor to the pointer in the same gesture, like the Rotation tool.
    Position compensates so nothing moves; Option moves the layer with its
-   anchor, Command snaps to the box. */
+   anchor, Command snaps to the box. Animated Position is never touched:
+   its keyframes stay exactly as they were. */
 function startAnchorTool(e: any): void {
   const pointer = pointerComp(e);
   const grabbed = anchorUnderPointer(pointer);
@@ -2491,6 +2501,7 @@ function startAnchorTool(e: any): void {
   const position = { x: ev(api, layer, 'position.x', T), y: ev(api, layer, 'position.y', T) };
   const parent = parentWorldMatrix(layer, T);
   const bounds = layerBounds(api, layer, T);
+  const staticPosition = panBehindPositionAxes(layer);
   const grabOffset = grabbed ? { x: grabbed.pivotWorld.x - pointer.x, y: grabbed.pivotWorld.y - pointer.y } : { x: 0, y: 0 };
   let moved = false;
   api.edit.begin('Move anchor point', { origin: 'canvas' });
@@ -2518,8 +2529,7 @@ function startAnchorTool(e: any): void {
     setOrKey(layer, 'anchor.x', api.util.round(next.anchor.x, 3), T);
     setOrKey(layer, 'anchor.y', api.util.round(next.anchor.y, 3), T);
     if (!ev.altKey) {
-      setOrKey(layer, 'position.x', api.util.round(next.position.x, 3), T);
-      setOrKey(layer, 'position.y', api.util.round(next.position.y, 3), T);
+      for (const axis of staticPosition) setOrKey(layer, 'position.' + axis, api.util.round(next.position[axis], 3), T);
     }
     invalidate();
   };
