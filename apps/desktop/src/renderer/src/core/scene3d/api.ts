@@ -1,4 +1,5 @@
 import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
+import { viewerService } from '../../legacy/core/services';
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
 import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
@@ -133,7 +134,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     })(),
     studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
       getPreview:()=>studioPreview(PM),setPreview:q=>setStudioPreview(PM,q),onPreviewChange:listener=>({dispose:onStudioPreview(PM,listener)}),
-      swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p):Promise.resolve(null);},
+      swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p,()=>!!(PM.playing||PM.interactionActive?.()||viewerService(PM)?.isNavigating?.()||PM.agentFrameCapture||PM.Export?.busy||PM.Preview?.preparing||PM.Preview?.active)):Promise.resolve(null);},
       skyThumbnail:(sky,size)=>skyThumbnail(sky,size),
       highlightAt:(u,v)=>{
         const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;

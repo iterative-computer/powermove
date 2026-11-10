@@ -11,6 +11,19 @@ import { initStudioGpu, studioGpuReady, StudioTarget } from './gpu';
 const SIZE = 96;
 const cache = new Map<string, Promise<string | null>>();
 let target: StudioTarget | null = null;
+let geometry: THREE.SphereGeometry | null = null;
+let queue: Promise<unknown> = Promise.resolve();
+
+function idle(blocked: () => boolean): Promise<void> {
+  return new Promise(resolve => {
+    const check = () => {
+      if (blocked()) { setTimeout(check, 100); return; }
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(() => blocked() ? check() : resolve());
+      else setTimeout(() => blocked() ? check() : resolve(), 0);
+    };
+    check();
+  });
+}
 
 function material(p: Record<string, number | string>): THREE.MeshPhysicalMaterial {
   const m = new THREE.MeshPhysicalMaterial({
@@ -25,14 +38,18 @@ function material(p: Record<string, number | string>): THREE.MeshPhysicalMateria
 }
 
 /** A data URL of `p` rendered on a sphere, or null where Studio cannot run. */
-export async function studioSwatch(id: string, p: Record<string, number | string>): Promise<string | null> {
+export async function studioSwatch(id: string, p: Record<string, number | string>, blocked = () => false): Promise<string | null> {
   if (!studioGpuReady() && !await initStudioGpu()) return null;
   const key = `${id}:${JSON.stringify(p)}`;
   let pending = cache.get(key);
   if (pending) return pending;
-  pending = (async () => {
+  pending = queue.then(async () => {
+    await idle(blocked);
     const scene = new THREE.Scene();
-    const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), material(p));
+    // Every finish uses the same sphere. Its geometry and bottom-level BVH
+    // can be reused rather than rebuilt for the whole palette in one task.
+    geometry ??= new THREE.SphereGeometry(1, 64, 32);
+    const sphere = new THREE.Mesh(geometry, material(p));
     sphere.userData.sceneId = 'swatch';
     scene.add(sphere);
     const key = new THREE.RectAreaLight(0xffffff, 6, 3, 2); key.position.set(-2.5, 3, 3); key.lookAt(0, 0, 0);
@@ -62,7 +79,8 @@ export async function studioSwatch(id: string, p: Record<string, number | string
     out.getContext('2d')!.drawImage(gpuCanvas, 0, 0);
     await target.done();
     return out.toDataURL('image/png');
-  })().catch(() => null);
+  }).catch(() => null);
+  queue = pending;
   cache.set(key, pending);
   return pending;
 }
