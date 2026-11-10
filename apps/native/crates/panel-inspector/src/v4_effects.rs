@@ -636,15 +636,14 @@ impl EffectsPanel {
                     .iter()
                     .filter(|p| effect.get("p").and_then(|v| v.get(&p.key)).is_some())
                     .map(|p| {
-                        let mut c = pm_kernel::commands::properties::SetProperty::new(
-                            &layer,
-                            format!("{id}.{}", p.key),
-                            p.default.clone(),
-                            time,
-                        );
-                        c.preserve_hand_edits = false;
+                        // Keys and expression go too, like the channel-row Reset.
                         pm_kernel::Command::Property(
-                            pm_kernel::commands::properties::PropertyCommand::Set(c),
+                            pm_kernel::commands::properties::PropertyCommand::Reset {
+                                layer_id: layer.clone(),
+                                channel: format!("{id}.{}", p.key),
+                                default: Some(p.default.clone()),
+                                time,
+                            },
                         )
                     })
                     .collect();
