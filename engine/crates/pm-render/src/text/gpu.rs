@@ -36,6 +36,8 @@ const DIRECT_ARENA_TEXELS: usize = 1 << 24;
 /// they are written through, reused across frames.
 const DIRECT_CHUNK_TEXELS: usize = 1 << 12;
 const DIRECT_MAX_SIDE: f64 = 512.0;
+/// Standard-size chunk textures kept for reuse (32 KiB each).
+const DIRECT_FREE_CHUNKS: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -119,7 +121,7 @@ struct DirectCache<C, E> {
 }
 
 struct DirectChunk<C> {
-    _payload: C,
+    payload: C,
     bytes: u64,
     keys: Vec<DirectKey>,
     used: u64,
@@ -145,13 +147,14 @@ impl<C, E> DirectCache<C, E> {
     }
 
     /// Charges a new chunk of `bytes`, first dropping the least recently
-    /// used chunks (with their glyphs) it would not fit beside.
-    fn admit(&mut self, payload: C, bytes: u64, tick: u64) -> u64 {
+    /// used chunks (with their glyphs) it would not fit beside; their
+    /// payloads go to `evicted`.
+    fn admit(&mut self, payload: C, bytes: u64, tick: u64, evicted: &mut Vec<C>) -> u64 {
         while self.bytes + bytes > self.limit {
             let Some((&oldest, _)) = self.chunks.iter().min_by_key(|(_, c)| c.used) else {
                 break;
             };
-            self.evict(oldest);
+            evicted.extend(self.evict(oldest));
         }
         let id = self.next;
         self.next += 1;
@@ -159,7 +162,7 @@ impl<C, E> DirectCache<C, E> {
         self.chunks.insert(
             id,
             DirectChunk {
-                _payload: payload,
+                payload,
                 bytes,
                 keys: Vec::new(),
                 used: tick,
@@ -175,10 +178,8 @@ impl<C, E> DirectCache<C, E> {
         }
     }
 
-    fn evict(&mut self, id: u64) {
-        let Some(chunk) = self.chunks.remove(&id) else {
-            return;
-        };
+    fn evict(&mut self, id: u64) -> Option<C> {
+        let chunk = self.chunks.remove(&id)?;
         self.bytes -= chunk.bytes;
         for key in chunk.keys {
             // A later chunk may hold the same glyph again.
@@ -186,6 +187,7 @@ impl<C, E> DirectCache<C, E> {
                 self.entries.remove(&key);
             }
         }
+        Some(chunk.payload)
     }
 
     fn clear(&mut self) {
@@ -262,6 +264,10 @@ pub struct TextGpu {
     // preceding frame's submission.
     retired: VecDeque<Target>,
     retired_bytes: u64,
+    /// Standard-size direct chunk textures left by evicted chunks: reused
+    /// from the next frame on (this frame's draws may still read them).
+    chunks_retired: Vec<wgpu::Texture>,
+    chunks_free: Vec<wgpu::Texture>,
     tick: u64,
     pub stats: TextStats,
 }
@@ -808,6 +814,8 @@ impl TextGpu {
             cache_bytes: 0,
             retired: VecDeque::new(),
             retired_bytes: 0,
+            chunks_retired: Vec::new(),
+            chunks_free: Vec::new(),
             tick: 0,
             stats: TextStats::default(),
         }
@@ -874,6 +882,8 @@ impl TextGpu {
         for target in self.retired.drain(..) {
             self.raster_pool.give(target);
         }
+        self.chunks_free.append(&mut self.chunks_retired);
+        self.chunks_free.truncate(DIRECT_FREE_CHUNKS);
         self.retired_bytes = 0;
     }
 
@@ -893,6 +903,8 @@ impl TextGpu {
         self.images.clear();
         self.image_bytes = 0;
         self.direct.clear();
+        self.chunks_retired.clear();
+        self.chunks_free.clear();
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -1025,7 +1037,10 @@ impl TextGpu {
                 total += sizes[end];
                 end += 1;
             }
-            let (w, h) = arena_shape(total, max_side);
+            // A chunk within the standard size takes a standard texture,
+            // reused across frames; a larger glyph gets its own.
+            let standard = total <= DIRECT_CHUNK_TEXELS;
+            let (w, h) = arena_shape(if standard { DIRECT_CHUNK_TEXELS } else { total }, max_side);
             scratch.clear();
             scratch.reserve(w * h);
             chunk.clear();
@@ -1040,21 +1055,30 @@ impl TextGpu {
             }
             at = end;
             let (width, height) = (w, h);
-            scratch.resize(width * height, [0.0, 0.0]);
+            // A standard texture (one row) is written only as far as used.
+            let written = if standard && height == 1 {
+                scratch.len().max(1)
+            } else {
+                scratch.resize(width * height, [0.0, 0.0]);
+                width
+            };
             let size = wgpu::Extent3d {
                 width: width as u32,
                 height: height as u32,
                 depth_or_array_layers: 1,
             };
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("pm text direct resolved edges"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rg32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
+            let reused = standard.then(|| self.chunks_free.pop()).flatten();
+            let texture = reused.unwrap_or_else(|| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("pm text direct resolved edges"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rg32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
             });
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -1070,16 +1094,29 @@ impl TextGpu {
                 },
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(width as u32 * 8),
+                    bytes_per_row: Some(written as u32 * 8),
                     rows_per_image: None,
                 },
-                size,
+                wgpu::Extent3d {
+                    width: written as u32,
+                    ..size
+                },
             );
             let view = texture.create_view(&Default::default());
             // The whole texture is retained while any of its glyphs is.
-            let id = self
-                .direct
-                .admit(texture, (width * height) as u64 * 8, self.tick);
+            let mut evicted = Vec::new();
+            let id = self.direct.admit(
+                texture,
+                (width * height) as u64 * 8,
+                self.tick,
+                &mut evicted,
+            );
+            let standard_size = arena_shape(DIRECT_CHUNK_TEXELS, max_side);
+            self.chunks_retired.extend(
+                evicted
+                    .into_iter()
+                    .filter(|t| (t.width() as usize, t.height() as usize) == standard_size),
+            );
             for (lines, mut meta, _) in chunk.drain(..) {
                 meta.width = width as u32;
                 let key = lines.key();
@@ -1986,7 +2023,7 @@ mod direct_tests {
         let mut tick = 0;
         for chunk in 0..2 {
             tick += 1;
-            let id = cache.admit((), 4096, tick);
+            let id = cache.admit((), 4096, tick, &mut Vec::new());
             for glyph in 0..4 {
                 cache.insert(id, key(chunk * 4 + glyph), glyph as u32);
             }
@@ -1997,7 +2034,7 @@ mod direct_tests {
         tick += 1;
         assert!(cache.hit(&key(0), tick).is_some());
         tick += 1;
-        let id = cache.admit((), 4096, tick);
+        let id = cache.admit((), 4096, tick, &mut Vec::new());
         cache.insert(id, key(8), 0);
         assert_eq!(cache.bytes, 8192, "two chunks retained");
         assert!(cache.bytes <= cache.limit);
@@ -2005,9 +2042,9 @@ mod direct_tests {
         assert!((0..4).all(|n| cache.hit(&key(n), tick).is_some()));
         // A glyph uploaded again into a newer chunk stays when the older
         // chunk leaves.
-        let older = cache.admit((), 4096, tick);
+        let older = cache.admit((), 4096, tick, &mut Vec::new());
         cache.insert(older, key(9), 1);
-        let newer = cache.admit((), 4096, tick);
+        let newer = cache.admit((), 4096, tick, &mut Vec::new());
         cache.insert(newer, key(9), 7);
         assert!(cache.bytes <= cache.limit);
         cache.evict(older);
@@ -2152,5 +2189,21 @@ mod direct_tests {
                 }
             }
         }
+    }
+
+    /// Chunks evicted to admit a new one come back as payloads (their
+    /// textures are reused from the next frame instead of dropped).
+    #[test]
+    fn evicted_chunks_hand_back_their_payloads() {
+        let mut cache: DirectCache<u32, ()> = DirectCache::new(2 * 4096);
+        let mut evicted = Vec::new();
+        cache.admit(1, 4096, 1, &mut evicted);
+        cache.admit(2, 4096, 2, &mut evicted);
+        assert!(evicted.is_empty());
+        cache.admit(3, 4096, 3, &mut evicted);
+        assert_eq!(evicted, [1], "the least recently used chunk");
+        cache.admit(4, 2 * 4096, 4, &mut evicted);
+        evicted.sort();
+        assert_eq!(evicted, [1, 2, 3]);
     }
 }
