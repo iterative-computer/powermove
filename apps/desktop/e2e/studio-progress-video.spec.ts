@@ -37,27 +37,32 @@ test('authors and exports the Studio progress film', async ({ session }) => {
   page.on('console', message => { if (message.text().startsWith('[progress]')) console.log(message.text()); });
   const timings: Record<string, number> = {};
 
-  // 1. The 3D title: Inter, extruded and bevelled, polished metal on a black
-  // black. One native Final frame, reused by the title and end card.
-  if (!existsSync(titlePng) || process.env.PM_PROGRESS_TITLE) {
+  // 1. The 3D title: Inter, extruded and bevelled, polished metal on black.
+  // v2: the key softbox sweeps left to right so its reflection travels
+  // across the metal letters, rendered frame by frame by Studio at Preview quality and
+  // encoded to a clip reused by the title and end card.
+  const titleClip = path.join(folder, 'title-3d.mp4');
+  const titleFrames = Number(process.env.PM_PROGRESS_TITLE_FRAMES || 120);
+  const titleQuality = process.env.PM_PROGRESS_TITLE_QUALITY || 'preview';
+  if (!existsSync(titleClip) || process.env.PM_PROGRESS_TITLE) {
     const started = Date.now();
-    // Extrusion reads outlines from font bytes; use the app's own packaged
-    // Inter, exactly as the 3D font regression and the standalone player do.
+    const frameDir = path.join(os.tmpdir(), 'pm-progress-title-frames');
+    await mkdir(frameDir, { recursive: true });
     const inter = [...await readFile(path.join(repoRoot, 'assets/fonts/Inter-Variable.ttf'))];
-    const title = await page.evaluate(async inter => {
+    await page.evaluate(async ({ inter, quality, frames }) => {
       const PM = (window as any).PM;
       const bytes = new Uint8Array(inter).buffer;
       PM.fontSource = (name: string) => name === 'Inter' ? bytes : undefined;
       PM.pause(); PM.AutomaticPreview?.cancel();
-      PM.replaceProject(PM.mkProject({ name: 'Studio title still', w: 1920, h: 1080, fps: 30, dur: 1, bg: '#000000' }));
+      PM.replaceProject(PM.mkProject({ name: 'Studio title', w: 1920, h: 1080, fps: 30, dur: frames / 30, bg: '#000000' }));
       const api = PM.Kernel.api('studio-progress-video').scene3d;
       const edit = (a: any) => { const r = api.edit(a); if (!r.ok) throw new Error(`${a.operation}: ${r.message}`); return r; };
       const check = (r: any) => { if (!r.ok) throw new Error(r.message || r.error); return r; };
       const add = (type: string, o: any) => { const l = PM.mkLayer(type, o); PM.addLayer(l, 0); return l; };
-            const light = (id: string, type: string, p: any) => edit({ operation: 'add_light', light: { id, name: id.replaceAll('_', ' '), type, p } });
+      const light = (id: string, type: string, p: any) => edit({ operation: 'add_light', light: { id, name: id.replaceAll('_', ' '), type, p } });
       edit({ operation: 'add_camera', id: 'camera', camera: { p: { x: -.25, y: .45, z: 8.9, targetX: 0, targetY: -.55, targetZ: 0, fov: 40, fStop: 0, focusDistance: 0 } } });
       edit({ operation: 'set_environment', patch: { background: '#000000', p: { ambient: .02, exposure: 1.15 } } });
-      const t = add('text', { from: 0, dur: 1, p: { 'position.x': 960, 'position.y': 520 }, d: { text: 'Powermove Studio', font: 'Inter', size: 165, color: '#C8CCD2', align: 'center', weight: 700, tracking: -3 } });
+      const t = add('text', { from: 0, dur: frames / 30, p: { 'position.x': 960, 'position.y': 520 }, d: { text: 'Powermove Studio', font: 'Inter', size: 165, color: '#C8CCD2', align: 'center', weight: 700, tracking: -3 } });
       check(api.setExtrusion(t.id, { enabled: true, depth: 40, bevelStyle: 'convex', bevelDepth: 5, quality: 'standard' }));
       for (const [s, roughness] of [['front', .24], ['bevel', .05], ['side', .3], ['back', .4]] as const)
         check(api.setSurfaceMaterialProperties(t.id, s, { color: s === 'front' ? '#CDD2DA' : '#E4E7EC', metallic: 1, roughness }));
@@ -65,21 +70,34 @@ test('authors and exports the Studio progress film', async ({ session }) => {
       light('top_softbox', 'area', { x: 0, y: 7, z: 3, targetX: 0, targetY: 0, targetZ: 0, intensity: 14, width: 12, height: 3, color: '#FFFFFF' });
       light('rim_left', 'area', { x: -15, y: 1.5, z: -5, targetX: 0, targetY: 0, targetZ: 0, intensity: 18, width: .4, height: 5, color: '#B9C8E6' });
       light('rim_right', 'area', { x: 15, y: 1.5, z: -5, targetX: 0, targetY: 0, targetZ: 0, intensity: 18, width: .4, height: 5, color: '#E6D9C8' });
+      const dur = frames / 30;
+      check(api.renderQuality.set(quality));
       for (const l of PM.proj.layers) l.mblur = false;
       PM.touch(); PM.invalidate(); PM.hist.clear();
-      PM.agentFrameCapture = true;
-      try {
-        PM.Studio?.setDenoise(true);
-        PM.setTime(0, { force: true });
-        await PM.prepareFrame(0, { width: 1920, height: 1080, mblur: false });
-        const c = PM.renderFrameTo(0, 1920, 1080, { mblur: false });
-        return { png: c.toDataURL('image/png'), status: PM.Studio.status(), captures: PM.Studio.captureDiagnostics?.() };
-      } finally { PM.agentFrameCapture = false; }
-    }, inter);
-    await writeFile(titlePng, Buffer.from(title.png.split(',')[1], 'base64'));
+      PM.Studio?.setDenoise(true);
+    }, { inter, quality: titleQuality, frames: titleFrames });
+    for (let i = 0; i < titleFrames; i++) {
+      const f0 = Date.now();
+      const png = await page.evaluate(async ({ i, frames }) => {
+        const PM = (window as any).PM;
+        const t = i / 30, u = i / Math.max(1, frames - 1), e = u * u * (3 - 2 * u);
+        const r = PM.Kernel.api('studio-progress-video').scene3d.edit({ operation: 'update_light', target: 'front_key', patch: { p: { x: -7 + 13 * e } } });
+        if (!r.ok) throw new Error(r.message);
+        PM.agentFrameCapture = true;
+        try {
+          PM.setTime(t, { force: true });
+          await PM.prepareFrame(t, { width: 1920, height: 1080, mblur: false });
+          return PM.renderFrameTo(t, 1920, 1080, { mblur: false }).toDataURL('image/png');
+        } finally { PM.agentFrameCapture = false; }
+      }, { i, frames: titleFrames });
+      await writeFile(path.join(frameDir, `f${String(i).padStart(4, '0')}.png`), Buffer.from(png.split(',')[1], 'base64'));
+      console.log('TITLE FRAME', i, (Date.now() - f0) / 1000);
+    }
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', '30', '-i', path.join(frameDir, 'f%04d.png'), '-c:v', 'libx264', '-crf', '12', '-pix_fmt', 'yuv420p', titleClip]);
+    execFileSync('rm', ['-rf', frameDir]);
     timings.title3dSeconds = (Date.now() - started) / 1000;
-    await writeFile(path.join(folder, 'title-3d-status.json'), JSON.stringify({ seconds: timings.title3dSeconds, status: title.status, captures: title.captures }, null, 2));
-    console.log('TITLE', timings.title3dSeconds, title.status?.backend);
+    console.log('TITLE', timings.title3dSeconds);
   }
 
   // 2. Import every source through the ordinary media importer.
@@ -89,7 +107,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
     PM.replaceProject(PM.mkProject({ name: 'Powermove Studio — progress', w: 1920, h: 1080, fps: 30, dur: 67, bg: '#000000' }));
     const input = document.createElement('input'); input.type = 'file'; input.multiple = true; input.id = 'progress-sources'; document.body.appendChild(input);
   });
-  await page.locator('#progress-sources').setInputFiles([...Object.values(media).map(([file]) => path.join(sources, file)), titlePng]);
+  await page.locator('#progress-sources').setInputFiles([...Object.values(media).map(([file]) => path.join(sources, file)), titleClip]);
   await page.evaluate(async () => {
     const PM = (window as any).PM;
     await PM.importFiles([...((document.querySelector('#progress-sources') as HTMLInputElement).files!)], { placement: null });
@@ -102,7 +120,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
     const main = PM.Comps.active();
     const assets: any[] = Object.values(PM.proj.assets);
     const asset = (key: string) => {
-      const [file, w, h] = key === 'title' ? ['title-3d.png', 1920, 1080] : media[key];
+      const [file, w, h] = key === 'title' ? ['title-3d.mp4', 1920, 1080] : media[key];
       const name = file.split('/').pop();
       const a = assets.find(a => a.name === name);
       if (!a) throw new Error(`Missing imported ${name}: ${assets.map(a => a.name).join(', ')}`);
@@ -159,7 +177,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
     };
 
     section('01 Title', 0, 4, () => {
-      const t = image('title', 960, 540, 100); scaleTo(t, [[0, 100], [4, 106]]); fade(t, [[0, 0], [1, 100]]);
+      const t = video('title', 960, 540, 100); scaleTo(t, [[0, 100], [4, 104]]); fade(t, [[0, 0], [1, 100]]);
       reveal(text('Progress since the first film', 960, 690, 44, GREY, { weight: 500 }), 1.4);
     });
 
@@ -274,7 +292,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
     });
 
     section('08 End card', 63, 4, () => {
-      const t = image('title', 960, 540, 103); scaleTo(t, [[0, 103], [4, 100]]); fade(t, [[0, 0], [.8, 100], [3.4, 100], [4, 0]]);
+      const t = video('title', 960, 540, 103); scaleTo(t, [[0, 103], [4, 100]]); fade(t, [[0, 0], [.8, 100], [3.4, 100], [4, 0]]);
       const line = text('Made in Powermove.', 960, 690, 40, GREY, { weight: 500 }); reveal(line, .8, 4);
     });
 
@@ -293,7 +311,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
   const setDestination = (file: string) => session.app.evaluate(({ dialog }, file) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: file });
   }, file);
-  await setDestination(path.join(folder, 'powermove-studio-progress.pmv'));
+  await setDestination(path.join(folder, process.env.PM_PROGRESS_PMV || 'powermove-studio-progress.pmv'));
   expect(await page.evaluate(() => (window as any).PM.Export.run({ format: 'json', reportPath: true }))).toMatchObject({ cancelled: false });
 
   if (mode === 'stills') {
@@ -312,7 +330,7 @@ test('authors and exports the Studio progress film', async ({ session }) => {
       console.log('STILL', s.name, s.t.toFixed(2));
     }
   } else {
-    const filename = 'powermove-studio-progress.mp4';
+    const filename = process.env.PM_PROGRESS_FILENAME || 'powermove-studio-progress.mp4';
     await setDestination(path.join(folder, filename));
     const started = Date.now();
     const result = await page.evaluate(async () => {
