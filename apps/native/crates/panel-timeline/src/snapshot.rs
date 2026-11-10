@@ -486,10 +486,7 @@ impl TimelineIndex {
     }
     /// The selected keys, each on the layer it was picked on; a key selected
     /// by id alone is selected on every layer holding it.
-    pub fn selected_keys(
-        &self,
-        selection: &pm_kernel::Selection,
-    ) -> Vec<(&Layer, &Channel, &Key)> {
+    pub fn selected_keys(&self, selection: &pm_kernel::Selection) -> Vec<(&Layer, &Channel, &Key)> {
         selection
             .keys()
             .iter()

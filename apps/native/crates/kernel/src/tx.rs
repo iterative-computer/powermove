@@ -209,7 +209,10 @@ impl ActorHistoryMark {
 
 #[derive(Clone, Debug)]
 pub enum SelectionCall {
-    Layers { ids: Vec<String>, add: bool },
+    Layers {
+        ids: Vec<String>,
+        add: bool,
+    },
     ToggleLayer(String),
     Keys(Vec<String>),
     /// Keys as picked on their layers, `(layer, key)` (key ids may repeat

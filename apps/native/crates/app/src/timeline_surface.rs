@@ -1298,8 +1298,7 @@ impl TimelineSurface {
                 let moved = f32::from(delta.x).abs().max(f32::from(delta.y).abs())
                     >= self.tokens.metrics.drag_threshold;
                 if moved {
-                    self.queue
-                        .push_back(Job::Apply(session.finish()));
+                    self.queue.push_back(Job::Apply(session.finish()));
                 } else {
                     self.queue.push_back(Job::Apply(Plan {
                         calls: vec![SelectionCall::Clear.into()],

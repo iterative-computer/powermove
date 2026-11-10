@@ -1615,9 +1615,10 @@ impl Frame {
             .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
             .filter_map(key_identity)
             .filter_map(|(row, key)| match crate::v4::parse_row(&row).ok()? {
-                crate::RowId::Layer(layer) | crate::RowId::Property { layer_id: layer, .. } => {
-                    Some((layer, key))
-                }
+                crate::RowId::Layer(layer)
+                | crate::RowId::Property {
+                    layer_id: layer, ..
+                } => Some((layer, key)),
             })
             .collect()
     }

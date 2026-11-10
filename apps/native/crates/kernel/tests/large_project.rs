@@ -528,7 +528,11 @@ fn a_dictionary_trimmed_on_open_is_archived() {
     drop(packed);
     let mut kernel = Kernel::new(KernelConfig::default());
     let session = open_file(&mut kernel, &source);
-    assert_eq!(store(&kernel).history().len(), 1, "the oldest step is trimmed");
+    assert_eq!(
+        store(&kernel).history().len(),
+        1,
+        "the oldest step is trimmed"
+    );
     call(&mut kernel, commands("Add", vec![add_layer("c")]));
     let path = dir.path("saved.pmv");
     let plan = kernel

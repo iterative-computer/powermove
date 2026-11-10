@@ -3304,26 +3304,61 @@ fn stale_settings_presses_never_reach_a_different_account_or_provider() {
     };
     // An unrelated change (the same provider rechecked) keeps a stale press.
     backend.native.facts["provider"] = provider(2, "http://a.invalid/v1");
-    assert!(press(&mut backend, &seen, "account.disconnect", "provider.disconnect"));
+    assert!(press(
+        &mut backend,
+        &seen,
+        "account.disconnect",
+        "provider.disconnect"
+    ));
     // Provider B replaced A: Disconnect seen on A must not disconnect B.
     let seen = backend.settings_snapshot().unwrap()["revision"].clone();
     backend.native.facts["provider"] = provider(3, "http://b.invalid/v1");
-    assert!(!press(&mut backend, &seen, "account.disconnect", "provider.disconnect"));
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.disconnect",
+        "provider.disconnect"
+    ));
     // Another Powermove account signed in: Sign Out and Delete seen on the
     // first refuse; the same account, rechecked, still signs out.
     let seen = backend.settings_snapshot().unwrap()["revision"].clone();
     backend.native.facts["cloud"] =
         json!({"revision":2,"signedIn":true,"identity":"@other","email":"b@example.com"});
-    assert!(!press(&mut backend, &seen, "account.sign-in", "account.sign-out"));
-    assert!(!press(&mut backend, &seen, "account.delete", "account.delete"));
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.sign-in",
+        "account.sign-out"
+    ));
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.delete",
+        "account.delete"
+    ));
     let seen = backend.settings_snapshot().unwrap()["revision"].clone();
     backend.native.facts["cloud"]["revision"] = json!(3);
-    assert!(press(&mut backend, &seen, "account.sign-in", "account.sign-out"));
+    assert!(press(
+        &mut backend,
+        &seen,
+        "account.sign-in",
+        "account.sign-out"
+    ));
     // A publication no longer remembered never carries a destructive press;
     // a harmless one (Sign In) still lands while offered.
-    assert!(!press(&mut backend, &json!(0), "account.sign-in", "account.sign-out"));
+    assert!(!press(
+        &mut backend,
+        &json!(0),
+        "account.sign-in",
+        "account.sign-out"
+    ));
     backend.native.facts["cloud"] = json!({"revision":4,"signedIn":false});
-    assert!(press(&mut backend, &json!(0), "account.sign-in", "account.sign-in"));
+    assert!(press(
+        &mut backend,
+        &json!(0),
+        "account.sign-in",
+        "account.sign-in"
+    ));
 }
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
