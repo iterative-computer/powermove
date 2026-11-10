@@ -140,7 +140,7 @@ pub struct Extensions {
     views: Rc<RefCell<BTreeMap<String, Rc<RefCell<MacDomHost>>>>>,
     data_stores: StoreDataStores,
     /// Panels drawn by a Store helper, with its id and run.
-    stores: BTreeMap<String, (String, u64)>,
+    pub(crate) stores: BTreeMap<String, (String, u64)>,
     owners: Rc<RefCell<BTreeMap<String, String>>>,
     /// Open contributed panels and where the shell placed their bodies.
     panels: BTreeMap<String, layout::Rect>,

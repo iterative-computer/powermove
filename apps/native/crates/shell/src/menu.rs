@@ -291,6 +291,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 Item::command("Panels", "panels", ""),
                 Item::command("Workspace", "workspaces", ""),
+                Item::command("Panel Library", "panelLibrary", ""),
                 Item::command("Maximize Panel", "maximizePanel", "`"),
                 Item::command("Restore Panel", "restorePanel", ""),
                 sep(),
