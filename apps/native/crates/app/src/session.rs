@@ -1021,8 +1021,8 @@ impl Controller {
         if let Some(t) = DISPATCHING.get() {
             return t;
         }
-        objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap())
-            .currentEvent()
+        objc2::MainThreadMarker::new()
+            .and_then(|main| objc2_app_kit::NSApplication::sharedApplication(main).currentEvent())
             .map(|e| e.timestamp())
             .filter(|t| t.is_finite() && *t > 0.)
             .unwrap_or_else(pm_engine_service::trace::now)
