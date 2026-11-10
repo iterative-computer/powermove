@@ -5,9 +5,14 @@
 //! appends one NDJSON line: `{"ui":kind,"input":t,"draw":t,"presented":t}`
 //! in host seconds (the clock of `NSEvent.timestamp` and
 //! `CAMetalDrawable.presentedTime`). Off unless the variable is set: no
-//! handler, no file, no clock reads.
+//! handler, no file, no clock reads. On, the file is opened and written on
+//! its own thread: a slow disk or a FIFO nobody reads never stalls input or
+//! drawing (lines past [`QUEUE`] waiting are dropped).
 use parking_lot::Mutex;
-use std::{fs::File, io::Write, sync::OnceLock};
+use std::{
+    io::Write,
+    sync::{OnceLock, mpsc},
+};
 
 unsafe extern "C" {
     fn CACurrentMediaTime() -> f64;
@@ -19,30 +24,50 @@ pub fn now() -> f64 {
     unsafe { CACurrentMediaTime() }
 }
 
-fn sink() -> Option<&'static Mutex<File>> {
-    static SINK: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+/// Lines waiting for the writer thread.
+pub const QUEUE: usize = 4096;
+
+/// Whether the probe is on: the variable alone decides, read once.
+pub fn enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PM_FEEL_TRACE").is_some_and(|p| !p.is_empty()))
+}
+
+/// The writer thread's queue, started by the first line.
+fn sink() -> Option<&'static mpsc::SyncSender<String>> {
+    static SINK: OnceLock<Option<mpsc::SyncSender<String>>> = OnceLock::new();
     SINK.get_or_init(|| {
-        let path = std::env::var_os("PM_FEEL_TRACE")?;
-        File::options()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-            .map(Mutex::new)
+        let path = std::env::var_os("PM_FEEL_TRACE").filter(|_| enabled())?;
+        let (sender, lines) = mpsc::sync_channel::<String>(QUEUE);
+        std::thread::Builder::new()
+            .name("pm-feel-trace".into())
+            .spawn(move || {
+                let Ok(mut file) = std::fs::File::options()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                else {
+                    return;
+                };
+                for mut line in lines {
+                    line.push('\n');
+                    if file.write_all(line.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(sender)
     })
     .as_ref()
 }
 
-pub fn enabled() -> bool {
-    sink().is_some()
-}
-
-/// Appends one line (presented handlers run on a Metal thread, never main).
+/// Queues one line for the trace file; never blocks.
 pub fn write(line: &str) {
-    if let Some(file) = sink() {
-        let mut file = file.lock();
-        let _ = file.write_all(line.as_bytes());
-        let _ = file.write_all(b"\n");
+    if enabled()
+        && let Some(sink) = sink()
+    {
+        let _ = sink.try_send(line.to_owned());
     }
 }
 
@@ -54,6 +79,13 @@ static PENDING: Mutex<Option<(f64, &'static str)>> = Mutex::new(None);
 pub fn note(input: f64, kind: &'static str) {
     if enabled() && input > 0. {
         PENDING.lock().get_or_insert((input, kind));
+    }
+}
+
+/// Notes an input handled now; off, the clock is not read.
+pub fn note_now(kind: &'static str) {
+    if enabled() {
+        note(now(), kind);
     }
 }
 
