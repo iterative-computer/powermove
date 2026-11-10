@@ -471,11 +471,24 @@ fn hex_to_rgba(hex: &str, opacity: f64) -> Option<Rgba> {
 }
 
 /// Hashes the scene into a 128-bit content key.
+/// Collects what a key hashes, for one blake3 pass (two SipHash passes
+/// over every glyph path element were 2% of a text-heavy frame).
+struct KeyBytes(Vec<u8>);
+
+impl Hasher for KeyBytes {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        unreachable!("read through blake3")
+    }
+}
+
 fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
-    let mut out = [0u64; 2];
-    for (i, o) in out.iter_mut().enumerate() {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (i as u64, generation, scene.width, scene.height, crop).hash(&mut h);
+    let mut h = KeyBytes(Vec::with_capacity(4096));
+    {
+        (generation, scene.width, scene.height, crop).hash(&mut h);
         for item in &scene.items {
             for c in item.color {
                 c.to_bits().hash(&mut h);
@@ -561,9 +574,13 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
                 }
             }
         }
-        *o = h.finish();
     }
-    out
+    let digest = blake3::hash(&h.0);
+    let bytes = digest.as_bytes();
+    [
+        u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes")),
+        u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+    ]
 }
 
 impl TextContext {
