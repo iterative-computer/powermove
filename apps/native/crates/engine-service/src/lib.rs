@@ -324,6 +324,15 @@ struct View {
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
+    /// The skimmer (Final Cut's): while paused the viewer shows this time,
+    /// and the playhead stays where it is.
+    skim: Option<Ticks>,
+    /// The skimmer's last position and pointer time, for its velocity.
+    skim_input: Option<f64>,
+    skim_rate: pm_protocol::common::PlaybackRate,
+    /// The skimmer moved since the worker last looked.
+    skim_moved: bool,
+    skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
 }
@@ -521,6 +530,41 @@ impl Viewer {
     pub fn adapt_drags(&self, on: bool) -> Result<()> {
         self.edit(|v| {
             v.adapt_drags = on;
+            Ok(())
+        })
+    }
+    /// The skimmer: while paused the viewer shows `time` (on the drag path:
+    /// reduced while it moves, exact once it rests) without moving the
+    /// playhead; `None` returns to the playhead's frame. `input` is the
+    /// pointer event's host time; the pointer's speed sets the skim
+    /// audio's direction and speed.
+    pub fn skim(&self, time: Option<Ticks>, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.edit(|v| {
+            if v.skim == time {
+                return Ok(());
+            }
+            v.skim_rate = match (v.skim, time, v.skim_input) {
+                (Some(a), Some(b), Some(at)) if input > at => skim_rate(
+                    (b.get() - a.get()) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                    input - at,
+                ),
+                _ => pm_protocol::common::PlaybackRate::NORMAL,
+            };
+            v.skim = time;
+            v.skim_input = Some(input);
+            v.skim_moved = true;
+            v.input = Some(input);
+            v.pipeline.request = trace::now();
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Audio skimming: grains of the mix follow the skimmer.
+    pub fn skim_audio(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.skim_audio = Some(on);
             Ok(())
         })
     }
@@ -911,6 +955,11 @@ impl EngineService {
                 resources: Arc::default(),
                 quality: Quality::Auto,
                 adapt_drags: false,
+                skim: None,
+                skim_input: None,
+                skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
+                skim_moved: false,
+                skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
             },
@@ -1134,6 +1183,17 @@ const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
+/// The skim audio's J/K/L rate for a skimmer that moved `seconds` of media
+/// in `elapsed` seconds: its direction, and 2x once it moves faster than
+/// one and a half times real time.
+fn skim_rate(seconds: f64, elapsed: f64) -> pm_protocol::common::PlaybackRate {
+    let speed = seconds / elapsed;
+    let num = if speed.abs() > 1.5 { 2 } else { 1 };
+    pm_protocol::common::PlaybackRate {
+        num: if seconds < 0. { -num } else { num },
+        den: 1,
+    }
+}
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -1525,6 +1585,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
+            if std::mem::take(&mut v.skim_moved) {
+                // A skim draws on the drag path; leaving returns exact.
+                r.scrub = v.skim.is_some();
+                r.refine_at = None;
+                let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
+                    (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
+                });
+                if let Some(a) = &r.transport.audio {
+                    a.send(audio::AudioCtl::Skim {
+                        at: v.skim.map(Ticks::get),
+                        rate: v.skim_rate,
+                        grain_ms: frame_ms.max(pm_audio::transport::GRAIN_MIN_MS as u64),
+                    });
+                }
+            }
+            if let (Some(on), Some(a)) = (v.skim_audio.take(), &r.transport.audio) {
+                a.send(audio::AudioCtl::SkimAudio(on));
+            }
             let sample = r.transport.poll((now * 1e6) as i64);
             changed |= v
                 .status
@@ -1632,7 +1710,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     plain
                 }
             } else {
-                sample.media_time
+                // Paused under the skimmer: its time, not the playhead's.
+                v.skim.filter(|_| !playing).unwrap_or(sample.media_time)
             };
             let time =
                 Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
@@ -2396,6 +2475,53 @@ mod worker_tests {
         }
         crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         v.retire();
+    }
+
+    /// The skimmer shows its time without moving the playhead, and the
+    /// viewer returns to the playhead's frame when the pointer leaves.
+    #[test]
+    fn the_skimmer_shows_its_frame_and_leaves_the_playhead() {
+        let service = EngineService::start(pm_gpu::Gpu::new("skim-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let frame = |v: &Viewer, at: Ticks| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+                {
+                    return status;
+                }
+                assert!(std::time::Instant::now() < deadline, "{at:?}: {status:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let playhead = Ticks::new(pm_protocol::common::TICKS_PER_SECOND / 3).unwrap();
+        v.scrub(playhead).unwrap();
+        frame(&v, playhead);
+        for (i, at) in [1, 2, 3, 2].map(|s| Ticks::new(s * pm_protocol::common::TICKS_PER_SECOND / 2).unwrap()).into_iter().enumerate() {
+            v.skim(Some(at), trace::now() + i as f64 * 0.016).unwrap();
+            let status = frame(&v, at);
+            assert_eq!(
+                status.clock.unwrap().media_time,
+                playhead,
+                "skimming never moves the playhead"
+            );
+        }
+        v.skim(None, trace::now()).unwrap();
+        frame(&v, playhead);
+        v.retire();
+    }
+
+    #[test]
+    fn skim_rates_follow_the_pointer() {
+        assert_eq!(skim_rate(0.05, 0.1).num, 1);
+        assert_eq!(skim_rate(-0.05, 0.1).num, -1);
+        assert_eq!(skim_rate(0.4, 0.1).num, 2);
+        assert_eq!(skim_rate(-0.4, 0.1).num, -2);
     }
 
     /// A slow project's drag draws reduced; the stopped frame is drawn again
