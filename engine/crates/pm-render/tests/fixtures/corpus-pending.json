@@ -1762,5 +1762,104 @@
       "unreferenced: max 176.00 p99.9 170.00 mean 13.211 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "f81ebac66d8146a04aa951fd3cc293769a06365f6bbf02fa8f36289a306265a7"
+  },
+  {
+    "frame": "dfb2a782a15ea22aaac1fdb05daa39e9007d8b76fcbf1908164e00d5fe771490",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 0; fraction within 2 0.881289062500; max outside edges 104; SSIM Some(0.7102531890028598)"
+    ],
+    "measurement_sha256": "e4d7fad3262d14979a5fa0ceb139861c97bca481ae7941a7345f573c46f5aba6"
+  },
+  {
+    "frame": "58e923d71cb58d9e9f7c09634792b864ea8d3a2bf1e64c2262aa18de913c61a8",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 0.000000000 CV; fraction within 2 0.947578125000; max outside edges 126; SSIM Some(0.8796114860847286)"
+    ],
+    "measurement_sha256": "21a8634662d833b0f49026359d59873346a6f194dcbcf4cad08fdf054e03124e"
+  },
+  {
+    "frame": "2f6e006062cfdd61ca0e583648e8a05b4240939795400e2cca9c330c5c3a7c17",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 0; fraction within 2 0.947569444444; max outside edges 126; SSIM Some(0.8806466523146379)"
+    ],
+    "measurement_sha256": "deab4fee62b83f5d729b3bcb56bc4bf963de01073eed9129b1a5c870f1154cde"
+  },
+  {
+    "frame": "1c69a33a6664005bb5e55a14b1434a34bcdd145666bd03253c8196e4df59334e",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 0.000000000 CV; fraction within 2 0.944674479167; max outside edges 126; SSIM Some(0.8719551347271387)"
+    ],
+    "measurement_sha256": "ef1b8fc8b36e6fd406a76d8c9f534bcdd5a902e14a218cd92b99fbed529ff5fa"
+  },
+  {
+    "frame": "ef1f30fce704f6d2ec1bd7fd7e2ead3dfad2aedfa5fd8d7a7efcf3d10c1dbcc9",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 0; fraction within 2 0.944678819444; max outside edges 126; SSIM Some(0.8733115324577482)"
+    ],
+    "measurement_sha256": "415decf465f75b2ff6bb52c3706f967a72daf5a611df864f061d70507f8a6c72"
+  },
+  {
+    "frame": "5606aa3c94f0d57995ab5bd734fad8ddc8c98a13d75a7cee5799eefd0a8ec679",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 0.000000000 CV; fraction within 2 0.947578125000; max outside edges 126; SSIM Some(0.8796114860847286)"
+    ],
+    "measurement_sha256": "21a8634662d833b0f49026359d59873346a6f194dcbcf4cad08fdf054e03124e"
+  },
+  {
+    "frame": "400d9d202226f52935c13fc75f60cfecdd3a770ed13ddbed92ece3845c55923d",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 0; fraction within 2 0.947569444444; max outside edges 126; SSIM Some(0.8806466523146379)"
+    ],
+    "measurement_sha256": "deab4fee62b83f5d729b3bcb56bc4bf963de01073eed9129b1a5c870f1154cde"
+  },
+  {
+    "frame": "9466f6a2f0e09bd3ec833f45dea0a98cb19b1d748b1e7149cd8c4ea96c0ab70c",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 0.622558594 CV; fraction within 2 0.978320312500; max outside edges 120; SSIM Some(0.9890347752443626)"
+    ],
+    "measurement_sha256": "90029d91773462f948b4ee679df4138aecbb74c5c0eeb38ee3340acc14f7439a"
+  },
+  {
+    "frame": "96b393257ba0b11702113004cfb24a8505fbc4c36a43bd1ad47ad85ff258ce76",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 1; fraction within 2 0.978311631944; max outside edges 120; SSIM Some(0.9893957580506093)"
+    ],
+    "measurement_sha256": "20511f7ac395776bd35eb52d8d7549f2fa9ab0fc8049ec7d836695e868b44746"
+  },
+  {
+    "frame": "160724905e6564c3033c28dc92bbb6fd45a2c2cc244ed49e429f58b936d00510",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 0.747070312 CV; fraction within 2 0.978324652778; max outside edges 120; SSIM Some(0.9890303892190486)"
+    ],
+    "measurement_sha256": "52b64188a89459e3046daa7c7d9c7b9095bc087382cd6259831504a38e73f1fe"
+  },
+  {
+    "frame": "4642b41b445054151cd1c9aec984440a3db04e72a4aed6e4f14101d5c320fbb4",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 1.000000000000; rest max 1; fraction within 2 0.978315972222; max outside edges 120; SSIM Some(0.9893914955409803)"
+    ],
+    "measurement_sha256": "73a1a89f374682d3d759511f2c21fdbe1eba24881e21efe3c3f6102c90a6f018"
   }
 ]
