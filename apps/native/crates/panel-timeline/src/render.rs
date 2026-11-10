@@ -42,6 +42,10 @@ pub struct Op {
     pub font_size: f64,
     pub detail: Value,
     pub clip: Option<Rect>,
+    /// A keyframe glyph identical to the key op before it at the same device
+    /// half-pixel: painting it changes nothing. It stays for hit testing and
+    /// marquee selection.
+    pub covered: bool,
 }
 impl Op {
     pub(crate) fn new(
@@ -62,6 +66,7 @@ impl Op {
             font_size: 0.,
             detail: Value::Null,
             clip: None,
+            covered: false,
         }
     }
     pub fn wire(&self) -> Value {
@@ -1367,6 +1372,9 @@ fn paint_keys(
         keys.first().map(|k| k.seconds),
         keys.last().map(|k| k.seconds),
     );
+    // The glyph drawn last and its device half-pixel: keys are in time
+    // order, so an identical glyph on the same half-pixel follows it directly.
+    let mut on_top: Option<(i64, (&str, u32, bool, Option<&str>))> = None;
     for key in &keys[start..end] {
         let x = v.x(key.seconds);
         let shape = if summary.is_some() {
@@ -1407,8 +1415,13 @@ fn paint_keys(
             })
             .flatten();
         o.detail = json!({"keyline":if key.selected {Some(t.colors.panel)}else{None},"keylineWidth":t.metrics.border,"half":half,"seconds":key.seconds});
+        let glyph = ((x * 2.).round() as i64, (shape, color, key.selected, half));
+        o.covered = on_top == Some(glyph);
+        on_top = Some(glyph);
         ops.push(o);
         if key.focused {
+            // The ring may cover keys under it: the next one draws again.
+            on_top = None;
             let mut o = Op::new(
                 format!("key-focus:{}", json!([row, key.id])),
                 "outside-ring",
@@ -1843,6 +1856,7 @@ pub fn decoration_ops(ops: &[Op], decorations: &Decorations) -> Vec<Op> {
                 font_size: 0.,
                 detail: Value::Null,
                 clip: within,
+                covered: false,
             };
             out.push(match shape {
                 Decoration::Rect {
@@ -1984,5 +1998,58 @@ mod decoration_tests {
             &visible(2),
         );
         assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+    }
+}
+
+#[cfg(test)]
+mod key_cover_tests {
+    use super::*;
+
+    fn key(id: &str, seconds: f64, selected: bool) -> Key {
+        Key {
+            id: id.into(),
+            seconds,
+            selected,
+            focused: false,
+            interpolation: Interpolation::Linear,
+        }
+    }
+
+    /// Dense keys: a glyph identical to the one before it on the same device
+    /// half-pixel is marked covered (paint leaves it out); every key keeps
+    /// its op for hit testing and marquee selection.
+    #[test]
+    fn identical_keys_on_one_half_pixel_are_covered_not_dropped() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let v = Viewport {
+            width: 1000.,
+            height: 300.,
+            scroll_y: 0.,
+            scroll_time: 0.,
+            pps: 10.,
+            layer_column: 200.,
+        };
+        // A span's ends are half filled (other glyphs); between them, keys
+        // a tenth of a pixel apart at 10 px/s.
+        let keys = vec![
+            key("start", 0., false),
+            key("a", 1., false),
+            key("b", 1.01, false),
+            key("c", 1.02, true),
+            key("d", 1.024, false),
+            key("e", 1.2, false),
+            key("f", 1.21, false),
+            key("end", 9., false),
+        ];
+        let mut ops = vec![];
+        paint_keys("L1", &keys, None, 50., v, &t, &mut ops);
+        let covered: Vec<bool> = ops.iter().map(|o| o.covered).collect();
+        // b repeats a on its half-pixel; c is selected (another glyph) and d
+        // is on top of it again; f repeats e.
+        assert_eq!(
+            covered,
+            [false, false, true, false, false, false, true, false]
+        );
+        assert_eq!(ops.len(), keys.len());
     }
 }

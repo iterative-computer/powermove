@@ -2122,9 +2122,9 @@ impl Render for TimelineSurface {
                                 )
                             });
                             let started = crate::diag::enabled().then(std::time::Instant::now);
-                            let mut covered = KeyCover::new(bounds.size);
+                            let cull = Cull::new(bounds.size);
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
-                                if covered.skip(op) {
+                                if cull.skip(op) {
                                     continue;
                                 }
                                 match above {
@@ -2260,60 +2260,30 @@ impl TimelineSurface {
     }
 }
 /// What the timeline's paint can leave out without changing a pixel: ops
-/// wholly off the canvas, and a keyframe glyph identical to the one already
-/// on top at the same device pixel. Dense keys (a baked animation, a long
-/// clip zoomed out) put tens of thousands of them on a few hundred columns;
-/// each is a tessellated path. Hit-testing keeps every op.
-struct KeyCover {
+/// wholly off the canvas, and keyframe glyphs the scene marked covered by an
+/// identical one on the same device pixel (`Op::covered`). Dense keys (a
+/// baked animation, a long clip zoomed out) put tens of thousands of them on
+/// a few hundred columns. Hit-testing keeps every op.
+struct Cull {
     width: f64,
     height: f64,
-    /// The key glyph last drawn at each half-point centre, since the last
-    /// other op (which may have covered it).
-    top: std::collections::HashMap<(i64, i64), u64>,
 }
-impl KeyCover {
+impl Cull {
     fn new(size: Size<Pixels>) -> Self {
         Self {
             width: f64::from(f32::from(size.width)),
             height: f64::from(f32::from(size.height)),
-            top: Default::default(),
         }
     }
-    fn skip(&mut self, op: &Op) -> bool {
+    fn skip(&self, op: &Op) -> bool {
         // Keylines and strokes reach a little past an op's box.
         const MARGIN: f64 = 4.;
         let b = op.bounds;
-        if b.x >= self.width + MARGIN
+        op.covered
+            || b.x >= self.width + MARGIN
             || b.y >= self.height + MARGIN
             || b.x + b.width <= -MARGIN
             || b.y + b.height <= -MARGIN
-        {
-            return true;
-        }
-        if !op.id.starts_with("key:") {
-            self.top.clear();
-            return false;
-        }
-        use std::hash::{Hash, Hasher};
-        let mut glyph = std::collections::hash_map::DefaultHasher::new();
-        (op.shape, op.color, op.opacity.to_bits()).hash(&mut glyph);
-        (
-            (b.width * 2.).round() as i64,
-            (b.height * 2.).round() as i64,
-        )
-            .hash(&mut glyph);
-        op.detail["half"].as_str().hash(&mut glyph);
-        op.detail["keyline"].as_u64().hash(&mut glyph);
-        op.detail["keylineWidth"]
-            .as_f64()
-            .map(f64::to_bits)
-            .hash(&mut glyph);
-        let glyph = glyph.finish();
-        let centre = (
-            ((b.x + b.width / 2.) * 2.).round() as i64,
-            ((b.y + b.height / 2.) * 2.).round() as i64,
-        );
-        self.top.insert(centre, glyph) == Some(glyph)
     }
 }
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
@@ -2696,17 +2666,17 @@ fn half_diamond(area: Bounds<Pixels>, toward_right: bool, color: Rgba, window: &
 }
 
 #[cfg(test)]
-mod key_cover_tests {
-    use super::KeyCover;
+mod cull_tests {
+    use super::Cull;
     use gpui::{px, size};
     use pm_panel_timeline::render::{Op, Rect};
 
-    fn op(id: &str, shape: &'static str, x: f64, y: f64, color: u32) -> Op {
+    fn op(id: &str, x: f64, y: f64, covered: bool) -> Op {
         Op {
             id: id.into(),
-            shape,
+            shape: "diamond",
             bounds: Rect::new(x, y, 9., 9.),
-            color,
+            color: 0xffffff,
             opacity: 0.85,
             radius: 0.,
             stroke: 0.,
@@ -2714,26 +2684,19 @@ mod key_cover_tests {
             font_size: 0.,
             detail: serde_json::json!({"half": null}),
             clip: None,
+            covered,
         }
     }
 
     #[test]
-    fn only_hidden_duplicates_and_off_canvas_ops_are_left_out() {
-        let mut cover = KeyCover::new(size(px(400.), px(100.)));
-        // The first key draws; an identical one on the same device pixel doesn't.
-        assert!(!cover.skip(&op("key:[1,a]", "diamond", 50., 10., 0xffffff)));
-        assert!(cover.skip(&op("key:[1,b]", "diamond", 50.2, 10., 0xffffff)));
-        // A different glyph there (selected: accent) draws, and so does the
-        // unselected one after it: it is on top again.
-        assert!(!cover.skip(&op("key:[1,c]", "diamond", 50., 10., 0xff8800)));
-        assert!(!cover.skip(&op("key:[1,d]", "diamond", 50., 10., 0xffffff)));
-        // One device pixel over is a different place.
-        assert!(!cover.skip(&op("key:[1,e]", "diamond", 50.5, 10., 0xffffff)));
-        // Anything else painted may cover keys: the next one draws again.
-        assert!(!cover.skip(&op("clip:x", "rect", 0., 0., 0x123456)));
-        assert!(!cover.skip(&op("key:[1,f]", "diamond", 50., 10., 0xffffff)));
+    fn only_covered_and_off_canvas_ops_are_left_out() {
+        let cull = Cull::new(size(px(400.), px(100.)));
+        assert!(!cull.skip(&op("key:[1,a]", 50., 10., false)));
+        assert!(cull.skip(&op("key:[1,b]", 50.2, 10., true)));
         // Wholly off the canvas: nothing to draw, key or not.
-        assert!(cover.skip(&op("key:[9,a]", "diamond", 50., 140., 0xffffff)));
-        assert!(cover.skip(&op("clip:y", "rect", 500., 10., 0x123456)));
+        assert!(cull.skip(&op("key:[9,a]", 50., 140., false)));
+        assert!(cull.skip(&op("clip:y", 500., 10., false)));
+        // Partly on the canvas draws.
+        assert!(!cull.skip(&op("clip:z", 395., 10., false)));
     }
 }
