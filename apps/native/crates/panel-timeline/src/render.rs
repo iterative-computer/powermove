@@ -851,7 +851,7 @@ impl Scene {
         v: Viewport,
         t: &Tokens,
         ops: &mut Vec<Op>,
-        mut controls: Option<&mut Vec<(Op, std::sync::Arc<[f64]>)>>,
+        controls: Option<&mut Vec<Control>>,
     ) {
         let (m, c) = (t.metrics, &t.colors);
         let row = &self.rows[i];
@@ -947,7 +947,7 @@ impl Scene {
                     },
                 );
                 o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
-                if let Some(controls) = controls.as_deref_mut() {
+                if let Some(controls) = controls {
                     controls.push((o.clone(), self.control_times[&row.id].clone()));
                 }
                 ops.push(o);
@@ -1544,6 +1544,8 @@ impl ClipNode {
 fn intersects(a: Rect, b: Rect) -> bool {
     a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
 }
+/// A keyframe toggle and its property's key times.
+type Control = (Op, std::sync::Arc<[f64]>);
 /// What a marquee covers. See [`Scene::marquee`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Marquee {
@@ -1559,7 +1561,7 @@ pub struct Frame {
     pub total: usize,
     pub ops: Vec<Op>,
     pub accessibility: Vec<Value>,
-    controls: Vec<(Op, std::sync::Arc<[f64]>)>,
+    controls: Vec<Control>,
 }
 impl Frame {
     pub fn wire(&self) -> Value {
