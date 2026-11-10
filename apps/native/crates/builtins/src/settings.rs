@@ -152,19 +152,24 @@ impl Backend {
     }
     /// Settings › Media: proxy preferences and storage, from the host's
     /// `mediaSettings` fact (this Mac's, so shown without a project).
-    fn media_rows(&self) -> Vec<Value> {
-        let media = &self.native.facts["mediaSettings"];
+    fn media_rows(&mut self) -> Result<Vec<Value>, String> {
+        let media = self.native.facts["mediaSettings"].clone();
         if media.is_null() {
-            return vec![];
+            return Ok(vec![]);
         }
-        let mut rows: Vec<Value> = media["rows"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let choices = media["rows"].as_array().cloned().unwrap_or_default();
+        // A choice shows its control only with a lease; its change goes to
+        // the panel's listener, which writes `media.*` through the host.
+        let leases = self.fields(&Value::Array(
+            choices.iter().map(|r| r["id"].clone()).collect(),
+        ))?;
+        let mut rows: Vec<Value> = choices
+            .iter()
             .map(|r| {
                 json!({"id":r["id"],"section":"media","group":"Proxies","label":r["label"],
                     "control":"choice","value":r["value"],"options":r["options"],
-                    "detail":r["detail"],"disabled":false})
+                    "detail":r["detail"],"binding":leases[r["id"].as_str().unwrap_or_default()],
+                    "disabled":false})
             })
             .collect();
         let used = &media["used"];
@@ -193,10 +198,10 @@ impl Backend {
                 "actionLabel":"Show in Finder"}),
         ]);
         rows.extend(protected_folders_row(&media["folders"]));
-        rows
+        Ok(rows)
     }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
-        let media = self.media_rows();
+        let media = self.media_rows()?;
         let Some(p) = self.published() else {
             return Ok(media);
         };
