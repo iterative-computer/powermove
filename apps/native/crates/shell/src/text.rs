@@ -26,6 +26,14 @@ pub struct TextField {
     fill: bool,
 }
 impl EventEmitter<TextEvent> for TextField {}
+/// Whether `window` can host a native field (an AppKit window, not a
+/// headless test window).
+pub fn available(window: &Window) -> bool {
+    matches!(
+        HasWindowHandle::window_handle(window).map(|h| h.as_raw()),
+        Ok(RawWindowHandle::AppKit(_))
+    )
+}
 impl TextField {
     pub fn new(
         kind: TextKind,

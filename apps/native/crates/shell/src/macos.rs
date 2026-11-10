@@ -170,7 +170,7 @@ pub fn open_editor(cx: &mut App) {
     open_editor_window(cx, true, None, None);
 }
 /// Opens a new editor window as a native tab of the window with session id `leader`.
-pub(crate) fn open_editor_tab(cx: &mut App, leader: u64) {
+pub fn open_editor_tab(cx: &mut App, leader: u64) {
     open_editor_window(cx, true, None, Some(leader).filter(|l| *l != 0));
 }
 fn next_window_id() -> u64 {
@@ -243,6 +243,10 @@ fn open_editor_window(
                     h.join_tabs(leader);
                 }
             }
+            // A restored frame lands before GPUI hears of resizes: take the
+            // content size now, or the first frames lay out at the default
+            // size (Home showed a band of empty window at launch).
+            window.bounds_changed(cx);
             let integration = cx
                 .try_global::<integration::AppIntegration>()
                 .map(|g| g.0.clone())

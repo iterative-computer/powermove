@@ -718,7 +718,8 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("star", "Star", "star"),
 ];
 const SHAPE_SEGMENT: isize = 5;
-const TOOLBAR: [&str; 6] = [
+const TOOLBAR: [&str; 7] = [
+    "home",
     "toggleSidebar",
     "title",
     "tools",
@@ -748,6 +749,11 @@ define_class!(
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
             toolbar_ids()
         }
+        /// Home is the toolbar's one selectable item: selected while it shows.
+        #[unsafe(method_id(toolbarSelectableItemIdentifiers:))]
+        fn selectable(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
+            NSArray::from_retained_slice(&[NSString::from_str("home")])
+        }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
             self.make(id)
@@ -757,8 +763,8 @@ define_class!(
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let mut v: Vec<_> = TOOLBAR.iter().map(|s| NSString::from_str(s)).collect();
     let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
-    v.insert(2, NSString::from_str(&f.to_string()));
-    v.insert(4, NSString::from_str(&f.to_string()));
+    v.insert(3, NSString::from_str(&f.to_string()));
+    v.insert(5, NSString::from_str(&f.to_string()));
     NSArray::from_retained_slice(&v)
 }
 fn symbol(s: &str, label: &str) -> Retained<NSImage> {
@@ -872,6 +878,7 @@ impl ToolbarDelegate {
             return Some(item);
         }
         let (sym, label) = match name.as_str() {
+            "home" => ("house", "Projects"),
             "toggleSidebar" => ("sidebar.leading", "Sidebar"),
             "agent" => ("sparkles", "Agent"),
             "export" => ("square.and.arrow.up", "Export"),
@@ -898,6 +905,19 @@ impl ToolbarDelegate {
         };
         b.setAccessibilityIdentifier(Some(&NSString::from_str(&format!("shell.toolbar.{name}"))));
         b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
+        if name == "home" {
+            // v1's home tab at the leading edge of the titlebar (`.project-home`).
+            item.setImage(Some(&symbol(sym, label)));
+            unsafe {
+                item.setTarget(Some(target));
+                item.setAction(Some(sel!(act:)));
+            }
+            item.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
+            item.setBordered(true);
+            item.setLabel(&NSString::from_str(label));
+            item.setToolTip(Some(&NSString::from_str(label)));
+            return Some(item);
+        }
         if name == "toggleSidebar" || name == "toggleInspector" {
             // Apple's sidebar toggles: a plain toolbar item, never a filled tint.
             item.setImage(Some(&symbol(sym, label)));
@@ -1083,6 +1103,8 @@ pub struct Host {
     /// Title and subtitle of the toolbar's document item.
     title: Retained<NSTextField>,
     subtitle: Retained<NSTextField>,
+    /// Home shows over the docks (`set_home`).
+    home: Cell<bool>,
 }
 /// Static palette rows: every menu command (including display-only menus and
 /// tools) plus workspace presets. Dynamic rows are added when it opens.
@@ -1258,6 +1280,7 @@ impl Host {
             definition: RefCell::new(None),
             title,
             subtitle,
+            home: Cell::new(false),
         }));
         let weak = Rc::downgrade(&host);
         let native_rects = host.borrow().native_panels.clone();
@@ -1648,6 +1671,27 @@ impl Host {
         self.title.setStringValue(&NSString::from_str(title));
         self.subtitle.setStringValue(&NSString::from_str(subtitle));
         layout_title(&self.title, &self.subtitle, &self.tokens);
+    }
+    /// Home over the window: the Home item reads selected, and the
+    /// document's own controls (tools, sidebars, Export, the title) step
+    /// aside, as v1's titlebar hides Export and the panel library on Home.
+    pub fn set_home(&self, home: bool) {
+        if self.home.get() == home {
+            return;
+        }
+        self.home.set(home);
+        let id = NSString::from_str("home");
+        self._toolbar
+            .setSelectedItemIdentifier(home.then_some(&*id));
+        for item in self._toolbar.items().to_vec() {
+            let name = item.itemIdentifier().to_string();
+            if matches!(
+                name.as_str(),
+                "toggleSidebar" | "title" | "tools" | "export" | "toggleInspector"
+            ) {
+                item.setHidden(home);
+            }
+        }
     }
     /// Current toolbar title and subtitle (tests, accessibility checks).
     pub fn document_title(&self) -> (String, String) {

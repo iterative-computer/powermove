@@ -27,6 +27,11 @@ pub trait Integration {
     ) -> Option<AnyElement> {
         None
     }
+    /// Home (v1's Projects screen), drawn in place of the docks while the
+    /// window shows it; `None` = the docks.
+    fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
+        None
+    }
     /// Commands that cannot run now, so menus never offer a silent no-op.
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()

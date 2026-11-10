@@ -1256,6 +1256,47 @@ pub fn tooltip(
         .into()
     }
 }
+impl Editor {
+    /// Home fills the window below the toolbar: no docks, no viewer slot,
+    /// no native panel bodies and no status bar (v1's Projects screen).
+    fn render_home(&mut self, home: AnyElement, top: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        if let Some(h) = &self.host {
+            let h = h.borrow();
+            h.viewer_rect.set(None);
+            h.canvas_focus.set(false);
+            h.keyboard_control_focus.set(true);
+            h.publish_menu_state(&self.menu_state(cx));
+            h.native_panels.borrow_mut().clear();
+        }
+        if let Some(integration) = &self.integration {
+            integration.shown_panels(&[], cx);
+        }
+        let t = &self.tokens;
+        let (ground, ground_alpha) = t.ground();
+        div()
+            .id("editor")
+            .role(Role::Group)
+            .accessibility_id("shell.editor")
+            .aria_label("Powermove editor")
+            .size_full()
+            .relative()
+            .bg(tint(ground, ground_alpha))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                if let Some(i) = &this.integration {
+                    i.drop_paths(paths.paths().to_vec(), cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(top))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(home),
+            )
+    }
+}
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panels = self.panels(cx);
@@ -1273,6 +1314,9 @@ impl Render for Editor {
             .host
             .as_ref()
             .map_or(m.toolbar, |h| h.borrow().toolbar_inset());
+        if let Some(home) = self.integration.clone().and_then(|i| i.home(w, cx)) {
+            return self.render_home(home, top, cx).into_any_element();
+        }
         self.dock_bounds = Rect {
             x: m.gap,
             y: top + m.gap,
@@ -2119,6 +2163,7 @@ impl Render for Editor {
                     )),
             ),
         )
+        .into_any_element()
     }
 }
 
