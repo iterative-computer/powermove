@@ -850,10 +850,16 @@ pub fn run_child() -> Result<()> {
                 0 => String::new(),
                 n => format!("; {n} more effects are missing too"),
             };
-            anyhow::bail!(
-                "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
-                missing.effect
-            );
+            match &missing.revision {
+                Some(revision) => anyhow::bail!(
+                    "{} version {revision} was saved by a newer Powermove ({uses}{others}). Export it there, or turn the effect off, then export again.",
+                    missing.effect
+                ),
+                None => anyhow::bail!(
+                    "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
+                    missing.effect
+                ),
+            }
         }
         if let Some(failure) = failures.iter().find(|failure| {
             matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }

@@ -1034,6 +1034,7 @@ impl Project {
     ) -> Result<(bool, Option<u64>), TransactionError> {
         let entry_id = self.entry.as_ref().map(|e| e.id);
         let before = self.store.current().clone();
+        crate::fault_injection::hit(crate::fault_injection::Stage::BeforeApply);
         let applied = self.store.kernel_apply(
             body,
             origin,
@@ -1046,6 +1047,7 @@ impl Project {
         let Some(applied) = applied else {
             return Ok((false, entry_id));
         };
+        crate::fault_injection::hit(crate::fault_injection::Stage::AfterApply);
         if self.entry.is_some() {
             self.fold(writer, origin, label, applied, false);
             return Ok((true, entry_id));
@@ -1059,6 +1061,7 @@ impl Project {
                 &before,
                 applied.scopes,
             );
+            crate::fault_injection::hit(crate::fault_injection::Stage::AfterRecord);
         } else {
             self.store.kernel_outside_write();
         }

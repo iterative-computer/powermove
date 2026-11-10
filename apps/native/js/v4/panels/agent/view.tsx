@@ -842,9 +842,10 @@ export function AgentView({
           {working ? (
             <UI.ToolbarItem
               id="agent-stop"
-            style={keep}
               label="Stop current run"
               title="Stop Current Run"
+              metadata={{ symbol: "stop.circle.fill" }}
+              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
               disabled={s.stopping}
               onClick={() => {
                 if (!s.stopping) send({ type: "stop" });
@@ -853,8 +854,10 @@ export function AgentView({
           ) : (
             <UI.ToolbarItem
               id="agent-send"
-            style={keep}
               label="Send"
+              title="Send"
+              metadata={{ symbol: "arrow.up.circle.fill" }}
+              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
               disabled={disabled || !s.sendable}
               onClick={() => {
                 if (!disabled && s.sendable) send({ type: "submit" });

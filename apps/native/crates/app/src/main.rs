@@ -1,3 +1,4 @@
+mod after_open;
 mod agent_clients;
 mod alert;
 mod builtins;
@@ -62,6 +63,7 @@ mod session;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
+mod skimming;
 mod smoke;
 mod store_window;
 #[cfg(test)]
@@ -117,6 +119,7 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
 }
 
 fn main() -> Result<()> {
+    diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let headless = args
         .first()
@@ -261,6 +264,7 @@ fn main() -> Result<()> {
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
+    diag::line(serde_json::json!({"startup":"engine"}));
     // Filled once the library is attached; the MCP server waits for that too.
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
@@ -280,6 +284,7 @@ fn main() -> Result<()> {
             let broker = broker.clone();
             move |host, window, cx| {
                 if !started.replace(true) {
+                    diag::line(serde_json::json!({"startup":"window"}));
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     notifications::install(cx);
@@ -313,6 +318,10 @@ fn main() -> Result<()> {
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
+                entity.update(cx, |c, cx| {
+                    c.apply_skimming(cx);
+                    c.load_skimming(cx);
+                });
                 // Each window owns its project: MCP's slot for this window, and
                 // the window wakes only when MCP changes that slot.
                 let key = window.window_handle().window_id().as_u64();

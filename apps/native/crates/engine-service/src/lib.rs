@@ -259,6 +259,11 @@ pub struct ViewerStatus {
     pub wants_display: bool,
     /// GPU devices lost and rebuilt under this viewer.
     pub device_losses: u64,
+    /// Times the worker started again after a panic (`supervise`).
+    pub restarts: u64,
+    /// A capture asked for (`capture_next`) that can't be delivered: the
+    /// viewer stopped after an internal error. Waiters stop waiting on it.
+    pub capture_failed: Option<String>,
     /// Clips the viewer plays from a proxy (View › Media). Never counted as
     /// originals.
     pub proxied: usize,
@@ -294,9 +299,15 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let what = match &missing.revision {
+            Some(revision) => format!(
+                "Effect saved by a newer Powermove: {} version {revision}",
+                missing.effect
+            ),
+            None => format!("Effect not installed: {}", missing.effect),
+        };
         Some(format!(
-            "Effect not installed: {}, bypassed on {}{}",
-            missing.effect,
+            "{what}, bypassed on {}{}",
             layers(missing.layers),
             more(self.missing_effects.len() - 1)
         ))
@@ -308,6 +319,13 @@ struct View {
     content: u64,
     dirty: bool,
     capture: bool,
+    /// A capture taken into a frame whose pixels haven't landed yet; a
+    /// restarted worker asks for it again.
+    capture_owed: bool,
+    /// The last `SetLoop` and `AudioScrub`, which a restarted worker's new
+    /// transport takes again.
+    looping: Option<pm_protocol::common::TickRange>,
+    audio_scrub: bool,
     overlays: OverlayGeometry,
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
@@ -323,6 +341,18 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    /// Auto draws dragged frames of a slow project reduced (an editor's
+    /// viewer); otherwise every paused frame is exact.
+    adapt_drags: bool,
+    /// The skimmer (Final Cut's): while paused the viewer shows this time,
+    /// and the playhead stays where it is.
+    skim: Option<Ticks>,
+    /// The skimmer's last position and pointer time, for its velocity.
+    skim_input: Option<f64>,
+    skim_rate: pm_protocol::common::PlaybackRate,
+    /// The skimmer moved since the worker last looked.
+    skim_moved: bool,
+    skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
 }
@@ -342,6 +372,8 @@ impl View {
             TransportCommand::PlayAround { .. } => {
                 self.desired_rate = pm_protocol::common::PlaybackRate::NORMAL
             }
+            TransportCommand::SetLoop { range } => self.looping = range,
+            TransportCommand::AudioScrub { enabled } => self.audio_scrub = enabled,
             _ => {}
         }
         self.commands.push_back(cmd);
@@ -356,6 +388,8 @@ struct State {
     next: u64,
     content: u64,
     stop: bool,
+    /// The worker stopped for good after repeated panics (`supervise`).
+    halted: Option<String>,
     subscribers: Vec<async_channel::Sender<()>>,
 }
 type ScopeTap = (
@@ -375,8 +409,18 @@ struct Shared {
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     lose_device: std::sync::atomic::AtomicBool,
+    /// Test hook: the worker panics once, as a bug in a frame would.
+    #[cfg(test)]
+    panic_once: std::sync::atomic::AtomicBool,
+    /// Test hook: the next this many frames panic while rendering (a frame
+    /// already holding its capture).
+    #[cfg(test)]
+    panic_frames: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     invalid_call: std::sync::atomic::AtomicBool,
+    /// Every still costs more than a refresh (drag adaptation tests).
+    #[cfg(test)]
+    slow_stills: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -508,6 +552,50 @@ impl Viewer {
                 v.stamp.sequence += 1;
                 v.dirty = true;
             }
+            Ok(())
+        })
+    }
+    /// Auto draws this viewer's dragged frames at reduced resolution while
+    /// the project is slower than a refresh, and the frame exact once the
+    /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    pub fn adapt_drags(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.adapt_drags = on;
+            Ok(())
+        })
+    }
+    /// The skimmer: while paused the viewer shows `time` (on the drag path:
+    /// reduced while it moves, exact once it rests) without moving the
+    /// playhead; `None` returns to the playhead's frame. `input` is the
+    /// pointer event's host time; the pointer's speed sets the skim
+    /// audio's direction and speed.
+    pub fn skim(&self, time: Option<Ticks>, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.edit(|v| {
+            if v.skim == time {
+                return Ok(());
+            }
+            v.skim_rate = match (v.skim, time, v.skim_input) {
+                (Some(a), Some(b), Some(at)) if input > at => skim_rate(
+                    (b.get() - a.get()) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                    input - at,
+                ),
+                _ => pm_protocol::common::PlaybackRate::NORMAL,
+            };
+            v.skim = time;
+            v.skim_input = Some(input);
+            v.skim_moved = true;
+            v.input = Some(input);
+            v.pipeline.request = trace::now();
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Audio skimming: grains of the mix follow the skimmer.
+    pub fn skim_audio(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.skim_audio = Some(on);
             Ok(())
         })
     }
@@ -690,6 +778,9 @@ impl Viewer {
         })
     }
     pub fn capture_next(&self) -> Result<()> {
+        if let Some(why) = &self.shared.state.lock().unwrap().halted {
+            anyhow::bail!("The viewer stopped after an internal error: {why}");
+        }
         self.edit(|v| {
             v.capture = true;
             v.stamp.sequence += 1;
@@ -752,8 +843,11 @@ impl EngineService {
             gpu.queue.clone(),
             Some(fonts.clone()),
         )?;
-        let mut engine = render::Engine::with_shader_cache(gpu, shader_cache)?;
+        // Built-in definitions load first thing on the service thread
+        // (`run`): the app's window doesn't wait for a cold shader cache.
+        let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
+        engine.builtins_pending = true;
         let mut service = Self::start_engine(device, engine)?;
         service.layer_rasters = Some(layer_rasters);
         Ok(service)
@@ -784,7 +878,13 @@ impl EngineService {
             #[cfg(test)]
             lose_device: Default::default(),
             #[cfg(test)]
+            panic_once: Default::default(),
+            #[cfg(test)]
+            panic_frames: Default::default(),
+            #[cfg(test)]
             invalid_call: Default::default(),
+            #[cfg(test)]
+            slow_stills: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
@@ -803,7 +903,7 @@ impl EngineService {
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
-            .spawn(move || run(engine, worker, wakes))?;
+            .spawn(move || supervise(engine, worker, wakes))?;
         Ok(Self {
             shared,
             thread: Some(thread),
@@ -889,6 +989,9 @@ impl EngineService {
                 content,
                 dirty: true,
                 capture: false,
+                capture_owed: false,
+                looping: None,
+                audio_scrub: false,
                 overlays: OverlayGeometry::default(),
                 overlay_time: None,
                 locked_provider: None,
@@ -906,6 +1009,12 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                adapt_drags: false,
+                skim: None,
+                skim_input: None,
+                skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
+                skim_moved: false,
+                skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
             },
@@ -952,6 +1061,9 @@ struct Runtime {
     scrub: bool,
     /// The last frame showed stand-ins: the landed counter it was drawn at.
     stand_in: Option<u64>,
+    /// A dragged frame was drawn below full resolution: draw it exact once
+    /// the playhead has stayed put until then (host s).
+    refine_at: Option<f64>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1126,13 +1238,139 @@ const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
-fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+/// The skim audio's J/K/L rate for a skimmer that moved `seconds` of media
+/// in `elapsed` seconds: its direction, and 2x once it moves faster than
+/// one and a half times real time.
+fn skim_rate(seconds: f64, elapsed: f64) -> pm_protocol::common::PlaybackRate {
+    let speed = seconds / elapsed;
+    let num = if speed.abs() > 1.5 { 2 } else { 1 };
+    pm_protocol::common::PlaybackRate {
+        num: if seconds < 0. { -num } else { num },
+        den: 1,
+    }
+}
+/// Runs the worker; a panic in it (a bug a frame hit) must not leave every
+/// viewer blank, or poison the state the UI thread reads. The worker starts
+/// again on a fresh engine, as after a lost GPU, every view draws again, and
+/// the viewer reports what happened (its error line and the Error Log). Three
+/// panics within a minute stop it with that error showing.
+fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+    let (fonts, compat, cache) = (
+        engine.fonts.clone(),
+        engine.compat.clone(),
+        engine.shader_cache.clone(),
+    );
+    let mut engine = Some(engine);
+    let mut recent = VecDeque::<std::time::Instant>::new();
+    while let Some(current) = engine.take() {
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(current, shared.clone(), &wakes)
+        }));
+        let Err(panic) = turn else { return };
+        shared.state.clear_poison();
+        shared.device.clear_poison();
+        shared.scopes.clear_poison();
+        let detail = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".into());
+        eprintln!("Viewer worker panicked: {detail}");
+        let now = std::time::Instant::now();
+        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        recent.push_back(now);
+        let next = (recent.len() < 3)
+            .then(|| {
+                pm_gpu::Gpu::new("pm-engine-service")
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .and_then(|gpu| render::Engine::with_shader_cache(gpu, cache.clone()))
+            })
+            .and_then(Result::ok);
+        let mut state = shared.state.lock().unwrap();
+        let restarted = next.is_some();
+        if !restarted {
+            state.halted = Some(detail.clone());
+        }
+        let now = trace::now();
+        for v in state.views.values_mut() {
+            v.status.error = Some(if restarted {
+                format!("The viewer restarted after an internal error.\n{detail}")
+            } else {
+                format!("The viewer stopped after an internal error.\n{detail}")
+            });
+            v.status.restarts += u64::from(restarted);
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            if restarted {
+                resume(v, now);
+            } else if std::mem::take(&mut v.capture) | std::mem::take(&mut v.capture_owed) {
+                v.status.capture_failed = Some(format!(
+                    "The viewer stopped after an internal error before the frame was captured.\n{detail}"
+                ));
+            }
+        }
+        state.notify();
+        if state.stop {
+            return;
+        }
+        drop(state);
+        if let Some(mut next) = next {
+            if let Some(fonts) = &fonts {
+                next.set_fonts(fonts.clone());
+            }
+            next.set_compat(compat.clone());
+            *shared.device.lock().unwrap() = next.metal().to_owned();
+            engine = Some(next);
+        }
+    }
+}
+
+/// What a restarted worker owes a view its old worker held: the transport
+/// (time, play state and rate, loop, audio scrub; the new transport opens
+/// its audio from the view's config) ahead of any command still queued, and
+/// a capture whose pixels never landed.
+fn resume(v: &mut View, now: f64) {
+    v.capture |= v.capture_owed;
+    let Some(clock) = v.status.clock else {
+        return;
+    };
+    let at = pm_protocol::common::HostMicros::new((now * 1e6) as u64)
+        .unwrap_or(pm_protocol::common::HostMicros::ZERO);
+    let mut restore = vec![
+        TransportCommand::SetLoop { range: v.looping },
+        TransportCommand::AudioScrub {
+            enabled: v.audio_scrub,
+        },
+        TransportCommand::Seek {
+            time: clock.media_time_at(at),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        },
+    ];
+    // The rate the old transport was running or starting at.
+    if v.desired_rate.num != 0 {
+        restore.push(TransportCommand::Play {
+            rate: v.desired_rate,
+        });
+    }
+    for cmd in restore.into_iter().rev() {
+        v.commands.push_front(cmd);
+    }
+}
+
+fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
     objc2::rc::autoreleasepool(|_| {
         objc2_foundation::NSThread::currentThread()
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
+    if std::mem::take(&mut engine.builtins_pending)
+        && let Err(error) = engine.load_builtin_definitions()
+    {
+        // Frames still draw; effects report the failure where they're used.
+        eprintln!("Built-in effect definitions failed to load: {error:#}");
+        engine.definition_failure = Some(error.to_string());
+    }
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
@@ -1181,6 +1419,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             engine.raise_validation_error();
+        }
+        #[cfg(test)]
+        if shared
+            .panic_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
         engine.poll();
@@ -1249,10 +1494,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
         while i < flights.len() {
+            // Retired once its completion handler has recorded the outcome:
+            // Metal reports the status before that handler runs on its own
+            // queue, and a frame read in between looked failed (gpu_ok still
+            // false) and was never drawn again.
             if !matches!(
                 flights[i].submission.command.status(),
                 metal::MTLCommandBufferStatus::Completed | metal::MTLCommandBufferStatus::Error
-            ) {
+            ) || flights[i].submission.trace.lock().unwrap().completed == 0.
+            {
                 i += 1;
                 continue;
             }
@@ -1305,6 +1555,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     r.auto
                         .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
+                if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    #[cfg(test)]
+                    let cost = if shared
+                        .slow_stills
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        f64::MAX
+                    } else {
+                        cost
+                    };
+                    r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
@@ -1312,12 +1575,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
-                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
                         "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
                 if v.stamp != f.stamp {
                     v.status.stale_rejections += 1;
+                    // Its readback is for a stamp no one shows: ask again.
+                    v.capture |= f.submission.readback.is_some();
                     continue;
                 }
                 if represent && v.commands.is_empty() {
@@ -1357,6 +1622,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         .map(|_| f.submission.pixels())
                         .or(kept),
                 });
+                if f.submission.readback.is_some() {
+                    v.capture_owed = false;
+                }
             }
             state.notify();
         }
@@ -1463,6 +1731,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     ahead: 1.,
                     scrub: false,
                     stand_in: None,
+                    refine_at: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -1493,11 +1762,30 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             while let Some(cmd) = v.commands.pop_front() {
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    r.refine_at = None;
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
             if let Some(solo) = v.monitor.take() {
                 r.transport.monitor(solo);
+            }
+            if std::mem::take(&mut v.skim_moved) {
+                // A skim draws on the drag path; leaving returns exact.
+                r.scrub = v.skim.is_some();
+                r.refine_at = None;
+                let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
+                    (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
+                });
+                if let Some(a) = &r.transport.audio {
+                    a.send(audio::AudioCtl::Skim {
+                        at: v.skim.map(Ticks::get),
+                        rate: v.skim_rate,
+                        grain_ms: frame_ms.max(pm_audio::transport::GRAIN_MIN_MS as u64),
+                    });
+                }
+            }
+            if let (Some(on), Some(a)) = (v.skim_audio.take(), &r.transport.audio) {
+                a.send(audio::AudioCtl::SkimAudio(on));
             }
             let sample = r.transport.poll((now * 1e6) as i64);
             changed |= v
@@ -1558,6 +1846,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
             }
+            // The playhead stopped on a frame dragged at reduced resolution.
+            // A new picture of the same time: its own `frame:rendered`.
+            if !playing && r.refine_at.is_some_and(|at| now >= at) {
+                r.refine_at = None;
+                r.scrub = false;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
             }
@@ -1598,7 +1894,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     plain
                 }
             } else {
-                sample.media_time
+                // Paused under the skimmer: its time, not the playhead's.
+                v.skim.filter(|_| !playing).unwrap_or(sample.media_time)
             };
             let time =
                 Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
@@ -1633,7 +1930,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     time,
                     output: v.config.output,
                     moment,
-                    scale: v.quality.scale(&r.auto, moment),
+                    // A capture reads the exact picture: Auto never adapts it.
+                    scale: v.quality.scale(
+                        &r.auto,
+                        if capture || (moment == Moment::Scrub && !v.adapt_drags) {
+                            Moment::Paused
+                        } else {
+                            moment
+                        },
+                    ),
                     decode_deadline: playing.then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
                     }),
@@ -1646,7 +1951,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     OverlayGeometry::default()
                 },
                 provider: v.locked_provider.clone(),
-                capture: std::mem::take(&mut v.capture),
+                capture: {
+                    v.capture_owed |= v.capture;
+                    std::mem::take(&mut v.capture)
+                },
                 due,
                 mastering: v.mastering,
                 resources: v.resources.clone(),
@@ -1701,6 +2009,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 target: due.unwrap_or(0.),
                 requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
                 predicted: plan.map_or(0., |p| p.shown),
+                count_work: recorder.is_some(),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -1732,6 +2041,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 engine.scopes_changed();
             }
             engine.scope_frames = tap;
+            #[cfg(test)]
+            if shared
+                .panic_frames
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                panic!("injected frame failure");
+            }
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
@@ -1801,6 +2122,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
+                            if spec.moment == Moment::Scrub && spec.scale < 1. {
+                                r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
                             r.refusals = 0;
@@ -1909,6 +2233,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let waiting = runtime
                 .values()
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
+            // A dragged frame waiting to be drawn exact wakes the loop then.
+            let settle = runtime
+                .values()
+                .filter_map(|r| r.refine_at)
+                .map(|at| (at - now).max(0.001))
+                .fold(f64::INFINITY, f64::min);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             // Only back-offs pending, nothing playing: sleep until the first is due.
@@ -1953,6 +2283,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
+            let timeout = if settle.is_finite() {
+                timeout.min(Duration::from_secs_f64(settle))
+            } else {
+                timeout
+            };
             let _ = wakes.recv_timeout(timeout);
         }
     }
@@ -2221,6 +2556,7 @@ mod worker_tests {
     fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
         let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
             effect: effect.into(),
+            revision: None,
             layers,
         };
         let mut status = ViewerStatus {
@@ -2230,6 +2566,17 @@ mod worker_tests {
         assert_eq!(
             status.notice().as_deref(),
             Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+        );
+        let newer = ViewerStatus {
+            missing_effects: vec![pm_render::effects::versions::MissingEffect {
+                revision: Some("99".into()),
+                ..missing("blur", 1)
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            newer.notice().as_deref(),
+            Some("Effect saved by a newer Powermove: blur version 99, bypassed on 1 layer")
         );
         status.layer_failures = vec![pm_render::LayerFailure {
             composition: "c".into(),
@@ -2262,11 +2609,188 @@ mod worker_tests {
         assert_eq!(output.resized(100, 50), output);
     }
 
+    /// Tests that build a whole second engine (every built-in translated)
+    /// run one at a time, so their limits measure the engine, not contention.
+    static REBUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A panic in the worker (a bug a frame hit) restarts it: the viewer
+    /// reports it and draws the same picture again, and the UI thread's
+    /// reads of its status keep working.
+    #[test]
+    fn a_worker_panic_restarts_the_worker_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let service = EngineService::start(pm_gpu::Gpu::new("panic-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .panic_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().restarts == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Reported until the restarted worker draws a good frame.
+        let error = v.status().error;
+        assert!(
+            error.is_none()
+                || error.as_deref().is_some_and(|e| e.starts_with(
+                    "The viewer restarted after an internal error.\ninjected viewer failure"
+                )),
+            "{error:?}"
+        );
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None, "a good frame clears the report");
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before);
+    }
+
+    fn wait_for(v: &Viewer, what: &str, ok: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = v.status();
+            if ok(&status) {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}: {status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn seconds(t: f64) -> Ticks {
+        Ticks::new((t * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// A restart keeps each viewer's transport: a paused viewer stays where
+    /// it was, a playing one keeps playing from where it was (not stopped at
+    /// zero), with its loop.
+    #[test]
+    fn a_worker_restart_keeps_time_play_state_and_loop() {
+        use pm_protocol::clock::{SeekMode, TransportState};
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let service = EngineService::start(pm_gpu::Gpu::new("restart-transport").unwrap()).unwrap();
+        let paused = shapes_viewer(&service, None);
+        let playing = shapes_viewer(&service, None);
+        paused
+            .command(TransportCommand::Seek {
+                time: seconds(1.5),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let range = pm_protocol::common::TickRange {
+            start: seconds(1.),
+            end: seconds(2.5),
+        };
+        for cmd in [
+            TransportCommand::SetLoop { range: Some(range) },
+            TransportCommand::Seek {
+                time: seconds(1.),
+                mode: SeekMode::Exact,
+            },
+            TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            },
+        ] {
+            playing.command(cmd).unwrap();
+        }
+        wait_for(&paused, "paused at 1.5 s", |s| {
+            s.clock.is_some_and(|c| c.media_time == seconds(1.5))
+        });
+        wait_for(&playing, "playing in the loop", |s| {
+            s.clock
+                .is_some_and(|c| c.state != TransportState::Stopped && c.loop_range == Some(range))
+        });
+        service
+            .shared
+            .panic_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        wait_for(&paused, "restart", |s| s.restarts == 1);
+        // The new transport's first samples.
+        // A frame of the restart's stamp: drawn by the new worker, whose
+        // transport took the restored commands first.
+        let p = wait_for(&paused, "paused after restart", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == paused.stamp().unwrap())
+        });
+        let clock = p.clock.unwrap();
+        assert_eq!(clock.state, TransportState::Stopped);
+        assert_eq!(clock.media_time, seconds(1.5), "still at 1.5 s, not zero");
+        let s = wait_for(&playing, "playing after restart", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == playing.stamp().unwrap())
+                && s.clock.is_some_and(|c| c.state != TransportState::Stopped)
+        });
+        let clock = s.clock.unwrap();
+        assert_eq!(clock.rate, pm_protocol::common::PlaybackRate::NORMAL);
+        let heard = clock.media_time_at(
+            pm_protocol::common::HostMicros::new((trace::now() * 1e6) as u64).unwrap(),
+        );
+        assert!(
+            heard >= range.start && heard < range.end,
+            "plays on inside its loop: {heard:?}"
+        );
+        wait_for(&playing, "loop kept", |s| {
+            s.clock.is_some_and(|c| c.loop_range == Some(range))
+        });
+    }
+
+    /// A capture whose frame was rendering when the worker panicked is
+    /// drawn by the restarted worker; nobody asks again.
+    #[test]
+    fn a_capture_in_flight_at_a_panic_is_delivered_after_restart() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let service = EngineService::start(pm_gpu::Gpu::new("restart-capture").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .panic_frames
+            .store(1, std::sync::atomic::Ordering::Release);
+        v.capture_next().unwrap();
+        wait_for(&v, "restart", |s| s.restarts == 1);
+        let after = drawn(&v);
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before);
+        assert_eq!(after.capture_failed, None);
+    }
+
+    /// When the worker stops for good (three panics in a minute), a pending
+    /// capture fails with the reason and later captures are refused: no
+    /// waiter waits forever.
+    #[test]
+    fn a_capture_pending_when_the_viewer_stops_fails() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let service = EngineService::start(pm_gpu::Gpu::new("stop-capture").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        service
+            .shared
+            .panic_frames
+            .store(3, std::sync::atomic::Ordering::Release);
+        v.capture_next().unwrap();
+        let status = wait_for(&v, "capture failed", |s| s.capture_failed.is_some());
+        assert_eq!(status.restarts, 2);
+        assert!(
+            status
+                .capture_failed
+                .unwrap()
+                .contains("injected frame failure")
+        );
+        assert!(v.capture_next().is_err());
+    }
+
     /// A removed or reset GPU: the worker rebuilds its device, points the
     /// viewer's layer and the service's device at it, and the viewer draws
     /// again without anyone reopening it.
     #[test]
     fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
         let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
         let layer = metal::MetalLayer::new();
         layer.set_device(&service.metal_device());
@@ -2306,6 +2830,157 @@ mod worker_tests {
             new.as_ptr(),
             "the layer follows the rebuild"
         );
+    }
+
+    /// Metal reports a command buffer complete before its completion handler
+    /// runs; a frame retired in between must not read as failed. Under load
+    /// the dragged frame then never showed (the bench's "scrub stuck").
+    #[test]
+    fn a_late_completion_handler_never_loses_a_dragged_frame() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("late-completion-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        crate::render::LATE_COMPLETION_MS.store(30, std::sync::atomic::Ordering::Relaxed);
+        for (i, at) in (1..=8).map(|i| {
+            (
+                i,
+                Ticks::new(i * pm_protocol::common::TICKS_PER_SECOND / 6).unwrap(),
+            )
+        }) {
+            v.scrub(at).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                // Display ticks keep the worker polling, as a display link and
+                // the bench do: it looks at its flights while the handler is late.
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status.frame.as_ref().is_some_and(|f| {
+                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "drag step {i} never showed: {status:?}"
+                );
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+        crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
+    }
+
+    /// The skimmer shows its time without moving the playhead, and the
+    /// viewer returns to the playhead's frame when the pointer leaves.
+    #[test]
+    fn the_skimmer_shows_its_frame_and_leaves_the_playhead() {
+        let service = EngineService::start(pm_gpu::Gpu::new("skim-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let frame = |v: &Viewer, at: Ticks| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+                {
+                    return status;
+                }
+                assert!(std::time::Instant::now() < deadline, "{at:?}: {status:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let playhead = Ticks::new(pm_protocol::common::TICKS_PER_SECOND / 3).unwrap();
+        v.scrub(playhead).unwrap();
+        frame(&v, playhead);
+        for (i, at) in [1, 2, 3, 2]
+            .map(|s| Ticks::new(s * pm_protocol::common::TICKS_PER_SECOND / 2).unwrap())
+            .into_iter()
+            .enumerate()
+        {
+            v.skim(Some(at), trace::now() + i as f64 * 0.016).unwrap();
+            let status = frame(&v, at);
+            assert_eq!(
+                status.clock.unwrap().media_time,
+                playhead,
+                "skimming never moves the playhead"
+            );
+        }
+        v.skim(None, trace::now()).unwrap();
+        frame(&v, playhead);
+        v.retire();
+    }
+
+    #[test]
+    fn skim_rates_follow_the_pointer() {
+        assert_eq!(skim_rate(0.05, 0.1).num, 1);
+        assert_eq!(skim_rate(-0.05, 0.1).num, -1);
+        assert_eq!(skim_rate(0.4, 0.1).num, 2);
+        assert_eq!(skim_rate(-0.4, 0.1).num, -2);
+    }
+
+    /// A slow project's drag draws reduced; the stopped frame is drawn again
+    /// exact, as a picture of its own.
+    #[test]
+    fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();
+        let shown = |v: &Viewer| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !v.status().frame.is_some_and(|f| f.gpu_ok) {
+                assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_stills
+            .store(true, std::sync::atomic::Ordering::Release);
+        shown(&v);
+        let at = Ticks::from_whole_seconds(1);
+        v.scrub(at).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let reduced = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.gpu_ok) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            reduced.scale,
+            crate::policy::AUTO_FLOOR,
+            "a slow drag is reduced"
+        );
+        // Settled: the same time again, exact, as a picture of its own (a
+        // new stamp: the window tells extensions `frame:rendered` again).
+        let exact = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale == 1.) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline, "never drawn exact");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(exact.stamp.sequence > reduced.stamp.sequence);
+        // A viewer that does not adapt keeps every paused frame exact.
+        let plain = shapes_viewer(&service, None);
+        shown(&plain);
+        plain.scrub(at).unwrap();
+        let f = loop {
+            if let Some(f) = plain.status().frame.filter(|f| f.time == at) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(f.scale, 1.);
+        v.retire();
+        plain.retire();
     }
 
     /// A validation error fails the frame that raised it, visibly, without a

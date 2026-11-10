@@ -112,3 +112,12 @@ fn open_errors_only_offer_finder_for_existing_paths_and_ok_is_default() {
     assert_eq!(a.message, "“Film” couldn’t be opened.");
     assert!(a.informative.contains("recovery journal"));
 }
+#[test]
+fn stopped_project_offers_reopen() {
+    let a = stopped("Launch Film");
+    assert_eq!(a.message, "“Launch Film” stopped after an internal error.");
+    assert_eq!(a.labels(), ["Reopen", "Later"]);
+    assert_eq!(on_return(&a), Some(Action::Reopen));
+    assert_eq!(on_key(&a, Key::Escape), Some(Action::Later));
+    assert!(a.notice, "closing the window or quitting dismisses it");
+}

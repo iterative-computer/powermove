@@ -140,7 +140,7 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
-    fonts: Option<pm_render::text::host::RenderFonts>,
+    pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
@@ -157,10 +157,14 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
+    /// Built-in definitions still to load on the service thread.
+    pub(crate) builtins_pending: bool,
+    /// The translated-shader folder, kept for a rebuilt engine.
+    pub(crate) shader_cache: Option<std::path::PathBuf>,
     /// Effects the document uses that no installed provider defines; the
     /// viewer draws their layers without them.
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
-    compat: Option<Arc<crate::compat::CompatStores>>,
+    pub(crate) compat: Option<Arc<crate::compat::CompatStores>>,
     /// The store of the document whose frame is rendering.
     compat_document: Option<Arc<crate::compat::CompatStore>>,
     /// The peaks of the content on screen, and the output tone of its frames.
@@ -202,7 +206,8 @@ impl Engine {
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {
-        let mut next = Self::new(Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?)?;
+        let gpu = Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?;
+        let mut next = Self::with_shader_cache(gpu, self.shader_cache.clone())?;
         next.set_waker(self.waker.lock().unwrap().clone());
         next.resources = self.resources.clone();
         next.mastering = self.mastering;
@@ -248,6 +253,24 @@ impl Engine {
     /// `shader_cache` keeps translated shaders across launches, so a launch
     /// after the first doesn't translate every built-in effect again.
     pub fn with_shader_cache(gpu: Gpu, shader_cache: Option<std::path::PathBuf>) -> Result<Self> {
+        let mut engine = Self::without_definitions(gpu, shader_cache)?;
+        engine.load_builtin_definitions()?;
+        Ok(engine)
+    }
+    /// Every built-in effect's definition. On a profile whose shader cache is
+    /// cold this translates each of them (about a second), so the service
+    /// does it on its own thread, never while the app waits to open a window.
+    pub fn load_builtin_definitions(&mut self) -> Result<()> {
+        self.renderer
+            .set_definitions(&pm_render::all_builtin_definitions())?;
+        Ok(())
+    }
+    /// An engine whose built-in definitions are loaded later
+    /// ([`Self::load_builtin_definitions`]).
+    pub(crate) fn without_definitions(
+        gpu: Gpu,
+        shader_cache: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
         let lost = Arc::new(AtomicBool::new(false));
         let waker = Waker::default();
         let (flag, wake) = (lost.clone(), waker.clone());
@@ -292,8 +315,7 @@ impl Engine {
             .map_err(|s| anyhow!(s))?;
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_draw_reuse(true);
-        renderer.set_program_cache_dir(shader_cache);
-        renderer.set_definitions(&pm_render::all_builtin_definitions())?;
+        renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
             mastering: Default::default(),
             // Use the producer's actual queue. Metal tracks the shared source
@@ -322,6 +344,8 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
+            builtins_pending: false,
+            shader_cache: shader_cache.clone(),
             missing_effects: Vec::new(),
             compat: None,
             compat_document: None,
@@ -637,6 +661,7 @@ impl Engine {
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
+                let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -650,6 +675,9 @@ impl Engine {
                     let mut t = trace.lock().unwrap();
                     t.render_submitted = now();
                     t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
+                    if let Some(work) = work {
+                        t.work = pm_perf::snapshot().since(&work);
+                    }
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
@@ -828,6 +856,12 @@ impl Engine {
             .unwrap_or_default()
     }
 }
+/// Delays every completion handler (tests: Metal's completion queue running
+/// late under load).
+#[cfg(test)]
+pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl Submission {
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();
@@ -892,6 +926,10 @@ impl Submission {
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                std::thread::sleep(std::time::Duration::from_millis(
+                    LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),
+                ));
                 let mut t = t.lock().unwrap();
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);
@@ -1004,6 +1042,67 @@ mod lifetime_tests {
         event.set_signaled_value(1);
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
+    }
+    #[test]
+    fn only_a_traced_frame_counts_its_work() {
+        let mut engine = Engine::new(Gpu::new("work-count-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let comp = doc
+            .to_value()
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get("compId")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp,
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut draw = |at: i32, count_work: bool| {
+            let trace = Arc::new(std::sync::Mutex::new(Trace {
+                count_work,
+                ..Default::default()
+            }));
+            let spec = FrameSpec::exact(Ticks::from_whole_seconds(at), output);
+            loop {
+                match engine.frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    false,
+                    trace.clone(),
+                ) {
+                    Err(e) if transient(&e) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    other => {
+                        other.unwrap().unwrap().commit();
+                        break;
+                    }
+                }
+            }
+            trace.lock().unwrap().work
+        };
+        assert_eq!(draw(0, false), pm_perf::Counters::default());
+        assert!(draw(1, true).get(pm_perf::Counter::LayersPlanned) > 0);
     }
     #[test]
     fn a_contributed_effect_changes_rendered_pixels_through_its_snapshot() {

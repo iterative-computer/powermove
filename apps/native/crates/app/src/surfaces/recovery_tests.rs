@@ -118,3 +118,13 @@ fn unrecoverable_reply_never_leaks_diagnostics_or_discards() {
     assert!(p.decision(Action::Discard).is_none());
     assert!(p.decision(Action::Recover).is_none());
 }
+#[test]
+fn reopening_after_a_stop_says_so_and_keeps_the_choices() {
+    let a = after_stop(ask_recovery("Launch Film", false, false), "Launch Film");
+    assert_eq!(
+        a.message,
+        "“Launch Film” stopped after an internal error with unsaved changes."
+    );
+    assert_eq!(labels(&a), ["Recover", "Open as Copy"]);
+    assert_eq!(on_return(&a), Some(Action::Recover));
+}

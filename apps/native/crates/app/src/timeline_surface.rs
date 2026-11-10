@@ -46,6 +46,16 @@ pub trait Delegate: 'static {
     fn painters_revision(&self, _cx: &App) -> u64 {
         0
     }
+    /// The skimmer moved to `seconds` (`None`: it left the timeline).
+    fn skim(&self, _seconds: Option<f64>, _cx: &mut App) {}
+    /// Whether skimming is on (View ▸ Skimming).
+    fn skimming(&self, _cx: &App) -> bool {
+        false
+    }
+    /// Whether the viewer still shows the skimmer's frame.
+    fn skimmer_shown(&self, _cx: &App) -> bool {
+        true
+    }
     /// A context menu whose native rows come first, then what extensions add
     /// for each of `locations` (v1–3's `MenuLocation` and what it was opened on).
     fn extension_menu(
@@ -206,6 +216,12 @@ pub struct TimelineSurface {
     late: Option<std::time::Instant>,
     /// The service facts last told to the delegate.
     told: Option<serde_json::Value>,
+    /// The skimmer's time while the pointer hovers the time area (Final
+    /// Cut's skimming): a ghost playhead; the playhead itself stays.
+    skimmer: Option<f64>,
+    /// Clears the skimmer when the window stops being active (Cmd-Tab, key
+    /// loss, hide): the pointer may never move out of the timeline.
+    activation: Option<Subscription>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -258,6 +274,8 @@ impl TimelineSurface {
             painted: None,
             painting: false,
             told: None,
+            skimmer: None,
+            activation: None,
             late: None,
         };
         this.restore_view();
@@ -601,6 +619,7 @@ impl TimelineSurface {
         if self.frame.is_none() {
             self.shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
+            let _span = crate::diag::span("timeline.prepare");
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
             if let Some(frame) = self.frame.clone() {
                 self.ask_painters(&frame, cx);
@@ -803,6 +822,12 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // Final Cut: a click moves the playhead to the skimmer; the gesture
+        // (selection, a drag) goes on from there, without a skimmer.
+        if let Some(at) = self.skimmer {
+            self.delegate.seek(at, cx);
+            self.set_skimmer(None, cx);
+        }
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -1451,8 +1476,59 @@ impl TimelineSurface {
             }),
         );
     }
+    /// The skimmer follows the pointer over the time area (ruler, tracks
+    /// and clips); over the layer column or with skimming off it hides.
+    fn skim_to(&mut self, x: f64, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.size.width) as f64;
+        let at = (self.delegate.skimming(cx) && x >= self.view.layer_column && x <= width)
+            .then(|| frame_time(&self.model, self.time_at(x)).clamp(0., self.model.index.duration));
+        self.set_skimmer(at, cx);
+    }
+    fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
+        if at != self.skimmer {
+            self.skimmer = at;
+            self.delegate.skim(at, cx);
+            cx.notify();
+        }
+    }
+    /// Development builds' review sweep: the pointer over `seconds` on the
+    /// ruler (`None`: it left), through the hover handler.
+    #[cfg(debug_assertions)]
+    pub fn review_hover(&mut self, seconds: Option<f64>, cx: &mut Context<Self>) {
+        match seconds {
+            Some(t) => {
+                let x = self.view.layer_column + (t - self.view.scroll_time) * self.view.pps;
+                let at =
+                    self.bounds.origin + point(px(x as f32), px(self.tokens.metrics.ruler / 2.));
+                self.hover(at, cx);
+            }
+            None => self.set_skimmer(None, cx),
+        }
+    }
+    /// View ▸ Skimming changed, or the controller dropped the skimmer
+    /// (Space with the pointer elsewhere): hide it unless the pointer still
+    /// skims here.
+    pub fn skimming_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.delegate.skimming(cx) || !self.delegate.skimmer_shown(cx) {
+            self.set_skimmer(None, cx);
+        }
+    }
+    #[cfg(test)]
+    pub fn skimmer(&self) -> Option<f64> {
+        self.skimmer
+    }
+    /// Whether the pointer is over the time area right now (Space plays
+    /// from the skimmer only then): the window is active and the pointer's
+    /// last position in it is inside this element.
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        self.skimmer.is_some()
+            && window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
+    }
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
+        self.skim_to(x, cx);
         let m = self.tokens.metrics;
         let cursor =
             if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
@@ -1916,7 +1992,14 @@ fn build(
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.activation.is_none() {
+            self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
+                if !window.is_window_active() {
+                    s.set_skimmer(None, cx);
+                }
+            }));
+        }
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_area().and_then(|area| self.graph_ops(area));
@@ -2030,7 +2113,12 @@ impl Render for TimelineSurface {
                                     point(bounds.right(), bounds.origin.y + px(r.y as f32)),
                                 )
                             });
+                            let started = crate::diag::enabled().then(std::time::Instant::now);
+                            let mut covered = KeyCover::new(bounds.size);
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
+                                if covered.skip(op) {
+                                    continue;
+                                }
                                 match above {
                                     Some(mask) if op.bounds.x >= column - 1. => window
                                         .with_content_mask(
@@ -2041,6 +2129,14 @@ impl Render for TimelineSurface {
                                             |w| paint(op, bounds.origin, &tokens, w, cx),
                                         ),
                                     _ => paint(op, bounds.origin, &tokens, window, cx),
+                                }
+                            }
+                            if let Some(started) = started {
+                                let ms = started.elapsed().as_secs_f64() * 1000.;
+                                if ms >= 4. {
+                                    let keys = frame.ops.iter().filter(|o| o.shape.starts_with("diamond") || o.shape == "keyframe.hold").count();
+                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":frame.ops.len(),"keys":keys,"h":f32::from(bounds.size.height),
+                                        "visible":frame.ops.iter().filter(|o| o.bounds.y < f64::from(f32::from(bounds.size.height)) && o.bounds.y + o.bounds.height > 0. && o.bounds.x < f64::from(f32::from(bounds.size.width)) && o.bounds.x + o.bounds.width > 0.).count()}));
                                 }
                             }
                             if let Some(r) = region {
@@ -2077,8 +2173,16 @@ impl Render for TimelineSurface {
                                         cx.stop_propagation();
                                     } else if s.bounds.contains(&e.position) {
                                         s.hover(e.position, cx);
+                                    } else {
+                                        s.set_skimmer(None, cx);
                                     }
                                 });
+                            }
+                        });
+                        let exited = this.clone();
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = exited.update(cx, |s, cx| s.set_skimmer(None, cx));
                             }
                         });
                         let released = this.clone();
@@ -2095,6 +2199,113 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(tip)
+            .children(self.skimmer_marks())
+    }
+}
+impl TimelineSurface {
+    /// The skimmer: a hairline of text ink across the ruler and tracks
+    /// (the playhead is the accent), with its timecode on the ruler.
+    fn skimmer_marks(&self) -> Vec<AnyElement> {
+        let Some(at) = self.skimmer else {
+            return vec![];
+        };
+        let t = &self.tokens;
+        let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+        let width = f32::from(self.bounds.size.width) as f64;
+        if x < self.view.layer_column || x > width {
+            return vec![];
+        }
+        let fps = self.model.index.fps.max(1.);
+        let frames = (at * fps).round().max(0.) as u64;
+        let nominal = fps.round().max(1.) as u64;
+        let sec = frames / nominal;
+        let code = format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        );
+        let ink = (t.colors.text << 8) | 0x99;
+        let line = div()
+            .id("timeline-skimmer")
+            .absolute()
+            .left(px(x as f32 - t.metrics.border / 2.))
+            .top_0()
+            .bottom_0()
+            .w(px(t.metrics.border))
+            .bg(rgba(ink));
+        let label = div()
+            .absolute()
+            .left(px(x as f32 + t.metrics.border * 2.))
+            .top(px(t.metrics.border))
+            .px(px(t.metrics.gap / 2.))
+            .rounded(px(t.metrics.control_radius))
+            .bg(rgb(t.colors.floating))
+            .border(px(t.metrics.border))
+            .border_color(rgb(t.colors.separator))
+            .text_size(px(t.typography.minimum))
+            .text_color(rgb(t.colors.text))
+            .whitespace_nowrap()
+            .child(code);
+        vec![line.into_any_element(), label.into_any_element()]
+    }
+}
+/// What the timeline's paint can leave out without changing a pixel: ops
+/// wholly off the canvas, and a keyframe glyph identical to the one already
+/// on top at the same device pixel. Dense keys (a baked animation, a long
+/// clip zoomed out) put tens of thousands of them on a few hundred columns;
+/// each is a tessellated path. Hit-testing keeps every op.
+struct KeyCover {
+    width: f64,
+    height: f64,
+    /// The key glyph last drawn at each half-point centre, since the last
+    /// other op (which may have covered it).
+    top: std::collections::HashMap<(i64, i64), u64>,
+}
+impl KeyCover {
+    fn new(size: Size<Pixels>) -> Self {
+        Self {
+            width: f64::from(f32::from(size.width)),
+            height: f64::from(f32::from(size.height)),
+            top: Default::default(),
+        }
+    }
+    fn skip(&mut self, op: &Op) -> bool {
+        // Keylines and strokes reach a little past an op's box.
+        const MARGIN: f64 = 4.;
+        let b = op.bounds;
+        if b.x >= self.width + MARGIN
+            || b.y >= self.height + MARGIN
+            || b.x + b.width <= -MARGIN
+            || b.y + b.height <= -MARGIN
+        {
+            return true;
+        }
+        if !op.id.starts_with("key:") {
+            self.top.clear();
+            return false;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut glyph = std::collections::hash_map::DefaultHasher::new();
+        (op.shape, op.color, op.opacity.to_bits()).hash(&mut glyph);
+        (
+            (b.width * 2.).round() as i64,
+            (b.height * 2.).round() as i64,
+        )
+            .hash(&mut glyph);
+        op.detail["half"].as_str().hash(&mut glyph);
+        op.detail["keyline"].as_u64().hash(&mut glyph);
+        op.detail["keylineWidth"]
+            .as_f64()
+            .map(f64::to_bits)
+            .hash(&mut glyph);
+        let glyph = glyph.finish();
+        let centre = (
+            ((b.x + b.width / 2.) * 2.).round() as i64,
+            ((b.y + b.height / 2.) * 2.).round() as i64,
+        );
+        self.top.insert(centre, glyph) == Some(glyph)
     }
 }
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
@@ -2473,5 +2684,48 @@ fn half_diamond(area: Bounds<Pixels>, toward_right: bool, color: Rgba, window: &
     path.close();
     if let Ok(path) = path.build() {
         window.paint_path(path, color);
+    }
+}
+
+#[cfg(test)]
+mod key_cover_tests {
+    use super::KeyCover;
+    use gpui::{px, size};
+    use pm_panel_timeline::render::{Op, Rect};
+
+    fn op(id: &str, shape: &'static str, x: f64, y: f64, color: u32) -> Op {
+        Op {
+            id: id.into(),
+            shape,
+            bounds: Rect::new(x, y, 9., 9.),
+            color,
+            opacity: 0.85,
+            radius: 0.,
+            stroke: 0.,
+            text: None,
+            font_size: 0.,
+            detail: serde_json::json!({"half": null}),
+            clip: None,
+        }
+    }
+
+    #[test]
+    fn only_hidden_duplicates_and_off_canvas_ops_are_left_out() {
+        let mut cover = KeyCover::new(size(px(400.), px(100.)));
+        // The first key draws; an identical one on the same device pixel doesn't.
+        assert!(!cover.skip(&op("key:[1,a]", "diamond", 50., 10., 0xffffff)));
+        assert!(cover.skip(&op("key:[1,b]", "diamond", 50.2, 10., 0xffffff)));
+        // A different glyph there (selected: accent) draws, and so does the
+        // unselected one after it: it is on top again.
+        assert!(!cover.skip(&op("key:[1,c]", "diamond", 50., 10., 0xff8800)));
+        assert!(!cover.skip(&op("key:[1,d]", "diamond", 50., 10., 0xffffff)));
+        // One device pixel over is a different place.
+        assert!(!cover.skip(&op("key:[1,e]", "diamond", 50.5, 10., 0xffffff)));
+        // Anything else painted may cover keys: the next one draws again.
+        assert!(!cover.skip(&op("clip:x", "rect", 0., 0., 0x123456)));
+        assert!(!cover.skip(&op("key:[1,f]", "diamond", 50., 10., 0xffffff)));
+        // Wholly off the canvas: nothing to draw, key or not.
+        assert!(cover.skip(&op("key:[9,a]", "diamond", 50., 140., 0xffffff)));
+        assert!(cover.skip(&op("clip:y", "rect", 500., 10., 0x123456)));
     }
 }

@@ -2042,5 +2042,25 @@
     "in_fields": true,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.skimming",
+    "chord": "alt+s",
+    "command": "toggleSkimming",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.audioSkimming",
+    "chord": "alt+shift+s",
+    "command": "toggleAudioSkimming",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

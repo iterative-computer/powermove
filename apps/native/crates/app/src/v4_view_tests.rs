@@ -776,3 +776,51 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
         !texts.iter().any(|t| t.starts_with("Exporting")) && texts.iter().any(|t| t == "Export")
     });
 }
+
+#[gpui::test]
+fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "input",
+        json!({"id":"source","data-pm-component":"text-field","control":"text","label":"Source","value":"Cube","disabled":true}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "input",
+        json!({"id":"depth","data-pm-component":"number-field","control":"number","label":"Depth","value":2.5,"unit":"px","disabled":true}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        4,
+        1,
+        "input",
+        json!({"id":"live","data-pm-component":"text-field","control":"text","label":"Live","value":"Editable"}),
+        &[],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let shown = view.read_with(&vcx, |v, _| {
+        [2, 3, 4].map(|id| {
+            v.prepared
+                .nodes
+                .get(&id)
+                .and_then(|n| v.disabled_field_text(n))
+        })
+    });
+    assert_eq!(shown[0].as_deref(), Some("Cube"));
+    assert_eq!(shown[1].as_deref(), Some("2.5 px"));
+    // An enabled field draws through its editor instead.
+    assert_eq!(shown[2], None);
+}

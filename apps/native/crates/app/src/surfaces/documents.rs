@@ -17,6 +17,8 @@ pub enum Action {
     DiscardChanges,
     ShowInFinder,
     Ok,
+    Reopen,
+    Later,
 }
 pub fn unsaved(name: &str) -> Alert<Action> {
     Alert::new(
@@ -28,6 +30,19 @@ pub fn unsaved(name: &str) -> Alert<Action> {
             Button::new("Don’t Save", Action::DontSave).key(Key::CommandD),
         ],
     )
+}
+/// An internal error interrupted an edit and the kernel stopped the project
+/// (nothing half done is kept or saved); reopening recovers its journal.
+pub fn stopped(name: &str) -> Alert<Action> {
+    Alert::new(
+        format!("“{name}” stopped after an internal error."),
+        "So nothing half done is kept, Powermove stopped editing and saving it. Reopen it to recover every change made before the error. Window ▸ Error Log has the details.",
+        vec![
+            Button::new("Reopen", Action::Reopen).default(),
+            Button::new("Later", Action::Later).cancel(),
+        ],
+    )
+    .notice()
 }
 pub fn review_quit(count: usize) -> Alert<Action> {
     assert!(count >= 2);

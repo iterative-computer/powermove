@@ -67,6 +67,7 @@ pub mod commands;
 pub mod document;
 pub mod error;
 pub mod extensions;
+pub mod fault_injection;
 pub mod history;
 pub mod journal;
 pub mod kernel;

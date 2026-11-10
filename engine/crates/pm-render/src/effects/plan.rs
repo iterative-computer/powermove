@@ -332,6 +332,10 @@ pub(crate) fn effect_steps_raster<'d>(
         }
         let ty = match effects.saved_key(&ty, node::member(Some(fx), "version")) {
             Ok(key) => key,
+            // A saved revision this build has no definition for (a newer
+            // app saved it): bypassed like a missing provider in viewer
+            // frames and named by `missing_effects`; exports refuse.
+            Err(_) if effects.bypass_missing => continue,
             Err(message) => {
                 refused.get_or_insert(Feature::Definition(message));
                 continue;

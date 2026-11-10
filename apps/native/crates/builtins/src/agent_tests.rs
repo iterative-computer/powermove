@@ -130,9 +130,17 @@ impl Agent {
             let p = self.latest.as_ref().expect("agent publication");
             (p.generation, p.surface.revision())
         };
-        let driven = self
-            .panels
-            .event("agent", generation, revision, target, event, detail);
+        // As the app's SurfaceView::send does: by the node's semantic id, so a
+        // republish between seeing the button and the press still lands.
+        let driven = self.panels.activate(
+            "agent",
+            generation,
+            revision,
+            target,
+            Some(id),
+            event,
+            detail,
+        );
         match driven.map(wait) {
             Ok(Ok(_)) => {
                 self.text();

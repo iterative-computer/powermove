@@ -15,10 +15,15 @@ pub enum CloseState {
     Saving,
     Dirty,
     Clean,
+    /// An internal error stopped the project: it closes without asking and
+    /// without saving; its journal is kept for the next open to recover.
+    Stopped,
 }
 pub fn close_state(p: Option<&Published>, opening: bool, saving: bool) -> CloseState {
     if saving || p.is_some_and(|p| p.saving) {
         CloseState::Saving
+    } else if p.is_some_and(|p| p.fault.is_some()) {
+        CloseState::Stopped
     } else if opening || p.is_some_and(|p| p.entry.is_some()) {
         CloseState::Busy
     } else if p.is_some_and(|p| p.dirty) {
@@ -291,13 +296,14 @@ impl Controller {
         if p.is_none() {
             self.session = None;
         }
-        match close_state(
+        let state = close_state(
             p.as_deref(),
             self.opening
                 || self.recovery_pending
-                || self.host.borrow().window.attachedSheet().is_some(),
+                || !crate::alert::dismiss_notice(&self.host.borrow().window),
             self.save_pending,
-        ) {
+        );
+        match state {
             CloseState::Saving => {
                 self.message =
                     "Saving in progress. Please wait for it to finish before closing.".into();
@@ -324,7 +330,7 @@ impl Controller {
         self.close_operation = Some(operation);
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
-        if p.as_ref().is_none_or(|p| !p.dirty) {
+        if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
             self.complete_close(intent, cx);
             return;
         }
@@ -518,6 +524,109 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+    /// An injected kernel panic stops the project mid-edit: the window
+    /// closes it without a save question (even with an edit open), nothing
+    /// is written over the saved project, and Reopen's calls bring back
+    /// exactly the acknowledged work through the recovery prompt.
+    #[test]
+    fn a_stopped_project_closes_unasked_and_reopens_to_its_journal() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let stored = || std::fs::read(dir.path().join("store/project.test.json")).unwrap();
+        let base = stored();
+        edit(&k);
+        let acknowledged = k.published("test").unwrap();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Drag".into(),
+                },
+            ),
+        )
+        .unwrap();
+        k.arm_fault(pm_kernel::fault_injection::Stage::AfterApply, "test");
+        assert!(
+            k.call(
+                "test",
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some("Opacity".into()),
+                        body: WriteBody::Commands(vec![
+                            CompCommand::Set {
+                                patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                    name: Some("Half applied".into()),
+                                    ..Default::default()
+                                }),
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .wait()
+            .is_none()
+        );
+        let p = k.published("test").unwrap();
+        assert!(p.fault.is_some());
+        assert!(
+            p.entry.is_some() && p.dirty,
+            "an edit is open, unsaved work"
+        );
+        assert_eq!(close_state(Some(&p), false, false), CloseState::Stopped);
+        let source = crate::session::reopen_source(&p, dir.path()).unwrap();
+        // complete_close's call.
+        assert!(matches!(
+            answer(&k, ShellCall::Close(session)),
+            ShellReply::Closed {
+                recovery_copy: None
+            }
+        ));
+        assert_eq!(
+            stored(),
+            base,
+            "closing wrote nothing of the stopped project"
+        );
+        // reopen_stopped → open_named → the recovery prompt's Recover.
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(
+            &k,
+            ShellCall::PrepareOpen {
+                id: "test".into(),
+                source,
+                electron_profile: None,
+            },
+        ) else {
+            panic!("reopening offers recovery")
+        };
+        answer(
+            &k,
+            ShellCall::DecideRecovery {
+                ticket,
+                decision: RecoveryDecision::Recover,
+            },
+        );
+        let recovered = k.published("test").unwrap();
+        assert!(recovered.fault.is_none());
+        assert_eq!(
+            recovered.snapshot.document.to_value().unwrap(),
+            acknowledged.snapshot.document.to_value().unwrap()
+        );
+        assert_eq!(recovered.history.undo_label.as_deref(), Some("Rename"));
+        // Quitting after Later instead: compaction keeps only the
+        // acknowledged work, never the half-applied edit.
+        let reopened = recovered.session.as_ref().unwrap().handle.clone();
+        answer(&k, ShellCall::DeferClose(reopened));
+        answer(&k, ShellCall::PrepareQuit);
+        let text = String::from_utf8(stored()).unwrap();
+        assert!(
+            text.contains("Rejected edit") && !text.contains("Half applied"),
+            "{text}"
+        );
+        actor.shutdown();
     }
     #[test]
     fn dont_save_library_archives_and_quit_never_resaves_rejected_work() {

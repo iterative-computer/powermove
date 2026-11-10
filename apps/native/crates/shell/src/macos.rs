@@ -98,9 +98,16 @@ fn launch(
         }
         if smoke {
             cx.quit();
-        } else {
-            // Cooperative activation: a launch in the background (`open -g`,
-            // a login item, an agent) leaves the user's app in front.
+        } else if objc2_foundation::NSBundle::mainBundle()
+            .bundleIdentifier()
+            .is_none()
+        {
+            // A bare binary (`cargo run`) isn't activated by LaunchServices.
+            // A bundled app never asks: LaunchServices brings a normal launch
+            // forward itself, and a background one (`open -g`, a login item,
+            // an agent) must stay behind the person's app; an activation
+            // request at launch could take the launcher's grant and come
+            // to the front anyway.
             cx.activate(false);
         }
     });

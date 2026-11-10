@@ -372,7 +372,9 @@ impl TransportClock {
                     self.anchor_media = self.wrap(self.anchor_media);
                 }
             }
-            TransportCommand::PlayAround { .. } | TransportCommand::AudioScrub { .. } => {
+            TransportCommand::PlayAround { .. }
+            | TransportCommand::AudioScrub { .. }
+            | TransportCommand::Grain { .. } => {
                 return false;
             }
         }

@@ -249,8 +249,18 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
-            crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
+            // Bound to the open that brought `project`: they run only if this
+            // window still shows it.
+            let shown = self.session.as_ref().is_some_and(|s| s.project == project);
+            let (run, dropped) = self.after_open.settle(self.settling_open, shown);
+            if let Some(note) = dropped {
+                self.message = note;
+            }
+            for (name, args) in run {
+                self.host.borrow().send_command(&name, args);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -1287,6 +1297,18 @@ struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
+    }
+    fn skim(&self, seconds: Option<f64>, cx: &mut App) {
+        let input = crate::skimming::input();
+        let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
+    }
+    fn skimming(&self, cx: &App) -> bool {
+        crate::skimming::on(&self.0, cx)
+    }
+    fn skimmer_shown(&self, cx: &App) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|c| c.read(cx).skimming.at.is_some())
     }
     fn seek(&self, seconds: f64, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {

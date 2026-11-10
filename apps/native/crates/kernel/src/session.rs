@@ -199,6 +199,11 @@ pub struct SessionSaveCompletion {
     ticket: String,
     result: Result<crate::SaveReceipt, crate::ProjectIoError>,
 }
+impl SessionSaveCompletion {
+    pub(crate) fn project(&self) -> &str {
+        &self.session.project
+    }
+}
 impl SessionSave {
     pub fn run(self) -> SessionSaveCompletion {
         SessionSaveCompletion {
@@ -260,6 +265,7 @@ fn failure(e: impl std::fmt::Display) -> KernelFailure {
     KernelFailure::Storage(e.to_string())
 }
 fn realize(k: &Kernel, id: &str) -> Result<Value, KernelFailure> {
+    k.refuse_faulted(id)?;
     let store = k
         .project(id)
         .ok_or_else(|| KernelFailure::NoProject(id.into()))?
@@ -423,7 +429,7 @@ impl Kernel {
                 Ok(ShellReply::Changed(true))
             }
             ShellCall::DeferClose(handle) => {
-                self.ensure_idle(&handle)?;
+                self.ensure_closable(&handle)?;
                 self.flush_project(&handle.project)?;
                 self.remove_closed_project(&handle.project);
                 Ok(ShellReply::Closed {
@@ -431,7 +437,7 @@ impl Kernel {
                 })
             }
             ShellCall::DiscardClose(handle) => {
-                self.ensure_idle(&handle)?;
+                self.ensure_closable(&handle)?;
                 self.archive_journal(&handle.project)?;
                 self.remove_closed_project(&handle.project);
                 Ok(ShellReply::Closed {
@@ -443,8 +449,11 @@ impl Kernel {
                 Ok(ShellReply::Durable)
             }
             ShellCall::PrepareQuit => {
+                // A stopped project is never compacted: its journal is the work.
                 for session in self.sessions.values() {
-                    self.ensure_idle(&session.handle)?;
+                    if self.fault(&session.handle.project).is_none() {
+                        self.ensure_idle(&session.handle)?;
+                    }
                 }
                 self.compacting = true;
                 let result = self.compact_all(false);
@@ -476,6 +485,17 @@ impl Kernel {
             } => {
                 self.check_session(&session)?;
                 self.save_session(&session, Some((path, replace)))
+            }
+            ShellCall::Close(handle) if self.fault(&handle.project).is_some() => {
+                // Nothing of a stopped project is written: its journal holds
+                // every edit acknowledged before the error, and the next open
+                // offers to recover it.
+                self.ensure_closable(&handle)?;
+                self.flush_project(&handle.project)?;
+                self.remove_closed_project(&handle.project);
+                Ok(ShellReply::Closed {
+                    recovery_copy: None,
+                })
             }
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
@@ -626,8 +646,21 @@ impl Kernel {
             },
         })
     }
+    /// [`ensure_idle`](Self::ensure_idle) for a close that saves nothing: a
+    /// project stopped by an internal error closes even with an edit open.
+    fn ensure_closable(&self, handle: &SessionHandle) -> Result<(), KernelFailure> {
+        if self.fault(&handle.project).is_none() {
+            return self.ensure_idle(handle);
+        }
+        self.check_session(handle)?;
+        if self.project(&handle.project).unwrap().store().is_saving() {
+            return Err(failure("A save is in flight; close again when it finishes"));
+        }
+        Ok(())
+    }
     fn ensure_idle(&self, handle: &SessionHandle) -> Result<(), KernelFailure> {
         self.check_session(handle)?;
+        self.refuse_faulted(&handle.project)?;
         let p = self.project(&handle.project).unwrap();
         if p.store().is_saving() || self.sessions[&handle.project].pending_save.is_some() {
             return Err(failure(
@@ -648,6 +681,7 @@ impl Kernel {
         path: PathBuf,
     ) -> Result<crate::SavePlan, KernelFailure> {
         self.check_session(&session)?;
+        self.refuse_faulted(&session.project)?;
         let project = self
             .project(&session.project)
             .ok_or_else(|| failure("Project closed"))?;
@@ -739,6 +773,9 @@ impl Kernel {
             .take()
             .unwrap();
         let receipt = result.map_err(failure)?;
+        // Written from the snapshot frozen before the error; the slot and the
+        // journal base keep their state (recovery offers a copy if they differ).
+        self.refuse_faulted(&session.project)?;
         self.project_mut(&session.project)
             .unwrap()
             .store_mut()
@@ -827,6 +864,7 @@ impl Kernel {
             .sessions
             .values()
             .filter(|s| into_files || matches!(s.destination, Destination::Library(_)))
+            .filter(|s| self.fault(&s.handle.project).is_none())
             .map(|s| s.handle.clone())
             .collect();
         let mut projects = 0;
