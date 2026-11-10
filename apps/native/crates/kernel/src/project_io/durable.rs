@@ -562,9 +562,9 @@ pub(crate) fn publish(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupPolicy {
     pub directory: PathBuf,
-    /// Most active versions (12 in the old app); older versions are archived.
+    /// Most versions kept (12 in the old app); older versions are deleted.
     pub max_versions: usize,
-    /// Byte budget across active versions (1 GiB in the old app).
+    /// Byte budget across kept versions (1 GiB in the old app).
     pub max_bytes: u64,
     /// Versions always kept even over budget (2 in the old app).
     pub min_versions: usize,
@@ -679,60 +679,51 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
     }
 }
 
-/// Keep the newest active versions within the budgets (at least
-/// `min_versions`). Archive every older generation; retention never deletes
-/// authored bytes. Archiving does not promise reclaimed disk space: that
-/// waits for [`reclaim_archived`].
+/// Keep the newest versions within the budgets (always the newest
+/// `min_versions`) and delete older ones, as the old app pruned its backups
+/// after each save (v1.2.0 kept 5). Generations earlier builds moved to
+/// `archived/` are older than every kept one and go too, so a project's
+/// backups stay bounded. Recovery copies (`*.recovery.pmv`) and files the app
+/// did not name are never touched; a linked `archived` is not followed.
 pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
     let mut bytes = 0u64;
+    let mut removed = false;
     for (index, file) in list_backups(policy)?.into_iter().enumerate() {
         let size = fs::symlink_metadata(&file).map(|m| m.len()).unwrap_or(0);
         bytes = bytes.saturating_add(size);
         if index >= policy.min_versions
             && (index >= policy.max_versions || bytes > policy.max_bytes)
         {
-            let archive = policy.directory.join("archived");
-            match fs::create_dir(&archive) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(io_err(&archive, e)),
-            }
-            if !fs::symlink_metadata(&archive)
-                .map_err(|e| io_err(&archive, e))?
-                .is_dir()
-            {
-                return Err(ProjectIoError::Invalid(
-                    "Unsafe backup archive directory".into(),
-                ));
-            }
-            let name = file.file_name().expect("listed backup has a name");
-            let mut target = archive.join(name);
-            loop {
-                // Exclusive link, then sync BEFORE retiring the active name.
-                // An interruption leaves at least one durable copy; collisions
-                // preserve both generations, even after an interrupted retry.
-                match fs::hard_link(&file, &target) {
-                    Ok(()) => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let mut unique = name.to_os_string();
-                        unique.push(format!(".{}", random_uuid()));
-                        target = archive.join(unique);
-                    }
-                    Err(e) => return Err(io_err(&target, e)),
-                }
-            }
-            sync_directory(&archive)?;
-            sync_directory(&policy.directory)?;
             fs::remove_file(&file).map_err(|e| io_err(&file, e))?;
-            sync_directory(&policy.directory)?;
+            removed = true;
         }
+    }
+    let archive = policy.directory.join("archived");
+    if fs::symlink_metadata(&archive).is_ok_and(|m| m.is_dir()) {
+        for entry in fs::read_dir(&archive)
+            .map_err(|e| io_err(&archive, e))?
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let named = name.get(..28).is_some_and(is_backup_name);
+            if named && entry.file_type().is_ok_and(|t| t.is_file()) {
+                fs::remove_file(entry.path()).map_err(|e| io_err(&entry.path(), e))?;
+            }
+        }
+        // Gone once empty; anything else in it stays.
+        let _ = fs::remove_dir(&archive);
+        removed = true;
+    }
+    if removed {
+        sync_directory(&policy.directory)?;
     }
     Ok(())
 }
 
 /// A full disk must not cost the user their current work: frees `needed`
-/// bytes from generations retention already archived, across every project,
-/// oldest first. Active versions and anything not named by the app stay.
+/// bytes from generations earlier builds archived (`archived/`), across
+/// every project, oldest first. Kept versions and anything not named by the
+/// app stay.
 /// Returns the bytes freed; a save that failed on space retries only if any.
 pub(crate) fn reclaim_archived(policy: &BackupPolicy, needed: u64) -> u64 {
     let Some(root) = policy.directory.parent() else {
