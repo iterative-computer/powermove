@@ -1354,6 +1354,8 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
 /// it, so a curve's ends read at a glance; selected keys are `accent` with a
 /// `panel` keyline. A collapsed layer's summary marks (`summary` = the clip's
 /// foreground) are small quiet diamonds inside the clip's foot.
+/// A key glyph's look: shape, colour, selected (opacity and keyline), half.
+type Glyph<'a> = (&'a str, u32, bool, Option<&'a str>);
 fn paint_keys(
     row: &str,
     keys: &[Key],
@@ -1374,7 +1376,7 @@ fn paint_keys(
     );
     // The glyph drawn last and its device half-pixel: keys are in time
     // order, so an identical glyph on the same half-pixel follows it directly.
-    let mut on_top: Option<(i64, (&str, u32, bool, Option<&str>))> = None;
+    let mut on_top: Option<(i64, Glyph)> = None;
     // `key:["row","key"]`, the row's part escaped once.
     let prefix = format!("key:[{},", serde_json::to_string(row).unwrap_or_default());
     for key in &keys[start..end] {
