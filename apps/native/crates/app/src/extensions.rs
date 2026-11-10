@@ -270,6 +270,14 @@ impl Extensions {
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }
+    /// The WebKit page an extension panel draws in, when it is open there.
+    pub(crate) fn page_of(&self, id: &str) -> Option<Rc<RefCell<MacDomHost>>> {
+        if !self.open_panels.contains(id) {
+            return None;
+        }
+        let key = self.owners.borrow().get(id).cloned().unwrap_or_default();
+        self.views.borrow().get(&key).cloned()
+    }
 }
 /// The shipped app's extensions as first launch migrated them (its sealed
 /// checkpoint, kept current by each launch's delta pass), then this profile's
