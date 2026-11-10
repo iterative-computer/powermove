@@ -496,6 +496,61 @@ fn an_edited_dictionary_history_is_not_archived() {
     assert_eq!(reopened.history.unwrap().len(), 2, "both edits are kept");
 }
 
+/// A valid dictionary whose shared records expand past the history byte
+/// budget opens trimmed: the trimmed steps exist only in the file, so the
+/// first save after an edit archives the history it replaces.
+#[test]
+fn a_dictionary_trimmed_on_open_is_archived() {
+    let dir = TempDir::new("trimmed-history");
+    let big = format!(
+        r#"{{"id":"a","type":"shape","name":"{}"}}"#,
+        "x".repeat((pm_kernel::history::DEFAULT_MAX_BYTES / 2) + (1 << 20))
+    );
+    let small = r#"{"id":"b","type":"shape","name":"b"}"#;
+    let side = |r: usize| {
+        format!(r#"[{{"patch":{{"path":["comps","main","layers"],"exists":true}},"refs":[{r}]}}]"#)
+    };
+    let packed = format!(
+        r#"{{"format":"powermove-history-dictionary","version":1,"records":[{big},{small}],"history":{{"version":1,"paths":"composition","index":1,"entries":[{{"label":"Big","forward":{f0},"backward":{f0}}},{{"label":"Small","forward":{f1},"backward":{f1}}}]}}}}"#,
+        f0 = side(0),
+        f1 = side(1),
+    );
+    drop(big);
+    let source = dir.path("source.json");
+    std::fs::write(
+        &source,
+        format!(
+            r##"{{"v":"1.0.0","proj":{{"id":"trim","name":"Trim","compId":"main","compName":"Main","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{small}]}},"history":{packed}}}"##
+        ),
+    )
+    .unwrap();
+    let original = parse(&packed).unwrap();
+    drop(packed);
+    let mut kernel = Kernel::new(KernelConfig::default());
+    let session = open_file(&mut kernel, &source);
+    assert_eq!(store(&kernel).history().len(), 1, "the oldest step is trimmed");
+    call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    let path = dir.path("saved.pmv");
+    let plan = kernel
+        .prepare_session_save(session, Some(path.clone()), false)
+        .unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    drop(kernel);
+    let file = std::fs::File::open(&path).unwrap();
+    let saved = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .document;
+    assert!(
+        saved.get("nativeHistoryArchive") == Some(&original),
+        "the trimmed history is archived as the file held it"
+    );
+}
+
 /// A large project's history holds this kernel's own operations (an insert
 /// into a large layer list): reopened, edited and saved, it is not archived.
 #[test]
