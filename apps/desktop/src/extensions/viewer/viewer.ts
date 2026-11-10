@@ -1004,18 +1004,40 @@ V.attach = (stage: HTMLElement) => {
     // Studio's refine indicator: shows while a 3D view is still sharpening.
     if(api.scene3d?.studio && !V.studioPill){
       const pill=document.createElement('div');pill.id='studio-refine';pill.setAttribute('role','status');
-      pill.style.cssText='position:absolute;right:10px;bottom:10px;z-index:6;display:none;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:var(--r-pill);background:var(--bg-float);box-shadow:var(--shadow-float);color:var(--tx-2);font-size:var(--fs-sm);pointer-events:none';
+      pill.style.cssText='position:absolute;right:10px;bottom:10px;z-index:6;display:none;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:var(--r-pill);background:var(--bg-float);box-shadow:var(--shadow-float);color:var(--tx-2);font-size:var(--fs-sm);pointer-events:auto;cursor:default';
       const ring=document.createElementNS('http://www.w3.org/2000/svg','svg');ring.setAttribute('width','14');ring.setAttribute('height','14');ring.setAttribute('viewBox','0 0 14 14');
       ring.innerHTML='<circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--ink-3)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" transform="rotate(-90 7 7)" stroke-dasharray="0 35"/>';
       const label=document.createElement('span');pill.append(ring,label);V.stage.append(pill);V.studioPill=pill;
-      let shown='';
+      let shown='',fallbackNoticed=false;
+      /* Studio errors are written for engineers ("exceeds the geometry memory
+         budget"); say what happened and what to do. The detail stays in the tooltip. */
+      const plainFailure=(failure:string)=>/budget|exceed|memory|too large|million triangles/i.test(failure)
+        ?`This 3D scene is too large for the GPU. Simplify models, lower the scatter count or export at a smaller size. (${failure})`
+        :`Studio can’t draw this 3D scene right now. Your project is safe; try undoing the last change. (${failure})`;
       const tick=()=>{
+        const health=api.scene3d!.studio.health?.();
+        // The native renderer stopped; Studio carried on with its backup. Say so once.
+        if(health?.fallback&&!fallbackNoticed){fallbackNoticed=true;api.ui.toast('The 3D renderer restarted on its backup. Your work is safe; 3D previews may be slower until you reopen the project.',{corner:'top-right',kind:'status',error:false} as any);}
+        if(health?.failure){
+          const text='3D can’t render';
+          if(text!==shown){shown=text;label.textContent=text;pill.style.display='flex';pill.dataset.state='error';pill.style.color='var(--danger, #E5484D)';pill.title=plainFailure(health.failure);
+            const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray','0 35');}
+          return;
+        }
+        if(pill.dataset.state){delete pill.dataset.state;pill.style.color='';shown='';}
         const p=api.scene3d!.studio.progress();
         // A large model's BVH builds in the background before Studio takes over.
         const prep=p?.preparing,done=prep?prep.total-prep.pending:0;
-        const text=prep?`Preparing ${prep.total>=1e6?`${(prep.total/1e6).toFixed(1)}M`:`${Math.round(prep.total/1e3)}K`} triangles`:p?(p.samples>=p.goal?'Clean':p.samples>0?`Refining · ${Math.max(1,Math.round(100*p.samples/p.goal))}%`:p.refining?'Refining…':'Live'):'';
+        /* Refine works toward the composition's Render Quality: name it when
+           done, and say where it is set. */
+        const quality=api.scene3d!.renderQuality?.describe?.();
+        const text=prep?`Preparing ${prep.total>=1e6?`${(prep.total/1e6).toFixed(1)}M`:`${Math.round(prep.total/1e3)}K`} triangles`:p?(p.samples>=p.goal?`Refined · ${quality?.label ?? 'Done'}`:p.samples>0?`Refining · ${Math.max(1,Math.round(100*p.samples/p.goal))}%`:p.refining?'Refining…':'Live'):'';
         if(text!==shown){
           shown=text;label.textContent=text;pill.style.display=text?'flex':'none';
+          pill.title=prep?'Studio is preparing the model before it can draw it':
+            text==='Live'?'Live — The real-time picture while you work. Pause to refine':
+            quality?`${text.startsWith('Refined')?'Refined':'Refining'} to ${quality.label} quality (${quality.perFrame.toLowerCase()}). Change it in the composition's Render Quality, with nothing selected`:'';
+          if(health?.fallback)pill.title+=`${pill.title?' · ':''}Drawing with the backup renderer`;
           const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray',`${prep?34.6*done/Math.max(1,prep.total):p?34.6*Math.min(1,p.samples/p.goal):0} 35`);
         }
       };

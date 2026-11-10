@@ -55,6 +55,17 @@ export function requestExtrusionFont(PM:any,d:any):Entry {
   })();
   return entry;
 }
+/** Whether extruded text can get its outlines, said for the person editing:
+ * a font that isn't installed can't become 3D geometry (2D text falls back to
+ * a similar font; geometry can't). */
+export function extrusionFontStatus(PM:any,d:any):{state:'ready'|'loading'|'missing';message:string|null} {
+  const entry=requestExtrusionFont(PM,d),name=String(d?.font || 'SF Pro Display');
+  if(entry.font)return {state:'ready',message:null};
+  if(!entry.error)return {state:'loading',message:null};
+  return {state:'missing',message:/No installed face matched/.test(entry.error)
+    ?`“${name}” isn’t installed on this Mac, so this text can’t be extruded. Choose an installed font, or install it and reopen the project.`
+    :`Powermove can’t read the outlines of “${name}” to extrude this text. Choose another font.`};
+}
 export function installExtrusionFont(PM:any,d:any,bytes:ArrayBuffer):void {cache(PM).set(extrusionFontKey(d),{font:parse(bytes)});}
 export function hasExtrudedText(PM:any,project:any):boolean {
   const has=(comp:any)=>(comp.layers || []).some((layer:any)=>isExtrudedLayer(layer) && layer.type==='text');

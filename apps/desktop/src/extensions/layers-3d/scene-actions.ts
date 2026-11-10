@@ -83,15 +83,20 @@ export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[
   const scatter:MenuContribution=models.length&&surfaces.length>1
     ?{label:'Scatter',submenu:[{header:'Copies of'},...models.map(m=>({label:m.name,submenu:[{header:'Over'},...[...surfaces].sort((a,b)=>Number(b.terrain)-Number(a.terrain)).filter(s=>s.id!==m.id).map(s=>({label:s.name,run:()=>addScatter(api,m.id,s.id)}))] as MenuContribution[]}))]}
     :{label:models.length?'Scatter (add a Terrain to cover first)':'Scatter (add a model to copy first)',disabled:true};
+  /* Grouped the way a first-time user looks for them, with the same icons
+     the Timeline and inspector show once the layer exists. */
+  const lightIcon:Record<string,string>={sun:'sun',point:'lightbulb',spot:'spotlight',area:'softbox',ambient:'ambient',environment:'skyLight'};
   return [
+    {header:'Shapes'},
     ...PRIMITIVES.map(p=>({label:p.label,run:()=>addPrimitive(api,p.id)})),
-    '-',
-    {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
-    world?{label:'World',run:()=>api.selection.select([world.id])}:{label:'World',submenu:SKY_PRESETS.map(p=>({label:p.label,run:()=>addWorld(api,p.id)}))},
-    {label:'Terrain',run:()=>addTerrain(api)},
-    scatter,
-    {label:'Fog Volume',run:()=>addFog(api)},'-',
-    ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
-    {label:'Camera',run:()=>addCamera(api)}
-  ];
+    {label:'Import 3D Model…',icon:'download',run:()=>importModelIntoScene(api)},'-',
+    {header:'Environment'},
+    world?{label:'World',icon:'globe',run:()=>api.selection.select([world.id])}:{label:'World',icon:'globe',submenu:SKY_PRESETS.map(p=>({label:p.label,run:()=>addWorld(api,p.id)}))},
+    {label:'Terrain',icon:'mountains',run:()=>addTerrain(api)},
+    {...scatter,icon:'tree'},
+    {label:'Fog Volume',icon:'fog',run:()=>addFog(api)},'-',
+    {header:'Lights and Camera'},
+    ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,icon:lightIcon[l.id],run:()=>addLight(api,l.id)})),
+    {label:'Camera',icon:'cam',run:()=>addCamera(api)}
+  ] as MenuContribution[];
 };

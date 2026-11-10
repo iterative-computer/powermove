@@ -3783,15 +3783,19 @@ function syncEmptyState() {
     actions.className = 'tl-empty-actions';
     const items: Array<[string, string, string, string]> = [
       ['type', 'Text', '⌘T', 'newText'], ['shape', 'Shape', '⇧⌘Y', 'newShape'], ['solid', 'Solid', '⌘Y', 'newSolid'],
-      ['anchor', 'Null', '⌥⇧⌘Y', 'newNull'], ['download', 'Import…', '⌘I', 'import'],
+      ['anchor', 'Null', '⌥⇧⌘Y', 'newNull'],
+      // 3D starts here too: shapes, imported models, World, lights and cameras.
+      ...(api.commands.has('3d.add-menu') ? [['cube', '3D Layer', '', '3d.add-menu'] as [string, string, string, string]] : []),
+      ['download', 'Import…', '⌘I', 'import'],
     ];
     for (const [icon, label, key, command] of items) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tl-empty-button';
       button.innerHTML = api.ui.icon(icon);
-      button.append(Object.assign(document.createElement('span'), { textContent: label }), Object.assign(document.createElement('kbd'), { textContent: key }));
-      button.addEventListener('click', () => { api.commands.run(command); });
+      button.append(Object.assign(document.createElement('span'), { textContent: label }));
+      if (key) button.append(Object.assign(document.createElement('kbd'), { textContent: key }));
+      button.addEventListener('click', () => { command === '3d.add-menu' ? api.commands.run(command, button) : api.commands.run(command); });
       actions.append(button);
     }
     const hint = document.createElement('div');

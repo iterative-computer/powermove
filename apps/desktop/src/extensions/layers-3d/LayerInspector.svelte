@@ -122,7 +122,8 @@
     <Section {api} title="Shot" />
     <div class="shots" role="group" aria-label="Studio"><button type="button" class="chip" onclick={()=>studioEdit({operation:'auto_studio'},'Set up studio')}>Set up studio</button></div>
     <div class="shots" role="group" aria-label="Shots">{#each studio.shots.filter(shot=>shot.id!=='turntable') as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
-    <Row {api} label="Final quality"><SelectField {api} get={()=>String(environment.samples ?? 64)} options={[{v:'16',label:'Draft · 16'},{v:'64',label:'Standard · 64'},{v:'256',label:'High · 256'},{v:'1024',label:'Best · 1024'}]} edit={{mode:'set',label:'Final quality',set:(v:unknown)=>edit('set_environment',{samples:Number(v)},'Final quality')}} label="Final quality" /></Row>
+    <!-- Render quality belongs to the composition (After Effects' Composition Settings ▸ 3D Renderer); point there instead of keeping a second sample picker. -->
+    <Row {api} label="Render Quality"><button type="button" class="chip" data-render-quality-link title="Render Quality is saved with the composition and applies to Refine and export. Click to change it in the composition's properties" onclick={()=>api.selection.select([])}>{api.scene3d.renderQuality.describe().label}</button></Row>
     <Row {api} label="Studio Set"><ToggleField {api} get={()=>!!environment.shadowCatcher} edit={{mode:'set',label:'Studio set',set:(v:unknown)=>studioEdit({operation:'set_studio',on:!!v},'Studio set')}} label="Studio set" /></Row>
     <Section {api} title="Scene" />
     {#each ENVIRONMENT_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}

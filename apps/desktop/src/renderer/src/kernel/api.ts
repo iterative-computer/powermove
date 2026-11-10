@@ -381,8 +381,15 @@ export interface Scene3DAPI {
    * morphs, extrusion and native planes. No projection or viewport clipping.
    * Missing/loading geometry throws; an entirely nonvisual selection is null. */
   geometryBounds(layerIds:readonly string[],time?:number):Bounds3D|null;
-  renderQuality: { onChange(listener: () => void): Disposable; presets: typeof import('../../../shared/studio-quality').STUDIO_QUALITY_PRESETS; get(): import('../../../shared/studio-quality').StudioQuality; set(quality: import('../../../shared/studio-quality').StudioQualityInput, meta?: import('../core/types/commands').EditMeta): import('../core/types/commands').EditResult };
+  /** Saved Studio render quality for the open composition. `choices` and
+   * `fields` name the presets and Custom settings for UI; `describe` gives the
+   * plain summary and per-frame (and, with `frames`, whole-export) estimate. */
+  renderQuality: { onChange(listener: () => void): Disposable; presets: typeof import('../../../shared/studio-quality').STUDIO_QUALITY_PRESETS;
+    choices: typeof import('../../../shared/studio-quality-ui').STUDIO_QUALITY_CHOICES; fields: typeof import('../../../shared/studio-quality-ui').STUDIO_QUALITY_FIELDS;
+    describe(quality?: import('../../../shared/studio-quality').StudioQualityInput, frames?: number): ReturnType<typeof import('../../../shared/studio-quality-ui').describeStudioQuality>; get(): import('../../../shared/studio-quality').StudioQuality; set(quality: import('../../../shared/studio-quality').StudioQualityInput, meta?: import('../core/types/commands').EditMeta): import('../core/types/commands').EditResult };
   /** Text/shape geometry is opt-in. Enabling extrusion also enables native 3D. */
+  /** Extruded text needs an installed font's outlines; `missing` explains what to do. */
+  extrusionFontStatus(layerId:string):{state:'ready'|'loading'|'missing';message:string|null};
   getExtrusion(layerId:string,time?:number):import('../core/scene3d/extrusion-data').ExtrusionState|null;
   setExtrusion(layerId:string,patch:import('../core/scene3d/extrusion-data').ExtrusionPatch,meta?:EditMeta):EditResult;
   listSurfaces(layerId:string):import('../core/scene3d/extrusion-data').ExtrusionSurfaceInfo[];
@@ -501,6 +508,9 @@ export interface Scene3DAPI {
     onPreviewChange(listener: (quality: 'fast' | 'quality') => void): Disposable;
     /** Samples so far toward a clean view, or null when Studio is not drawing. */
     progress(): { samples: number; goal: number; refining: boolean; preparing?: { pending: number; total: number } } | null;
+    /** `failure`: why Studio can't draw the current scene (e.g. over the GPU memory budget), or null.
+     * `fallback`: set once the native renderer stopped and Studio continues on its WebGPU backup. */
+    health(): { failure: string | null; fallback: string | null };
     /** Light by pointing: place a softbox whose reflection lands where the frame point (u, v in 0..1) meets a model. Returns its layer id. */
     highlightAt(u: number, v: number): string | null;
     /** While dragging: move that softbox so its highlight follows the frame point (a preview, not yet an edit). */

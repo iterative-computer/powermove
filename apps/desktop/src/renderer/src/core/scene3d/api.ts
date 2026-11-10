@@ -1,4 +1,6 @@
 import { resolveStudioQuality, STUDIO_QUALITY_PRESETS } from '../../../../shared/studio-quality';
+import { describeStudioQuality, STUDIO_QUALITY_CHOICES, STUDIO_QUALITY_FIELDS } from '../../../../shared/studio-quality-ui';
+import { extrusionFontStatus } from './extrusion-fonts';
 import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
 import { viewerService } from '../../legacy/core/services';
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
@@ -70,11 +72,15 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     nullViewerState:(id,time,rect)=>nullViewerState(PM,id,time,rect),
     renderQuality: {
       presets: STUDIO_QUALITY_PRESETS,
+      choices: STUDIO_QUALITY_CHOICES,
+      fields: STUDIO_QUALITY_FIELDS,
+      describe: (quality, frames) => describeStudioQuality(quality ?? (PM.curComp?.() || PM.proj).studioQuality, frames),
       onChange: listener => {qualityListeners.add(listener);return {dispose:()=>qualityListeners.delete(listener)};},
       get: () => resolveStudioQuality((PM.curComp?.() || PM.proj).studioQuality),
       set: (quality, meta) => editScene(PM, {operation:'set_render_quality', ...(typeof quality === 'string' ? {preset:quality} : {patch:quality})}, {origin:'interface',label:'Change render quality',...meta}),
     },
     getExtrusion:(layerId,time)=>readExtrusion(PM,PM.L?.(layerId),time),
+    extrusionFontStatus:layerId=>{const layer=PM.L?.(layerId);return layer?.type==='text'?extrusionFontStatus(PM,layer.d):{state:'ready',message:null};},
     setExtrusion:(layerId,patch,meta)=>editScene(PM,{operation:'set_extrusion',target:layerId,patch},{origin:'interface',...meta}),
     listSurfaces:layerId=>listExtrusionSurfaces(PM,layerId),
     getSurfaceMaterialProperties:(layerId,surface,time)=>readSurfaceProperties(PM,layerId,surface,time),
@@ -148,6 +154,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       };
     })(),
     studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
+      health:()=>{const status=PM.Studio?.status?.();return {failure:status?.failure?String(status.failure):null,fallback:status?.declined?String(status.declined):null};},
       getPreview:()=>studioPreview(PM),setPreview:q=>setStudioPreview(PM,q),onPreviewChange:listener=>({dispose:onStudioPreview(PM,listener)}),
       swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p,()=>!!(PM.playing||PM.interactionActive?.()||viewerService(PM)?.isNavigating?.()||PM.agentFrameCapture||PM.Export?.busy||PM.Preview?.preparing||PM.Preview?.active)):Promise.resolve(null);},
       skyThumbnail:(sky,size)=>skyThumbnail(sky,size),

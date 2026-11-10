@@ -326,10 +326,23 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   return {commands,id:layer.id};
 }
 
+/* Edit ▸ Undo names what happened, as After Effects does ("Undo Add Terrain"),
+   for agents and scripts as well as for panels that pass their own label. */
+const EDIT_LABELS: Record<string, string> = {
+  set_render_quality: 'Change Render Quality', set_world: 'Change World', add_fog: 'Add Fog Volume', update_fog: 'Change Fog Volume',
+  add_terrain: 'Add Terrain', update_terrain: 'Change Terrain', add_scatter: 'Add Scatter', update_scatter: 'Change Scatter',
+  set_material_options: 'Change Material Options', create: 'Add 3D Layers', add_object: 'Add 3D Model', add_light: 'Add Light',
+  add_camera: 'Add Camera', update_object: 'Change 3D Model', update_light: 'Change Light', remove: 'Delete 3D Layer',
+  duplicate: 'Duplicate 3D Layer', set_camera: 'Change Camera', set_environment: 'Change Environment', set_material_map: 'Change Material Map',
+  set_material_properties: 'Change Material', set_extrusion: 'Change Geometry Options', set_surface_material_map: 'Change Material Map',
+  set_surface_material_properties: 'Change Material', set_part: 'Change Model Part', apply_material: 'Apply Finish',
+  light_highlight: 'Light by Pointing', shot: 'Add Shot', set_studio: 'Change Studio Set', explode: 'Exploded View',
+  drop_to_floor: 'Drop to Floor', place_on: 'Place On', auto_studio: 'Auto Studio', soften: 'Soften Light',
+};
 export function editScene(PM: any,args: Scene3DEdit,meta: EditMeta = {}): EditResult {
   try {
     const plan = sceneCommands(PM,args,meta);
-    const result = PM.Edit.apply(plan.commands,{label:'Edit 3D layers',...meta});
+    const result = PM.Edit.apply(plan.commands,{label:EDIT_LABELS[args.operation] ?? 'Edit 3D layers',...meta});
     if (result.ok) result.data.result = {id:plan.id || null,layerId:plan.id || args.target || PM.sel?.layers?.[0] || null};
     return result;
   } catch (e) { return {ok:false,message:e instanceof Error ? e.message : String(e)}; }
