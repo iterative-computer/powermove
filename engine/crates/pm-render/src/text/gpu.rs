@@ -268,6 +268,8 @@ pub struct TextGpu {
     /// from the next frame on (this frame's draws may still read them).
     chunks_retired: Vec<wgpu::Texture>,
     chunks_free: Vec<wgpu::Texture>,
+    /// Staging for glyph-edge chunk uploads, reused across frames.
+    belt: crate::upload::Belt,
     tick: u64,
     pub stats: TextStats,
 }
@@ -816,6 +818,7 @@ impl TextGpu {
             retired_bytes: 0,
             chunks_retired: Vec::new(),
             chunks_free: Vec::new(),
+            belt: Default::default(),
             tick: 0,
             stats: TextStats::default(),
         }
@@ -1020,6 +1023,7 @@ impl TextGpu {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         planned: Vec<(pm_text::render::scene::CoverageLines, DirectPlan)>,
     ) -> Option<Vec<(wgpu::TextureView, DirectMeta)>> {
         let max_side = device.limits().max_texture_dimension_2d.max(1) as usize;
@@ -1080,28 +1084,49 @@ impl TextGpu {
                     view_formats: &[],
                 })
             });
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                // [f32; 2] has no padding; write_texture copies the bytes
-                // before returning.
-                unsafe {
-                    std::slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), scratch.len() * 8)
-                },
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(written as u32 * 8),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: written as u32,
-                    ..size
-                },
-            );
+            // [f32; 2] has no padding; both routes copy the bytes before
+            // returning.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), scratch.len() * 8)
+            };
+            let destination = wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            };
+            let extent = wgpu::Extent3d {
+                width: written as u32,
+                ..size
+            };
+            if height == 1 {
+                // One row needs no row pitch: staged in the reused belt,
+                // not a fresh staging buffer per chunk.
+                let (buffer, offset) = self.belt.stage(device, bytes);
+                encoder.copy_buffer_to_texture(
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: None,
+                            rows_per_image: None,
+                        },
+                    },
+                    destination,
+                    extent,
+                );
+            } else {
+                queue.write_texture(
+                    destination,
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(written as u32 * 8),
+                        rows_per_image: None,
+                    },
+                    extent,
+                );
+            }
             let view = texture.create_view(&Default::default());
             // The whole texture is retained while any of its glyphs is.
             let mut evicted = Vec::new();
@@ -1316,7 +1341,9 @@ impl TextGpu {
                 }
             }
             if direct && !planned.is_empty() {
-                match self.direct_upload(device, queue, planned) {
+                let uploaded = self.direct_upload(device, queue, encoder, planned);
+                self.belt.close(encoder);
+                match uploaded {
                     Some(flushed) => {
                         for (i, at, translation) in staged_items {
                             let (view, meta) = &flushed[at];
