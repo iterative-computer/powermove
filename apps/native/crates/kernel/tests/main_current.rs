@@ -79,14 +79,7 @@ fn main_saved_project_opens_and_an_untouched_save_keeps_every_document_value() {
     let dir = TempDir::new("main-current-untouched");
     let input = fixture(&dir);
     let original = document(&input);
-    let opened = open_project(
-        &input,
-        OpenOptions {
-            verify_media: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let opened = open_project(&input, OpenOptions { verify_media: true }).unwrap();
     assert!(
         opened.history.is_some(),
         "main's saved Undo history is read"
@@ -151,14 +144,7 @@ fn main_saved_project_opens_and_an_untouched_save_keeps_every_document_value() {
     // V2 writes canonical JSON (sorted keys); every number and string is
     // otherwise identical to main's bytes. Main's reader re-checks it below.
     assert_eq!(to_canonical_string(&saved), to_canonical_string(&original));
-    let reopened = open_project(
-        &output,
-        OpenOptions {
-            verify_media: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let reopened = open_project(&output, OpenOptions { verify_media: true }).unwrap();
     assert_eq!(reopened.file.media.len(), 1);
 }
 
