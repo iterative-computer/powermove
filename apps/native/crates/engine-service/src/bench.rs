@@ -7,6 +7,7 @@
 //! `--from=SECONDS` starts the run there instead of at the start;
 //! `--loop=SECONDS` loops that much of it for the whole run;
 //! `--quality=full|half|quarter` pins the resolution (Auto by default);
+//! `--skim=SPEED` sets the skim sweep's media seconds per second (1);
 //! `--fill=DIR` first renders the played range into a disk render cache in
 //! `DIR` (Render Selection's child) and reports its bytes and read cost.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
@@ -342,6 +343,63 @@ pub fn run() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_micros(100));
     };
+    // Skimming: pointer events at 60 Hz move the skimmer `--skim` seconds of
+    // media per second over two seconds forward, then back over the same
+    // span; each frame shown counts from the event that asked for its time.
+    let skim_speed: f64 = arg("skim", "1").parse()?;
+    let mut skim_pass = |forward: bool| -> anyhow::Result<Vec<f64>> {
+        let events = 120;
+        let span = (2. * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
+        let mut asked: std::collections::HashMap<i64, f64> = Default::default();
+        let mut out = Vec::new();
+        let mut seen = None;
+        let started = Instant::now();
+        let collect = |out: &mut Vec<f64>,
+                       asked: &std::collections::HashMap<i64, f64>,
+                       seen: &mut Option<(i64, u64)>| {
+            if let Some(f) = viewer.status().frame
+                && let Some(done) = f.completion_host_seconds
+                && seen != &Some((f.time.get(), f.stamp.sequence))
+            {
+                *seen = Some((f.time.get(), f.stamp.sequence));
+                if let Some(input) = asked.get(&f.time.get()) {
+                    out.push((done - input) * 1000.);
+                }
+            }
+        };
+        for i in 0..=events {
+            let due = started + Duration::from_secs_f64(i as f64 / 60.);
+            while Instant::now() < due {
+                pm_text::host::serve(&mut font_service, fonts.take_asks());
+                viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+                collect(&mut out, &asked, &mut seen);
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            let along = (i as f64 / events as f64 * skim_speed * 2.).min(1.);
+            let offset = (along * span as f64) as i64;
+            let t = if forward {
+                scrub_from + offset
+            } else {
+                scrub_from + span - offset
+            };
+            let at = Ticks::new(t.max(0) / frame * frame)?;
+            let input = pm_engine_service::trace::now();
+            asked.entry(at.get()).or_insert(input);
+            viewer.skim(Some(at), input)?;
+        }
+        let rest = Instant::now();
+        while rest.elapsed() < Duration::from_millis(400) {
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            collect(&mut out, &asked, &mut seen);
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        out.sort_by(f64::total_cmp);
+        Ok(out)
+    };
+    let skim_forward = skim_pass(true)?;
+    let skim_back = skim_pass(false)?;
+    viewer.skim(None, pm_engine_service::trace::now())?;
     let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
@@ -354,7 +412,7 @@ pub fn run() -> anyhow::Result<()> {
         "layer_failures":status.layer_failures.len(),
         "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
         "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"settle_exact":settle_ms,"budget_120hz":9.333},
-        "fill":fill,
+        "skim_ms":{"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
