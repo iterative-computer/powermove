@@ -122,7 +122,10 @@ function drawScale(source: NativeImage, geometry: any[]): number {
     geometry.length === 8
       ? [geometry[6] / (geometry[2] || 1), geometry[7] / (geometry[3] || 1)]
       : geometry.length === 4
-        ? [geometry[2] / (source.width || 1), geometry[3] / (source.height || 1)]
+        ? [
+            geometry[2] / (source.width || 1),
+            geometry[3] / (source.height || 1),
+          ]
         : [1, 1];
   return Math.max(Math.abs(dw), Math.abs(dh), 0) || 1;
 }
@@ -227,7 +230,8 @@ export class RecorderCanvas {
           }
           if (
             name === "createPattern" &&
-            (args[0] instanceof RecorderCanvas || args[0] instanceof NativeImage)
+            (args[0] instanceof RecorderCanvas ||
+              args[0] instanceof NativeImage)
           ) {
             const source = args[0] as RecorderCanvas | NativeImage;
             if (source instanceof RecorderCanvas) source.live();

@@ -953,8 +953,7 @@ export class RemoteDOM {
     if (!node.isConnected) return;
     this.collect(this.observer.takeRecords());
     const known = this.layouts.get(node);
-    const changed =
-      this.dirty.size || this.commands.length || this.pending || this.backlog.length;
+    const changed = this.dirty.size || this.commands.length || this.pending || this.backlog.length;
     if (
       known &&
       known.applied >= this.seq &&
@@ -1025,7 +1024,10 @@ export class RemoteDOM {
       if (!node) continue;
       const previous = this.layouts.get(node);
       if (previous && previous.applied > message.applied) continue;
-      const styles = { ...(previous?.applied === message.applied ? previous.entry.styles : {}), ...entry.styles };
+      const styles = {
+        ...(previous?.applied === message.applied ? previous.entry.styles : {}),
+        ...entry.styles
+      };
       this.layouts.set(node, { entry: { ...entry, styles }, applied: message.applied });
       let values = this.values.get(node);
       if (!values) this.values.set(node, (values = new Map()));

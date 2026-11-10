@@ -107,7 +107,9 @@ export class PageApplier {
   private snapshot(id: number, styles: string[] = []): LayoutEntry {
     const node = this.get(id).node as Element,
       rect = node.getBoundingClientRect();
-    const computed = (node.ownerDocument.defaultView ?? this.document.defaultView!).getComputedStyle(node);
+    const computed = (
+      node.ownerDocument.defaultView ?? this.document.defaultView!
+    ).getComputedStyle(node);
     const values: Record<string, string> = {};
     // Cache declared style requests plus the complete enumerated declaration.
     for (const name of new Set([...Array.from(computed), ...styles]))
@@ -489,7 +491,9 @@ export class PageApplier {
       this.selected = this.event + 1;
       // The document the selection changed in: the panel's or a sheet's.
       const target = event.target as any;
-      const selection = (target?.getSelection ? target : (target?.ownerDocument ?? this.document)).getSelection();
+      const selection = (
+        target?.getSelection ? target : (target?.ownerDocument ?? this.document)
+      ).getSelection();
       data.selection = {
         anchor: selection?.anchorNode ? (this.reverse.get(selection.anchorNode) ?? null) : null,
         anchor_offset: selection?.anchorOffset ?? 0,
