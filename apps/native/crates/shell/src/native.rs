@@ -84,7 +84,8 @@ pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
     pub open: Vec<String>,
-    pub saved: Vec<String>,
+    /// Window ▸ Workspace: id, name, built-in (built-ins first).
+    pub workspaces: Vec<(String, String, bool)>,
     pub workspace: String,
     pub sidebar: bool,
     pub inspector: bool,
@@ -658,14 +659,19 @@ fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
         }
     }
 }
-/// Window ▸ Workspace: presets (current one checked), saved workspaces, then
-/// Save / Delete / Reset. One vocabulary: a workspace is a panel arrangement.
+/// Window ▸ Workspace: built-ins, then saved workspaces (current one
+/// checked), then Save / Delete / Reset.
 fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
     let mtm = MainThreadMarker::new().unwrap();
     let mut items = vec![];
-    for (id, label) in crate::layout::PRESETS {
-        let item = named_item(mtm, label, &format!("workspace:{id}"));
-        item.setState(if id == state.workspace {
+    let mut builtin = true;
+    for (id, name, b) in &state.workspaces {
+        if builtin && !b {
+            items.push(NSMenuItem::separatorItem(mtm));
+        }
+        builtin = *b;
+        let item = named_item(mtm, name, &format!("workspace:{id}"));
+        item.setState(if *id == state.workspace {
             NSControlStateValueOn
         } else {
             NSControlStateValueOff
@@ -673,13 +679,8 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
         items.push(item);
     }
     items.push(NSMenuItem::separatorItem(mtm));
-    for name in &state.saved {
-        items.push(named_item(mtm, name, &format!("layout:apply:{name}")));
-    }
-    if !state.saved.is_empty() {
-        items.push(NSMenuItem::separatorItem(mtm));
-    }
     items.push(named_item(mtm, "Save Workspace…", "layout:save"));
+    items.push(named_item(mtm, "Edit Workspace JSON…", "layout:edit"));
     let delete = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -689,11 +690,11 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
         )
     };
     let names = NSMenu::new(mtm);
-    for name in &state.saved {
-        names.addItem(&named_item(mtm, name, &format!("layout:delete:{name}")));
+    for (id, name, _) in state.workspaces.iter().filter(|w| !w.2) {
+        names.addItem(&named_item(mtm, name, &format!("layout:delete:{id}")));
     }
     delete.setSubmenu(Some(&names));
-    delete.setEnabled(!state.saved.is_empty());
+    delete.setEnabled(state.workspaces.iter().any(|w| !w.2));
     items.push(delete);
     items.push(named_item(mtm, "Reset Workspace", "layout:reset"));
     items
@@ -1077,6 +1078,8 @@ pub struct Host {
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
+    /// The open Workspace Definition sheet, kept alive while it shows.
+    definition: RefCell<Option<Retained<DefinitionTarget>>>,
     /// Title and subtitle of the toolbar's document item.
     title: Retained<NSTextField>,
     subtitle: Retained<NSTextField>,
@@ -1100,10 +1103,6 @@ fn base_choices() -> Vec<Choice> {
             label: i.label,
             command: i.command,
         })
-        .chain(crate::layout::PRESETS.iter().map(|(id, name)| Choice {
-            label: format!("Workspace: {name}"),
-            command: format!("workspace:{id}"),
-        }))
         .collect()
 }
 /// command → shortcut glyphs, preferring menu accelerators, then the first
@@ -1256,6 +1255,7 @@ impl Host {
             restored_project: None,
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
+            definition: RefCell::new(None),
             title,
             subtitle,
         }));
@@ -1981,14 +1981,18 @@ impl Host {
             });
         }
         choices.extend(self.contributed_choices.iter().cloned());
-        for name in &state.saved {
+        for (id, name, _) in &state.workspaces {
             choices.push(Choice {
-                label: format!("Layout: {name}"),
-                command: format!("layout:apply:{name}"),
+                label: format!("Workspace: {name}"),
+                command: format!("workspace:{id}"),
             });
         }
         choices.push(Choice {
-            label: "Save Layout…".into(),
+            label: "Edit Workspace JSON…".into(),
+            command: "layout:edit".into(),
+        });
+        choices.push(Choice {
+            label: "Save Workspace…".into(),
             command: "layout:save".into(),
         });
         choices.push(Choice {
@@ -2032,11 +2036,7 @@ impl Host {
         if self.window.attachedSheet().is_some() {
             return;
         }
-        let preset = crate::layout::PRESETS
-            .iter()
-            .find(|p| p.0 == workspace)
-            .map_or("Custom", |p| p.1);
-        let sheet = workspace_sheet(&self.tokens, &format!("{preset} Copy"));
+        let sheet = workspace_sheet(&self.tokens, &format!("{workspace} Copy"));
         let field = sheet.field.clone();
         let sender = self.sender.clone();
         let handler = block2::RcBlock::new(move |response: NSModalResponse| {
@@ -2059,6 +2059,33 @@ impl Host {
             .beginSheet_completionHandler(&sheet.window, Some(&handler));
         sheet.window.makeFirstResponder(Some(&sheet.field));
         *self.sheet.borrow_mut() = Some(sheet);
+    }
+    /// Edit Workspace JSON… (S100): the active workspace's definition in a
+    /// wide sheet. Apply closes it only when the text is a usable definition
+    /// (else the reason shows above the buttons, and nothing changes), then
+    /// sends `layout:define` with the text and the definition it started from.
+    pub fn edit_workspace_definition(&self, json: &str) {
+        if self.window.attachedSheet().is_some() {
+            return;
+        }
+        let target = definition_sheet(&self.tokens, json);
+        let window = target.ivars().window.clone();
+        let text = target.ivars().text.clone();
+        let original = json.to_owned();
+        let sender = self.sender.clone();
+        let handler = block2::RcBlock::new(move |response: NSModalResponse| {
+            if response == NSModalResponseOK {
+                let _ = sender.try_send(Command {
+                    name: "layout:define".into(),
+                    args: vec![text.string().to_string().into(), original.clone().into()],
+                    token: None,
+                });
+            }
+        });
+        self.window
+            .beginSheet_completionHandler(&window, Some(&handler));
+        window.makeFirstResponder(Some(&target.ivars().text));
+        *self.definition.borrow_mut() = Some(target);
     }
     /// Queues a command for this window's editor, as a menu item would.
     pub fn send_command(&self, name: &str, args: Vec<serde_json::Value>) {
@@ -2283,6 +2310,169 @@ fn end_sheet(sender: &NSControl, response: NSModalResponse) {
     {
         parent.endSheet_returnCode(&sheet, response);
     }
+}
+pub struct DefinitionState {
+    window: Retained<NSWindow>,
+    text: Retained<NSTextView>,
+    error: Retained<NSTextField>,
+}
+define_class!(
+    /// The Workspace Definition sheet's buttons. Apply ends the sheet only
+    /// when its text is a usable definition.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMShellDefinitionTarget"]
+    #[ivars = DefinitionState]
+    pub struct DefinitionTarget;
+    impl DefinitionTarget {
+        #[unsafe(method(apply:))]
+        fn apply(&self, sender: &NSControl) {
+            match crate::workspace::check_definition(&self.ivars().text.string().to_string()) {
+                Ok(_) => end_sheet(sender, NSModalResponseOK),
+                Err(why) => self.ivars().error.setStringValue(&NSString::from_str(&why)),
+            }
+        }
+        #[unsafe(method(cancel:))]
+        fn cancel(&self, sender: &NSControl) {
+            end_sheet(sender, NSModalResponseCancel);
+        }
+    }
+);
+/// S100 Workspace Definition: heading, a monospaced editor, an error line,
+/// then Cancel and Apply (the default button).
+fn definition_sheet(t: &Tokens, json: &str) -> Retained<DefinitionTarget> {
+    let mtm = MainThreadMarker::new().unwrap();
+    let (m, ty, c) = (t.metrics, t.typography, &t.colors);
+    let pad = (m.inset * 2.) as f64;
+    let width = m.sheet_width_wide as f64;
+    let inner = width - pad * 2.;
+    let heading_h = (ty.heading * ty.dense_leading).ceil() as f64;
+    let editor_h = m.palette_height as f64;
+    let error_h = (ty.reading * ty.reading_leading * 2.).ceil() as f64;
+    let footer_h = (m.control + m.inset * 2.) as f64;
+    let height = pad + heading_h + m.gap as f64 + editor_h + m.gap as f64 + error_h + footer_h;
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
+            NSWindowStyleMask::Titled,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    appearance(&window, t);
+    window.setBackgroundColor(Some(&native_color(c.panel)));
+    window.setTitle(&NSString::from_str("Workspace Definition"));
+    let content = window.contentView().unwrap();
+    let mut y = height - pad - heading_h;
+    let title = NSTextField::labelWithString(&NSString::from_str("Workspace Definition"), mtm);
+    title.setFont(Some(&NSFont::systemFontOfSize_weight(
+        ty.heading as f64,
+        unsafe { NSFontWeightSemibold },
+    )));
+    title.setTextColor(Some(&native_color(c.text)));
+    title.setFrame(NSRect::new(
+        NSPoint::new(pad, y),
+        NSSize::new(inner, heading_h),
+    ));
+    content.addSubview(&title);
+    y -= m.gap as f64 + editor_h;
+    let frame = NSRect::new(NSPoint::new(pad, y), NSSize::new(inner, editor_h));
+    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
+    scroll.setHasVerticalScroller(true);
+    scroll.setBorderType(NSBorderType::NoBorder);
+    scroll.setDrawsBackground(true);
+    scroll.setBackgroundColor(&native_color(c.field));
+    scroll.setWantsLayer(true);
+    if let Some(layer) = scroll.layer() {
+        layer.setCornerRadius(m.control_radius as f64);
+        layer.setMasksToBounds(true);
+    }
+    let text = NSTextView::initWithFrame(
+        NSTextView::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, NSSize::new(inner, editor_h)),
+    );
+    text.setRichText(false);
+    text.setDrawsBackground(false);
+    text.setVerticallyResizable(true);
+    text.setHorizontallyResizable(false);
+    text.setAutomaticQuoteSubstitutionEnabled(false);
+    text.setAutomaticDashSubstitutionEnabled(false);
+    text.setAutomaticTextReplacementEnabled(false);
+    text.setAutomaticSpellingCorrectionEnabled(false);
+    text.setContinuousSpellCheckingEnabled(false);
+    text.setTextContainerInset(NSSize::new(m.text_padding as f64, m.text_padding as f64));
+    text.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(
+        ty.body as f64,
+        unsafe { NSFontWeightRegular },
+    )));
+    text.setTextColor(Some(&native_color(c.text)));
+    text.setString(&NSString::from_str(json));
+    text.setAccessibilityLabel(Some(&NSString::from_str("Workspace definition")));
+    scroll.setDocumentView(Some(&text));
+    content.addSubview(&scroll);
+    y -= m.gap as f64 + error_h;
+    let error = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+    error.setFont(Some(&NSFont::systemFontOfSize(ty.reading as f64)));
+    error.setTextColor(Some(&native_color(c.danger)));
+    error.setFrame(NSRect::new(
+        NSPoint::new(pad, y),
+        NSSize::new(inner, error_h),
+    ));
+    content.addSubview(&error);
+    let line = NSBox::initWithFrame(
+        NSBox::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0., footer_h),
+            NSSize::new(width, m.border as f64),
+        ),
+    );
+    line.setBoxType(NSBoxType::Custom);
+    line.setBorderWidth(0.);
+    line.setFillColor(&native_color(c.separator));
+    content.addSubview(&line);
+    let target: Retained<DefinitionTarget> = unsafe {
+        msg_send![
+            super(DefinitionTarget::alloc(mtm).set_ivars(DefinitionState {
+                window: window.clone(),
+                text: text.clone(),
+                error,
+            })),
+            init
+        ]
+    };
+    let button = |title: &str, action: objc2::runtime::Sel, key: &str| {
+        let b = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(title),
+                Some(&target),
+                Some(action),
+                mtm,
+            )
+        };
+        b.setKeyEquivalent(&NSString::from_str(key));
+        b.setControlSize(NSControlSize::Large);
+        b
+    };
+    // Return types a newline in the editor; ⌘Return applies.
+    let apply = button("Apply", sel!(apply:), "\r");
+    apply.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    apply.setBezelColor(Some(&native_color(c.accent)));
+    let cancel = button("Cancel", sel!(cancel:), "\u{1b}");
+    let bw = (m.control * 3.) as f64;
+    let by = (footer_h - m.control as f64) / 2.;
+    apply.setFrame(NSRect::new(
+        NSPoint::new(width - pad - bw, by),
+        NSSize::new(bw, m.control as f64),
+    ));
+    cancel.setFrame(NSRect::new(
+        NSPoint::new(width - pad - bw * 2. - m.inset as f64, by),
+        NSSize::new(bw, m.control as f64),
+    ));
+    content.addSubview(&cancel);
+    content.addSubview(&apply);
+    target
 }
 /// A sheet window and the controls the completion handler reads.
 pub struct Sheet {

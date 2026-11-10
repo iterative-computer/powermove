@@ -80,6 +80,16 @@ pub struct Controller {
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
+    /// The workspace store this window last built (`crate::workspaces`).
+    pub workspace_store: crate::workspaces::Cache,
+    /// The Workspaces panel's last action, for its status line.
+    pub workspaces_status: String,
+    /// The layer a generated select's open menu edits, bound when it opened.
+    pub(crate) generated_menu_layer: Option<String>,
+    /// This window's shell view (its live layout).
+    pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
+    /// Cloud media offered and downloading in this window.
+    pub cloud: crate::cloud_media::State,
     pub captions: crate::captions_panel::State,
     pub shader: crate::shader_panel::State,
     pub takes: crate::takes_panel::State,
@@ -170,6 +180,8 @@ pub struct Bridge(pub Entity<Controller>);
 impl pm_shell::integration::Integration for Bridge {
     fn observe(&self, cx: &mut gpui::Context<pm_shell::view::Editor>) {
         cx.observe(&self.0, |_, _, cx| cx.notify()).detach();
+        let shell = cx.weak_entity();
+        self.0.update(cx, |v, _| v.shell = Some(shell));
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
@@ -202,6 +214,8 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
+                .or_else(|| crate::generated_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -210,6 +224,16 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
+        Some(self.0.read(cx).workspace_store())
+    }
+    fn note(&self, text: &str, cx: &mut App) {
+        let text = text.to_owned();
+        self.0.update(cx, |v, cx| v.note(text, cx));
+    }
+    fn write_workspace(&self, write: pm_shell::workspace::Write, cx: &mut App) {
+        self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
@@ -455,6 +479,11 @@ impl Controller {
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
+            workspace_store: Default::default(),
+            workspaces_status: String::new(),
+            generated_menu_layer: None,
+            shell: None,
+            cloud: Default::default(),
             captions: Default::default(),
             shader: Default::default(),
             takes: Default::default(),
@@ -1650,6 +1679,9 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::generated_panel::pick(self, &cmd.name, cx) {
+            return true;
+        }
         if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
             self.restore_take(id, cx);
             return true;

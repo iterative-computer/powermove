@@ -239,6 +239,36 @@ impl StateSnapshot {
                         .insert("extensions".into(), Value::Object(enabled));
                     Arc::make_mut(&mut next.extensions).insert(entry.id.clone(), entry);
                 }
+                StateOp::RemoveExtension { id } => {
+                    if Arc::make_mut(&mut next.extensions).remove(&id).is_some()
+                        && let Some(Value::Object(enabled)) = next.settings.get("extensions")
+                        && enabled.get(id.as_str()).is_some()
+                    {
+                        let mut enabled = enabled.clone();
+                        enabled.remove(id.as_str());
+                        Arc::make_mut(&mut next.settings)
+                            .insert("extensions".into(), Value::Object(enabled));
+                    }
+                }
+                StateOp::Workspace { record, base } => {
+                    upsert_workspace(Arc::make_mut(&mut next.settings), record, base.as_ref())?;
+                }
+                StateOp::ArchiveWorkspace { id, deleted_at } => {
+                    let settings = Arc::make_mut(&mut next.settings);
+                    let mut all = workspace_list(settings, "workspaces");
+                    let Some(at) = all.iter().position(|w| workspace_id(w) == Some(&id)) else {
+                        return Err("No such workspace".into());
+                    };
+                    let mut record = all.remove(at);
+                    if let Some(o) = record.as_object_mut() {
+                        o.insert("deletedAt", Value::Number(deleted_at));
+                    }
+                    let mut trash = workspace_list(settings, "workspaceTrash");
+                    trash.retain(|w| workspace_id(w) != Some(&id));
+                    trash.insert(0, record);
+                    settings.insert("workspaces".into(), Value::Array(all));
+                    settings.insert("workspaceTrash".into(), Value::Array(trash));
+                }
             }
         }
         if next.settings != self.settings
@@ -290,6 +320,79 @@ pub fn is_setting(key: &str) -> bool {
         && !["projects", "projectTrash", "autosave", "takes"].contains(&key))
         || matches!(crate::library::parse_key(key), Some(crate::library::StoreKey::Dynamic { prefix, .. }) if matches!(prefix.as_str(), "agentModel" | "agentThreads" | "agentAttachment" | "ext"))
 }
+fn workspace_id(record: &Value) -> Option<&str> {
+    record
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+fn workspace_list(settings: &BTreeMap<String, Value>, key: &str) -> Vec<Value> {
+    settings
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+/// Files `record` in `workspaces` under its id, in place, or appends it.
+/// With `base` (the record as its writer last saw it) only what the writer
+/// changed lands: another writer's change to the stored record since then
+/// stays (`merge3`). Without one, `record` replaces it.
+pub(crate) fn upsert_workspace(
+    settings: &mut BTreeMap<String, Value>,
+    record: Value,
+    base: Option<&Value>,
+) -> Result<(), String> {
+    let id = workspace_id(&record)
+        .ok_or("A workspace needs an id")?
+        .to_owned();
+    let mut all = workspace_list(settings, "workspaces");
+    match all.iter_mut().find(|w| workspace_id(w) == Some(&id)) {
+        Some(existing) => {
+            *existing = match base.filter(|b| workspace_id(b) == Some(&id)) {
+                Some(base) => merge3(base, record, existing),
+                None => record,
+            }
+        }
+        None => all.push(record),
+    }
+    settings.insert("workspaces".into(), Value::Array(all));
+    Ok(())
+}
+/// Three-way merge of JSON: `ours` and `theirs` both started from `base`.
+/// Objects merge key by key, recursively; anything else one side left alone
+/// takes the other side's value; where both changed the same non-object
+/// value, `ours` (the later writer) wins.
+pub(crate) fn merge3(base: &Value, ours: Value, theirs: &Value) -> Value {
+    if ours == *base {
+        return theirs.clone();
+    }
+    if theirs == base {
+        return ours;
+    }
+    let (Value::Object(b), Value::Object(o), Value::Object(t)) = (base, &ours, theirs) else {
+        return ours;
+    };
+    let mut merged = t.clone();
+    let keys: std::collections::BTreeSet<_> = b.keys().chain(o.keys()).cloned().collect();
+    for key in keys {
+        let (bv, ov, tv) = (b.get_key(&key), o.get_key(&key), t.get_key(&key));
+        if ov == bv {
+            continue;
+        }
+        match (ov, bv, tv) {
+            (None, _, _) => {
+                merged.remove_key(&key);
+            }
+            (Some(ov), Some(bv), Some(tv)) => {
+                merged.insert(key, merge3(bv, ov.clone(), tv));
+            }
+            (Some(ov), _, _) => {
+                merged.insert(key, ov.clone());
+            }
+        }
+    }
+    Value::Object(merged)
+}
 #[derive(Clone, Debug, Default)]
 pub struct StateTransaction {
     pub expected_revision: Option<u64>,
@@ -322,6 +425,25 @@ pub enum StateOp {
         owner: Writer,
     },
     Extension(ExtensionEntry),
+    /// Forgets an extension whose folder is gone (deleted outside Powermove):
+    /// its entry and on/off preference go; its saved values stay.
+    RemoveExtension {
+        id: String,
+    },
+    /// Adds or replaces the `workspaces` record with this record's id, keeping
+    /// the others and their order (one writer's edit never drops another's).
+    /// `base` is the record as the writer last saw it: given, only the
+    /// writer's own changes land on the stored record (`merge3`).
+    Workspace {
+        record: Value,
+        base: Option<Value>,
+    },
+    /// Moves a `workspaces` record to the front of `workspaceTrash`, stamped
+    /// `deletedAt` (Unix ms), as v1's `WS.remove`.
+    ArchiveWorkspace {
+        id: String,
+        deleted_at: f64,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum StateChange {
@@ -449,5 +571,107 @@ impl UiState {
             m.insert("time", time.clone());
         }
         Value::Object(m)
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    fn ids(state: &StateSnapshot, key: &str) -> Vec<String> {
+        state.settings[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.get("id").and_then(Value::as_str).unwrap().to_owned())
+            .collect()
+    }
+    fn stage(state: &StateSnapshot, ops: Vec<StateOp>) -> StateSnapshot {
+        state
+            .stage(StateTransaction {
+                expected_revision: None,
+                ops,
+            })
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn merge3_keeps_both_writers_changes_and_the_later_wins_a_clash() {
+        let v = |j: &str| parse(j).unwrap();
+        let base = v(r#"{"a":1,"b":{"x":1,"y":1},"c":[1],"d":1}"#);
+        let theirs = v(r#"{"a":2,"b":{"x":2,"y":1},"c":[1],"d":1,"e":1}"#);
+        let ours = v(r#"{"a":3,"b":{"x":1,"y":3},"c":[2]}"#);
+        assert_eq!(
+            merge3(&base, ours, &theirs),
+            v(r#"{"a":3,"b":{"x":2,"y":3},"c":[2],"e":1}"#)
+        );
+        assert_eq!(merge3(&base, base.clone(), &theirs), theirs);
+    }
+    #[test]
+    fn workspace_records_upsert_in_place_and_archive_to_the_trash_front() {
+        let record =
+            |id: &str, name: &str| parse(&format!(r#"{{"id":"{id}","name":"{name}"}}"#)).unwrap();
+        let s = StateSnapshot::default();
+        let s = stage(
+            &s,
+            vec![StateOp::Workspace {
+                record: record("a", "A"),
+                base: None,
+            }],
+        );
+        let s = stage(
+            &s,
+            vec![StateOp::Workspace {
+                record: record("b", "B"),
+                base: None,
+            }],
+        );
+        let s = stage(
+            &s,
+            vec![StateOp::Workspace {
+                record: record("a", "A2"),
+                base: None,
+            }],
+        );
+        assert_eq!(ids(&s, "workspaces"), ["a", "b"]);
+        assert_eq!(
+            s.settings["workspaces"].as_array().unwrap()[0]
+                .get("name")
+                .unwrap()
+                .as_str(),
+            Some("A2")
+        );
+        let s = stage(
+            &s,
+            vec![StateOp::ArchiveWorkspace {
+                id: "a".into(),
+                deleted_at: 5.,
+            }],
+        );
+        assert_eq!(ids(&s, "workspaces"), ["b"]);
+        assert_eq!(ids(&s, "workspaceTrash"), ["a"]);
+        let trashed = &s.settings["workspaceTrash"].as_array().unwrap()[0];
+        assert_eq!(trashed.get("deletedAt"), Some(&Value::Number(5.)));
+        assert!(
+            s.stage(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::ArchiveWorkspace {
+                    id: "zz".into(),
+                    deleted_at: 1.
+                }],
+            })
+            .is_err()
+        );
+        assert!(
+            s.stage(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Workspace {
+                    record: parse("{}").unwrap(),
+                    base: None,
+                }],
+            })
+            .is_err()
+        );
     }
 }

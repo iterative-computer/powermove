@@ -126,6 +126,10 @@ fn next_quit(cx: &mut App) {
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
             crate::error_log::session_ended().await;
+            // The window session's queued writes land before the process ends.
+            cx.background_executor()
+                .spawn(async { pm_shell::session::flush() })
+                .await;
         }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the

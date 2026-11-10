@@ -133,8 +133,7 @@ pub fn tokens() -> Tokens {
 /// Reopens the saved windows (all of them only when the system keeps windows
 /// on quit; see `Session::restore_plan`). With no session, one new window.
 fn restore_session(cx: &mut App) {
-    let plan = view::state_paths()
-        .map(|(_, session)| session)
+    let plan = view::session_path()
         .filter(|p| p.exists())
         .and_then(|p| match session::Session::load(&p) {
             Ok(s) => Some(s),
@@ -176,8 +175,7 @@ pub(crate) fn open_editor_tab(cx: &mut App, leader: u64) {
 }
 fn next_window_id() -> u64 {
     thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
-    let saved = view::state_paths()
-        .map(|(_, p)| p)
+    let saved = view::session_path()
         .filter(|p| p.exists())
         .and_then(|p| session::Session::load(&p).ok())
         .map_or(1, |s| s.next_id());
