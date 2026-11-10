@@ -6,6 +6,7 @@
 //! cargo bench -p pm-kernel --features synthetic --bench edit_scale [-- 5000 20000]
 //!
 //! Target: a typical edit under one 60 Hz frame (16.7 ms) on the kernel thread.
+//! `add` puts a solid on top; `delete` removes the ones it added.
 use std::time::{Duration, Instant};
 
 use pm_kernel::commands::properties::SetProperty;
@@ -41,6 +42,30 @@ fn edit(kind: &str, layer: &str, n: usize) -> Command {
             layer_id: layer.into(),
             visible: n % 2 == 1,
         },
+        "delete" => LayerCommand::Delete {
+            layer_ids: vec![format!("{layer}add{n}")],
+        }
+        .into(),
+        "add" => LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
+            id: format!("{layer}add{n}"),
+            layer_type: "solid".into(),
+            comp: None,
+            name: Some(format!("Added {n}")),
+            from: Some(0.),
+            duration: None,
+            content: Default::default(),
+            properties: Default::default(),
+            color: None,
+            index: None,
+            parent: None,
+            blend: None,
+            motion_blur: None,
+            visible: None,
+            shy: None,
+            collapsed: None,
+            time: 0.,
+        }))
+        .into(),
         _ => unreachable!(),
     }
 }
@@ -93,7 +118,7 @@ fn run(layers: usize) -> bool {
     let ids = pm_kernel::synthetic::main_layer_ids(layers);
     let targets = [ids[ids.len() / 2].clone(), "c7L3".to_owned()];
     let mut ok = true;
-    for kind in ["move", "keyframe", "rename", "toggle"] {
+    for kind in ["move", "keyframe", "rename", "toggle", "add", "delete"] {
         for target in &targets {
             let (mut actor_work, mut round) = (vec![], vec![]);
             for n in 0..RUNS {
