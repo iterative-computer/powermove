@@ -84,7 +84,6 @@ pub fn sample(
     )?
     .clone();
     let layer = index.layer(&layer_id)?;
-    let selected = model.selection.keys();
     let speed = model.graph_mode == crate::GraphMode::Speed;
     let mut curves = vec![];
     let mut range = (f64::INFINITY, f64::NEG_INFINITY);
@@ -150,7 +149,7 @@ pub fn sample(
                 value: plot(seconds, if last { -1 } else { 1 }, 1e-3)?,
             };
             range = (range.0.min(point.value), range.1.max(point.value));
-            let selected = selected.contains(&key.id);
+            let selected = model.selection.key_selected(&layer_id, &key.id);
             let handles: Vec<_> = handles
                 .get(i)
                 .filter(|_| selected)
@@ -195,6 +194,15 @@ pub fn sample(
 impl Graph {
     pub fn curves(&self) -> &[Curve] {
         &self.curves
+    }
+    /// The layer of the curve showing key `key` (key ids may repeat across
+    /// layers).
+    pub fn key_layer(&self, key: &str) -> Option<&str> {
+        self.curves
+            .iter()
+            .find(|c| c.points.iter().any(|p| p.id == key))
+            .and_then(|c| c.id.rsplit_once(':'))
+            .map(|(layer, _)| layer)
     }
     /// The value at `y` in a graph drawn into `area`.
     pub fn value_at(&self, area: Rect, y: f64) -> f64 {

@@ -209,9 +209,15 @@ impl ActorHistoryMark {
 
 #[derive(Clone, Debug)]
 pub enum SelectionCall {
-    Layers { ids: Vec<String>, add: bool },
+    Layers {
+        ids: Vec<String>,
+        add: bool,
+    },
     ToggleLayer(String),
     Keys(Vec<String>),
+    /// Keys as picked on their layers, `(layer, key)` (key ids may repeat
+    /// across layers).
+    LayerKeys(Vec<(String, String)>),
     Channel(Option<String>),
     Clear,
 }
@@ -959,6 +965,7 @@ impl Project {
             SelectionCall::Layers { ids, add } => self.store.select_layers(ids, add),
             SelectionCall::ToggleLayer(id) => self.store.toggle_layer(&id),
             SelectionCall::Keys(ids) => self.store.select_keys(ids),
+            SelectionCall::LayerKeys(pairs) => self.store.select_layer_keys(pairs),
             SelectionCall::Channel(channel) => self.store.set_selected_channel(channel),
             SelectionCall::Clear => self.store.clear_selection(),
         }

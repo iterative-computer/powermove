@@ -41,11 +41,15 @@ const stack = { display: "flex", flexDirection: "column" } as const;
 /** Summary and actions under a hairline, like v1's sheet footer. */
 const footer = {
   ...line,
+  gap: token("metrics.gap"),
   borderTopWidth: token("metrics.border"),
   borderColor: token("colors.hairline"),
   paddingTop: token("metrics.inset"),
   marginTop: token("metrics.gap"),
 } as const;
+/** The footer's notice wraps beside the buttons; the buttons never give way. */
+const notice = { ...stack, flexGrow: 1, flexShrink: 1 } as const;
+const actions = { ...cluster, flexShrink: 0 } as const;
 const detail = {
   color: token("colors.muted"),
   fontSize: token("typography.minimum"),
@@ -535,7 +539,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             }}
             style={footer}
           >
-            <div style={stack}>
+            <div style={notice}>
               <text
                 id="export.summary"
                 label={summary}
@@ -560,7 +564,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               </text>
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>
-            <div style={cluster}>
+            <div style={actions}>
               <Action
                 id="export.cancel"
                 label="Cancel"

@@ -27,7 +27,60 @@ pub fn line(value: serde_json::Value) {
                 (start().elapsed().as_secs_f64() * 1000.).round().into(),
             );
         }
-        eprintln!("PM_MAIN {value}");
+        // A writer thread: stderr is a file, and a write that waited on a
+        // busy disk held the main thread for a second (soak, 2026-11-09).
+        static WRITER: OnceLock<Option<Queue>> = OnceLock::new();
+        let writer = WRITER.get_or_init(|| {
+            let (queue, rx) = Queue::new(QUEUE_LINES);
+            std::thread::Builder::new()
+                .name("pm-diag".into())
+                .spawn(move || {
+                    for line in rx {
+                        eprintln!("{line}");
+                    }
+                })
+                .ok()
+                .map(|_| queue)
+        });
+        let line = format!("PM_MAIN {value}");
+        match writer {
+            Some(queue) => queue.push(line),
+            None => eprintln!("{line}"),
+        }
+    }
+}
+
+/// Lines waiting for a slow or blocked stderr before new ones are dropped.
+const QUEUE_LINES: usize = 4096;
+
+/// The writer thread's bounded queue. A full queue drops the line and counts
+/// it; the next line that fits is preceded by one `{"dropped":N}` line, in
+/// the place the lines went missing.
+struct Queue {
+    tx: std::sync::mpsc::SyncSender<String>,
+    dropped: std::sync::atomic::AtomicU64,
+}
+impl Queue {
+    fn new(lines: usize) -> (Queue, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(lines);
+        let dropped = Default::default();
+        (Queue { tx, dropped }, rx)
+    }
+    fn push(&self, line: String) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let missing = self.dropped.swap(0, Relaxed);
+        if missing > 0
+            && self
+                .tx
+                .try_send(format!(r#"PM_MAIN {{"dropped":{missing}}}"#))
+                .is_err()
+        {
+            self.dropped.fetch_add(missing + 1, Relaxed);
+            return;
+        }
+        if self.tx.try_send(line).is_err() {
+            self.dropped.fetch_add(1, Relaxed);
+        }
     }
 }
 
@@ -117,6 +170,10 @@ fn report_activation() {
 /// Main-thread responsiveness: a foreground task asks for a 5 ms timer and
 /// reports how late it resumes. A late resume is time the UI thread could
 /// not paint or handle input.
+/// Live editor controllers, for the probe line: a closed window's editor
+/// must go (stability soak).
+pub static EDITORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn install_probe(cx: &mut gpui::App) {
     if !enabled() {
         return;
@@ -137,7 +194,8 @@ pub fn install_probe(cx: &mut gpui::App) {
                 line(serde_json::json!({"stall_ms":late}));
             }
             if reported.elapsed() >= Duration::from_secs(1) {
-                line(serde_json::json!({"probe_worst_ms":worst}));
+                line(serde_json::json!({"probe_worst_ms":worst,
+                    "editors":EDITORS.load(std::sync::atomic::Ordering::Relaxed)}));
                 worst = 0.;
                 reported = Instant::now();
             }
@@ -287,5 +345,27 @@ mod stall_sampler {
                 }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Queue;
+
+    /// A blocked stderr never grows the queue past its bound: the overflow
+    /// is counted and reported once, where it happened.
+    #[test]
+    fn a_blocked_writer_drops_and_counts_lines() {
+        let (queue, rx) = Queue::new(2);
+        for n in 0..5 {
+            queue.push(format!("line {n}"));
+        }
+        let drained: Vec<String> = rx.try_iter().collect();
+        assert_eq!(drained, ["line 0", "line 1"]);
+        queue.push("line 5".into());
+        let drained: Vec<String> = rx.try_iter().collect();
+        assert_eq!(drained, [r#"PM_MAIN {"dropped":3}"#, "line 5"]);
+        queue.push("line 6".into());
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["line 6"]);
     }
 }

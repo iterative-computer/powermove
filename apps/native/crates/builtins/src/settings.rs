@@ -113,14 +113,16 @@ impl Backend {
             .into_iter()
             .map(|(provider, name)| {
                 let status = accounts.status(provider);
+                let target = status.email.clone();
                 let who = [status.email, status.plan]
                     .into_iter()
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" · ");
                 let id = format!("account.{}", name.to_lowercase());
-                let mut row =
-                    json!({"id":id,"section":"accounts","group":"Subscriptions","label":name});
+                // The signed-in account (none while signing in) a press acts on.
+                let mut row = json!({"id":id,"section":"accounts","group":"Subscriptions",
+                    "label":name,"target":target});
                 let (action, label) = match status.state {
                     State::Connected => (Some("account.disconnect"), "Sign Out"),
                     State::Connecting => (Some("account.disconnect"), "Cancel"),
@@ -152,19 +154,24 @@ impl Backend {
     }
     /// Settings › Media: proxy preferences and storage, from the host's
     /// `mediaSettings` fact (this Mac's, so shown without a project).
-    fn media_rows(&self) -> Vec<Value> {
-        let media = &self.native.facts["mediaSettings"];
+    fn media_rows(&mut self) -> Result<Vec<Value>, String> {
+        let media = self.native.facts["mediaSettings"].clone();
         if media.is_null() {
-            return vec![];
+            return Ok(vec![]);
         }
-        let mut rows: Vec<Value> = media["rows"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let choices = media["rows"].as_array().cloned().unwrap_or_default();
+        // A choice shows its control only with a lease; its change goes to
+        // the panel's listener, which writes `media.*` through the host.
+        let leases = self.fields(&Value::Array(
+            choices.iter().map(|r| r["id"].clone()).collect(),
+        ))?;
+        let mut rows: Vec<Value> = choices
+            .iter()
             .map(|r| {
                 json!({"id":r["id"],"section":"media","group":"Proxies","label":r["label"],
                     "control":"choice","value":r["value"],"options":r["options"],
-                    "detail":r["detail"],"disabled":false})
+                    "detail":r["detail"],"binding":leases[r["id"].as_str().unwrap_or_default()],
+                    "disabled":false})
             })
             .collect();
         let used = &media["used"];
@@ -193,10 +200,10 @@ impl Backend {
                 "actionLabel":"Show in Finder"}),
         ]);
         rows.extend(protected_folders_row(&media["folders"]));
-        rows
+        Ok(rows)
     }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
-        let media = self.media_rows();
+        let media = self.media_rows()?;
         let Some(p) = self.published() else {
             return Ok(media);
         };
@@ -422,12 +429,47 @@ impl Backend {
             })
             .collect())
     }
+    /// A row button pressed on an older publication still lands when the
+    /// latest one offers that row the same action, enabled, on the same
+    /// target (the account or provider the person saw): an unrelated fact (an
+    /// account check finishing) must not refuse a click, and a press must
+    /// never reach a different account. A destructive press from a
+    /// publication no longer remembered is refused. Writes keep the strict
+    /// revision check.
+    fn row_still_offers(&mut self, seen: Option<u64>, action: &Value) -> Result<bool, String> {
+        if action["type"] != "row" {
+            return Ok(false);
+        }
+        let latest = self.settings_snapshot()?;
+        let offered = latest["rows"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == action["id"]))
+            .is_some_and(|row| {
+                row["action"] == action["action"] && row["disabled"] != true && row["busy"] != true
+            });
+        let id = action["id"].as_str().unwrap_or_default();
+        let target = |revision: u64| {
+            self.native
+                .settings_targets
+                .iter()
+                .find(|(r, _)| *r == revision)
+                .map(|(_, rows)| rows[id].clone())
+        };
+        let now = target(self.native.settings_sequence);
+        Ok(offered
+            && match seen.and_then(target) {
+                Some(then) => then["action"] == action["action"] && Some(then) == now,
+                None => !destructive(action["action"].as_str().unwrap_or_default()),
+            })
+    }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
         self.sync()?;
-        if args["revision"].as_u64() != Some(self.native.settings_sequence) {
+        let action = &args["action"];
+        if args["revision"].as_u64() != Some(self.native.settings_sequence)
+            && !self.row_still_offers(args["revision"].as_u64(), action)?
+        {
             return Err("Settings changed; retry from the latest publication".into());
         }
-        let action = &args["action"];
         match action["type"].as_str() {
             Some("write")
                 if action["id"]
@@ -769,6 +811,18 @@ impl pm_services::surface_backing::projects::ModsHost for PushMod<'_> {
     }
 }
 /// Settings › Accounts › Powermove Account, from the app's `cloud` fact
+/// Row actions that sign out, disconnect or delete: from an older Settings
+/// publication they land only on the target that publication showed.
+fn destructive(action: &str) -> bool {
+    matches!(
+        action,
+        "account.disconnect"
+            | "account.sign-out"
+            | "account.delete"
+            | "provider.disconnect"
+            | "agents.remove"
+    )
+}
 /// (v1.2.0 SettingsScreen): Sign In… while signed out; the identity with Sign
 /// Out, Remember Installs and Delete Account… while signed in.
 pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
@@ -793,6 +847,7 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     let identity = cloud["identity"].as_str().unwrap_or_default();
     let email = cloud["email"].as_str().unwrap_or_default();
     let mut account = row("sign-in", identity, "action");
+    account["target"] = json!(identity);
     account["action"] = json!("account.sign-out");
     account["actionLabel"] = json!("Sign Out");
     if identity != email {
@@ -804,6 +859,7 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
         "Keep a list of the extensions you install from the Store. Turning this off deletes the list."
     );
     let mut delete = row("delete", "Delete Account", "action");
+    delete["target"] = json!(identity);
     delete["action"] = json!("account.delete");
     delete["actionLabel"] = json!("Delete Account…");
     delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
@@ -870,10 +926,14 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
     } else {
         "Use an API, Ollama, or LM Studio."
     });
+    // The connection a press acts on: its type, address and model.
+    let target = connected.then(|| json!([text("type"), text("url"), text("model")]));
+    action["target"] = json!(target);
     rows.push(action);
     if connected {
         rows.push(json!({"id":"account.disconnect","section":"accounts","group":"API or Local Model",
-            "label":"Disconnect","control":"action","action":"provider.disconnect","actionLabel":"Disconnect"}));
+            "label":"Disconnect","control":"action","action":"provider.disconnect","actionLabel":"Disconnect",
+            "target":target}));
     }
     rows
 }

@@ -148,6 +148,10 @@ pub struct SurfaceView {
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
+    /// Events sent to the script and not yet handled; an agent's action
+    /// waits for its own (`wake_idle` asks for a notify when they finish).
+    handling: usize,
+    pub(crate) wake_idle: bool,
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
     parked: Option<Compiled>,
@@ -204,6 +208,8 @@ impl SurfaceView {
             queued_move: None,
             latest: 0,
             shown: 0,
+            handling: 0,
+            wake_idle: false,
             parked: None,
             requested: None,
             focus_text: None,
@@ -853,6 +859,7 @@ impl SurfaceView {
         let p = self.publication.clone();
         let event = event.to_owned();
         let semantic = self.prepared.node(id).and_then(|n| n.semantic.clone());
+        self.handling += 1;
         // Native planning can read model state. Keep its locks off the main thread.
         cx.spawn(async move |this, cx| {
             let ticket = cx
@@ -869,9 +876,25 @@ impl SurfaceView {
                     )
                 })
                 .await;
-            let _ = this.update(cx, |v, cx| v.run(ticket, cx));
+            let error = match ticket {
+                Ok(ticket) => ticket.await.err().map(|e| e.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            let _ = this.update(cx, |v, cx| {
+                v.handling -= 1;
+                if let Some(error) = error {
+                    v.error = Some(error);
+                    cx.notify();
+                } else if v.handling == 0 && std::mem::take(&mut v.wake_idle) {
+                    cx.notify();
+                }
+            });
         })
         .detach();
+    }
+    /// Every event sent to the panel's script has been handled.
+    pub fn idle(&self) -> bool {
+        self.handling == 0
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.

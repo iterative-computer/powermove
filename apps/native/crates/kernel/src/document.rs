@@ -304,7 +304,7 @@ impl DocumentStore {
     }
 
     fn from_parts(
-        mut file: ProjectFile,
+        file: ProjectFile,
         document: Document,
         history: History,
         history_owned: bool,
@@ -326,16 +326,46 @@ impl DocumentStore {
             Value::String(v) => v.as_str().map(str::to_owned),
             _ => None,
         }));
-        if let Some(root) = document.root() {
+        DocumentStore::assemble(
+            file,
+            Arc::new(document),
+            history,
+            history_owned,
+            upgraded_on_open,
+        )
+    }
+
+    /// A planning copy of a published document (an agent's batch resolved
+    /// command by command): it shares the snapshot's tree, so making it costs
+    /// nothing however large the project; untitled, without history on disk,
+    /// never saved. A published snapshot is already upgraded.
+    pub fn scratch(snapshot: &Snapshot) -> DocumentStore {
+        DocumentStore::assemble(
+            ProjectFile::untitled(),
+            snapshot.document.clone(),
+            History::new(),
+            true,
+            false,
+        )
+    }
+
+    fn assemble(
+        mut file: ProjectFile,
+        current: Arc<Document>,
+        history: History,
+        history_owned: bool,
+        upgraded_on_open: bool,
+    ) -> DocumentStore {
+        if let Some(root) = current.root() {
             crate::media_versions::hydrate_embedded(root, &mut file.media);
         }
-        let queries = QueryContext::new(&document);
+        let queries = QueryContext::new(&current);
         let token = history.state_token();
         DocumentStore {
             runtime_state: None,
             text_host: None,
             doc_id: new_doc_id(),
-            current: Arc::new(document),
+            current,
             file,
             history,
             history_owned,
@@ -564,6 +594,12 @@ impl DocumentStore {
         S: Into<String>,
     {
         self.selection.set_keys(ids.into_iter().map(Into::into));
+        self.emit(StoreEvent::SelectionChanged);
+    }
+
+    /// Selects keyframes as picked on their layers, `(layer, key)`.
+    pub fn select_layer_keys(&mut self, pairs: Vec<(String, String)>) {
+        self.selection.set_layer_keys(pairs);
         self.emit(StoreEvent::SelectionChanged);
     }
 
@@ -2411,8 +2447,10 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
         };
         let mut ids = HashSet::with_capacity(items.len());
         for layer in items.iter() {
-            crate::commands::scene3d::validate_layer(&layer.to_value())
-                .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            if crate::commands::scene3d::is_scene3d_layer(layer) {
+                crate::commands::scene3d::validate_layer(&layer.to_value())
+                    .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            }
             let id = layer.get("id").and_then(model::str_of);
             match id {
                 Some(id) if !id.is_empty() => {

@@ -440,3 +440,165 @@ fn a_large_document_checkpoints_by_journal_size_and_recovers_at_any_point() {
         "authored media order is journaled"
     );
 }
+
+/// A history stored as a dictionary (main's packed form; the library keeps
+/// every project's history so) is one this kernel reads and writes in full:
+/// editing it must not archive it. Archived, every save of a library project
+/// after an edit kept another full copy of its history (a 285 MB project
+/// grew 100 MB a save).
+#[test]
+fn an_edited_dictionary_history_is_not_archived() {
+    let dir = TempDir::new("dictionary-history");
+    let layer = |id: &str| {
+        format!(
+            r#"{{"id":"{id}","type":"shape","name":"{id}","from":0,"dur":2,"on":true,"p":{{"opacity":{{"v":100,"kf":[],"expr":null}}}}}}"#
+        )
+    };
+    let (one, two) = (layer("a"), format!("{},{}", layer("a"), layer("b")));
+    let history = parse(&format!(
+        r#"{{"version":1,"paths":"composition","index":0,"entries":[{{"label":"Add","forward":[{{"path":["comps","main","layers"],"exists":true,"value":[{two}]}}],"backward":[{{"path":["comps","main","layers"],"exists":true,"value":[{one}]}}]}}]}}"#
+    ))
+    .unwrap();
+    let packed = pm_kernel::history::pack(history);
+    assert!(packed.get("format").is_some(), "the input is a dictionary");
+    let source = dir.path("source.json");
+    std::fs::write(
+        &source,
+        format!(
+            r##"{{"v":"1.0.0","proj":{{"id":"dict","name":"Dict","compId":"main","compName":"Main","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{two}]}},"history":{}}}"##,
+            to_canonical_string(&packed)
+        ),
+    )
+    .unwrap();
+    let mut kernel = Kernel::new(KernelConfig::default());
+    let session = open_file(&mut kernel, &source);
+    assert!(
+        store(&kernel).history().can_undo(),
+        "the dictionary is read"
+    );
+    call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    let path = dir.path("saved.pmv");
+    let plan = kernel
+        .prepare_session_save(session, Some(path.clone()), false)
+        .unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let saved = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .document;
+    assert!(saved.get("nativeHistoryArchive").is_none());
+    let reopened = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+    assert_eq!(reopened.history.unwrap().len(), 2, "both edits are kept");
+}
+
+/// A valid dictionary whose shared records expand past the history byte
+/// budget opens trimmed: the trimmed steps exist only in the file, so the
+/// first save after an edit archives the history it replaces.
+#[test]
+fn a_dictionary_trimmed_on_open_is_archived() {
+    let dir = TempDir::new("trimmed-history");
+    let big = format!(
+        r#"{{"id":"a","type":"shape","name":"{}"}}"#,
+        "x".repeat((pm_kernel::history::DEFAULT_MAX_BYTES / 2) + (1 << 20))
+    );
+    let small = r#"{"id":"b","type":"shape","name":"b"}"#;
+    let side = |r: usize| {
+        format!(r#"[{{"patch":{{"path":["comps","main","layers"],"exists":true}},"refs":[{r}]}}]"#)
+    };
+    let packed = format!(
+        r#"{{"format":"powermove-history-dictionary","version":1,"records":[{big},{small}],"history":{{"version":1,"paths":"composition","index":1,"entries":[{{"label":"Big","forward":{f0},"backward":{f0}}},{{"label":"Small","forward":{f1},"backward":{f1}}}]}}}}"#,
+        f0 = side(0),
+        f1 = side(1),
+    );
+    drop(big);
+    let source = dir.path("source.json");
+    std::fs::write(
+        &source,
+        format!(
+            r##"{{"v":"1.0.0","proj":{{"id":"trim","name":"Trim","compId":"main","compName":"Main","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{small}]}},"history":{packed}}}"##
+        ),
+    )
+    .unwrap();
+    let original = parse(&packed).unwrap();
+    drop(packed);
+    let mut kernel = Kernel::new(KernelConfig::default());
+    let session = open_file(&mut kernel, &source);
+    assert_eq!(
+        store(&kernel).history().len(),
+        1,
+        "the oldest step is trimmed"
+    );
+    call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    let path = dir.path("saved.pmv");
+    let plan = kernel
+        .prepare_session_save(session, Some(path.clone()), false)
+        .unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    drop(kernel);
+    let file = std::fs::File::open(&path).unwrap();
+    let saved = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .document;
+    assert!(
+        saved.get("nativeHistoryArchive") == Some(&original),
+        "the trimmed history is archived as the file held it"
+    );
+}
+
+/// A large project's history holds this kernel's own operations (an insert
+/// into a large layer list): reopened, edited and saved, it is not archived.
+#[test]
+fn an_edited_operation_history_is_not_archived() {
+    let dir = TempDir::new("operation-history");
+    let source = dir.path("source.pmv");
+    let mut untitled = DocumentStore::new_untitled(project());
+    common::save_as(&mut untitled, &source).unwrap();
+    drop(untitled);
+    let document = |path: &std::path::Path| {
+        let file = std::fs::File::open(path).unwrap();
+        read_container(
+            &file,
+            ReadOptions {
+                verify_media: false,
+            },
+        )
+        .unwrap()
+        .document
+    };
+    let mut previous = source;
+    for round in 0..2 {
+        let mut kernel = Kernel::new(KernelConfig::default());
+        let session = open_file(&mut kernel, &previous);
+        call(
+            &mut kernel,
+            commands("Add", vec![add_layer(&format!("r{round}"))]),
+        );
+        let path = dir.path(&format!("round-{round}.pmv"));
+        let plan = kernel
+            .prepare_session_save(session, Some(path.clone()), false)
+            .unwrap();
+        kernel.finish_session_save(plan.run()).unwrap();
+        drop(kernel);
+        let saved = document(&path);
+        let history = to_canonical_string(saved.get("history").unwrap());
+        assert!(
+            history.contains(r#""op":"insert""#),
+            "round {round} keeps operations"
+        );
+        assert!(
+            saved.get("nativeHistoryArchive").is_none(),
+            "round {round} archived the kernel's own history"
+        );
+        previous = path;
+    }
+}

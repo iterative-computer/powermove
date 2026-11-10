@@ -9,6 +9,24 @@ pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
 pub use pm_panel_inspector::EffectClipboard;
 pub use settings::{RESOLUTIONS, set_notification_status};
+
+/// Panel state is locked both on the V8 owner thread (every panel and
+/// extension realm runs there) and on host threads. A panic on one thread
+/// while it held a lock must not cascade into every later locker and take the
+/// owner thread down: the poison is cleared and the value used. Held state is
+/// maps, queues and panel backends whose views are rebuilt from the kernel on
+/// their next tick; the panic itself was reported where it happened.
+pub(crate) trait LockShared<T: ?Sized> {
+    fn shared(&self) -> std::sync::MutexGuard<'_, T>;
+}
+impl<T: ?Sized> LockShared<T> for std::sync::Mutex<T> {
+    fn shared(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| {
+            self.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+}
 #[cfg(test)]
 mod agent_tests;
 mod data;
@@ -212,13 +230,13 @@ struct Broker {
 pub struct EffectDesk(Arc<Broker>);
 impl EffectDesk {
     pub fn run(&self, op: &str) -> std::result::Result<Value, String> {
-        let clipboard = self.0.effect_clipboard.lock().unwrap().clone();
+        let clipboard = self.0.effect_clipboard.shared().clone();
         match op {
             "copy" => {
-                let entry = self.0.entries.lock().unwrap().get("layer-effects").cloned();
+                let entry = self.0.entries.shared().get("layer-effects").cloned();
                 let copied = entry.and_then(|entry| {
-                    let entry = entry.lock().unwrap();
-                    let mut backend = entry.backend.lock().unwrap();
+                    let entry = entry.shared();
+                    let mut backend = entry.backend.shared();
                     let model = backend.model.as_mut()?;
                     let layer = model.effects.layer.clone()?;
                     let first = model.effects.ids.first().cloned()?;
@@ -237,13 +255,13 @@ impl EffectDesk {
                 }
                 // Through the window's Effect Controls (or Properties) model:
                 // its effect definitions are the window's registries.
-                let entries = self.0.entries.lock().unwrap().clone();
+                let entries = self.0.entries.shared().clone();
                 let entry = ["layer-effects", "inspector"]
                     .iter()
                     .find_map(|id| entries.get(*id).cloned())
                     .ok_or("The window's panels are not running")?;
-                let entry = entry.lock().unwrap();
-                let mut backend = entry.backend.lock().unwrap();
+                let entry = entry.shared();
+                let mut backend = entry.backend.shared();
                 backend.sync()?;
                 let caller = backend.caller;
                 let model = backend.model.as_ref().ok_or("No open project")?;
@@ -315,15 +333,7 @@ impl Builtins {
             return None;
         }
         let entry = self.broker.entry("agent")?;
-        let state = entry
-            .lock()
-            .unwrap()
-            .backend
-            .lock()
-            .unwrap()
-            .native
-            .agent
-            .clone()?;
+        let state = entry.shared().backend.shared().native.agent.clone()?;
         let carry = AgentCarry::take(&self.broker.agent, &state)?;
         self.broker
             .agent_released
@@ -352,7 +362,7 @@ impl Builtins {
         let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
         let (agent, link) = {
             let backend = self.backend("agent").map_err(|_| closed())?;
-            let backend = backend.lock().unwrap();
+            let backend = backend.shared();
             let agent = backend.native.agent.clone().ok_or_else(closed)?;
             (agent, backend.native.agent_link.clone())
         };
@@ -364,7 +374,7 @@ impl Builtins {
         let caller_run = args["callerRunId"].as_str().unwrap_or_default();
         let thread_arg = args["threadId"].as_str().unwrap_or_default().to_owned();
         let describe = |thread: &str, extra: Value| -> std::result::Result<Value, String> {
-            let state = agent.lock().unwrap();
+            let state = agent.shared();
             let session = state.panel.session(thread).map_err(|_| missing())?;
             let mut out = json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
                 "busy":session.run.is_some(),"provider":session.settings.provider.name(),
@@ -399,7 +409,7 @@ impl Builtins {
         };
         if tool == "thread_cancel" {
             let effect = {
-                let mut state = agent.lock().unwrap();
+                let mut state = agent.shared();
                 let running = state
                     .panel
                     .session(&thread_arg)
@@ -434,13 +444,8 @@ impl Builtins {
             )
         });
         if let Some(key) = &request_key
-            && let Some((seen, thread, run)) = self
-                .broker
-                .thread_requests
-                .lock()
-                .unwrap()
-                .get(key)
-                .cloned()
+            && let Some((seen, thread, run)) =
+                self.broker.thread_requests.shared().get(key).cloned()
         {
             if seen != fingerprint {
                 return Err(if tool == "thread_launch" {
@@ -463,8 +468,7 @@ impl Builtins {
             if self
                 .broker
                 .thread_requests
-                .lock()
-                .unwrap()
+                .shared()
                 .keys()
                 .filter(|k| k.starts_with(&prefix))
                 .count()
@@ -482,7 +486,7 @@ impl Builtins {
         let now = agent_host::now_ms();
         // What the request asks for, against the thread's current settings.
         let (thread, steer, reconfigure) = {
-            let mut state = agent.lock().unwrap();
+            let mut state = agent.shared();
             let base = if tool == "thread_send" {
                 thread_arg.clone()
             } else {
@@ -535,12 +539,11 @@ impl Builtins {
         };
         // A reconfigured run stops first; the new turn carries the request on.
         if reconfigure {
-            let effect = agent.lock().unwrap().panel.stop(&thread).map_err(failed)?;
+            let effect = agent.shared().panel.stop(&thread).map_err(failed)?;
             run_effect(&effect)?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             while agent
-                .lock()
-                .unwrap()
+                .shared()
                 .panel
                 .session(&thread)
                 .is_ok_and(|s| s.run.is_some())
@@ -552,13 +555,13 @@ impl Builtins {
             }
         }
         let effect = {
-            let mut state = agent.lock().unwrap();
+            let mut state = agent.shared();
             if steer.is_none() {
                 // A new turn runs at the caller's access and the target settings.
                 if let Some(effect) = state.panel.set_access(&thread, caller).map_err(failed)? {
                     drop(state);
                     run_effect(&effect)?;
-                    state = agent.lock().unwrap();
+                    state = agent.shared();
                 }
                 if let Some(provider) = target["providerInstanceId"].as_str().map(provider_of) {
                     let model = target["model"].as_str().unwrap_or_default().to_owned();
@@ -623,7 +626,7 @@ impl Builtins {
             },
         )?;
         if let Some(key) = request_key {
-            self.broker.thread_requests.lock().unwrap().insert(
+            self.broker.thread_requests.shared().insert(
                 key,
                 (
                     fingerprint,
@@ -646,7 +649,7 @@ impl Builtins {
             let backend = self.backend("agent").map_err(|_| {
                 "Open the Agent panel in this project's window before delegating.".to_owned()
             })?;
-            let backend = backend.lock().unwrap();
+            let backend = backend.shared();
             let agent = backend
                 .native
                 .agent
@@ -666,7 +669,7 @@ impl Builtins {
         const GONE: &str = "The visualization’s agent run is no longer active.";
         let (agent, link) = {
             let backend = self.backend("agent").map_err(|_| GONE.to_owned())?;
-            let backend = backend.lock().unwrap();
+            let backend = backend.shared();
             let agent = backend.native.agent.clone().ok_or(GONE)?;
             (agent, backend.native.agent_link.clone())
         };
@@ -680,7 +683,7 @@ impl Builtins {
         let prepared = pm_agents::visual::prepare(&input)?;
         let id = format!("visual-{}", pm_kernel::new_id("reply"));
         let thread = {
-            let mut state = agent.lock().unwrap();
+            let mut state = agent.shared();
             let thread = state.runs.live(run).ok_or(GONE)?.thread.clone();
             let artifact = json!({"version":1,"id":id,"runId":run,"title":prepared.title,
                 "html":prepared.html,"height":prepared.height});
@@ -718,7 +721,7 @@ impl Builtins {
             let backend = self
                 .backend("agent")
                 .map_err(|_| "The Agent panel closed.")?;
-            let backend = backend.lock().unwrap();
+            let backend = backend.shared();
             (
                 backend
                     .native
@@ -734,7 +737,7 @@ impl Builtins {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| format!("{e:?}"))?;
         {
-            let mut state = agent.lock().unwrap();
+            let mut state = agent.shared();
             let thread = state.panel.active_id().to_owned();
             state
                 .panel
@@ -767,10 +770,10 @@ impl Builtins {
     pub fn agent_thread_live(&self, thread: &str) -> Option<Value> {
         let shared = {
             let backend = self.backend("agent").ok()?;
-            let state = backend.lock().unwrap().native.agent.clone();
-            state.or_else(|| self.broker.carried.lock().unwrap().clone())?
+            let state = backend.shared().native.agent.clone();
+            state.or_else(|| self.broker.carried.shared().clone())?
         };
-        let state = shared.lock().unwrap();
+        let state = shared.shared();
         let session = state.panel.session(thread).ok()?;
         let busy = session.run.is_some();
         let steps: Vec<Value> = session.trace.rows.values().cloned().collect();
@@ -882,33 +885,33 @@ impl Builtins {
     /// commit. Waits (bounded) for the isolate: call off the main thread.
     pub fn park(&self, panel: &str) -> bool {
         if !builtin_panel(panel).is_some_and(|p| p.parks)
-            || !self.realms.lock().unwrap().contains_key(panel)
+            || !self.realms.shared().contains_key(panel)
         {
             return false;
         }
         self.retire(panel);
-        self.broker.parked.lock().unwrap().insert(panel.into());
+        self.broker.parked.shared().insert(panel.into());
         true
     }
     /// A parked panel opened again, as the fork that replaced it if any.
     pub fn unpark(&self, panel: &str) -> Option<Result<Ticket<Evaluation>>> {
-        if !self.broker.parked.lock().unwrap().remove(panel) {
+        if !self.broker.parked.shared().remove(panel) {
             return None;
         }
-        let fork = self.forks.lock().unwrap().get(panel).cloned();
+        let fork = self.forks.shared().get(panel).cloned();
         Some(match fork {
             Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
             None => self.mount_builtin(panel),
         })
     }
     pub fn is_parked(&self, panel: &str) -> bool {
-        self.broker.parked.lock().unwrap().contains(panel)
+        self.broker.parked.shared().contains(panel)
     }
     fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         let Some(builtin) = builtin_panel(panel) else {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         };
-        if self.realms.lock().unwrap().contains_key(panel)
+        if self.realms.shared().contains_key(panel)
             || (self.broker.application && !builtin.application)
         {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
@@ -924,7 +927,7 @@ impl Builtins {
             self.broker.agent.add_realm(realm.clone());
         }
         let ticket = realm.eval(source)?;
-        self.realms.lock().unwrap().insert(panel.into(), realm);
+        self.realms.shared().insert(panel.into(), realm);
         Ok(ticket)
     }
     /// Retire a built-in panel's realm, its writer and its surface, so the next
@@ -932,7 +935,7 @@ impl Builtins {
     /// Waits (bounded) for the old isolate to go, so its heap reservation is
     /// back before the next one starts: call off the main thread.
     fn retire(&self, panel: &str) {
-        let realm = self.realms.lock().unwrap().remove(panel);
+        let realm = self.realms.shared().remove(panel);
         if let Some(realm) = realm {
             realm.close();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -940,8 +943,8 @@ impl Builtins {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        self.broker.entries.lock().unwrap().remove(panel);
-        self.broker.publications.lock().unwrap().remove(panel);
+        self.broker.entries.shared().remove(panel);
+        self.broker.publications.shared().remove(panel);
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
         self.broker.forget_overlay(panel);
@@ -957,23 +960,22 @@ impl Builtins {
         }
         self.retire(panel);
         self.forks
-            .lock()
-            .unwrap()
+            .shared()
             .insert(panel.into(), (fork.into(), graph.clone()));
         self.start(panel, fork_source(fork, graph, panel))
     }
     /// The fork went away: the shipped panel comes back.
     pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.retire(panel);
-        self.forks.lock().unwrap().remove(panel);
-        self.broker.parked.lock().unwrap().remove(panel);
+        self.forks.shared().remove(panel);
+        self.broker.parked.shared().remove(panel);
         self.mount_builtin(panel)
     }
     /// Realms running user code: third-party extensions and forks of
     /// built-ins. Menus, clip painters and viewer overlays come from these.
     fn user_realms(&self) -> Vec<(String, Realm)> {
-        let forks = self.forks.lock().unwrap();
-        let realms = self.realms.lock().unwrap();
+        let forks = self.forks.shared();
+        let realms = self.realms.shared();
         let mut out: Vec<(String, Realm)> = forks
             .keys()
             .filter_map(|panel| Some((panel.clone(), realms.get(panel)?.clone())))
@@ -981,8 +983,7 @@ impl Builtins {
         drop((realms, forks));
         out.extend(
             self.extension_realms
-                .lock()
-                .unwrap()
+                .shared()
                 .iter()
                 .map(|(id, realm)| (id.clone(), realm.clone())),
         );
@@ -1009,11 +1010,11 @@ impl Builtins {
         graph: &Value,
         hot: Option<&str>,
     ) -> Result<Ticket<Evaluation>> {
-        let mut extensions = self.extension_realms.lock().unwrap();
+        let mut extensions = self.extension_realms.shared();
         if builtin_panel(id).is_some() || extensions.contains_key(id) || self.broker.application {
             return Err(Error::Invalid("extension panel id is taken"));
         }
-        self.broker.extensions.lock().unwrap().insert(id.into());
+        self.broker.extensions.shared().insert(id.into());
         let realm = self.pool.realm(RealmKind::V4Extension(id.into()))?;
         let ticket = realm.eval(format!(
             "{BUNDLE}\n__pmBuiltin.mountExtension({},{},undefined,{})",
@@ -1031,12 +1032,12 @@ impl Builtins {
     /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
     /// its writer on the isolate owner; the same id can mount again.
     pub fn unmount_extension(&self, id: &str) {
-        if let Some(realm) = self.extension_realms.lock().unwrap().remove(id) {
+        if let Some(realm) = self.extension_realms.shared().remove(id) {
             realm.close();
         }
-        self.broker.extensions.lock().unwrap().remove(id);
+        self.broker.extensions.shared().remove(id);
         // Its surface and router go too; a late call from it is a stale generation.
-        self.broker.entries.lock().unwrap().remove(id);
+        self.broker.entries.shared().remove(id);
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
@@ -1048,7 +1049,7 @@ impl Builtins {
     /// Themes v4 extensions offer, when they changed since `seen`: each
     /// `{panel, id, title, tokens}`.
     pub fn themes_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let themes = self.broker.themes.lock().unwrap();
+        let themes = self.broker.themes.shared();
         (themes.0 != seen).then(|| {
             let list = themes
                 .1
@@ -1065,7 +1066,7 @@ impl Builtins {
         })
     }
     pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let commands = self.broker.commands.lock().unwrap();
+        let commands = self.broker.commands.shared();
         (commands.0 != seen).then(|| {
             let list = commands
                 .1
@@ -1082,12 +1083,12 @@ impl Builtins {
     /// Runs a command an extension registered, in that extension's realm.
     /// True while any user realm runs (context menus ask them).
     pub fn has_extensions(&self) -> bool {
-        !self.forks.lock().unwrap().is_empty() || !self.extension_realms.lock().unwrap().is_empty()
+        !self.forks.shared().is_empty() || !self.extension_realms.shared().is_empty()
     }
     /// The latest `themes.activate` in this window: `(number, panel, id)`,
     /// with `id` `None` for the built-in look. Numbers only grow.
     pub fn theme_request(&self) -> Option<ThemeRequest> {
-        self.broker.theme_request.lock().unwrap().1.clone()
+        self.broker.theme_request.shared().1.clone()
     }
     /// Every v4 extension's items for a menu opening at `location` (each
     /// realm waits at most 100 ms on its own contributions).
@@ -1111,7 +1112,7 @@ impl Builtins {
     /// with a painter (`timeline.paint`); each answers JSON text.
     pub fn paint_clips(&self, clips: &Value) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         let script = format!("__pmBuiltin.paintClips({clips})");
-        let painters = self.broker.painters.lock().unwrap().1.clone();
+        let painters = self.broker.painters.shared().1.clone();
         self.user_realms()
             .into_iter()
             .filter(|(id, _)| painters.contains(id))
@@ -1120,12 +1121,12 @@ impl Builtins {
     }
     /// 0 with no clip painter; otherwise moves whenever one arrives or leaves.
     pub fn painters_revision(&self) -> u64 {
-        let painters = self.broker.painters.lock().unwrap();
+        let painters = self.broker.painters.shared();
         if painters.1.is_empty() { 0 } else { painters.0 }
     }
     /// Viewer overlays whose extension took them down since the last look.
     pub fn take_cleared_overlays(&self) -> Vec<String> {
-        std::mem::take(&mut *self.broker.overlays_cleared.lock().unwrap())
+        std::mem::take(&mut *self.broker.overlays_cleared.shared())
     }
     /// Where the composition sits in the viewer, for extension overlays:
     /// `{x, y, width, height, scale}` in overlay points.
@@ -1143,19 +1144,18 @@ impl Builtins {
         ))
     }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
-        if let Some(realm) = self.realms.lock().unwrap().get(panel) {
+        if let Some(realm) = self.realms.shared().get(panel) {
             return Ok(realm.clone());
         }
         self.extension_realms
-            .lock()
-            .unwrap()
+            .shared()
             .get(panel)
             .cloned()
             .ok_or(Error::Closed)
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
-        let extensions = self.extension_realms.lock().unwrap();
-        let realms = self.realms.lock().unwrap();
+        let extensions = self.extension_realms.shared();
+        let realms = self.realms.shared();
         realms
             .iter()
             .chain(extensions.iter())
@@ -1163,14 +1163,14 @@ impl Builtins {
             .collect()
     }
     pub fn take_publications(&self) -> Vec<Publication> {
-        std::mem::take(&mut *self.broker.publications.lock().unwrap())
+        std::mem::take(&mut *self.broker.publications.shared())
             .into_values()
             .collect()
     }
     pub fn update_facts(&self, facts: Value) {
-        *self.broker.facts.lock().unwrap() = facts.clone();
+        *self.broker.facts.shared() = facts.clone();
         for entry in self.broker.all_entries() {
-            entry.lock().unwrap().backend.lock().unwrap().native.facts = facts.clone();
+            entry.shared().backend.shared().native.facts = facts.clone();
         }
     }
     /// Worker-only native observations. Never expose filesystem paths to JSX.
@@ -1180,8 +1180,8 @@ impl Builtins {
         observed: pm_panel_media::readiness::ObservedRuntime,
     ) {
         for entry in self.broker.all_entries() {
-            let backend = entry.lock().unwrap().backend.clone();
-            let mut backend = backend.lock().unwrap();
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
             backend.native.originals = originals.clone();
             if backend.native.media_runtime != observed {
                 backend.native.media_runtime = observed.clone();
@@ -1194,8 +1194,8 @@ impl Builtins {
     /// every panel's locks: call it on a worker, as `update_media` is.
     pub fn show_missing_media(&self) {
         for entry in self.broker.all_entries() {
-            let backend = entry.lock().unwrap().backend.clone();
-            let mut backend = backend.lock().unwrap();
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
             backend.native.show_missing = true;
             backend.native.media_sequence += 1;
         }
@@ -1268,7 +1268,7 @@ impl Builtins {
         if id == 0 {
             return;
         }
-        self.broker.platform_replies.lock().unwrap().insert(
+        self.broker.platform_replies.shared().insert(
             id,
             match result {
                 Ok(value) => json!({"accepted":true,"value":value}),
@@ -1326,7 +1326,7 @@ impl Builtins {
     /// Every panel of this window copies and pastes effects through
     /// `clipboard` (the app's one), from panels mounted after this on.
     pub fn share_effect_clipboard(&self, clipboard: EffectClipboard) {
-        *self.broker.effect_clipboard.lock().unwrap() = clipboard;
+        *self.broker.effect_clipboard.shared() = clipboard;
     }
     /// v1's inspector service over this window's Effect Controls and the
     /// app's effect clipboard, callable from any thread.
@@ -1343,14 +1343,18 @@ impl Builtins {
         backend.native.properties.layers_of(handle)
     }
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
-        std::mem::take(&mut *self.broker.platform.lock().unwrap())
+        std::mem::take(&mut *self.broker.platform.shared())
+    }
+    /// A script asked the host for something (a menu, a picker) not yet taken.
+    pub fn platform_pending(&self) -> bool {
+        !self.broker.platform.lock().unwrap().is_empty()
     }
     pub fn status(&self) -> Vec<Value> {
-        let entries = self.broker.entries.lock().unwrap().clone();
-        entries.into_iter().map(|(id,e)|{let e=e.lock().unwrap();json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.lock().unwrap().service_revision})}).collect()
+        let entries = self.broker.entries.shared().clone();
+        entries.into_iter().map(|(id,e)|{let e=e.shared();json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.shared().service_revision})}).collect()
     }
     pub fn take_errors(&self) -> Vec<String> {
-        std::mem::take(&mut *self.broker.errors.lock().unwrap())
+        std::mem::take(&mut *self.broker.errors.shared())
     }
     /// Validate the exact tree revision before enqueueing. An old click must not
     /// activate a newly selected layer after a publication or project switch.
@@ -1377,7 +1381,7 @@ impl Builtins {
         semantic: Option<String>,
     ) -> Result<Ticket<Evaluation>> {
         let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
-        let mut entry = entry.lock().unwrap();
+        let mut entry = entry.shared();
         let entry = &mut *entry;
         let mut event = entry
             .interaction
@@ -1411,7 +1415,7 @@ impl Builtins {
     ) -> Result<Ticket<Evaluation>> {
         let (revision, semantic) = {
             let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
-            let entry = entry.lock().unwrap();
+            let entry = entry.shared();
             let surface = &entry.surface;
             let same = semantic.filter(|id| {
                 surface
@@ -1441,8 +1445,7 @@ impl Builtins {
             .broker
             .entry(panel)
             .ok_or(Error::Closed)?
-            .lock()
-            .unwrap()
+            .shared()
             .surface
             .revision();
         self.event(panel, generation, revision, target, event, detail)
@@ -1454,7 +1457,7 @@ impl Builtins {
         panel: &str,
     ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
     {
-        let caller = self.backend(panel)?.lock().unwrap().caller;
+        let caller = self.backend(panel)?.shared().caller;
         Ok(self.broker.kernel.call(
             &self.broker.project,
             pm_kernel::Request::new(
@@ -1475,7 +1478,7 @@ impl Builtins {
     {
         let backend = self.backend(panel)?;
         let (caller, command) = {
-            let mut backend = backend.lock().unwrap();
+            let mut backend = backend.shared();
             let command = backend
                 .native_command("panel.binding", &json!({"handle":handle,"value":value}))
                 .map_err(Error::Host)?;
@@ -1506,7 +1509,7 @@ impl Builtins {
         commit: bool,
     ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
     {
-        let caller = self.backend(panel)?.lock().unwrap().caller;
+        let caller = self.backend(panel)?.shared().caller;
         let call = if commit {
             pm_kernel::GestureCall::Commit { gesture }
         } else {
@@ -1520,7 +1523,7 @@ impl Builtins {
     fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
         self.broker
             .entry(panel)
-            .map(|e| e.lock().unwrap().backend.clone())
+            .map(|e| e.shared().backend.clone())
             .ok_or(Error::Closed)
     }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
@@ -1541,14 +1544,8 @@ impl Builtins {
         {
             self.broker.agent.close();
         }
-        let extensions = self.extension_realms.lock().unwrap();
-        for realm in self
-            .realms
-            .lock()
-            .unwrap()
-            .values()
-            .chain(extensions.values())
-        {
+        let extensions = self.extension_realms.shared();
+        for realm in self.realms.shared().values().chain(extensions.values()) {
             realm.close();
         }
     }
@@ -1567,13 +1564,13 @@ impl Broker {
     }
     fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
         let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
-        if builtin_panel(id).is_none() && !self.extensions.lock().unwrap().contains(id) {
+        if builtin_panel(id).is_none() && !self.extensions.shared().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
         Ok(id)
     }
     fn report(&self, message: String) {
-        let mut errors = self.errors.lock().unwrap();
+        let mut errors = self.errors.shared();
         if errors.len() < 64 {
             errors.push(message);
         }
@@ -1602,7 +1599,7 @@ impl EngineProxy for Broker {
         budget.check()?;
         let panel = self.panel(generation)?;
         if operation == "identity" {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.shared();
             if entries.contains_key(panel) {
                 return Err(Error::Invalid("duplicate panel identity"));
             }
@@ -1620,18 +1617,18 @@ impl EngineProxy for Broker {
                 )
                 .map_err(Error::Host)?,
             ));
-            backend.lock().unwrap().native.agent_link = self.agent.clone();
-            if let Some(model) = backend.lock().unwrap().model.as_mut() {
-                model.clipboard = self.effect_clipboard.lock().unwrap().clone();
+            backend.shared().native.agent_link = self.agent.clone();
+            if let Some(model) = backend.shared().model.as_mut() {
+                model.clipboard = self.effect_clipboard.shared().clone();
             }
             if panel == "agent"
-                && let Some(state) = self.carried.lock().unwrap().take()
+                && let Some(state) = self.carried.shared().take()
             {
-                backend.lock().unwrap().native.agent = Some(state);
+                backend.shared().native.agent = Some(state);
             }
-            let facts = self.facts.lock().unwrap().clone();
+            let facts = self.facts.shared().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
-                backend.lock().unwrap().native.facts = facts;
+                backend.shared().native.facts = facts;
             }
             let router = HostRouter::new(
                 identity.clone(),
@@ -1653,7 +1650,7 @@ impl EngineProxy for Broker {
             return Ok(serde_json::to_value(identity).unwrap());
         }
         let entry = self.entry(panel).ok_or(Error::StaleGeneration)?;
-        let mut entry = entry.lock().unwrap();
+        let mut entry = entry.shared();
         if entry.generation != generation.number {
             return Err(Error::StaleGeneration);
         }
@@ -1676,12 +1673,12 @@ impl EngineProxy for Broker {
             }
             "host.poll" => {
                 {
-                    let mut backend = entry.backend.lock().unwrap();
+                    let mut backend = entry.backend.shared();
                     // Drain effect receipts on the panel worker. Main only
                     // deposits replies; it never locks a worker-owned backend.
                     {
-                        let mut pending = self.timeline_requests.lock().unwrap();
-                        let mut replies = self.platform_replies.lock().unwrap();
+                        let mut pending = self.timeline_requests.shared();
+                        let mut replies = self.platform_replies.shared();
                         let ids = pending
                             .iter()
                             .filter(|(_, owner)| owner.0 == panel && owner.1 == generation.number)
@@ -1705,15 +1702,14 @@ impl EngineProxy for Broker {
                     backend.tick().map_err(Error::Host)?;
                     let requests = std::mem::take(&mut backend.native.platform);
                     if !requests.is_empty() {
-                        let mut queue = self.platform.lock().unwrap();
+                        let mut queue = self.platform.shared();
                         for (operation, input) in requests {
                             let id = if operation == "timeline.effect" {
                                 let id = self
                                     .platform_ids
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 self.timeline_requests
-                                    .lock()
-                                    .unwrap()
+                                    .shared()
                                     .insert(id, (panel.into(), generation.number));
                                 id
                             } else {
@@ -1739,7 +1735,7 @@ impl EngineProxy for Broker {
                 .map_err(|e| Error::Host(e.to_string()))
             }
             "host.publications" => {
-                entry.backend.lock().unwrap().tick().map_err(Error::Host)?;
+                entry.backend.shared().tick().map_err(Error::Host)?;
                 serde_json::to_value(entry.router.publications().map_err(Error::Host)?)
                     .map_err(|e| Error::Host(e.to_string()))
             }
@@ -1763,7 +1759,7 @@ impl EngineProxy for Broker {
                 if !valid {
                     return Err(Error::Invalid("themes need an id, a title and tokens"));
                 }
-                let mut themes = self.themes.lock().unwrap();
+                let mut themes = self.themes.shared();
                 themes.0 += 1;
                 themes.1.insert(panel.into(), input.clone());
                 drop(themes);
@@ -1777,11 +1773,11 @@ impl EngineProxy for Broker {
                     Value::String(id) if (1..=128).contains(&id.len()) => Some(id.clone()),
                     _ => return Err(Error::Invalid("a theme id or null")),
                 };
-                let mut request = self.theme_request.lock().unwrap();
+                let mut request = self.theme_request.shared();
                 request.0 += 1;
                 request.1 = Some((request.0, panel.into(), id));
                 drop(request);
-                self.themes.lock().unwrap().0 += 1;
+                self.themes.shared().0 += 1;
                 (self.wake)();
                 Ok(Value::Null)
             }
@@ -1802,7 +1798,7 @@ impl EngineProxy for Broker {
                 if !valid {
                     return Err(Error::Invalid("commands need an id and a title"));
                 }
-                let mut commands = self.commands.lock().unwrap();
+                let mut commands = self.commands.shared();
                 commands.0 += 1;
                 commands.1.insert(panel.into(), input.clone());
                 drop(commands);
@@ -1815,7 +1811,7 @@ impl EngineProxy for Broker {
                 match entry.surface.apply(commit) {
                     Ok(_) => {
                         entry.interaction.reconcile(&entry.surface);
-                        self.publications.lock().unwrap().insert(
+                        self.publications.shared().insert(
                             panel.into(),
                             Publication {
                                 panel: panel.into(),
@@ -1836,7 +1832,7 @@ impl EngineProxy for Broker {
                     .map_err(|e| Error::Host(e.to_string()))?;
                 match entry.overlay.apply(commit) {
                     Ok(_) => {
-                        self.publications.lock().unwrap().insert(
+                        self.publications.shared().insert(
                             format!("{panel}{VIEWER_OVERLAY}"),
                             Publication {
                                 panel: format!("{panel}{VIEWER_OVERLAY}"),
@@ -1868,7 +1864,7 @@ impl EngineProxy for Broker {
             }
             "timeline.painted" => {
                 // A painter came (`true`) or went: the timeline asks again.
-                let mut painters = self.painters.lock().unwrap();
+                let mut painters = self.painters.shared();
                 painters.0 += 1;
                 if input == &json!(true) {
                     painters.1.insert(panel.into());
@@ -1887,48 +1883,35 @@ impl EngineProxy for Broker {
                 Ok(Value::Null)
             }
             "export.observe" => {
-                let mut backend = entry.backend.lock().unwrap();
+                let mut backend = entry.backend.shared();
                 backend.native.export["run"] = input.clone();
                 backend.native.export["sequence"] =
                     json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
                 Ok(Value::Null)
             }
-            "fields.register" => entry
-                .backend
-                .lock()
-                .unwrap()
-                .fields(input)
-                .map_err(Error::Host),
+            "fields.register" => entry.backend.shared().fields(input).map_err(Error::Host),
             "inspector.snapshot" => entry
                 .backend
-                .lock()
-                .unwrap()
+                .shared()
                 .inspector_snapshot()
                 .map_err(Error::Host),
             "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
             "timeline.frame" => entry
                 .backend
-                .lock()
-                .unwrap()
+                .shared()
                 .timeline_frame(input)
                 .map_err(Error::Host),
-            "agent.snapshot" => entry
-                .backend
-                .lock()
-                .unwrap()
-                .agent_snapshot()
-                .map_err(Error::Host),
+            "agent.snapshot" => entry.backend.shared().agent_snapshot().map_err(Error::Host),
             "settings.snapshot" => entry
                 .backend
-                .lock()
-                .unwrap()
+                .shared()
                 .settings_snapshot()
                 .map_err(Error::Host),
             "project.layout" => Ok(
                 json!({"columns":1,"rowHeight":pm_design::Tokens::new(pm_design::Scheme::Dark,Default::default()).metrics.row}),
             ),
             "platform.enqueue" => {
-                let mut requests = self.platform.lock().unwrap();
+                let mut requests = self.platform.shared();
                 if requests.len() >= 128 {
                     return Err(Error::Quota("platform queue"));
                 }
@@ -1948,22 +1931,21 @@ impl EngineProxy for Broker {
             }
             "platform.poll" => Ok(self
                 .platform_replies
-                .lock()
-                .unwrap()
+                .shared()
                 .remove(&input.as_u64().ok_or(Error::Invalid("platform request"))?)
                 .unwrap_or(Value::Null)),
             "effects.bindings" => {
-                entry.backend.lock().unwrap().local_fields();
+                entry.backend.shared().local_fields();
                 Ok(json!({"search":"effects.search", "scope":"effects.scope"}))
             }
-            "effects.registry" => Ok(entry.backend.lock().unwrap().registry()),
-            "effects.target" => entry.backend.lock().unwrap().target().map_err(Error::Host),
+            "effects.registry" => Ok(entry.backend.shared().registry()),
+            "effects.target" => entry.backend.shared().target().map_err(Error::Host),
             "report" => {
                 self.report(format!("{panel}: {input}"));
                 Ok(Value::Null)
             }
             "platform.activatePanel" | "platform.focus" | "platform.announce" => {
-                let mut requests = self.platform.lock().unwrap();
+                let mut requests = self.platform.shared();
                 if requests.len() >= 128 {
                     return Err(Error::Quota("platform queue"));
                 }
@@ -2045,7 +2027,7 @@ impl KernelHooks for Broker {
         let Some(entry) = self.entry(panel) else {
             return;
         };
-        let mut entry = entry.lock().unwrap();
+        let mut entry = entry.shared();
         if entry.generation != generation.number {
             return;
         }
@@ -2069,14 +2051,14 @@ impl KernelHooks for Broker {
 }
 impl Broker {
     fn entry(&self, panel: &str) -> Option<Arc<Mutex<Entry>>> {
-        self.entries.lock().unwrap().get(panel).cloned()
+        self.entries.shared().get(panel).cloned()
     }
     fn all_entries(&self) -> Vec<Arc<Mutex<Entry>>> {
-        self.entries.lock().unwrap().values().cloned().collect()
+        self.entries.shared().values().cloned().collect()
     }
     /// Queues a `timeline.chrome` edit for this window's chrome writer.
     fn chrome_edit(&self, edit: chrome::ChromeEdit) {
-        let mut writer = self.chrome.lock().unwrap();
+        let mut writer = self.chrome.shared();
         let tx = writer
             .get_or_insert_with(|| chrome::spawn_writer(self.kernel.clone(), self.project.clone()));
         let _ = tx.send(edit);
@@ -2084,7 +2066,7 @@ impl Broker {
     /// An extension (or one failed generation of it) leaving puts back the
     /// timeline chrome it set.
     fn forget_timeline(&self, panel: &str, generation: Option<u64>) {
-        if self.chrome.lock().unwrap().is_some() {
+        if self.chrome.shared().is_some() {
             self.chrome_edit(chrome::ChromeEdit::Forget {
                 panel: panel.into(),
                 generation,
@@ -2092,24 +2074,24 @@ impl Broker {
         }
     }
     fn forget_painter(&self, panel: &str) {
-        let mut painters = self.painters.lock().unwrap();
+        let mut painters = self.painters.shared();
         if painters.1.remove(panel) {
             painters.0 += 1;
         }
     }
     fn forget_overlay(&self, panel: &str) {
         let id = format!("{panel}{VIEWER_OVERLAY}");
-        self.publications.lock().unwrap().remove(&id);
-        self.overlays_cleared.lock().unwrap().push(id);
+        self.publications.shared().remove(&id);
+        self.overlays_cleared.shared().push(id);
     }
     fn forget_themes(&self, panel: &str) {
-        let mut themes = self.themes.lock().unwrap();
+        let mut themes = self.themes.shared();
         if themes.1.remove(panel).is_some() {
             themes.0 += 1;
         }
     }
     fn forget_commands(&self, panel: &str) {
-        let mut commands = self.commands.lock().unwrap();
+        let mut commands = self.commands.shared();
         if commands.1.remove(panel).is_some() {
             commands.0 += 1;
         }

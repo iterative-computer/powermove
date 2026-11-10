@@ -500,7 +500,12 @@ impl Journal {
         if taps.is_empty() && workspace.is_none() {
             return Ok(());
         }
-        if let Some(initial) = self.deferred.take() {
+        // A layout change alone (a tab switched, a panel moved) isn't project
+        // work: its record replays on the base, so the base's checkpoint waits
+        // for the first edit instead of rewriting the whole document.
+        if !taps.is_empty()
+            && let Some(initial) = self.deferred.take()
+        {
             durability.submit(Job::Checkpoint {
                 dir: self.dir.clone(),
                 project: self.project.clone(),
@@ -970,7 +975,9 @@ fn segment_head(path: &Path) -> Option<Map> {
     parse(json).ok()?.as_object().cloned()
 }
 
-/// Whether any segment of `session` holds an entry after its header.
+/// Whether any segment of `session` holds an edit after its header. Workspace
+/// records alone aren't unsaved work: the layout is also filed in the app's
+/// state, and the window never called them changes.
 fn has_changes(session: &Path) -> bool {
     numbered(session, "journal-", ".log").into_iter().any(|n| {
         let mut text = Vec::new();
@@ -979,10 +986,16 @@ fn has_changes(session: &Path) -> bool {
             .is_ok_and(|_| {
                 text.split(|&b| b == b'\n')
                     .filter(|l| !l.is_empty())
-                    .nth(1)
-                    .is_some()
+                    .skip(1)
+                    .any(|l| !is_workspace_line(l))
             })
     })
+}
+/// `<checksum> {"t":"ws",…}`: a workspace record.
+fn is_workspace_line(line: &[u8]) -> bool {
+    line.splitn(2, |&b| b == b' ')
+        .nth(1)
+        .is_some_and(|json| json.starts_with(br#"{"t":"ws","#))
 }
 
 fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, String> {

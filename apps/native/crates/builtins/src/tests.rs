@@ -45,6 +45,52 @@ fn actor() -> KernelActor {
     actor
 }
 #[test]
+fn a_panic_holding_a_panel_lock_never_stops_the_v8_owner_thread() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    panels.take_publications();
+    // A host thread panics while it holds the panel's backend.
+    let backend = panels
+        .broker
+        .entry("layer-effects")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let held = backend.clone();
+    let panicked = thread::spawn(move || {
+        let _guard = held.lock().unwrap();
+        panic!("a host thread fails while holding panel state");
+    })
+    .join();
+    assert!(panicked.is_err() && backend.is_poisoned());
+    // The owner thread still serves the panel: a selection republishes it.
+    actor
+        .handle()
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
+    let next = panels.take_publications().pop().unwrap();
+    assert!(next.surface.nodes().values().any(|n| n.text == "Headline"));
+    assert!(!backend.is_poisoned());
+    assert!(panels.take_errors().is_empty());
+}
+#[test]
 fn authored_effect_controls_mount_and_follow_kernel_selection() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
@@ -3190,6 +3236,170 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
     // A new account state is a new publication.
     backend.native.facts["cloud"]["revision"] = json!(5);
     assert_ne!(backend.settings_snapshot().unwrap()["revision"], revision);
+    // A button pressed on the older publication still lands while the newest
+    // offers that row the same action; a write or a changed action does not.
+    let stale = |action: Value| json!({"revision":revision,"action":action});
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &stale(json!({"type":"row","id":"account.sign-in","action":"account.sign-out"})),
+        )
+        .unwrap();
+    assert_eq!(
+        backend.native.platform,
+        [("command".to_owned(), json!({ "name": "cloudSignOut" }))]
+    );
+    for action in [
+        json!({"type":"write","id":"account.remember","value":false}),
+        json!({"type":"row","id":"account.sign-in","action":"account.sign-in"}),
+    ] {
+        backend.native.platform.clear();
+        assert!(
+            backend
+                .native_command("panel.settings", &stale(action))
+                .is_err()
+        );
+        assert!(backend.native.platform.is_empty());
+    }
+}
+/// A press from an older Settings publication acts only on the account or
+/// provider that publication showed: provider B replacing A, or another
+/// account signing in, refuses a stale Disconnect / Sign Out / Delete.
+#[test]
+fn stale_settings_presses_never_reach_a_different_account_or_provider() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let provider = |revision: u64, url: &str| {
+        json!({"revision":revision,"connected":true,"type":"OpenAI-compatible","url":url,
+            "model":"m","hasKey":true})
+    };
+    backend.native.facts = json!({
+        "cloud":{"revision":1,"signedIn":true,"identity":"@maker","email":"a@example.com"},
+        "provider":provider(1, "http://a.invalid/v1"),
+    });
+    let seen = backend.settings_snapshot().unwrap()["revision"].clone();
+    assert!(
+        backend.settings_snapshot().unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("target").is_none()),
+        "targets are not published"
+    );
+    let press = |backend: &mut data::Backend, revision: &Value, id: &str, action: &str| {
+        backend.native.platform.clear();
+        let landed = backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":{"type":"row","id":id,"action":action}}),
+            )
+            .is_ok();
+        landed && !backend.native.platform.is_empty()
+    };
+    // An unrelated change (the same provider rechecked) keeps a stale press.
+    backend.native.facts["provider"] = provider(2, "http://a.invalid/v1");
+    assert!(press(
+        &mut backend,
+        &seen,
+        "account.disconnect",
+        "provider.disconnect"
+    ));
+    // Provider B replaced A: Disconnect seen on A must not disconnect B.
+    let seen = backend.settings_snapshot().unwrap()["revision"].clone();
+    backend.native.facts["provider"] = provider(3, "http://b.invalid/v1");
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.disconnect",
+        "provider.disconnect"
+    ));
+    // Another Powermove account signed in: Sign Out and Delete seen on the
+    // first refuse; the same account, rechecked, still signs out.
+    let seen = backend.settings_snapshot().unwrap()["revision"].clone();
+    backend.native.facts["cloud"] =
+        json!({"revision":2,"signedIn":true,"identity":"@other","email":"b@example.com"});
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.sign-in",
+        "account.sign-out"
+    ));
+    assert!(!press(
+        &mut backend,
+        &seen,
+        "account.delete",
+        "account.delete"
+    ));
+    let seen = backend.settings_snapshot().unwrap()["revision"].clone();
+    backend.native.facts["cloud"]["revision"] = json!(3);
+    assert!(press(
+        &mut backend,
+        &seen,
+        "account.sign-in",
+        "account.sign-out"
+    ));
+    // A publication no longer remembered never carries a destructive press;
+    // a harmless one (Sign In) still lands while offered.
+    assert!(!press(
+        &mut backend,
+        &json!(0),
+        "account.sign-in",
+        "account.sign-out"
+    ));
+    backend.native.facts["cloud"] = json!({"revision":4,"signedIn":false});
+    assert!(press(
+        &mut backend,
+        &json!(0),
+        "account.sign-in",
+        "account.sign-in"
+    ));
+}
+/// Settings › Media's proxy choices show their pop-ups (a choice without a
+/// lease drew no control at all) and a change reaches the app's media service.
+#[test]
+fn media_proxy_choices_have_controls_and_write_through_the_app() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"mediaSettings":{"rows":[
+        {"id":"media.create","label":"Create Proxies","detail":"","value":"ask",
+         "options":[{"v":"ask","label":"When Asked"},{"v":"import","label":"On Import"}]}],
+        "location":"/synthetic","used":null,"folders":[]}});
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "media.create")
+        .unwrap()
+        .clone();
+    assert_eq!(row["control"], "choice");
+    assert!(row["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":publication["revision"],
+                "action":{"type":"write","id":"media.create","value":"import"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        backend.native.platform,
+        [(
+            "media.settings".to_owned(),
+            json!({"write":"media.create","value":"import"})
+        )]
+    );
 }
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {

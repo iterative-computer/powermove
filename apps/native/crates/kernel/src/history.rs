@@ -618,7 +618,7 @@ fn is_record_array_path(path: &[Value]) -> bool {
 }
 
 /// `unpackHistory`. `None` when the dictionary is malformed.
-fn unpack(value: &Value) -> Option<Value> {
+pub(crate) fn unpack(value: &Value) -> Option<Value> {
     let Some(map) = value.as_object() else {
         return Some(value.clone());
     };

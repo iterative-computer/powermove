@@ -1002,6 +1002,33 @@ fn clicking_a_layer_row_selects_it(cx: &mut TestAppContext) {
         .to_vec();
     assert_eq!(selected, ["l1".to_string()]);
 }
+/// Key ids may repeat across layers: pressing the earlier layer's key selects
+/// that layer and that key, never the later layer holding the same id.
+#[gpui::test]
+fn pressing_a_key_id_two_layers_share_selects_the_pressed_layer(cx: &mut TestAppContext) {
+    let layer = |id: &str| {
+        format!(
+            r##"{{"id":"{id}","type":"shape","name":"{id}","from":0,"dur":4,"on":true,"p":{{"opacity":{{"v":100,"kf":[{{"i":"k","t":1,"v":100}}]}}}},"d":{{"w":100,"h":100}},"fx":[]}}"##
+        )
+    };
+    let project = format!(
+        r##"{{"id":"integration","name":"Shared","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{},{}]}}"##,
+        layer("l0"),
+        layer("l1")
+    );
+    let mut s = stage_project(cx, project);
+    let row = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer("l0".into()));
+    let op = format!("key:{}", serde_json::json!([row, "k"]));
+    let at = op_center(&mut s, &op);
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    let selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
+    assert_eq!(selection.layers(), ["l0".to_string()]);
+    assert_eq!(
+        selection.key_layers(),
+        [("l0".to_string(), "k".to_string())]
+    );
+}
 /// Clips are accessible elements in the tracks list: named, with their times
 /// and selection, and an assistive Press selects one through the pointer path.
 #[gpui::test]

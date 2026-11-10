@@ -1,5 +1,6 @@
 //! Worker-only delivery planning and original-media project closure. No JS,
 //! codec or filesystem work belongs on the UI thread.
+use crate::LockShared;
 use pm_kernel::Snapshot;
 use pm_promedia::export_panel::{Format, Options};
 use pm_protocol::{
@@ -378,6 +379,7 @@ pub fn capabilities(
                 settings: planned.settings.ok_or("Missing render settings")?,
                 media: std::sync::Arc::new(pm_export::render::MediaPaths {
                     paths: originals.clone(),
+                    ..Default::default()
                 }),
                 destination: destination
                     .path()
@@ -675,12 +677,12 @@ impl MediaProbes {
                 metadata.ino(),
             ),
         );
-        if let Some(known) = self.results.lock().unwrap().get(&key) {
+        if let Some(known) = self.results.shared().get(&key) {
             return known.clone();
         }
         self.runs.fetch_add(1, Ordering::Relaxed);
         let result = probe_media(path, kind);
-        let mut results = self.results.lock().unwrap();
+        let mut results = self.results.shared();
         if results.len() >= 16_384 {
             results.clear();
         }

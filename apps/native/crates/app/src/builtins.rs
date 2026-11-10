@@ -40,7 +40,7 @@ pub struct Host {
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
-    requests: VecDeque<PlatformRequest>,
+    pub(crate) requests: VecDeque<PlatformRequest>,
     pub windows: BTreeMap<String, AnyWindowHandle>,
     /// The size each panel window was opened at (the Agent popover's, for the
     /// MCP panel tools).
@@ -224,6 +224,9 @@ impl Controller {
             });
         })
         .detach();
+        // Weak: the runtime owns this loop's sender, so a strong handle kept
+        // the realms (their isolates) alive after the editor closed.
+        let runtime = Arc::downgrade(&runtime);
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this
@@ -231,7 +234,7 @@ impl Controller {
                         if v.builtins
                             .runtime
                             .as_ref()
-                            .is_some_and(|r| Arc::ptr_eq(r, &runtime))
+                            .is_some_and(|r| std::ptr::eq(Arc::as_ptr(r), runtime.as_ptr()))
                         {
                             v.drain_builtins(cx);
                         }

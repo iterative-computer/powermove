@@ -15,3 +15,9 @@ incremental = false
 [profile.test]
 debug = 0
 incremental = false
+
+# Release code with review links (`cfg(debug_assertions)`): the soak
+# (scripts/stability/soak.py) drives a release-optimised app through them.
+[profile.soak]
+inherits = "release"
+debug-assertions = true

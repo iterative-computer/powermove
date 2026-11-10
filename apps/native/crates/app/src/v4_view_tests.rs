@@ -824,3 +824,76 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     // An enabled field draws through its editor instead.
     assert_eq!(shown[2], None);
 }
+
+/// The export sheet's footer laid out with `offline` unreadable originals in
+/// a project export: the sheet, its notice and its two buttons.
+fn export_footer(cx: &mut TestAppContext, offline: usize) -> [Bounds<Pixels>; 4] {
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let assets = (0..offline)
+        .map(|i| format!(r#""a{i}":{{"id":"a{i}","kind":"video","dur":10}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rig = rig_project(
+        "export",
+        &format!(
+            r##"{{"id":"integration","name":"Strips","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","exportDefaults":{{"format":"json"}},"assets":{{{assets}}},"comps":{{}},"layers":[]}}"##
+        ),
+    );
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    let expected = match offline {
+        0 => "Strips".to_owned(),
+        n => format!("{n} media files are offline"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        for p in rig.runtime.take_publications() {
+            view.update(&mut vcx, |v, cx| v.publish(p, cx));
+        }
+        vcx.run_until_parked();
+        let shown = view.read_with(&vcx, |v, _| {
+            v.publication
+                .surface
+                .nodes()
+                .values()
+                .any(|n| n.text.contains(&expected))
+        });
+        if shown {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{expected:?} never showed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    [
+        "export.sheet",
+        "export.summary",
+        "export.cancel",
+        "export.start",
+    ]
+    .map(|n| bounds(&mut vcx, n))
+}
+
+/// The footer keeps its buttons whole and inside the sheet however long its
+/// notice runs: the notice wraps beside them (Cancel was squeezed, and the
+/// AppKit button it hosts then pushed Export Video past the sheet's edge).
+#[gpui::test]
+fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppContext) {
+    let [_, _, cancel_alone, start_alone] = export_footer(cx, 0);
+    let [sheet, summary, cancel, start] = export_footer(cx, 12);
+    assert_eq!(
+        (cancel.size.width, start.size.width),
+        (cancel_alone.size.width, start_alone.size.width),
+        "buttons squeezed by the notice"
+    );
+    assert!(
+        start.right() <= sheet.right() && summary.right() <= cancel.left(),
+        "notice {summary:?}, buttons {cancel:?} {start:?}, sheet {sheet:?}"
+    );
+    assert!(summary.size.height > cancel.size.height, "the notice wraps");
+}

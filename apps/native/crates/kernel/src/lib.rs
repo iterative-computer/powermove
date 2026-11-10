@@ -135,6 +135,8 @@ pub mod locks;
 pub mod persistence;
 pub mod session;
 pub mod state;
+#[cfg(feature = "synthetic")]
+pub mod synthetic;
 
 pub mod profile;
 

@@ -1,5 +1,6 @@
 //! Native model coordination. Snapshots contain presentation facts and leased
 //! identifiers, never a writable JS project or a second persistence authority.
+use crate::LockShared;
 use crate::{
     data::{Backend, model, wire},
     properties::Properties,
@@ -9,6 +10,9 @@ use pm_panel_media::{Catalog, readiness::ObservedRuntime, v4::ProjectBridge};
 use pm_panel_timeline::{PropertyFacts, TimelineClient};
 use pm_surface::host_api::Query;
 use serde_json::{Value, json};
+
+/// Settings publications whose row targets are remembered for stale presses.
+pub(crate) const SETTINGS_TARGETS_KEPT: usize = 16;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -49,6 +53,10 @@ pub(crate) struct Models {
     pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
     pub stamp: String,
     pub settings_sequence: u64,
+    /// The last [`SETTINGS_TARGETS_KEPT`] Settings publications' row actions
+    /// and targets (the account or provider a row acts on), so a press from
+    /// an older one is judged against what that person saw.
+    pub settings_targets: std::collections::VecDeque<(u64, Value)>,
     pub export: Value,
     pub project_reply: Option<Value>,
     pub media_runtime: ObservedRuntime,
@@ -113,6 +121,7 @@ impl Models {
             agent_link: Default::default(),
             stamp: String::new(),
             settings_sequence: 1,
+            settings_targets: Default::default(),
             export: Value::Null,
             timeline_job: None,
             timeline_effect_pending: 0,
@@ -522,7 +531,7 @@ impl Backend {
     }
     pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
         let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
-        let mut state = agent.lock().unwrap();
+        let mut state = agent.shared();
         let active = state.panel.active_id().to_owned();
         let provider = state
             .panel
@@ -672,6 +681,30 @@ impl Backend {
             }).collect::<Vec<_>>();
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
+        }
+        // Targets stay here: recorded for this revision, not published.
+        let mut targets = serde_json::Map::new();
+        for row in publication["rows"].as_array_mut().into_iter().flatten() {
+            let target = row
+                .as_object_mut()
+                .and_then(|row| row.remove("target"))
+                .unwrap_or(Value::Null);
+            if let Some(id) = row["id"].as_str() {
+                targets.insert(
+                    id.to_owned(),
+                    json!({"action":row["action"],"target":target}),
+                );
+            }
+        }
+        let revision = self.native.settings_sequence;
+        let kept = &mut self.native.settings_targets;
+        if kept.back().is_none_or(|(r, _)| *r != revision) {
+            kept.push_back((revision, Value::Object(targets)));
+            if kept.len() > SETTINGS_TARGETS_KEPT {
+                kept.pop_front();
+            }
+        } else if let Some(last) = kept.back_mut() {
+            last.1 = Value::Object(targets);
         }
         Ok(publication)
     }
@@ -1192,7 +1225,7 @@ impl Backend {
                 let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
                 let link = self.native.agent_link.clone();
                 let effect = {
-                    let mut state = agent.lock().unwrap();
+                    let mut state = agent.shared();
                     let thread = state.panel.active_id().to_owned();
                     let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
                     let (provider, live) = (session.settings.provider, session.run.is_some());

@@ -212,7 +212,7 @@ pub enum Edge {
 pub enum RowContent {
     Layer {
         clip: Option<Clip>,
-        summary: Vec<Key>,
+        summary: std::sync::Arc<[Key]>,
     },
     Property {
         state: KeyState,
@@ -363,7 +363,13 @@ impl Scene {
             .iter()
             .map(String::as_str)
             .collect();
-        let selected_keys: HashSet<_> = model.selection.keys().iter().map(String::as_str).collect();
+        // Selected keys by (layer, key): key ids may repeat across layers.
+        let selected_keys: HashSet<(&str, &str)> = model
+            .index
+            .selected_keys(&model.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.as_str(), k.id.as_str()))
+            .collect();
         let keys = |layer: &crate::Layer, channels: Vec<&crate::Channel>| {
             channels
                 .into_iter()
@@ -371,12 +377,14 @@ impl Scene {
                 .map(|k| Key {
                     id: k.id.clone(),
                     seconds: layer.from + k.time,
-                    selected: selected_keys.contains(k.id.as_str()),
+                    selected: selected_keys.contains(&(layer.id.as_str(), k.id.as_str())),
                     focused: false,
                     interpolation: p.interpolation(k),
                 })
                 .collect::<Vec<_>>()
         };
+        // Layers with a selected key: only their marks are copied to show it.
+        let marked: HashSet<&str> = selected_keys.iter().map(|(layer, _)| *layer).collect();
         let mut summaries = HashMap::new();
         let rows = model
             .rows()
@@ -387,7 +395,29 @@ impl Scene {
                         let layer = model.index.layer(id).ok_or(Error::DuplicateId)?;
                         let summary = summaries
                             .entry(id.clone())
-                            .or_insert_with(|| keys(layer, layer.channels.iter().collect()))
+                            .or_insert_with(|| {
+                                let shared = layer.summary(|layer| {
+                                    keys(layer, layer.channels.iter().collect())
+                                        .into_iter()
+                                        .map(|k| Key {
+                                            selected: false,
+                                            ..k
+                                        })
+                                        .collect()
+                                });
+                                if marked.contains(id.as_str()) {
+                                    shared
+                                        .iter()
+                                        .map(|k| Key {
+                                            selected: selected_keys
+                                                .contains(&(id.as_str(), k.id.as_str())),
+                                            ..k.clone()
+                                        })
+                                        .collect()
+                                } else {
+                                    shared
+                                }
+                            })
                             .clone();
                         (
                             RowContent::Layer {
@@ -523,9 +553,20 @@ impl Scene {
             {
                 return Err(Error::DuplicateId);
             }
-            let (clips, keys): (Vec<&Clip>, &mut Vec<Key>) = match &mut row.content {
-                RowContent::Layer { clip, summary } => (clip.iter().collect(), summary),
-                RowContent::Property { keys, .. } => (vec![], keys),
+            let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
+            let (clips, keys): (Vec<&Clip>, &[Key]) = match &mut row.content {
+                RowContent::Layer { clip, summary } => {
+                    if !sorted(summary) {
+                        let mut keys = summary.to_vec();
+                        keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                        *summary = keys.into();
+                    }
+                    (clip.iter().collect(), summary)
+                }
+                RowContent::Property { keys, .. } => {
+                    keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                    (vec![], keys)
+                }
                 RowContent::Track { clips } => {
                     if clips.iter().any(|c| !valid_clip(c)) {
                         return Err(Error::InvalidTime);
@@ -538,7 +579,6 @@ impl Scene {
             if clips.iter().any(|c| !valid_clip(c)) || keys.iter().any(|k| !k.seconds.is_finite()) {
                 return Err(Error::InvalidTime);
             }
-            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
             tops.push(tops.last().unwrap() + row.height(t));
         }
         let control_times = rows
@@ -1377,6 +1417,15 @@ fn paint_keys(
         }
     }
 }
+/// A key op's `(row, key)` as `(layer, key)`.
+fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
+    match crate::v4::parse_row(&row).ok()? {
+        crate::RowId::Layer(layer)
+        | crate::RowId::Property {
+            layer_id: layer, ..
+        } => Some((layer, key)),
+    }
+}
 fn key_identity(op: &Op) -> Option<(String, String)> {
     serde_json::from_str(op.id.strip_prefix("key:")?).ok()
 }
@@ -1567,13 +1616,18 @@ impl Frame {
     pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
         key_identity(self.hit_op("key:", x, y, slop)?)
     }
-    /// Every key whose diamond meets the rectangle, for marquee selection.
-    pub fn keys_in(&self, area: Rect) -> Vec<String> {
+    /// The key under a point as `(layer, key)`: key ids may repeat across
+    /// layers, so the row it sits on names its layer.
+    pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
+        self.hit_key(x, y, slop).and_then(on_layer)
+    }
+    /// The keys a marquee covers, as `(layer, key)`.
+    pub fn keys_in(&self, area: Rect) -> Vec<(String, String)> {
         self.ops
             .iter()
             .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
             .filter_map(key_identity)
-            .map(|(_, key)| key)
+            .filter_map(on_layer)
             .collect()
     }
     /// One accessible element per painted clip, in paint order: its name and
