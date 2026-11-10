@@ -150,6 +150,15 @@ all of them already exist in Powermove.
 
 ## Verification
 
+Lane M's 2026-11-10 material/bounds pass at `c1d40e8ab` passes the full
+desktop unit suite (**7,563 passed, 7 skipped; 743 files passed, 3 skipped**),
+Rust with OIDN/MetalFX (**115 passed, 0 ignored**), the final non-film 3D editor
+suite (**82 passed, 2 opt-in cases skipped**) and desktop typecheck (**0 errors,
+1 existing accessibility warning**). All ten built-in version checks pass.
+The new group-material/null-control cases also pass 14 repeated editor checks.
+The earlier Final denoising equality failure reproduces on the clean pre-lane
+commit and remains open; see [the full validation evidence](production-readiness.md#lane-m-material-and-bounds-parity-2026-11-10).
+
 The 2026-11-09 import/material pass covers Inter, Geist and Geist Mono variable
 font instances, a static font, invalid-layer isolation, generated static and
 skinned animated FBX, saved-asset reopening, all eighteen physical texture

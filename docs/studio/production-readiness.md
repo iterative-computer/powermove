@@ -3,7 +3,7 @@
 **Decision: not ready to ship.** A green renderer demonstration is insufficient.
 Every unchecked gate below blocks a production-quality claim. No tag, release,
 notarization, upload or installation over an existing app is authorized by this
-checklist. Updated 2026-11-10 by Lanes P1/P2/P3/P4/P5b (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
+checklist. Updated 2026-11-10 by Lanes P1/P2/P3/P4/P5b/M (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
 
 Status: **PASS** = reproduced against the stated build; **OPEN** = evidence still
 required; **FAIL** = attempted and failed; **PARTIAL** = narrower evidence only.
@@ -20,13 +20,56 @@ Unset `ELECTRON_RUN_AS_NODE`; set `CARGO_TARGET_DIR=$HOME/Developer/pm-target`.
 
 | Gate | Status | Evidence / required command |
 | --- | --- | --- |
-| All desktop unit tests | PASS | P5b combined DN2/native hardening at code `f5741368c`: **7,486 passed, 7 skipped**, 737 files passed / 3 skipped (321.98 s). Includes extension-resource collection, durable cache eviction, native frame ownership, thumbnail readback, resize and camera-session regressions. `npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
+| All desktop unit tests | PASS | Lane M at code `c1d40e8ab`: **7,563 passed, 7 skipped**, 743 files passed / 3 skipped (416.32 s). Includes all prior regressions plus material allocation/sharing/caching, group dependencies, importer alpha, geometry bounds, null controls and composition clocks. `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
 | Entire desktop e2e suite, including 2D/editor/media | PASS (24 skipped) | P2 at `2844ef8de`: **1,024 discovered; 1,000 passed, 0 failed, 24 skipped** (48.9 min). Completed with one worker, no filters and no retries, including all fourteen repaired cases, native environment assertions, both film exports and video persistence. `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. The 24 skipped cases remain unexecuted; optional fixtures/benchmarks and the separate acceptance gates below still need their own evidence. |
-| Non-film 3D editor regressions | PASS, intermittent Final equality issue OPEN | P5b at code `63ec627c5`: **72 passed, 1 skipped** (9.4 min), rebuilt native host, `ELECTRON_RUN_AS_NODE` unset, background mode, temporary user-data profiles and UI screenshots outside Git. `npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`, with `PM_SHOT_DIR` pointing outside Git. The skipped DN2 capture requires an explicitly supplied local project. Includes native transport/poster, GC lifecycle, shutter/motion-blur and exact Final image checks. An earlier full run failed Final equality once; three immediate repeats and this final full run pass, without relaxing assertions. The entire 2D/editor/media suite was not rerun after P5b. |
+| Non-film 3D editor regressions | PASS, intermittent Final equality issue OPEN | Lane M at code `c1d40e8ab`: **84 discovered, 82 passed, 0 failed, 2 skipped** (9.4 min), rebuilt native host, `ELECTRON_RUN_AS_NODE` unset, background mode and temporary user-data profiles. `nice -n 10 npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`, with captures outside Git. Skips are the explicit-project DN2 capture and opt-in progress film. Includes new group-material effects/alpha and real-camera bounds-null checks alongside native transport, GC lifecycle, motion blur and exact Final output. The pre-existing Final equality intermittency reproduced on the clean baseline; see Lane M evidence below. The entire 2D/editor/media suite was not rerun in Lane M. |
 | Svelte and renderer types | PASS | 0 errors, 1 existing accessibility warning in `IconCropper.svelte`.  `npx svelte-check --tsconfig ./tsconfig.web.json` |
 | Main/preload types | PASS | Generate cloud bindings/types first: `bun run --cwd ../cloud types && bun run --cwd ../cloud types:emit`.  `npx tsc --noEmit -p tsconfig.node.json` |
-| Rust workspace, host and GPU tests | PASS | P5b combined DN2/native hardening: **115 passed, zero failed or ignored**, `cargo test -p pm-studio -p pm-studio-host --features oidn,metalfx`, isolated target under `~/Developer/pm-target`. Includes all 11 bounded Cycles scenes as one test, reused-versus-fresh OIDN output, resize, specular-distance guide rebinding, cancellation and recovery. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
-| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P5b's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans **1,253 commits at code `63ec627c5`** with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
+| Rust workspace, host and GPU tests | PASS | Lane M at code `c1d40e8ab`: **115 passed, zero failed or ignored**, `nice -n 10 cargo test -p pm-studio -p pm-studio-host --features oidn,metalfx`, with `CARGO_TARGET_DIR=~/Developer/pm-target`. Includes all 11 bounded Cycles scenes as one test, reused-versus-fresh OIDN output, resize, specular-distance guide rebinding, cancellation and recovery. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
+| Public-repository secret scan | PASS for tested branch | Lane M's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans **1,257 commits at code `c1d40e8ab`** with no leaks. Staged scans before every commit pass; no ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
+
+## Lane M material and bounds parity (2026-11-10)
+
+This pass ports the independent #187/#188 material, bounds-null and navigation
+capabilities to Studio. Its functional checks do not waive any performance,
+packaged-app, visual-review or release gate below. The release decision remains
+**not ready to ship**.
+
+| Audit pitfall | Baseline exposure | Change / retained proof |
+| --- | --- | --- |
+| Capture allocation at extreme camera/4K demand | The fixed 1024 cap avoided giant captures but lost closeup detail | Camera/UV demand now fits 4,194,304 pixels and preview working bytes (64/pixel); direct oversized capture rejects before targets; intermediate artwork/SVG density is also bounded. `material-parity`, `material-resolution`, `compositor`. |
+| Disposed shared texture left in scalar/normal slots | Baseline duplicated bindings; introducing sharing creates this risk | Replace every supported map slot and saved loading binding before disposal; regression explicitly places the old texture in Normal and Roughness as well as Color/Emissive. `material-parity`. |
+| Group bounds change with active children | Baseline had no group-source support | Duration-union canvas retains origin and size across entrances/exits and animated motion; edit invalidation retained. `material-source-bounds`. |
+| Group capture recursively renders 3D descendants | Baseline rejected groups entirely | New group eligibility rejects nested 3D descendants before capture, including nested precomps. `material-parity`. |
+| SVG/Figma alpha becomes white/opaque extrusion | Reproduced | Split RGB and alpha in import and extrusion; preserve independent paint opacity. `material-parity`, Figma `convert`, `extrusion`. |
+| Inflated path bounds alter pivot placement | Reproduced | Visual half-width and actual joins/caps are separate from raster antialiasing margin; bounds can be measured without allocating a path canvas. `material-parity`, `geometry-bounds`. |
+
+Static caching observes source dependency edits, decoded image identity, fonts,
+matte/effect programs and timing boundaries, while retaining pixels for
+receiver-only edits. Texture detail uses the final render camera before Studio
+scene extraction; replacement advances the runtime revision. Bounds-null tests
+cover hierarchy, animation, morphs/skin, all nine positions and Undo/reopen,
+including real-camera picking/orbit for models, extrusions and standalone 3D
+planes. The existing heavy-composition pan-cost regression remains enforced.
+Navigation tests cover precomp offset/trim/speed/remapping and instance context.
+See [parity and merge reconciliation](parity.md#material-source-parity-with-main-reviews-187--188).
+
+Validation at code `c1d40e8abc7de4ee9c83ee422f958a717d74ddca` used the
+hardware/OS and commands above: full Vitest **7,563 passed / 7 skipped**;
+Rust **115 passed / 0 ignored**; final non-film 3D **82 passed / 2 skipped**;
+desktop typecheck **0 errors / 1 existing IconCropper accessibility warning**;
+all **10 built-in version checks passed**. The focused group-material and
+null-control editor cases also passed **14/14** across two repeats. Layers 3D,
+Timeline and Viewer manifest versions were bumped and their hashes updated.
+
+An earlier full 3D run produced **81 passed, 1 failed, 2 skipped**, at the
+unchanged `studio.spec.ts` Final denoising byte-equality assertion. It passed
+two of three isolated repeats on the Lane M tree. A clean pre-lane checkout
+at `60b500850` reproduced the identical assertion failure: **4 passed,
+1 failed** in five repeats. The final full Lane M run passed without changing
+that test or relaxing its equality/quality assertions; the pre-existing
+intermittency remains **OPEN**. The two opt-in skipped cases remain unexecuted.
+No production benchmark is claimed during concurrent Lane Q rendering.
 
 ## Real packaged app
 
