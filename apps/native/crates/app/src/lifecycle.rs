@@ -39,6 +39,12 @@ struct QuitCoordinator {
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
+    /// A second Quit's prompt is showing: the window and its sheet, ended
+    /// before the app terminates (AppKit refuses to while a sheet is up).
+    asking_now: Option<(
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    )>,
     host: std::sync::Arc<crate::mcp::Host>,
 }
 impl gpui::Global for QuitCoordinator {}
@@ -55,6 +61,7 @@ fn cancel_quit(cx: &mut App) {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
         q.discard = false;
+        q.asking_now = None;
         q.queue.clear();
         q.host.closing.store(false, Ordering::Release);
         q.controllers.clone()
@@ -65,6 +72,9 @@ fn cancel_quit(cx: &mut App) {
     cx.defer(move |cx| {
         for weak in controllers {
             let _ = weak.update(cx, |v, cx| {
+                if v.closing_note.take().is_some() {
+                    cx.notify();
+                }
                 if v.extensions.stopped_for_quit {
                     v.start_extensions(cx);
                 }
@@ -75,7 +85,7 @@ fn cancel_quit(cx: &mut App) {
 pub fn begin_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
     if q.quitting {
-        return;
+        return ask_quit_now(cx);
     }
     q.quitting = true;
     q.queue = q.controllers.clone();
@@ -128,6 +138,96 @@ fn next_quit(cx: &mut App) {
     })
     .detach();
 }
+/// What a second Quit does while the first one runs.
+#[derive(Debug, PartialEq)]
+enum SecondQuit {
+    /// The person is being asked something (a save question), or already
+    /// asked to quit now: the question on screen is the answer.
+    Ignore,
+    /// The quit waits for this work: offer to quit now.
+    Ask(String),
+}
+fn second_quit(asking_now: bool, waiting: Option<String>) -> SecondQuit {
+    match waiting {
+        Some(note) if !asking_now => SecondQuit::Ask(note),
+        _ => SecondQuit::Ignore,
+    }
+}
+/// The prompt of a second Quit while the first waits for `note`.
+fn quit_now_alert(note: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let work = note.split_once(": ").map_or(note, |(_, work)| work);
+    let work = work.trim_end_matches('…');
+    Alert::new(
+        "Powermove is still finishing before it quits.",
+        format!(
+            "Still {work}. If you quit now, no work is lost: the next time you open the project, Powermove offers to recover your unsaved changes."
+        ),
+        vec![
+            Button::new("Keep Waiting", false)
+                .default()
+                .key(Key::Escape),
+            Button::new("Quit Now", true),
+        ],
+    )
+}
+/// A second Quit while the first waits on work (archiving, saving, the
+/// library): says what it waits for and offers to quit now. Quitting now
+/// flushes the journals and leaves everything as a crash would: the journal
+/// keeps unsaved work, consistent with whichever file a running save left,
+/// and the next open offers to recover it.
+fn ask_quit_now(cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    let waiting = q.controllers.iter().find_map(|weak| {
+        let c = weak.upgrade()?;
+        let note = c.read(cx).closing_note.clone()?;
+        Some((note, c.read(cx).host.borrow().window.clone()))
+    });
+    let (note, window) = match waiting {
+        Some((note, window)) => (Some(note), Some(window)),
+        None => (None, None),
+    };
+    let (SecondQuit::Ask(note), Some(window)) = (second_quit(q.asking_now.is_some(), note), window)
+    else {
+        return;
+    };
+    let mut sheet = None;
+    let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
+    cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
+    cx.spawn(async move |cx| {
+        let now = answer.recv().await.ok().flatten() == Some(true);
+        let kernel = cx.update(|cx| {
+            let q = cx.global_mut::<QuitCoordinator>();
+            q.asking_now = None;
+            (now && q.quitting).then(|| q.host.kernel.clone())
+        });
+        let Some(kernel) = kernel else {
+            return;
+        };
+        // Every edit the kernel acknowledged is already written to its
+        // journal; make it durable without waiting for the busy kernel.
+        // Saves journal their save point before replacing a file, so the
+        // journal replays onto whatever the disk holds.
+        let synced = cx
+            .background_executor()
+            .spawn(async move { kernel.sync_journals() })
+            .await;
+        cx.update(|cx| {
+            let q = cx.global_mut::<QuitCoordinator>();
+            // The quit may have been cancelled (a failed save) meanwhile.
+            if !q.quitting {
+                return;
+            }
+            q._delegate.resolve_quit_events(false);
+            if let Err(e) = synced {
+                eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
+            }
+            eprintln!("Quit Now: {note}");
+            std::process::exit(0);
+        });
+    })
+    .detach();
+}
 /// The quit alert for a window session that couldn't be written.
 fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button, Key};
@@ -166,6 +266,12 @@ fn ask_session_failed(error: &str, cx: &mut App) {
 /// Compacts and releases the library, then quits.
 fn finish_quit(cx: &mut App) {
     let host = cx.global::<QuitCoordinator>().host.clone();
+    for weak in cx.global::<QuitCoordinator>().controllers.clone() {
+        let _ = weak.update(cx, |v, cx| {
+            v.closing_note = Some("Quitting: writing the project library…".into());
+            cx.notify();
+        });
+    }
     cx.spawn(async move |cx| {
         let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
@@ -182,6 +288,11 @@ fn finish_quit(cx: &mut App) {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
             Some(Ok(ShellReply::Compacted { .. })) => {
+                // A second Quit's prompt would hold the termination.
+                if let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
+                {
+                    window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+                }
                 allow_quit(cx);
                 cx.quit();
             }
@@ -211,6 +322,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             queue: Vec::new(),
             quitting: false,
             discard: false,
+            asking_now: None,
             host,
         });
         cx.spawn(async move |cx| {
@@ -283,6 +395,13 @@ fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String
         _ => "the project library didn’t answer".into(),
     }
 }
+/// The status line while a close or quit waits for `work`.
+fn closing(intent: Intent, work: &str) -> String {
+    match intent {
+        Intent::Quit => format!("Quitting: {work}…"),
+        Intent::Window => format!("Closing: {work}…"),
+    }
+}
 impl Controller {
     fn dirty(&self) -> bool {
         self.session
@@ -292,6 +411,7 @@ impl Controller {
     }
     pub fn cancel_close(&mut self, cx: &mut Context<Self>) {
         self.close_pending = false;
+        self.closing_note = None;
         self.close_operation.take();
         if self
             .session
@@ -451,6 +571,7 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match choice {
                 Some(Action::Save) => {
                     v.close_after_save = Some(intent);
+                    v.closing_note = Some(closing(intent, "saving"));
                     v.save(None, cx);
                 }
                 Some(Action::DontSave) => v.discard_and_close(intent, cx),
@@ -465,7 +586,7 @@ impl Controller {
             return;
         };
         let kernel = self.kernel.clone();
-        self.message = "Archiving changes…".into();
+        self.closing_note = Some(closing(intent, "archiving changes"));
         cx.spawn(async move |this, cx| {
             let result = discard_close(&kernel, session).await;
             let _ = this.update(cx, |v, cx| match result {
@@ -492,7 +613,7 @@ impl Controller {
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         let kernel = self.kernel.clone();
         let session = self.session.clone();
-        self.message = "Finishing save and recovery data…".into();
+        self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(session) = session {
@@ -536,7 +657,7 @@ impl Controller {
                     v.mcp.bind_window(v.window_key, None);
                     v.close_operation.take();
                     if intent == Intent::Quit {
-                        v.message = "Closed. Finishing quit…".into();
+                        v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
                     } else if let Some(handle) = v.close_window {
                         v.mcp.closing.store(false, Ordering::Release);
@@ -559,6 +680,33 @@ impl Controller {
 mod tests {
     use super::*;
     use pm_kernel::*;
+
+    /// A second Quit while the first waits on work names that work and
+    /// offers to quit now; while a question is on screen it is the answer.
+    #[test]
+    fn a_second_quit_offers_to_quit_now_while_the_first_waits() {
+        assert_eq!(second_quit(false, None), SecondQuit::Ignore);
+        assert_eq!(
+            second_quit(true, Some("Quitting: saving…".into())),
+            SecondQuit::Ignore
+        );
+        let note = closing(Intent::Quit, "archiving changes");
+        assert_eq!(note, "Quitting: archiving changes…");
+        assert_eq!(
+            second_quit(false, Some(note.clone())),
+            SecondQuit::Ask(note.clone())
+        );
+        let alert = quit_now_alert(&note);
+        assert_eq!(alert.labels(), ["Keep Waiting", "Quit Now"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(
+            alert
+                .informative
+                .starts_with("Still archiving changes. If you quit now")
+        );
+        assert!(alert.informative.contains("no work is lost"));
+    }
 
     #[test]
     fn a_window_session_that_fails_to_save_asks_before_quitting() {

@@ -8,6 +8,41 @@ pub struct Plan {
     pub body: WriteBody,
     pub clip: Value,
 }
+/// One line for the reply's `applied` list, as `apply_commands` describes a
+/// command (`Edit audio · clip · gain, fadeIn`). v1 listed the call's
+/// `commands`, which `edit_video` has none of, so it always replied `[]`.
+pub fn describe(a: &Value) -> String {
+    let op = a["operation"].as_str().unwrap_or("");
+    let action = match op {
+        "insert" => "Insert clip",
+        "move" => "Move clip",
+        "trim" => "Trim clip",
+        "slip" => "Slip clip",
+        "split" => "Split clip",
+        "speed" => "Change speed",
+        "separate_audio" => "Separate audio",
+        "audio" => "Edit audio",
+        "remove" => "Remove clip",
+        other => other,
+    };
+    let target = a["layerId"]
+        .as_str()
+        .or(a["assetId"].as_str())
+        .unwrap_or("");
+    let detail = match op {
+        "audio" => ["gain", "fadeIn", "fadeOut"]
+            .into_iter()
+            .filter(|k| a.get(*k).is_some())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    };
+    [action, target, &detail]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 fn n(v: &Value, key: &str, min: f64) -> Result<f64> {
     v[key]
         .as_f64()

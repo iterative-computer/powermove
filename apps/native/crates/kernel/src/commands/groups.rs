@@ -98,7 +98,8 @@ pub(super) fn group(
     time: f64,
 ) -> Result<(), CommandError> {
     let comp = check_targets(cx, ids)?;
-    let layers = cx.layers(comp.as_deref());
+    // Grouping reads ids, types and groups: the layers' heads.
+    let layers = cx.layer_stack(comp.as_deref());
     let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let selected: Vec<&Value> = layers
         .iter()
@@ -170,17 +171,20 @@ pub(super) fn group(
     }
     let at = index_of(&layers, &roots[0]).unwrap_or(0);
     let mut next = layers.clone();
-    next.insert(at, g);
-    for l in next.iter_mut() {
+    next.insert(at, g.clone());
+    cx.insert_layer(comp.as_deref(), at, g)?;
+    for (index, l) in next.iter_mut().enumerate() {
         if values::text(l, "id").is_some_and(|i| roots.iter().any(|r| r == i)) {
             values::obj(l).insert("group", values::s(group_id));
+            let path = layers::layer_field(cx, comp.as_deref(), index, "group");
+            cx.set(path, values::s(group_id))?;
         }
     }
     let next = layers::normalize_group_stack(next);
-    layers::write_layers(cx, comp.as_deref(), next)?;
+    layers::write_order(cx, comp.as_deref(), &next)?;
     // The pivot at the members' bounds center (an identity transform).
     let members: HashSet<&str> = [group_id].into_iter().collect();
-    let now = cx.layers(comp.as_deref());
+    let now = cx.layer_stack(comp.as_deref());
     let has_text = layers::expand_groups(&now, &members).iter().any(|id| {
         now.iter()
             .find(|l| values::text(l, "id") == Some(id.as_str()))
@@ -205,8 +209,20 @@ pub(super) fn group(
 /// engine's `groups::ungroup` kernel.
 fn ungroup(cx: &mut Cx<'_>, ids: &[String], time: f64) -> Result<(), CommandError> {
     let comp = check_targets(cx, ids)?;
-    let layers = cx.layers(comp.as_deref());
+    let heads = cx.layer_stack(comp.as_deref());
     let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    // The groups whole (their effects, masks and visibility are checked);
+    // every other layer by its head.
+    let layers: Vec<Value> = heads
+        .into_iter()
+        .map(|head| match values::text(&head, "id") {
+            Some(id) if wanted.contains(id) && values::text(&head, "type") == Some("group") => cx
+                .find(id)
+                .and_then(|loc| cx.layer_node(&loc).map(pm_model::Node::to_value))
+                .unwrap_or(head),
+            _ => head,
+        })
+        .collect();
     let groups: Vec<usize> = layers
         .iter()
         .enumerate()
@@ -254,28 +270,37 @@ fn ungroup(cx: &mut Cx<'_>, ids: &[String], time: f64) -> Result<(), CommandErro
     })?;
     // The kernel moves the members; the group itself goes (or becomes a null
     // when outside layers use it as a transform parent).
-    let now = cx.layers(comp.as_deref());
+    let now = cx.layer_stack(comp.as_deref());
     let mut next = Vec::with_capacity(now.len());
-    for l in now {
-        let id = values::text(&l, "id").unwrap_or_default().to_owned();
-        if wanted.contains(id.as_str()) && values::text(&l, "type") == Some("group") {
-            let parented = next
+    let mut gone = Vec::new();
+    for (index, l) in now.iter().enumerate() {
+        let id = values::text(l, "id").unwrap_or_default().to_owned();
+        if wanted.contains(id.as_str()) && values::text(l, "type") == Some("group") {
+            let parented = now
                 .iter()
-                .chain(cx.layers(comp.as_deref()).iter())
-                .any(|o: &Value| values::text(o, "parent") == Some(id.as_str()));
+                .any(|o| values::text(o, "parent") == Some(id.as_str()));
             if parented {
-                let mut l = l;
+                let mut l = l.clone();
                 let m = values::obj(&mut l);
                 m.insert("type", values::s("null"));
                 m.insert("solo", Value::Bool(false));
+                for (field, value) in [("type", values::s("null")), ("solo", Value::Bool(false))] {
+                    let path = layers::layer_field(cx, comp.as_deref(), index, field);
+                    cx.set(path, value)?;
+                }
                 next.push(l);
+            } else {
+                gone.push(id);
             }
             continue;
         }
-        next.push(l);
+        next.push(l.clone());
+    }
+    for id in &gone {
+        cx.delete_layer(comp.as_deref(), id)?;
     }
     let next = layers::normalize_group_stack(next);
-    layers::write_layers(cx, comp.as_deref(), next)
+    layers::write_order(cx, comp.as_deref(), &next)
 }
 
 /// `hasVisualStyle(layer)`.
@@ -324,7 +349,7 @@ fn move_to_group(
     time: f64,
 ) -> Result<(), CommandError> {
     let comp = check_targets(cx, ids)?;
-    let layers = cx.layers(comp.as_deref());
+    let layers = cx.layer_stack(comp.as_deref());
     let group = match target {
         Some(t) => Some(
             layers
@@ -383,6 +408,6 @@ fn move_to_group(
         target,
         values::finite(time, "time")?,
     )?;
-    let next = layers::normalize_group_stack(cx.layers(comp.as_deref()));
-    layers::write_layers(cx, comp.as_deref(), next)
+    let next = layers::normalize_group_stack(cx.layer_stack(comp.as_deref()));
+    layers::write_order(cx, comp.as_deref(), &next)
 }

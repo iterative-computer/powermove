@@ -20,7 +20,7 @@
 //! * A first save never overwrites: exclusive rename (`RENAME_EXCL`) or a
 //!   hard link, both of which fail if anything appeared at the destination.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -562,9 +562,9 @@ pub(crate) fn publish(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupPolicy {
     pub directory: PathBuf,
-    /// Most active versions (12 in the old app); older versions are archived.
+    /// Most versions kept (12 in the old app); older versions are deleted.
     pub max_versions: usize,
-    /// Byte budget across active versions (1 GiB in the old app).
+    /// Byte budget across kept versions (1 GiB in the old app).
     pub max_bytes: u64,
     /// Versions always kept even over budget (2 in the old app).
     pub min_versions: usize,
@@ -581,13 +581,19 @@ impl BackupPolicy {
     }
 }
 
+/// Where a backup sorts in save order: its stamp in milliseconds, then its
+/// collision number. Stamps are assigned in save order (see [`backup`]), so
+/// this order is the order the versions were saved, whatever the clock did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BackupKey {
+    millis: i64,
+    collision: u64,
+}
+
 /// `2026-10-31T21-38-05-123Z` (an ISO-8601 instant with `:` and `.` replaced,
 /// as the old app named its backups).
-fn backup_stamp(now: std::time::SystemTime) -> String {
-    let d = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = d.as_secs() as i64;
+fn backup_stamp(millis: i64) -> String {
+    let secs = millis.div_euclid(1000);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's civil_from_days.
     let z = days + 719_468;
@@ -604,56 +610,529 @@ fn backup_stamp(now: std::time::SystemTime) -> String {
         rem / 3600,
         rem % 3600 / 60,
         rem % 60,
-        d.subsec_millis()
+        millis.rem_euclid(1000)
     )
 }
 
-fn is_backup_name(name: &str) -> bool {
-    // `^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.pmv(?:-\d+)?$`
+/// The inverse of [`backup_stamp`] for the 24 stamp characters.
+fn stamp_millis(stamp: &[u8]) -> i64 {
+    let n = |range: std::ops::Range<usize>| {
+        stamp[range]
+            .iter()
+            .fold(0i64, |acc, d| acc * 10 + i64::from(d - b'0'))
+    };
+    let (year, month, day) = (n(0..4), n(5..7), n(8..10));
+    // Howard Hinnant's days_from_civil.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    ((days * 24 + n(11..13)) * 60 + n(14..16)) * 60_000 + n(17..19) * 1000 + n(20..23)
+}
+
+/// A name this app gives a backup, the whole name and nothing else:
+/// `^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.pmv(?:-\d+)?$`.
+fn backup_key(name: &str) -> Option<BackupKey> {
     let b = name.as_bytes();
-    if b.len() < 28 {
-        return false;
-    }
     let shape = b"dddd-dd-ddTdd-dd-dd-dddZ.pmv";
+    if b.len() < shape.len() {
+        return None;
+    }
     for (i, s) in shape.iter().enumerate() {
         let ok = match s {
             b'd' => b[i].is_ascii_digit(),
             c => b[i] == *c,
         };
         if !ok {
-            return false;
+            return None;
         }
     }
-    let rest = &b[28..];
-    rest.is_empty()
-        || (rest.len() > 1 && rest[0] == b'-' && rest[1..].iter().all(u8::is_ascii_digit))
+    let collision = match &b[shape.len()..] {
+        [] => 0,
+        [b'-', digits @ ..] if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) => {
+            std::str::from_utf8(digits).ok()?.parse().ok()?
+        }
+        _ => return None,
+    };
+    Some(BackupKey {
+        millis: stamp_millis(b),
+        collision,
+    })
 }
 
-/// Backups of the policy's directory, newest first.
-pub fn list_backups(policy: &BackupPolicy) -> Result<Vec<PathBuf>, ProjectIoError> {
-    let entries = match fs::read_dir(&policy.directory) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io_err(&policy.directory, e)),
+/// A name earlier builds gave a generation they moved to `archived/`: a
+/// backup name, or a backup name plus `.<uuid v4>` when the archive already
+/// held that name. Anything else in `archived/` is not ours.
+fn archived_key(name: &str) -> Option<BackupKey> {
+    if let Some(key) = backup_key(name) {
+        return Some(key);
+    }
+    let split = name.len().checked_sub(37)?;
+    let (base, suffix) = (name.get(..split)?, name.get(split..)?);
+    if is_uuid_v4(suffix.strip_prefix('.')?) {
+        backup_key(base)
+    } else {
+        None
+    }
+}
+
+/// [`random_uuid`]'s form: lowercase hex, hyphenated, version 4.
+fn is_uuid_v4(uuid: &str) -> bool {
+    let uuid = uuid.as_bytes();
+    let hyphens = [8, 13, 18, 23];
+    uuid.len() == 36
+        && uuid.iter().enumerate().all(|(i, c)| {
+            if hyphens.contains(&i) {
+                *c == b'-'
+            } else {
+                matches!(c, b'0'..=b'9' | b'a'..=b'f')
+            }
+        })
+        && uuid[14] == b'4'
+        && matches!(uuid[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// Removes the empty staging files ([`temporary_sibling`]) a save cut short
+/// left next to `destination` (Quit Now exits before a staged file is
+/// written or dropped). Only `.<file name>.<uuid v4>.tmp` exactly, only an
+/// empty regular file, listed and removed through the folder held open
+/// without following links. Call it while holding the project's lock, so
+/// no save of this project is staging one. Best effort: returns how many
+/// went.
+pub(crate) fn remove_abandoned_temps(destination: &Path) -> usize {
+    let (Some(parent), Some(name)) = (destination.parent(), destination.file_name()) else {
+        return 0;
     };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| is_backup_name(n))
-        .collect();
-    names.sort_by(|a, b| b.cmp(a));
-    Ok(names
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let Some(name) = name.to_str() else {
+        return 0;
+    };
+    let ours = |entry: &str| {
+        entry
+            .strip_prefix('.')
+            .and_then(|e| e.strip_prefix(name))
+            .and_then(|e| e.strip_prefix('.'))
+            .and_then(|e| e.strip_suffix(".tmp"))
+            .is_some_and(is_uuid_v4)
+    };
+    let Ok(Some(dir)) = Dir::open(parent) else {
+        return 0;
+    };
+    let Ok(entries) = dir.entries() else {
+        return 0;
+    };
+    let mut removed = 0;
+    for (entry, kind) in entries {
+        if matches!(kind, Kind::File { size: 0 })
+            && entry.to_str().is_some_and(ours)
+            && dir.unlink(&entry).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        let _ = dir.sync();
+    }
+    removed
+}
+
+/// Directories held open by descriptor. Backups are listed, created and
+/// deleted relative to a descriptor opened without following links, so a
+/// link planted anywhere inside the backup tree (a project folder,
+/// `archived/`) is refused, not followed, and a swap after the check cannot
+/// redirect a delete outside the tree.
+#[cfg(unix)]
+mod held {
+    use std::ffi::{CStr, CString, OsStr, OsString};
+    use std::fs::File;
+    use std::io::{self, Seek};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::raw::c_int;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+
+    pub(super) enum Kind {
+        File { size: u64 },
+        Dir,
+        Other,
+    }
+
+    pub(super) struct Dir(OwnedFd);
+
+    const DIR_FLAGS: c_int =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    fn component(name: &OsStr) -> io::Result<CString> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a single file name",
+            ));
+        }
+        CString::new(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in name"))
+    }
+
+    fn checked(rc: c_int) -> io::Result<c_int> {
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(rc)
+        }
+    }
+
+    /// `None` when nothing is there; `NotADirectory` for a link or a file.
+    fn opened(fd: c_int) -> io::Result<Option<Dir>> {
+        if fd >= 0 {
+            // SAFETY: `fd` was just returned by open/openat and is owned here.
+            return Ok(Some(Dir(unsafe { OwnedFd::from_raw_fd(fd) })));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) => Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "is a link or not a folder",
+            )),
+            _ => Err(e),
+        }
+    }
+
+    impl Dir {
+        /// Opens `path`'s last component without following a link.
+        pub fn open(path: &Path) -> io::Result<Option<Dir>> {
+            let c = CString::new(path.as_os_str().as_bytes())?;
+            // SAFETY: `c` is a valid NUL-terminated path for the call.
+            opened(unsafe { libc::open(c.as_ptr(), DIR_FLAGS) })
+        }
+
+        /// Opens (optionally creating) the folder `name` in this one.
+        pub fn sub(&self, name: &OsStr, create: bool) -> io::Result<Option<Dir>> {
+            let c = component(name)?;
+            if create {
+                // SAFETY: valid descriptor and NUL-terminated name.
+                let rc = unsafe { libc::mkdirat(self.fd(), c.as_ptr(), 0o755) };
+                if let Err(e) = checked(rc)
+                    && e.kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(e);
+                }
+            }
+            // SAFETY: valid descriptor and NUL-terminated name.
+            opened(unsafe { libc::openat(self.fd(), c.as_ptr(), DIR_FLAGS) })
+        }
+
+        fn fd(&self) -> c_int {
+            self.0.as_raw_fd()
+        }
+
+        /// Every entry, classified without following links.
+        pub fn entries(&self) -> io::Result<Vec<(OsString, Kind)>> {
+            // SAFETY: duplicates a valid descriptor; the copy is handed to
+            // fdopendir, which owns it until closedir.
+            let dup = checked(unsafe { libc::fcntl(self.fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
+            // SAFETY: `dup` is an open directory descriptor.
+            let stream = unsafe { libc::fdopendir(dup) };
+            if stream.is_null() {
+                let e = io::Error::last_os_error();
+                // SAFETY: fdopendir failed, so `dup` is still ours.
+                unsafe { libc::close(dup) };
+                return Err(e);
+            }
+            let mut names = Vec::new();
+            // SAFETY: `stream` is a valid DIR*; the duplicate shares the
+            // offset with our descriptor, so start from the beginning.
+            unsafe { libc::rewinddir(stream) };
+            loop {
+                // SAFETY: valid stream; the entry lives until the next call.
+                let entry = unsafe { libc::readdir(stream) };
+                if entry.is_null() {
+                    break;
+                }
+                // SAFETY: `d_name` is NUL-terminated.
+                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+                if name != b"." && name != b".." {
+                    names.push(OsString::from_vec(name.to_vec()));
+                }
+            }
+            // SAFETY: closes the stream and `dup` once.
+            unsafe { libc::closedir(stream) };
+            Ok(names
+                .into_iter()
+                .map(|n| {
+                    let kind = self.kind(&n);
+                    (n, kind)
+                })
+                .collect())
+        }
+
+        pub fn kind(&self, name: &OsStr) -> Kind {
+            let Ok(c) = component(name) else {
+                return Kind::Other;
+            };
+            // SAFETY: an all-zero `stat` is a valid out-parameter.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: valid descriptor, name and out-pointer.
+            let rc =
+                unsafe { libc::fstatat(self.fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+            if rc != 0 {
+                return Kind::Other;
+            }
+            match st.st_mode & libc::S_IFMT {
+                libc::S_IFREG => Kind::File {
+                    size: st.st_size as u64,
+                },
+                libc::S_IFDIR => Kind::Dir,
+                _ => Kind::Other,
+            }
+        }
+
+        /// Removes the entry `name` from this folder (a link is removed,
+        /// never followed).
+        pub fn unlink(&self, name: &OsStr) -> io::Result<()> {
+            let c = component(name)?;
+            // SAFETY: valid descriptor and name.
+            checked(unsafe { libc::unlinkat(self.fd(), c.as_ptr(), 0) }).map(drop)
+        }
+
+        /// Removes the empty folder `name` (fails for anything else).
+        pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+            let c = component(name)?;
+            // SAFETY: valid descriptor and name.
+            checked(unsafe { libc::unlinkat(self.fd(), c.as_ptr(), libc::AT_REMOVEDIR) }).map(drop)
+        }
+
+        /// `syncDirectory` on the held folder.
+        pub fn sync(&self) -> io::Result<()> {
+            File::from(self.0.try_clone()?).sync_all()
+        }
+
+        fn open_file(&self, name: &OsStr, flags: c_int, mode: libc::c_uint) -> io::Result<File> {
+            let c = component(name)?;
+            // SAFETY: valid descriptor and name; the result is owned below.
+            let fd = checked(unsafe {
+                libc::openat(
+                    self.fd(),
+                    c.as_ptr(),
+                    flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    mode,
+                )
+            })?;
+            // SAFETY: `fd` was just opened and is owned by the File.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+
+        /// Copies `source` to the new entry `name` (an APFS clone where the
+        /// volume supports it), failing with `AlreadyExists` if anything is
+        /// there, then makes it durable.
+        pub fn copy_new(&self, source: &File, name: &OsStr) -> io::Result<()> {
+            #[cfg(target_os = "macos")]
+            {
+                let c = component(name)?;
+                // SAFETY: valid descriptors and name.
+                let rc =
+                    unsafe { libc::fclonefileat(source.as_raw_fd(), self.fd(), c.as_ptr(), 0) };
+                match checked(rc) {
+                    Ok(_) => return self.sync_new(name),
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+                    // Not cloneable here (another volume type): copy bytes.
+                    Err(_) => {}
+                }
+            }
+            let mut out =
+                self.open_file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)?;
+            let copied = (|| {
+                let mut src = source;
+                src.rewind()?;
+                io::copy(&mut src, &mut out)?;
+                out.set_permissions(source.metadata()?.permissions())?;
+                out.sync_all()
+            })();
+            if copied.is_err() {
+                let _ = self.unlink(name);
+            }
+            copied
+        }
+
+        fn sync_new(&self, name: &OsStr) -> io::Result<()> {
+            let synced = self
+                .open_file(name, libc::O_RDONLY, 0)
+                .and_then(|f| f.sync_all());
+            if synced.is_err() {
+                let _ = self.unlink(name);
+            }
+            synced
+        }
+    }
+}
+
+/// The same interface by path where descriptors are not available.
+#[cfg(not(unix))]
+mod held {
+    use std::ffi::{OsStr, OsString};
+    use std::fs::{self, File};
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    pub(super) enum Kind {
+        File { size: u64 },
+        Dir,
+        Other,
+    }
+
+    pub(super) struct Dir(PathBuf);
+
+    fn kind_of(meta: io::Result<fs::Metadata>) -> Kind {
+        match meta {
+            Ok(m) if m.is_file() => Kind::File { size: m.len() },
+            Ok(m) if m.is_dir() => Kind::Dir,
+            _ => Kind::Other,
+        }
+    }
+
+    impl Dir {
+        pub fn open(path: &Path) -> io::Result<Option<Dir>> {
+            match kind_of(fs::symlink_metadata(path)) {
+                Kind::Dir => Ok(Some(Dir(path.to_owned()))),
+                _ if !path.exists() => Ok(None),
+                _ => Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder")),
+            }
+        }
+        pub fn sub(&self, name: &OsStr, create: bool) -> io::Result<Option<Dir>> {
+            let path = self.0.join(name);
+            if create
+                && let Err(e) = fs::create_dir(&path)
+                && e.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(e);
+            }
+            Dir::open(&path)
+        }
+        pub fn entries(&self) -> io::Result<Vec<(OsString, Kind)>> {
+            Ok(fs::read_dir(&self.0)?
+                .flatten()
+                .map(|e| (e.file_name(), kind_of(fs::symlink_metadata(e.path()))))
+                .collect())
+        }
+        pub fn kind(&self, name: &OsStr) -> Kind {
+            kind_of(fs::symlink_metadata(self.0.join(name)))
+        }
+        pub fn unlink(&self, name: &OsStr) -> io::Result<()> {
+            fs::remove_file(self.0.join(name))
+        }
+        pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+            fs::remove_dir(self.0.join(name))
+        }
+        pub fn sync(&self) -> io::Result<()> {
+            Ok(())
+        }
+        pub fn copy_new(&self, source: &File, name: &OsStr) -> io::Result<()> {
+            let mut out = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.0.join(name))?;
+            let mut src = source;
+            io::copy(&mut src, &mut out)?;
+            out.sync_all()
+        }
+    }
+}
+
+use held::{Dir, Kind};
+
+/// `NotADirectory` from [`held`] means a link (or a file) where a backup
+/// folder belongs: refused, never followed.
+fn backup_dir_err(path: &Path, e: std::io::Error) -> ProjectIoError {
+    if e.kind() == std::io::ErrorKind::NotADirectory {
+        ProjectIoError::Invalid(format!(
+            "{} is a link or a file, not a backup folder. Powermove keeps backups only in a real folder.",
+            path.display()
+        ))
+    } else {
+        io_err(path, e)
+    }
+}
+
+/// The backup root and this project's folder in it, both opened without
+/// following links. `Ok(None)` when either does not exist (and `create` is
+/// false).
+fn open_backups(policy: &BackupPolicy, create: bool) -> Result<Option<Dir>, ProjectIoError> {
+    let folder = &policy.directory;
+    let name = folder
+        .file_name()
+        .ok_or_else(|| ProjectIoError::Invalid("The backup folder has no name.".into()))?;
+    let root = match folder.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    if create {
+        fs::create_dir_all(root).map_err(|e| io_err(root, e))?;
+    }
+    let Some(root_dir) = Dir::open(root).map_err(|e| backup_dir_err(root, e))? else {
+        return Ok(None);
+    };
+    root_dir
+        .sub(name, create)
+        .map_err(|e| backup_dir_err(folder, e))
+}
+
+/// A folder's backups (regular files with the app's exact names), newest
+/// first in save order, with their sizes.
+fn generations(dir: &Dir) -> Result<Vec<(BackupKey, OsString, u64)>, std::io::Error> {
+    let mut found: Vec<_> = dir
+        .entries()?
         .into_iter()
-        .map(|n| policy.directory.join(n))
+        .filter_map(|(name, kind)| {
+            let Kind::File { size } = kind else {
+                return None;
+            };
+            let key = backup_key(name.to_str()?)?;
+            Some((key, name, size))
+        })
+        .collect();
+    found.sort_by(|a, b| b.cmp(a));
+    Ok(found)
+}
+
+/// Backups of the policy's directory, newest first in save order.
+pub fn list_backups(policy: &BackupPolicy) -> Result<Vec<PathBuf>, ProjectIoError> {
+    let Some(dir) = open_backups(policy, false)? else {
+        return Ok(Vec::new());
+    };
+    let found = generations(&dir).map_err(|e| io_err(&policy.directory, e))?;
+    Ok(found
+        .into_iter()
+        .map(|(_, name, _)| policy.directory.join(name))
         .collect())
 }
 
 /// Copies (clones) the current destination into the backup directory and
 /// syncs it. Returns the backup's path.
+///
+/// The stamp is the wall clock unless that would sort at or before the
+/// newest backup already kept (the clock moved backward, or an earlier build
+/// stamped with a clock that ran ahead): then it is 1 ms after that one. A
+/// backup's name order is therefore its save order, which is what retention
+/// prunes by.
 pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBuf, ProjectIoError> {
-    fs::create_dir_all(&policy.directory).map_err(|e| io_err(&policy.directory, e))?;
-    let stamp = backup_stamp(std::time::SystemTime::now());
+    let dir = open_backups(policy, true)?
+        .ok_or_else(|| io_err(&policy.directory, std::io::ErrorKind::NotFound.into()))?;
+    let source = File::open(destination).map_err(|e| io_err(destination, e))?;
+    let newest = generations(&dir)
+        .map_err(|e| io_err(&policy.directory, e))?
+        .first()
+        .map(|(key, _, _)| key.millis);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let stamp = backup_stamp(newest.map_or(now, |newest| now.max(newest + 1)));
     let mut collision = 0u32;
     loop {
         let name = if collision == 0 {
@@ -661,106 +1140,124 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
         } else {
             format!("{stamp}.pmv-{collision}")
         };
-        let file = policy.directory.join(name);
-        if fs::symlink_metadata(&file).is_ok() {
-            collision += 1;
-            continue;
+        let file = policy.directory.join(&name);
+        match dir.copy_new(&source, name.as_ref()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                collision += 1;
+                continue;
+            }
+            Err(e) => return Err(io_err(&file, e)),
         }
-        fs::copy(destination, &file).map_err(|e| io_err(&file, e))?;
-        let synced = File::open(&file)
-            .and_then(|h| h.sync_all())
-            .map_err(|e| io_err(&file, e))
-            .and_then(|()| sync_directory(&policy.directory));
-        if let Err(e) = synced {
-            let _ = fs::remove_file(&file);
-            return Err(e);
+        if let Err(e) = dir.sync() {
+            let _ = dir.unlink(name.as_ref());
+            return Err(io_err(&policy.directory, e));
         }
         return Ok(file);
     }
 }
 
-/// Keep the newest active versions within the budgets (at least
-/// `min_versions`). Archive every older generation; retention never deletes
-/// authored bytes. Archiving does not promise reclaimed disk space: that
-/// waits for [`reclaim_archived`].
-pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
+/// Keep the newest versions within the budgets (always the newest
+/// `min_versions` in save order, and always `just_written`) and delete older
+/// ones, as the old app pruned its backups after each save (v1.2.0 kept 5).
+/// Generations earlier builds moved to `archived/` are older than every kept
+/// one and go too, so a project's backups stay bounded. Only regular files
+/// with the exact names the app writes are deleted; recovery copies
+/// (`*.recovery.pmv`) and anything else stay. Linked folders are refused or
+/// skipped, never followed.
+pub(crate) fn retain(
+    policy: &BackupPolicy,
+    just_written: Option<&Path>,
+) -> Result<(), ProjectIoError> {
+    let Some(dir) = open_backups(policy, false)? else {
+        return Ok(());
+    };
+    let folder_err = |e| io_err(&policy.directory, e);
+    let keep = just_written.and_then(Path::file_name);
     let mut bytes = 0u64;
-    for (index, file) in list_backups(policy)?.into_iter().enumerate() {
-        let size = fs::symlink_metadata(&file).map(|m| m.len()).unwrap_or(0);
+    let mut removed = false;
+    for (index, (_, name, size)) in generations(&dir)
+        .map_err(folder_err)?
+        .into_iter()
+        .enumerate()
+    {
         bytes = bytes.saturating_add(size);
+        if Some(name.as_os_str()) == keep {
+            continue;
+        }
         if index >= policy.min_versions
             && (index >= policy.max_versions || bytes > policy.max_bytes)
         {
-            let archive = policy.directory.join("archived");
-            match fs::create_dir(&archive) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(io_err(&archive, e)),
-            }
-            if !fs::symlink_metadata(&archive)
-                .map_err(|e| io_err(&archive, e))?
-                .is_dir()
-            {
-                return Err(ProjectIoError::Invalid(
-                    "Unsafe backup archive directory".into(),
-                ));
-            }
-            let name = file.file_name().expect("listed backup has a name");
-            let mut target = archive.join(name);
-            loop {
-                // Exclusive link, then sync BEFORE retiring the active name.
-                // An interruption leaves at least one durable copy; collisions
-                // preserve both generations, even after an interrupted retry.
-                match fs::hard_link(&file, &target) {
-                    Ok(()) => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let mut unique = name.to_os_string();
-                        unique.push(format!(".{}", random_uuid()));
-                        target = archive.join(unique);
-                    }
-                    Err(e) => return Err(io_err(&target, e)),
-                }
-            }
-            sync_directory(&archive)?;
-            sync_directory(&policy.directory)?;
-            fs::remove_file(&file).map_err(|e| io_err(&file, e))?;
-            sync_directory(&policy.directory)?;
+            dir.unlink(&name).map_err(folder_err)?;
+            removed = true;
         }
+    }
+    let archived = OsStr::new("archived");
+    let archive = match dir.sub(archived, false) {
+        Ok(archive) => archive,
+        // A linked `archived` is not ours to clean.
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => None,
+        Err(e) => return Err(folder_err(e)),
+    };
+    if let Some(archive) = archive {
+        let archive_path = policy.directory.join(archived);
+        for (name, kind) in archive.entries().map_err(|e| io_err(&archive_path, e))? {
+            let ours = name.to_str().and_then(archived_key).is_some();
+            if ours && matches!(kind, Kind::File { .. }) {
+                archive
+                    .unlink(&name)
+                    .map_err(|e| io_err(&archive_path, e))?;
+            }
+        }
+        // Gone once empty; anything else in it stays.
+        let _ = dir.remove_dir(archived);
+        removed = true;
+    }
+    if removed {
+        dir.sync().map_err(folder_err)?;
     }
     Ok(())
 }
 
 /// A full disk must not cost the user their current work: frees `needed`
-/// bytes from generations retention already archived, across every project,
-/// oldest first. Active versions and anything not named by the app stay.
+/// bytes from generations earlier builds archived (`archived/`), across
+/// every project, oldest first. Kept versions, anything not named by the
+/// app, and anything behind a link stay.
 /// Returns the bytes freed; a save that failed on space retries only if any.
 pub(crate) fn reclaim_archived(policy: &BackupPolicy, needed: u64) -> u64 {
     let Some(root) = policy.directory.parent() else {
         return 0;
     };
-    let mut archived: Vec<(String, PathBuf, u64)> = vec![];
-    for project in fs::read_dir(root).into_iter().flatten().flatten() {
-        let folder = project.path().join("archived");
-        if !fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
+    let Ok(Some(root)) = Dir::open(root) else {
+        return 0;
+    };
+    let archived = OsStr::new("archived");
+    let mut archives = vec![];
+    let mut files: Vec<(BackupKey, usize, OsString, u64)> = vec![];
+    for (project, kind) in root.entries().into_iter().flatten() {
+        if !matches!(kind, Kind::Dir) {
             continue;
         }
-        for file in fs::read_dir(&folder).into_iter().flatten().flatten() {
-            let name = file.file_name().to_string_lossy().into_owned();
-            let stamp = name.get(..28).filter(|prefix| is_backup_name(prefix));
-            if let (Some(stamp), Ok(meta)) = (stamp, fs::symlink_metadata(file.path()))
-                && meta.is_file()
-            {
-                archived.push((stamp.to_owned(), file.path(), meta.len()));
+        let Ok(Some(project)) = root.sub(&project, false) else {
+            continue;
+        };
+        let Ok(Some(archive)) = project.sub(archived, false) else {
+            continue;
+        };
+        for (name, kind) in archive.entries().into_iter().flatten() {
+            if let (Kind::File { size }, Some(key)) = (kind, name.to_str().and_then(archived_key)) {
+                files.push((key, archives.len(), name, size));
             }
         }
+        archives.push(archive);
     }
-    archived.sort();
+    files.sort();
     let mut freed = 0;
-    for (_, file, size) in archived {
+    for (_, archive, name, size) in files {
         if freed >= needed {
             break;
         }
-        if fs::remove_file(file).is_ok() {
+        if archives[archive].unlink(&name).is_ok() {
             freed += size;
         }
     }
@@ -773,14 +1270,20 @@ mod tests {
 
     #[test]
     fn backup_names_match_the_old_pattern() {
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_793_489_885_123);
-        let stamp = backup_stamp(t);
+        let stamp = backup_stamp(1_793_489_885_123);
         assert_eq!(stamp, "2026-10-31T23-38-05-123Z");
-        assert!(is_backup_name(&format!("{stamp}.pmv")));
-        assert!(is_backup_name(&format!("{stamp}.pmv-3")));
-        assert!(!is_backup_name(&format!("{stamp}.pmv-")));
-        assert!(!is_backup_name(&format!("{stamp}.pmv.recovery.pmv")));
-        assert!(!is_backup_name("notes.pmv"));
+        assert_eq!(stamp_millis(stamp.as_bytes()), 1_793_489_885_123);
+        for millis in [0, 951_782_400_000, 4_102_444_799_999] {
+            assert_eq!(stamp_millis(backup_stamp(millis).as_bytes()), millis);
+        }
+        let key = |name: &str| backup_key(name).map(|k| (k.millis, k.collision));
+        assert_eq!(key(&format!("{stamp}.pmv")), Some((1_793_489_885_123, 0)));
+        assert_eq!(key(&format!("{stamp}.pmv-3")), Some((1_793_489_885_123, 3)));
+        assert_eq!(key(&format!("{stamp}.pmv-")), None);
+        assert_eq!(key(&format!("{stamp}.pmv.recovery.pmv")), None);
+        assert_eq!(key("notes.pmv"), None);
+        // Collisions sort numerically: `-10` is newer than `-9`.
+        assert!(key(&format!("{stamp}.pmv-10")) > key(&format!("{stamp}.pmv-9")));
     }
 
     #[test]

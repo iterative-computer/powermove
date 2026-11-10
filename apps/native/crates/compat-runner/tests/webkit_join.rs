@@ -270,6 +270,9 @@ mod mac {
         let mut opened = false;
         let mut stage = 0;
         let mut ticket = None;
+        // An agent's read and capture of the panel (`get_panel_state`, `capture_panel`).
+        let mut read: Option<CaptureTicket<Value>> = None;
+        let mut png: Option<CaptureTicket<Vec<u8>>> = None;
         let script_in = |web: &objc2_web_kit::WKWebView, source: &str| unsafe {
             web.evaluateJavaScript_completionHandler(&NSString::from_str(source), None);
         };
@@ -329,7 +332,8 @@ mod mac {
                     }
                     1 if text == "typed in WebKit" => {
                         println!("webkit_event_ran_v8_closure=1");
-                        stage = 2;
+                        stage = 6;
+                        read = Some(web.read_contribution("synthetic.panel")?);
                     }
                     2 if text == "[255,0,0,255]" => {
                         println!("recorder_canvas_painted_in_webkit=1");
@@ -359,6 +363,40 @@ mod mac {
                     _ => (),
                 }
             }
+            if let Some(reply) = read.as_ref().and_then(CaptureTicket::try_take) {
+                read = None;
+                let reply = reply?;
+                let controls = reply["controls"].as_array().ok_or("no controls")?;
+                let field = controls
+                    .iter()
+                    .find(|c| c["role"] == "textbox")
+                    .ok_or("no text field")?;
+                if field["value"] != "typed in WebKit"
+                    || !reply["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("typed in WebKit"))
+                    || field["bounds"]["width"].as_f64().unwrap_or(0.) <= 0.
+                {
+                    return Err(format!("panel read: {reply}").into());
+                }
+                println!("agent_reads_panel_text_and_controls=1");
+                png = Some(web.capture_rect_png(Rect::new(10., 20., 300., 200.))?);
+            }
+            if let Some(reply) = png.as_ref().and_then(CaptureTicket::try_take) {
+                png = None;
+                let bytes = reply?;
+                if !bytes.starts_with(b"\x89PNG") {
+                    return Err("panel capture is not a PNG".into());
+                }
+                // The snapshot is the panel's rect (300 × 200 points, at 1× or 2×).
+                let width = u32::from_be_bytes(bytes[16..20].try_into()?);
+                let height = u32::from_be_bytes(bytes[20..24].try_into()?);
+                if width * 2 != height * 3 || width < 300 {
+                    return Err(format!("panel capture is {width}×{height}").into());
+                }
+                println!("agent_captures_panel_rect=1");
+                stage = 2;
+            }
             // The realm opened the sheet: type into its own document.
             if stage == 3
                 && let Some(sheet) = web.child_web_views().pop()
@@ -369,7 +407,7 @@ mod mac {
                     "{const i=document.querySelector('#modal-name');if(!i)throw Error('no body');i.value='typed in sheet';i.dispatchEvent(new InputEvent('input',{bubbles:true}))}0",
                 );
             }
-            if ready && opened && ticket.is_none() && stage != 3 {
+            if ready && opened && ticket.is_none() && stage != 3 && stage < 6 {
                 let selector = match stage {
                     0 | 1 | 4 | 5 => Some(("#echo", false)),
                     _ => None,

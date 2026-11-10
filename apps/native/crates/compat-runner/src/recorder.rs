@@ -321,8 +321,15 @@ impl NativeHost {
                 _ if item["hidden"] == true => crate::RasterAnswer::Hidden,
                 _ if item["retry"] == true => crate::RasterAnswer::Retry,
                 _ if item["moved"] == true => crate::RasterAnswer::Moved,
+                // The override's own throw (or unreadable result) is
+                // deterministic; anything else the realm reports is not.
                 _ if item["error"].is_string() => {
-                    crate::RasterAnswer::Failed(item["error"].as_str().unwrap_or_default().into())
+                    let error = item["error"].as_str().unwrap_or_default().into();
+                    if item["threw"] == true {
+                        crate::RasterAnswer::Failed(error)
+                    } else {
+                        crate::RasterAnswer::Unavailable(error)
+                    }
                 }
                 // An empty canvas draws nothing, as on main.
                 Some(canvas) if canvas.size().0 == 0 || canvas.size().1 == 0 => {
@@ -347,10 +354,10 @@ impl NativeHost {
                                 _ => [0., 0., 1., 1.],
                             },
                         },
-                        Err(error) => crate::RasterAnswer::Failed(error.to_string()),
+                        Err(error) => crate::RasterAnswer::Unavailable(error.to_string()),
                     }
                 }
-                None => crate::RasterAnswer::Failed("The override's canvas is gone".into()),
+                None => crate::RasterAnswer::Unavailable("The override's canvas is gone".into()),
             };
             answers.push(answer);
         }

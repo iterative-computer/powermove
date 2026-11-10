@@ -13,9 +13,10 @@
 //!   its nearest answer (plan 3.6.4: "a late override reuses its last-good
 //!   surface") and is redrawn exact when the answer lands. The viewer never
 //!   blocks on JavaScript, and never stops showing frames for it.
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node};
@@ -223,9 +224,14 @@ struct Answers {
     by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
     /// Asked of the realm and not answered yet, and when.
     asked: HashMap<NeedKey, Instant>,
-    /// Needs whose override failed: their frames fail (as main's compositor
-    /// throws) and are not asked again until the revision or wrappers change.
-    failed: HashSet<NeedKey>,
+    /// Needs whose override failed, with its message: the layer fails in
+    /// their frames (drawn as nothing and reported, never waited for) and is
+    /// not asked again until the revision or wrappers change.
+    failed: HashMap<NeedKey, String>,
+    /// Needs the realm could not answer this time: asked again once their
+    /// backoff passes; after a few attempts their frames report the error
+    /// meanwhile instead of waiting.
+    unavailable: HashMap<NeedKey, Unavailable>,
     /// The frame being drawn: how it treats late layers, and which it drew
     /// from a nearest answer.
     late: Late,
@@ -243,6 +249,90 @@ struct Answers {
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
     horizon: Option<i64>,
+}
+struct Unavailable {
+    message: String,
+    attempts: u32,
+    again_at: Instant,
+}
+/// The wait before asking again after `attempts` transient failures.
+fn backoff(attempts: u32) -> Duration {
+    (FIRST_RETRY * 2u32.saturating_pow(attempts.saturating_sub(1))).min(LAST_RETRY)
+}
+const FIRST_RETRY: Duration = Duration::from_millis(100);
+const LAST_RETRY: Duration = Duration::from_secs(5);
+/// Transient failures a frame waits through before it reports the error.
+const REPORT_AFTER: u32 = 3;
+
+type Redraw = Arc<dyn Fn() + Send + Sync>;
+
+/// Redraws the viewers at each pending retry's time, earliest first, so
+/// every unavailable need is asked again at its own backoff (a frame asks
+/// for what is due). One thread per store while retries are pending.
+#[derive(Default)]
+struct Wakes(Arc<WakeQueue>);
+#[derive(Default)]
+struct WakeQueue {
+    state: Mutex<WakeState>,
+    changed: Condvar,
+}
+#[derive(Default)]
+struct WakeState {
+    at: BinaryHeap<Reverse<Instant>>,
+    redraw: Option<Redraw>,
+    running: bool,
+    closed: bool,
+}
+impl Wakes {
+    fn at(&self, deadlines: Vec<Instant>, redraw: Redraw) {
+        let mut state = self.0.state.lock().unwrap();
+        state.at.extend(deadlines.into_iter().map(Reverse));
+        state.redraw = Some(redraw);
+        if state.running {
+            self.0.changed.notify_one();
+            return;
+        }
+        state.running = true;
+        drop(state);
+        let queue = self.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name("pm-compat-retry".into())
+            .spawn(move || queue.run());
+        if spawned.is_err() {
+            self.0.state.lock().unwrap().running = false;
+        }
+    }
+}
+impl WakeQueue {
+    fn run(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.closed {
+            let Some(&Reverse(next)) = state.at.peek() else {
+                break;
+            };
+            let now = Instant::now();
+            if next > now {
+                state = self.changed.wait_timeout(state, next - now).unwrap().0;
+                continue;
+            }
+            while state.at.peek().is_some_and(|Reverse(at)| *at <= now) {
+                state.at.pop();
+            }
+            let redraw = state.redraw.clone();
+            drop(state);
+            if let Some(redraw) = redraw {
+                redraw();
+            }
+            state = self.state.lock().unwrap();
+        }
+        state.running = false;
+    }
+}
+impl Drop for Wakes {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().closed = true;
+        self.0.changed.notify_all();
+    }
 }
 struct Previous {
     map: HashMap<NeedKey, CompatAnswer>,
@@ -300,7 +390,11 @@ impl Answers {
             .filter(|need| {
                 let key = need_key(need);
                 !self.map.contains_key(&key)
-                    && !self.failed.contains(&key)
+                    && !self.failed.contains_key(&key)
+                    && self
+                        .unavailable
+                        .get(&key)
+                        .is_none_or(|u| Instant::now() >= u.again_at)
                     && self
                         .asked
                         .get(&key)
@@ -318,8 +412,12 @@ pub type CompatSink = Arc<dyn Fn(u64, u64, Vec<CompatNeed>) + Send + Sync>;
 /// What the realm answered for one need.
 pub enum Reply {
     Draw(CompatAnswer),
-    /// The override threw or returned what cannot be drawn.
-    Failed,
+    /// The override threw or returned what cannot be drawn (its message):
+    /// the same revision fails the same way, so it is not asked again.
+    Failed(String),
+    /// The realm could not answer this time (a readback failed, the realm
+    /// restarted, the answer was lost): asked again after a backoff.
+    Unavailable(String),
     /// The realm had not seen the revision yet.
     Retry,
 }
@@ -341,6 +439,8 @@ pub struct CompatStore {
     sink: Mutex<Option<CompatSink>>,
     /// Redraws the viewers when answers land.
     redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Redraws again when each unavailable need's backoff ends.
+    wakes: Wakes,
     /// The code the wrappers come from (`set_code`); 0 while unknown.
     code: std::sync::atomic::AtomicU64,
 }
@@ -538,22 +638,45 @@ impl CompatStore {
             });
         }
         let mut drew = false;
+        let mut again = Vec::new();
         for (need, reply) in answered {
             let key = need_key(&need);
             answers.asked.remove(&key);
+            if !matches!(reply, Reply::Unavailable(_)) {
+                answers.unavailable.remove(&key);
+            }
             let answer = match reply {
                 Reply::Draw(answer) => answer,
-                Reply::Failed => {
+                Reply::Failed(message) => {
                     if answers.failed.len() >= MAX_ENTRIES {
                         answers.failed.clear();
                     }
-                    answers.failed.insert(key);
+                    answers.failed.insert(key, message);
                     drew = true;
                     continue;
                 }
                 // Asked again by the next frame that needs it.
                 Reply::Retry => {
                     drew = true;
+                    continue;
+                }
+                // Asked again by the first frame that needs it after the
+                // backoff; a redraw then makes sure one does.
+                Reply::Unavailable(message) => {
+                    if answers.unavailable.len() >= MAX_ENTRIES {
+                        answers.unavailable.clear();
+                    }
+                    let attempts = answers.unavailable.get(&key).map_or(0, |u| u.attempts) + 1;
+                    let again_at = Instant::now() + backoff(attempts);
+                    answers.unavailable.insert(
+                        key,
+                        Unavailable {
+                            message,
+                            attempts,
+                            again_at,
+                        },
+                    );
+                    again.push(again_at);
                     continue;
                 }
             };
@@ -589,8 +712,13 @@ impl CompatStore {
         } else {
             self.dispatch(answers, queued);
         }
-        if drew && let Some(redraw) = self.redraw.lock().unwrap().clone() {
-            redraw();
+        if let Some(redraw) = self.redraw.lock().unwrap().clone() {
+            if drew {
+                redraw();
+            }
+            if !again.is_empty() {
+                self.wakes.at(again, redraw);
+            }
         }
     }
     #[cfg(test)]
@@ -653,8 +781,19 @@ impl CompatRasters for CompatStore {
         if let Some(answer) = answers.map.get(&key) {
             return answer.clone();
         }
-        // A failed override fails its frames, as main's compositor throws.
-        if answers.late == Late::Wait || answers.failed.contains(&key) {
+        // A failed override fails its layer: reported, not waited for.
+        if let Some(message) = answers.failed.get(&key) {
+            return CompatAnswer::Failed(message.clone());
+        }
+        // One the realm keeps failing to answer is reported while it waits
+        // to be asked again; once due, the frame asks.
+        if let Some(u) = answers.unavailable.get(&key)
+            && u.attempts >= REPORT_AFTER
+            && Instant::now() < u.again_at
+        {
+            return CompatAnswer::Failed(u.message.clone());
+        }
+        if answers.late == Late::Wait {
             return CompatAnswer::Missing;
         }
         let stand_in = match (answers.nearest(composition, layer, ticks), answers.late) {
@@ -786,13 +925,15 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
     }
     #[test]
-    fn a_failed_override_fails_its_frames_without_asking_again() {
+    fn a_failed_override_fails_its_layer_without_asking_again() {
         let store = CompatStore::default();
         let asked = asking(&store);
         store.set_state(true, 7, 1);
         store.request(vec![need("x")]);
-        store.answer_all(7, 1, vec![(need("x"), Reply::Failed)]);
-        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        store.answer_all(7, 1, vec![(need("x"), Reply::Failed("boom".into()))]);
+        // The layer fails with the override's message; the frame does not
+        // wait for an answer that will never come.
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Failed(m) if m == "boom"));
         store.request(vec![need("x")]);
         assert_eq!(asked.lock().unwrap().len(), 1);
         // A realm that had not caught up is asked again.
@@ -804,6 +945,113 @@ mod tests {
         store.set_state(true, 8, 1);
         store.request(vec![need("x")]);
         assert_eq!(asked.lock().unwrap().len(), 4);
+    }
+    /// A readback error, a restarted realm or a lost answer is asked again
+    /// after a backoff (a redraw makes the frame ask), then draws; one that
+    /// keeps failing is reported meanwhile but still asked again. Only an
+    /// override's throw is sticky for the revision.
+    #[test]
+    fn a_transient_failure_is_asked_again_after_a_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        let redraws = Arc::new(AtomicUsize::new(0));
+        let count = redraws.clone();
+        store.set_redraw(Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let redrawn = |after: usize| {
+            let start = Instant::now();
+            while redraws.load(Ordering::SeqCst) <= after {
+                assert!(start.elapsed() < Duration::from_secs(10), "no redraw");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        store.set_state(true, 7, 1);
+        let unavailable = || Reply::Unavailable("readback".into());
+        store.request(vec![need("x")]);
+        store.answer_all(7, 1, vec![(need("x"), unavailable())]);
+        // Not the layer's failure: the paused frame waits for it.
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        store.request(vec![need("x")]);
+        assert_eq!(asked.lock().unwrap().len(), 1, "not before the backoff");
+        redrawn(redraws.load(Ordering::SeqCst));
+        store.request(vec![need("x")]);
+        assert_eq!(asked.lock().unwrap().len(), 2, "asked again");
+        store.answer_all(7, 1, vec![(need("x"), draw(9))]);
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Raster(r) if r.data[0] == 9));
+
+        // Failing every time: reported after a few attempts, never sticky.
+        for attempt in 1..=REPORT_AFTER {
+            let before = redraws.load(Ordering::SeqCst);
+            store.request(vec![need("y")]);
+            assert_eq!(asked.lock().unwrap().len(), 2 + attempt as usize);
+            store.answer_all(7, 1, vec![(need("y"), unavailable())]);
+            let reported =
+                matches!(answer(&store, "y"), CompatAnswer::Failed(m) if m == "readback");
+            assert_eq!(reported, attempt >= REPORT_AFTER, "attempt {attempt}");
+            redrawn(before);
+        }
+        store.request(vec![need("y")]);
+        assert_eq!(asked.lock().unwrap().len(), 3 + REPORT_AFTER as usize);
+        // An override's throw is not asked again for this revision.
+        store.answer_all(7, 1, vec![(need("y"), Reply::Failed("boom".into()))]);
+        store.request(vec![need("y")]);
+        assert_eq!(asked.lock().unwrap().len(), 3 + REPORT_AFTER as usize);
+    }
+    /// Two layers the realm could not answer wait different backoffs: each
+    /// gets a redraw when its own wait ends and is asked again then, even
+    /// after the earlier one was answered (no wake is lost to the shortest).
+    #[test]
+    fn every_pending_retry_wakes_at_its_own_time() {
+        let store = CompatStore::default();
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
+            log.lock()
+                .unwrap()
+                .extend(needs.iter().map(|n| n.layer.as_str().to_owned()));
+        })));
+        let redraws = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let times = redraws.clone();
+        store.set_redraw(Arc::new(move || times.lock().unwrap().push(Instant::now())));
+        store.set_state(true, 7, 1);
+        let unavailable = || Reply::Unavailable("readback".into());
+        // "slow" has failed once already, so its next wait is twice as long.
+        store.answer_all(7, 1, vec![(need("slow"), unavailable())]);
+        store.request(vec![need("fast"), need("slow")]);
+        store.answer_all(
+            7,
+            1,
+            vec![(need("fast"), unavailable()), (need("slow"), unavailable())],
+        );
+        let due = |layer: &str| {
+            let answers = store.answers.lock().unwrap();
+            answers.unavailable[&need_key(&need(layer))].again_at
+        };
+        let (fast, slow) = (due("fast"), due("slow"));
+        assert!(slow > fast);
+        let redrawn_after = |at: Instant| {
+            let start = Instant::now();
+            while !redraws.lock().unwrap().iter().any(|t| *t >= at) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "no redraw when the wait ended"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        redrawn_after(fast);
+        asked.lock().unwrap().clear();
+        store.request(vec![need("fast"), need("slow")]);
+        if Instant::now() < slow {
+            assert_eq!(*asked.lock().unwrap(), ["fast"]);
+        }
+        store.answer_all(7, 1, vec![(need("fast"), draw(1))]);
+        redrawn_after(slow);
+        asked.lock().unwrap().clear();
+        store.request(vec![need("fast"), need("slow")]);
+        assert_eq!(*asked.lock().unwrap(), ["slow"], "asked at its own time");
     }
     fn at(layer: &str, seconds: f64) -> CompatNeed {
         let mut n = need(layer);
@@ -845,10 +1093,13 @@ mod tests {
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
         assert!(store.end_frame().is_empty());
-        // A failed override still fails its frames.
-        store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed)]);
+        // A failed override still fails its layer, playing or not.
+        store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed("boom".into()))]);
         store.begin_frame(Moment::Playing);
-        assert!(matches!(answer_at(&store, "x", 3.), CompatAnswer::Missing));
+        assert!(matches!(
+            answer_at(&store, "x", 3.),
+            CompatAnswer::Failed(_)
+        ));
         store.end_frame();
         // An edit keeps the last revision's answers as stand-ins only.
         store.set_state(true, 8, 1);

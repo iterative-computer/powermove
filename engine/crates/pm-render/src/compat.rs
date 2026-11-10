@@ -14,7 +14,9 @@
 //! ([`CompatAnswer::Missing`]): the frame then fails with
 //! [`crate::RenderError::CompatPending`] naming what it needs, and the
 //! caller asks the renderer and renders it again (the decision 19 fallback
-//! runner's pattern). Rasters are drawn exactly like a text raster: an
+//! runner's pattern). An override that threw ([`CompatAnswer::Failed`]) is a
+//! failing layer: it draws nothing and is reported with the override's
+//! message (the viewer isolates it; exports refuse). Rasters are drawn exactly like a text raster: an
 //! E-encoded premultiplied image (a canvas's backing store), sampled through
 //! the layer's quad, so effects, masks, mattes, transforms, and blending
 //! apply to them as to the layer's own raster.
@@ -56,6 +58,9 @@ pub enum CompatAnswer {
     Native,
     /// Not answered yet.
     Missing,
+    /// The override threw or returned what cannot be drawn: the layer fails
+    /// with this message, never waited for.
+    Failed(String),
 }
 
 /// The compatibility rasters of one session (the interactive engine's

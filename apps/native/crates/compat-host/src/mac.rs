@@ -650,6 +650,25 @@ impl MacDomHost {
         let source = format!(
             "(()=>{{const nodes=document.querySelectorAll({selector});if(nodes.length!==1)throw Error('capture requires exactly one node');return JSON.stringify(nodes[0].{property})}})()"
         );
+        Ok(self.evaluate_json(generation, &source))
+    }
+    /// One contributed panel's text and controls, as an agent reads a panel
+    /// (`get_panel_state`): its `section[data-pm-contribution]` read by a fixed
+    /// script (nothing an extension or caller supplies runs). Password and
+    /// file inputs are left out. Invoke on AppKit and poll the ticket.
+    pub fn read_contribution(&self, panel: &str) -> Result<CaptureTicket<Value>> {
+        let generation = self.generation();
+        if !self.shared.ready.get() {
+            return Err(Error::Backpressure);
+        }
+        if panel.len() > 512 {
+            return Err(Error::InvalidRequest);
+        }
+        let id = serde_json::to_string(panel).map_err(|_| Error::InvalidRequest)?;
+        Ok(self.evaluate_json(generation, &READ_CONTRIBUTION.replace("$ID", &id)))
+    }
+    /// Runs one of this crate's fixed scripts, which returns JSON text.
+    fn evaluate_json(&self, generation: Generation, source: &str) -> CaptureTicket<Value> {
         let (sender, ticket) = crate::capture::ticket();
         let shared = self.shared.clone();
         let callback = block2::RcBlock::new(
@@ -673,12 +692,10 @@ impl MacDomHost {
             },
         );
         unsafe {
-            self.web.evaluateJavaScript_completionHandler(
-                &NSString::from_str(&source),
-                Some(&callback),
-            );
+            self.web
+                .evaluateJavaScript_completionHandler(&NSString::from_str(source), Some(&callback));
         }
-        Ok(ticket)
+        ticket
     }
     /// Actual WebKit snapshot completion, independent of DOM batch admission.
     /// This captures this rendering document; the app owns full-window captures.
@@ -686,6 +703,29 @@ impl MacDomHost {
         if generation != self.generation() {
             return Err(Error::StaleGeneration);
         }
+        self.snapshot(generation, None)
+    }
+    /// The page's pixels inside `rect` (page points, top-left origin): one
+    /// panel's body, as WebKit draws it.
+    pub fn capture_rect_png(&self, rect: Rect) -> Result<CaptureTicket<Vec<u8>>> {
+        if !(rect.w > 0. && rect.h > 0.) {
+            return Err(Error::InvalidRequest);
+        }
+        let mtm = MainThreadMarker::new().ok_or(Error::InvalidRequest)?;
+        let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
+        unsafe {
+            configuration.setRect(NSRect::new(
+                NSPoint::new(rect.x, rect.y),
+                NSSize::new(rect.w, rect.h),
+            ));
+        }
+        self.snapshot(self.generation(), Some(&configuration))
+    }
+    fn snapshot(
+        &self,
+        generation: Generation,
+        configuration: Option<&WKSnapshotConfiguration>,
+    ) -> Result<CaptureTicket<Vec<u8>>> {
         if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
@@ -716,7 +756,7 @@ impl MacDomHost {
         });
         unsafe {
             self.web
-                .takeSnapshotWithConfiguration_completionHandler(None, &callback);
+                .takeSnapshotWithConfiguration_completionHandler(configuration, &callback);
         }
         Ok(ticket)
     }
@@ -1046,6 +1086,10 @@ fn random_token() -> Result<String> {
         .map_err(|_| Error::Unsupported("compat_entropy_unavailable"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
+
+/// `read_contribution`'s script: the panel's visible text and its controls
+/// (role, label, value, state, panel-relative bounds), capped.
+const READ_CONTRIBUTION: &str = r#"(()=>{const root=document.querySelector('[data-pm-contribution='+JSON.stringify($ID)+']');if(!root)throw Error('no such panel');const box=root.getBoundingClientRect();const text=(root.innerText||'').replace(/\n{3,}/g,'\n\n').trim().slice(0,20000);const controls=[];for(const el of root.querySelectorAll('button,a[href],input,select,textarea,[role=button],[role=checkbox],[role=switch],[role=slider],[role=tab],[role=menuitem],[contenteditable=""],[contenteditable=true]')){if(controls.length>=200)break;const type=(el.getAttribute('type')||'').toLowerCase();if(type==='password'||type==='file'||type==='hidden')continue;const r=el.getBoundingClientRect();if(r.width===0&&r.height===0)continue;const tag=el.tagName;const role=el.getAttribute('role')||(tag==='A'?'link':tag==='SELECT'?'combobox':tag==='TEXTAREA'?'textbox':tag==='INPUT'?(type==='checkbox'?'checkbox':type==='radio'?'radio':type==='range'?'slider':'textbox'):el.isContentEditable?'textbox':'button');const label=(el.getAttribute('aria-label')||(el.labels&&el.labels[0]&&el.labels[0].innerText)||(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'?'':el.innerText)||el.getAttribute('placeholder')||el.getAttribute('title')||el.getAttribute('name')||'').trim().slice(0,200);const c={role,label};if((tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')&&type!=='checkbox'&&type!=='radio')c.value=String(el.value).slice(0,500);if(type==='checkbox'||type==='radio')c.checked=!!el.checked;if(el.disabled||el.getAttribute('aria-disabled')==='true')c.disabled=true;if(tag==='SELECT')c.options=Array.from(el.options).slice(0,100).map(o=>o.text);c.bounds={x:Math.round(r.left-box.left),y:Math.round(r.top-box.top),width:Math.round(r.width),height:Math.round(r.height)};controls.push(c);}return JSON.stringify({text,controls});})()"#;
 
 #[cfg(test)]
 mod admission_tests {

@@ -72,9 +72,28 @@ pub struct HistoryRecord {
     /// realm. Never exported (the old `export()` kept document entries only).
     pub external: Option<ExternalRef>,
     pub selection: Option<Arc<(crate::selection::Selection, crate::selection::Selection)>>,
+    /// The digest of the form the file stores for this step, computed once
+    /// and shared by every copy ([`History::identity`]).
+    digest: Arc<std::sync::OnceLock<String>>,
 }
 
 impl HistoryRecord {
+    /// SHA-256 of the forward and backward lists the file stores for this
+    /// step (`to_saved`'s entry, label aside).
+    fn digest(&self) -> &str {
+        self.digest.get_or_init(|| {
+            let (forward, backward) = match self.saved_form() {
+                Some((f, b)) => (
+                    Value::Array(f.iter().map(Patch::to_value).collect()),
+                    Value::Array(b.iter().map(Patch::to_value).collect()),
+                ),
+                None => (ops_to_value(&self.forward), ops_to_value(&self.inverse)),
+            };
+            let form = Value::Array(vec![forward, backward]);
+            pm_model::hash::sha256_hex(pm_model::json::to_canonical_string(&form).as_bytes())
+        })
+    }
+
     pub fn is_document(&self) -> bool {
         self.external.is_none() && self.selection.is_none()
     }
@@ -347,6 +366,7 @@ impl History {
             bytes,
             external: None,
             selection: None,
+            digest: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -378,6 +398,7 @@ impl History {
             bytes,
             external: Some(external),
             selection: None,
+            digest: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -406,6 +427,7 @@ impl History {
             bytes,
             external: None,
             selection: Some(Arc::new((before, after))),
+            digest: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -509,6 +531,27 @@ impl History {
             saved,
             revision,
         ))
+    }
+
+    /// Identity of the undo history a save writes: equal for this history
+    /// and the one a file it saved opens with (the steps `to_saved()` keeps,
+    /// their labels and forms, and how many are applied). Each step's form
+    /// is hashed once.
+    pub fn identity(&self) -> String {
+        let mut text = String::new();
+        let applied = self.entries[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        text.push_str(&applied.to_string());
+        for r in self.entries.iter().filter(|r| r.is_document()) {
+            text.push('\n');
+            text.push_str(r.digest());
+            text.push_str(&pm_model::json::to_canonical_string(&Value::from(
+                r.label.as_str(),
+            )));
+        }
+        pm_model::hash::sha256_hex(text.as_bytes())
     }
 
     /// A copy for a save on another thread (records are shared, not copied).
@@ -722,6 +765,7 @@ impl History {
                 bytes,
                 external: None,
                 selection: None,
+                digest: Default::default(),
             });
             history.total_bytes += bytes;
         }

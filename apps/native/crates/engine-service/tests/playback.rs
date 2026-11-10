@@ -140,6 +140,8 @@ fn red(p: [f64; 3]) -> bool {
 
 #[test]
 fn an_offline_clip_draws_its_card_and_leaves_the_rest_of_the_frame_on_screen() {
+    pm_perf::count_globally(true);
+    let counted = pm_perf::snapshot_global();
     let s = project("gone");
     let service = service("isolation");
     let v = service
@@ -163,6 +165,14 @@ fn an_offline_clip_draws_its_card_and_leaves_the_rest_of_the_frame_on_screen() {
         red(at(&pixels, 60, 90)),
         "the healthy layer above stays on screen"
     );
+    // The card is painted on the GPU: the CPU fallback (seconds per frame in
+    // a debug build) is never taken for it.
+    let drawn = pm_perf::snapshot_global().since(&counted);
+    assert!(
+        drawn.get(pm_perf::Counter::VectorCacheMisses) > 0,
+        "the card was resolved"
+    );
+    assert_eq!(drawn.get(pm_perf::Counter::SvgFallbackFeature), 0);
 }
 
 #[test]

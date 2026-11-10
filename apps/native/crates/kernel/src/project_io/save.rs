@@ -595,6 +595,11 @@ impl SavePlan {
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         self.validate()?;
         let dest = &self.destination;
+        // A save of the project (its lock held), not an export to a path
+        // another writer may be staging in.
+        if !self.options.portable {
+            durable::remove_abandoned_temps(dest);
+        }
         let publish = match &self.publish {
             Some(p) => p.clone(),
             None => match FileVersion::read(dest)? {
@@ -895,7 +900,7 @@ impl SavePlan {
             return Err(e);
         }
         if let Some(policy) = &self.options.backups {
-            let _ = durable::retain(policy);
+            let _ = durable::retain(policy, backup.as_deref());
         }
 
         let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;

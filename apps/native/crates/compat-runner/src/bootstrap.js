@@ -188,7 +188,8 @@ globalThis.__compat = {
     // Raster overrides: the viewer and exports ask for layers they need, a
     // batch at a time. An override's canvas goes back as pixels, a pass-through
     // as native, a null result (main draws nothing) as hidden, and a failure
-    // as an error: the frame fails rather than draw the layer without it.
+    // as an error: the viewer reports the layer as not drawn, with the error,
+    // and an export fails rather than draw the layer without it.
     const layerIn = (project, composition, id) => {
       const comps = project?.comps;
       const nested = Array.isArray(comps)
@@ -222,7 +223,8 @@ globalThis.__compat = {
           if (!result) return { hidden: true };
           if (realm.isBaseRaster(result, need)) return { native: true };
           const surface = this.nativeSurfaceOf?.(result.cv);
-          if (!surface) return { error: "The override returned a canvas the engine cannot read" };
+          if (!surface)
+            return { error: "The override returned a canvas the engine cannot read", threw: true };
           return {
             surface,
             w: result.w,
@@ -233,7 +235,8 @@ globalThis.__compat = {
           };
         } catch (error) {
           this.reportFailure(error);
-          return { error: failure(error) };
+          // The override's own throw: the same revision throws again.
+          return { error: failure(error), threw: true };
         } finally {
           realm.rasterContext = null;
         }

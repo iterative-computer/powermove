@@ -627,7 +627,59 @@ impl Kernel {
         Ok(handled)
     }
 
-    /// Start a new journal base only after its library/file save barrier.
+    /// Journals the save point of a save about to publish `document` at
+    /// `revision` with the project's current undo history
+    /// ([`Journal::mark_save`]), so recovery replays onto the file whether
+    /// or not the save lands. The barrier a save passes before it may
+    /// replace anything: when the save point cannot be made durable, the
+    /// save must not publish (a published file the journal cannot replay
+    /// onto would strand the edits after it).
+    pub(crate) fn mark_save_point(
+        &mut self,
+        id: &str,
+        document: &Document,
+        revision: u64,
+    ) -> Result<(), KernelFailure> {
+        let (Some(slot), Some(durability)) = (self.slots.get_mut(id), &self.durability) else {
+            return Ok(());
+        };
+        let Some(journal) = &mut slot.journal else {
+            return Ok(());
+        };
+        let hash = document.canonical_hash().unwrap_or_default();
+        let project = &slot.project;
+        let history = project.store().history().identity();
+        journal
+            .mark_save(durability, &hash, &history, revision, || {
+                let store = project.store();
+                CheckpointState {
+                    revision: store.revision(),
+                    document: store.current().clone(),
+                    history: store.history().snapshot(),
+                    workspace: project.workspace().clone(),
+                }
+            })
+            .map_err(|e| {
+                KernelFailure::Storage(format!(
+                    "Not saved: the recovery journal could not record the save ({e}). \
+                     The file was not changed; your work is still open."
+                ))
+            })
+    }
+
+    /// The save whose save point was journalled last published: the journal
+    /// lists it as an ancestor from now on ([`Journal::published`]).
+    pub(crate) fn save_published(&mut self, id: &str) {
+        if let Some(journal) = self.slots.get_mut(id).and_then(|s| s.journal.as_mut()) {
+            journal.published();
+        }
+    }
+
+    /// A handle that makes every journal durable from any thread.
+    pub fn journal_sync(&self) -> Option<journal::JournalSync> {
+        self.durability.as_ref().map(Durability::syncer)
+    }
+
     pub(crate) fn rebase_journal(&mut self, id: &str) -> Result<(), KernelFailure> {
         let dir = self.project_dir(id);
         let library_hash = if let Some(crate::session::Session {

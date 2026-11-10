@@ -149,22 +149,46 @@ fn normalize_ids(before: &Value, after: &Value, result: &Value) -> (Value, Value
 #[test]
 fn video_every_operation_matches_tagged_body_and_rolls_back() {
     let operations = [
-        json!({"operation":"insert","assetId":"a","from":1,"duration":4,"sourceIn":2}),
-        json!({"operation":"split","layerId":"clip","at":5}),
-        json!({"operation":"trim","layerId":"clip","start":1,"end":9}),
-        json!({"operation":"move","layerId":"clip","from":10}),
-        json!({"operation":"slip","layerId":"clip","sourceIn":4}),
-        json!({"operation":"separate_audio","layerId":"clip"}),
-        json!({"operation":"remove","layerId":"clip"}),
+        (
+            json!({"operation":"insert","assetId":"a","from":1,"duration":4,"sourceIn":2}),
+            "Insert clip · a",
+        ),
+        (
+            json!({"operation":"split","layerId":"clip","at":5}),
+            "Split clip · clip",
+        ),
+        (
+            json!({"operation":"trim","layerId":"clip","start":1,"end":9}),
+            "Trim clip · clip",
+        ),
+        (
+            json!({"operation":"move","layerId":"clip","from":10}),
+            "Move clip · clip",
+        ),
+        (
+            json!({"operation":"slip","layerId":"clip","sourceIn":4}),
+            "Slip clip · clip",
+        ),
+        (
+            json!({"operation":"separate_audio","layerId":"clip"}),
+            "Separate audio · clip",
+        ),
+        (
+            json!({"operation":"remove","layerId":"clip"}),
+            "Remove clip · clip",
+        ),
     ];
-    for args in operations {
+    for (args, applied) in operations {
         let f = Fixture::new();
         f.media();
         let mut seed = f.session();
         f.seed_video(&mut seed);
         ok(seed.call("finish_session", json!({"commit":true})));
         let before = f.read();
-        let expected = oracle(json!({"tool":"edit_video","project":before,"arguments":args}));
+        let mut expected = oracle(json!({"tool":"edit_video","project":before,"arguments":args}));
+        // v1 listed the call's `commands` (none): the reply names the edit.
+        assert_eq!(expected["result"]["applied"], json!([]));
+        expected["result"]["applied"] = json!([applied]);
         let mut s = f.session();
         let result = ok(s.call("edit_video", args.clone()));
         let after = f.read();
@@ -197,8 +221,15 @@ fn speed_and_audio_controls_match_tag() {
         ok(s.call("apply_commands",json!({"commands":[{"type":"add_layer","id":"clip","layerType":kind,"from":2,"duration":6,"content":if kind=="video"{json!({"asset":"a","embeddedAudio":false,"trim":1,"speed":1})}else{json!({"asset":"a","trim":1})}}]})));
         let p = f.read();
         let expected = oracle(json!({"tool":"edit_video","project":p,"arguments":args}));
-        ok(s.call("edit_video", args));
+        let result = ok(s.call("edit_video", args));
         assert_eq!(f.read()["layers"], expected["project"]["layers"]);
+        // The reply names what changed (v1 replied `applied: []`).
+        let applied = if kind == "video" {
+            "Change speed · clip"
+        } else {
+            "Edit audio · clip · gain, fadeIn, fadeOut"
+        };
+        assert_eq!(result["applied"], json!([applied]));
     }
 }
 #[test]
@@ -906,7 +937,8 @@ fn video_masks_effects_transitions_rebase_and_unknown_data_survive() {
     f.host.lock().unwrap().restore(&f.id, p, r, 1).unwrap();
     let before = f.read();
     let args = json!({"operation":"split","layerId":"clip","at":4});
-    let expected = oracle(json!({"tool":"edit_video","project":before,"arguments":args}));
+    let mut expected = oracle(json!({"tool":"edit_video","project":before,"arguments":args}));
+    expected["result"]["applied"] = json!(["Split clip · clip"]);
     let mut s = f.session();
     let mut result = ok(s.call("edit_video", args));
     result.as_object_mut().unwrap().remove("revision");
@@ -929,6 +961,7 @@ fn empty_noop_video_and_media_do_not_dirty_or_falsely_report_change() {
         json!({"operation":"move","layerId":"clip","from":2}),
     ));
     assert_eq!(result["message"], "No source changes");
+    assert_eq!(result["applied"], json!([]), "nothing changed");
     assert_eq!(f.read(), before);
     let renamed = ok(s.call(
         "manage_media",

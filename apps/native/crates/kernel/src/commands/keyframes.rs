@@ -493,7 +493,19 @@ fn edit_tracks(
     if ids.is_empty() {
         return Ok(());
     }
-    for loc in cx.all_layers() {
+    // Only a layer holding one of the keys is converted and searched.
+    let locs = cx.all_layers();
+    let held = {
+        let nodes = locs
+            .iter()
+            .map(|loc| cx.layer_node(loc))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::model::holding_keys(&nodes, &|i| ids.contains(i))
+    };
+    for (loc, held) in locs.into_iter().zip(held) {
+        if held == 0 {
+            continue;
+        }
         let layer = cx.layer_node(&loc)?.to_value();
         let hits: Vec<(String, Vec<Step>)> = channels::all(&layer)
             .into_iter()
@@ -1629,38 +1641,47 @@ fn simplify_track(source: &[Value], o: &SimplifyOptions) -> Option<Vec<Value>> {
     Some(after)
 }
 
-/// `simplifyProperties(PM, simplificationRefs(command))`.
+/// `simplifyProperties(PM, simplificationRefs(command))`. The project-wide
+/// rules (an expression anywhere, nested or time-mapped layers, rigs) read
+/// the tree; only the layers in scope are converted.
 fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> {
+    use crate::model::{str_of, truthy};
     let locs = cx.all_layers();
-    let mut layers: Vec<(crate::model::LayerLoc, Value)> = Vec::with_capacity(locs.len());
-    for loc in locs {
-        let v = cx.layer_node(&loc)?.to_value();
-        layers.push((loc, v));
-    }
-    let find = |id: &str| {
-        layers
-            .iter()
-            .position(|(_, l)| values::text(l, "id") == Some(id))
-    };
-    let mut refs: Vec<(usize, String)> = Vec::new();
-    match scope {
-        SimplifyScope::All | SimplifyScope::Layers(_) => {
-            if let SimplifyScope::Layers(ids) = scope
-                && ids.iter().any(|id| find(id).is_none())
-            {
+    let nodes = locs
+        .iter()
+        .map(|loc| cx.layer_node(loc))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids: Vec<Option<&str>> = nodes.iter().map(|n| n.get("id").and_then(str_of)).collect();
+    let find = |id: &str| ids.iter().position(|i| *i == Some(id));
+    let in_scope: Vec<usize> = match scope {
+        SimplifyScope::All => (0..nodes.len()).collect(),
+        SimplifyScope::Layers(wanted) => {
+            if wanted.iter().any(|id| find(id).is_none()) {
                 return Err(CommandError::Invalid(
                     "Simplification layer not found".into(),
                 ));
             }
-            for (i, (_, l)) in layers.iter().enumerate() {
-                if let SimplifyScope::Layers(ids) = scope
-                    && !ids
-                        .iter()
-                        .any(|id| Some(id.as_str()) == values::text(l, "id"))
-                {
-                    continue;
-                }
-                for (key, _) in channels::all(l) {
+            (0..nodes.len())
+                .filter(|&i| ids[i].is_some_and(|id| wanted.iter().any(|w| w == id)))
+                .collect()
+        }
+        SimplifyScope::Properties(list) => {
+            let mut at: Vec<usize> = list.iter().filter_map(|(id, _)| find(id)).collect();
+            at.sort_unstable();
+            at.dedup();
+            at
+        }
+    };
+    let mut layers: Vec<Option<Value>> = vec![None; nodes.len()];
+    for &i in &in_scope {
+        layers[i] = Some(nodes[i].to_value());
+    }
+    let layer = |i: usize| layers[i].as_ref().expect("in scope");
+    let mut refs: Vec<(usize, String)> = Vec::new();
+    match scope {
+        SimplifyScope::All | SimplifyScope::Layers(_) => {
+            for &i in &in_scope {
+                for (key, _) in channels::all(layer(i)) {
                     refs.push((i, key));
                 }
             }
@@ -1668,7 +1689,7 @@ fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> 
         SimplifyScope::Properties(list) => {
             for (id, path) in list {
                 let i = find(id)
-                    .filter(|&i| channels::find(&layers[i].1, values::channel_key(path)).is_some())
+                    .filter(|&i| channels::find(layer(i), values::channel_key(path)).is_some())
                     .ok_or_else(|| {
                         CommandError::Invalid("Simplification property not found".into())
                     })?;
@@ -1677,9 +1698,13 @@ fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> 
         }
     }
     refs.dedup();
-    let expression_consumer = layers.iter().any(|(_, l)| {
-        channels::all(l).iter().any(|(_, p)| {
-            channels::get(l, p)
+    // Any expression in the project stops it. Only layers whose tree holds
+    // a truthy `expr` are converted to check their properties exactly.
+    let maybe = pm_model::parallel::map(nodes.len(), |i| crate::model::holds_expression(nodes[i]));
+    let expression_consumer = (0..nodes.len()).filter(|&i| maybe[i]).any(|i| {
+        let l = nodes[i].to_value();
+        channels::all(&l).iter().any(|(_, p)| {
+            channels::get(&l, p)
                 .and_then(|c| c.get("expr"))
                 .is_some_and(Value::is_truthy)
         })
@@ -1692,19 +1717,34 @@ fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> 
         _ => 1,
     };
     let nested_or_mapped = comp_count > 1
-        || layers.iter().any(|(_, l)| {
-            values::text(l, "type") == Some("precomp")
+        || nodes.iter().any(|l| {
+            l.get("type").and_then(str_of) == Some("precomp")
                 || l.get("d")
                     .and_then(|d| d.get("timeRemap"))
-                    .is_some_and(Value::is_truthy)
+                    .is_some_and(truthy)
                 || l.get("d")
                     .and_then(|d| d.get("stretch"))
-                    .is_some_and(|v| !v.is_null())
-                || l.get("timeStretch").is_some_and(|v| !v.is_null())
+                    .is_some_and(|v| !matches!(v.kind(), pm_model::NodeKind::Null))
+                || l.get("timeStretch")
+                    .is_some_and(|v| !matches!(v.kind(), pm_model::NodeKind::Null))
         });
+    // A layer others parent to, group under or matte from (its composition).
+    let rigged = |at: usize, id: &str| {
+        nodes.iter().zip(&locs).any(|(o, loc)| {
+            loc.comp_id == locs[at].comp_id
+                && ["parent", "group", "matteSource"]
+                    .iter()
+                    .any(|f| o.get(f).and_then(str_of) == Some(id))
+        })
+    };
     let mut touched: Vec<usize> = Vec::new();
+    let mut edited: Vec<(usize, Value)> = Vec::new();
     for (i, path) in refs {
-        let (loc, layer) = &layers[i];
+        let loc = &locs[i];
+        let layer = edited
+            .iter()
+            .find(|(at, _)| *at == i)
+            .map_or_else(|| layer(i), |(_, l)| l);
         let id = values::text(layer, "id").unwrap_or_default().to_owned();
         if cx.check_lock(loc, &id).is_err() {
             continue;
@@ -1732,17 +1772,7 @@ fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> 
         if !supported || prop.get("expr").is_some_and(Value::is_truthy) {
             continue;
         }
-        let all: Vec<&Value> = layers
-            .iter()
-            .filter(|(l, _)| l.comp_id == loc.comp_id)
-            .map(|(_, v)| v)
-            .collect();
-        let parent_rig = t == "group"
-            || all.iter().any(|o| {
-                ["parent", "group", "matteSource"]
-                    .iter()
-                    .any(|f| values::text(o, f) == Some(id.as_str()))
-            });
+        let parent_rig = t == "group" || rigged(i, &id);
         let comp = cx.comp_node(loc.comp_id.as_deref())?;
         let comp_num = |k: &str| comp.get(k).and_then(crate::model::number_of);
         let options = SimplifyOptions {
@@ -1760,17 +1790,18 @@ fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> 
                     .is_some_and(Value::is_truthy),
         };
         if let Some(next) = simplify_track(track::keys_of(&prop), &options) {
-            let layer = &mut layers[i].1;
-            let slot = channels::get_mut(layer, &steps).expect("found");
-            values::obj(slot).insert("kf", Value::Array(next));
             if !touched.contains(&i) {
                 touched.push(i);
+                edited.push((i, layer.clone()));
             }
+            let (_, layer) = edited.iter_mut().find(|(at, _)| *at == i).expect("edited");
+            let slot = channels::get_mut(layer, &steps).expect("found");
+            values::obj(slot).insert("kf", Value::Array(next));
         }
     }
-    for i in touched {
-        let (loc, layer) = layers[i].clone();
-        cx.put_layer(&loc, layer)?;
+    drop(nodes);
+    for (i, layer) in edited {
+        cx.put_layer(&locs[i], layer)?;
     }
     Ok(())
 }

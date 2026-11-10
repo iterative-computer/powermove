@@ -952,11 +952,11 @@ impl Project {
             SelectionCall::ToggleLayer(id) => vec![id.clone()],
             _ => vec![],
         };
-        let layers = self.store.layers();
-        if ids
-            .iter()
-            .any(|id| !layers.iter().any(|layer| &layer.id == id))
-        {
+        let present = match self.store.root() {
+            Some(root) if !ids.is_empty() => crate::model::layer_ids(root, None),
+            _ => HashSet::new(),
+        };
+        if ids.iter().any(|id| !present.contains(id)) {
             return Reply::Throw(KernelError::Guard(
                 "Select existing layer IDs; no selection was changed".into(),
             ));

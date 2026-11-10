@@ -203,8 +203,15 @@ impl Editor {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
         let mut written = self.layout.clone();
-        for (id, (place, _)) in &self.parked {
+        for (id, (place, showing)) in &self.parked {
             written.insert_at(id, *place);
+            // It was the stack's showing tab: the saved stack still shows it,
+            // not the tab the window fell back to while it was away.
+            if showing.is_none()
+                && let Some((dock, group, tab)) = written.find(id)
+            {
+                written.docks[dock].groups[group].active = tab;
+            }
         }
         let after = workspace::write(&written, &self.record);
         if after != self.record {
@@ -2218,6 +2225,53 @@ mod keyboard_tests {
                 // Asking for a panel still shows it.
                 assert!(v.shell_command("panel:show:ext.pexels", cx));
                 assert_eq!(showing(v), "ext.pexels");
+            })
+            .unwrap();
+    }
+    /// A project whose saved stack shows an extension's panel that is not
+    /// there at open (uninstalled, or its realm still starting): the window
+    /// falls back to another tab, but the workspace keeps the saved choice.
+    #[::core::prelude::v1::test]
+    fn a_parked_showing_tab_stays_the_saved_choice() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.integration = Some(Rc::new(Contributions(vec![(
+                    "ext.voice".into(),
+                    "Voiceover".into(),
+                )])));
+                assert!(v.shell_command("panel:show:ext.voice", cx));
+                assert!(v.shell_command("panel:group:ext.voice:inspector", cx));
+                assert!(v.shell_command("panel:show:ext.voice", cx));
+                v.save();
+                let saved = v.record.clone();
+                let showing = |l: &crate::layout::Layout| {
+                    let (d, g, _) = l.find("inspector").unwrap();
+                    let stack = &l.docks[d].groups[g];
+                    stack.tabs[stack.active].clone()
+                };
+                assert_eq!(showing(&workspace::layout(&saved)), "ext.voice");
+                assert!(v.shell_command("panel:park:ext.voice", cx));
+                assert_eq!(showing(&v.layout), "inspector", "the window falls back");
+                v.save();
+                assert_eq!(
+                    showing(&workspace::layout(&v.record)),
+                    "ext.voice",
+                    "the saved stack still shows the parked panel"
+                );
+                assert_eq!(v.record, saved, "nothing new is written");
             })
             .unwrap();
     }
