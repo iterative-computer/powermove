@@ -39,8 +39,12 @@ struct QuitCoordinator {
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
-    /// A second Quit's prompt is showing.
-    asking_now: bool,
+    /// A second Quit's prompt is showing: the window and its sheet, ended
+    /// before the app terminates (AppKit refuses to while a sheet is up).
+    asking_now: Option<(
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    )>,
     host: std::sync::Arc<crate::mcp::Host>,
 }
 impl gpui::Global for QuitCoordinator {}
@@ -57,7 +61,7 @@ fn cancel_quit(cx: &mut App) {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
         q.discard = false;
-        q.asking_now = false;
+        q.asking_now = None;
         q.queue.clear();
         q.host.closing.store(false, Ordering::Release);
         q.controllers.clone()
@@ -152,11 +156,12 @@ fn second_quit(asking_now: bool, waiting: Option<String>) -> SecondQuit {
 /// The prompt of a second Quit while the first waits for `note`.
 fn quit_now_alert(note: &str) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button, Key};
-    let what = note.trim_end_matches('…').trim_end_matches('.');
+    let work = note.split_once(": ").map_or(note, |(_, work)| work);
+    let work = work.trim_end_matches('…');
     Alert::new(
         "Powermove is still finishing before it quits.",
         format!(
-            "{what}. If you quit now, no work is lost: the next time you open the project, Powermove offers to recover your unsaved changes."
+            "Still {work}. If you quit now, no work is lost: the next time you open the project, Powermove offers to recover your unsaved changes."
         ),
         vec![
             Button::new("Keep Waiting", false)
@@ -181,16 +186,18 @@ fn ask_quit_now(cx: &mut App) {
         Some((note, window)) => (Some(note), Some(window)),
         None => (None, None),
     };
-    let (SecondQuit::Ask(note), Some(window)) = (second_quit(q.asking_now, note), window) else {
+    let (SecondQuit::Ask(note), Some(window)) = (second_quit(q.asking_now.is_some(), note), window)
+    else {
         return;
     };
-    cx.global_mut::<QuitCoordinator>().asking_now = true;
-    let answer = quit_now_alert(&note).sheet(&window);
+    let mut sheet = None;
+    let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
+    cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
     cx.spawn(async move |cx| {
         let now = answer.recv().await.ok().flatten() == Some(true);
         cx.update(|cx| {
             let q = cx.global_mut::<QuitCoordinator>();
-            q.asking_now = false;
+            q.asking_now = None;
             // The quit may have been cancelled (a failed save) meanwhile.
             if now && q.quitting {
                 q._delegate.resolve_quit_events(false);
@@ -261,6 +268,11 @@ fn finish_quit(cx: &mut App) {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
             Some(Ok(ShellReply::Compacted { .. })) => {
+                // A second Quit's prompt would hold the termination.
+                if let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
+                {
+                    window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+                }
                 allow_quit(cx);
                 cx.quit();
             }
@@ -290,7 +302,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             queue: Vec::new(),
             quitting: false,
             discard: false,
-            asking_now: false,
+            asking_now: None,
             host,
         });
         cx.spawn(async move |cx| {
@@ -366,8 +378,8 @@ fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String
 /// The status line while a close or quit waits for `work`.
 fn closing(intent: Intent, work: &str) -> String {
     match intent {
-        Intent::Quit => format!("Quitting: {} first…", work.to_lowercase()),
-        Intent::Window => format!("Closing: {} first…", work.to_lowercase()),
+        Intent::Quit => format!("Quitting: {work}…"),
+        Intent::Window => format!("Closing: {work}…"),
     }
 }
 impl Controller {
@@ -539,7 +551,7 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match choice {
                 Some(Action::Save) => {
                     v.close_after_save = Some(intent);
-                    v.closing_note = Some(closing(intent, "Saving"));
+                    v.closing_note = Some(closing(intent, "saving"));
                     v.save(None, cx);
                 }
                 Some(Action::DontSave) => v.discard_and_close(intent, cx),
@@ -554,7 +566,7 @@ impl Controller {
             return;
         };
         let kernel = self.kernel.clone();
-        self.closing_note = Some(closing(intent, "Archiving changes"));
+        self.closing_note = Some(closing(intent, "archiving changes"));
         cx.spawn(async move |this, cx| {
             let result = discard_close(&kernel, session).await;
             let _ = this.update(cx, |v, cx| match result {
@@ -581,7 +593,7 @@ impl Controller {
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         let kernel = self.kernel.clone();
         let session = self.session.clone();
-        self.closing_note = Some(closing(intent, "Finishing save and recovery data"));
+        self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(session) = session {
@@ -625,7 +637,7 @@ impl Controller {
                     v.mcp.bind_window(v.window_key, None);
                     v.close_operation.take();
                     if intent == Intent::Quit {
-                        v.closing_note = Some("Closed. Finishing quit…".into());
+                        v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
                     } else if let Some(handle) = v.close_window {
                         v.mcp.closing.store(false, Ordering::Release);
@@ -655,11 +667,11 @@ mod tests {
     fn a_second_quit_offers_to_quit_now_while_the_first_waits() {
         assert_eq!(second_quit(false, None), SecondQuit::Ignore);
         assert_eq!(
-            second_quit(true, Some("Quitting: saving first…".into())),
+            second_quit(true, Some("Quitting: saving…".into())),
             SecondQuit::Ignore
         );
-        let note = closing(Intent::Quit, "Archiving changes");
-        assert_eq!(note, "Quitting: archiving changes first…");
+        let note = closing(Intent::Quit, "archiving changes");
+        assert_eq!(note, "Quitting: archiving changes…");
         assert_eq!(
             second_quit(false, Some(note.clone())),
             SecondQuit::Ask(note.clone())
@@ -671,7 +683,7 @@ mod tests {
         assert!(
             alert
                 .informative
-                .starts_with("Quitting: archiving changes first. ")
+                .starts_with("Still archiving changes. If you quit now")
         );
         assert!(alert.informative.contains("no work is lost"));
     }
