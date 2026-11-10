@@ -1,4 +1,5 @@
 import { makeVectorPath, makeVertex, type VectorPath } from './vector-paths';
+import {splitPaintColor} from '../../../../shared/paint-color';
 
 import { parseSvgPathData } from '../../../../shared/figma/paths';
 export { parseSvgPathData } from '../../../../shared/figma/paths';
@@ -192,10 +193,10 @@ export function parseSvg(source: string): ImportedSvg {
         paths.push({
           name: element.getAttribute('id') || `${tag[0]!.toUpperCase()}${tag.slice(1)} ${paths.length + 1}${subpaths.length > 1 ? `.${index + 1}` : ''}`,
           vertices: transformed, closed: subpath.closed,
-          fill: normalizedColor(style.fill, '#000000'), fillEnabled: subpath.closed && style.fill !== 'none',
-          fillOpacity: style.fillOpacity * style.opacity * 100,
-          stroke: normalizedColor(style.stroke, '#000000'), strokeWidth: style.stroke === 'none' ? 0 : Math.max(0, style.strokeWidth * strokeScale),
-          strokeOpacity: style.strokeOpacity * style.opacity * 100,
+          fill: normalizedColor(splitPaintColor(style.fill).color, '#000000'), fillEnabled: subpath.closed && style.fill !== 'none',
+          fillOpacity: style.fillOpacity * style.opacity * splitPaintColor(style.fill).opacity * 100,
+          stroke: normalizedColor(splitPaintColor(style.stroke).color, '#000000'), strokeWidth: style.stroke === 'none' ? 0 : Math.max(0, style.strokeWidth * strokeScale),
+          strokeOpacity: style.strokeOpacity * style.opacity * splitPaintColor(style.stroke).opacity * 100,
         });
       });
     } else if (!containers.has(tag)) warnings.add(`Skipped unsupported <${tag}> content`);

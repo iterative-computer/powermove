@@ -1,5 +1,5 @@
 import { environmentProperties,evaluateEnvironmentNode } from './environment-data';
-import { extrusionProperties } from './extrusion-data';
+import { extrusionProperties,isExtrudedLayer,isShared3DPlane } from './extrusion-data';
 import { objectMapSets,mapImageId } from './material-maps';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
 
@@ -32,9 +32,29 @@ export function layer3DKind(layer:any):{label:string;icon:string}|null {
  * groups retain the composition's existing 2D interaction. */
 export function isModelGroup(PM:any,layer:any):boolean {
   if(layer?.type!=='group')return false;
-  const members=(PM.curComp?.() || PM.proj)?.layers?.filter((child:any)=>child.type!=='group' && child.type!=='audio'
+  const members=(PM.curComp?.() || PM.proj)?.layers?.filter((child:any)=>child.type!=='group' && child.type!=='audio' && child.type!=='null'
     && (PM.groupAncestors?.(child) || []).some((group:any)=>group.id===layer.id)) || [];
   return members.length>0 && members.every((child:any)=>!!layer3DRole(child));
+}
+/** Nulls driving models share their scene-unit coordinate system. New controls
+ * persist that basis; older controls are recognized from their descendants. */
+export function isModelNull(PM:any,layer:any):boolean {
+  if(layer?.type!=='null'||layer.threeD!==true)return false;
+  if(layer.d?.boundsNullSpace)return layer.d.boundsNullSpace==='scene';
+  const layers=(PM.curComp?.() || PM.proj)?.layers || [],children=new Map<string,any[]>();
+  for(const child of layers)for(const id of new Set([child.parent,child.group].filter(Boolean))){const list=children.get(id) || [];list.push(child);children.set(id,list);}
+  const seen=new Set([layer.id]),queue=[layer.id];let models=0;
+  for(let i=0;i<queue.length;i++)for(const child of children.get(queue[i]) || []){
+    if(seen.has(child.id))continue;seen.add(child.id);queue.push(child.id);
+    if(['group','null','audio'].includes(child.type))continue;
+    if(!layer3DRole(child))return false;models++;
+  }
+  return models>0;
+}
+/** Native nulls in an extrusion scene follow the same camera as the artwork. */
+export function isSceneNull(PM:any,layer:any):boolean {
+  const comp=PM.curComp?.()||PM.proj;
+  return layer?.type==='null'&&layer.threeD===true&&(isModelNull(PM,layer)||(comp?.layers||[]).some((child:any)=>isExtrudedLayer(child)||isShared3DPlane(comp,child)));
 }
 /** Timeline/inspector names for a part's channels. */
 export const PART_LABELS:Record<string,string>={x:'Position X',y:'Position Y',z:'Position Z',rx:'X Rotation',ry:'Y Rotation',rz:'Z Rotation',scale:'Scale',visible:'Visible'};

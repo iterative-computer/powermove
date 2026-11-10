@@ -2,6 +2,7 @@ import { contentSlot, drawingProperties } from './content-properties';
 import { createPathTiming, type PathTiming } from '../../core/anim/motion-path';
 import { structuredProperties } from './vector-paths';
 import { sceneProperties } from '../../core/scene3d/schema';
+import {boundsControlSpace,controlMatrix,usesSceneUnits} from '../../core/scene3d/control-space';
 /* Ported from js/core/anim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
@@ -340,20 +341,31 @@ PM.beginEval = (T: any) => {
  * Group membership changes the surrounding coordinate space, never the parent link. */
 PM.transformParentMatrix = (L: any, T: any, parent = parentOf(L)) => {
   const groups = new Set<string>();
+  const controls = new Set<string>();
+  let scene:boolean|undefined;
   let matrix = [1,0,0,1,0,0];
+  const append = (item:any) => {
+    let local=PM.localMatrix(item,T);
+    if(boundsControlSpace(item)){
+      if(controls.has(item.id))return;
+      controls.add(item.id);scene ??= usesSceneUnits(PM,L);
+      local=controlMatrix(PM,item,local,scene);
+    }
+    matrix=mul(matrix,local);
+  };
   const appendParents = (layer: any, firstParent = parentOf(layer)) => {
     const chain: any[] = [], seen = new Set<any>([layer]);
     for (let cur = firstParent; cur && !seen.has(cur) && chain.length < 256; cur = parentOf(cur)) {
       seen.add(cur); chain.push(cur); appendGroups(cur);
     }
-    for (let i = chain.length - 1; i >= 0; i--) matrix = mul(matrix, PM.localMatrix(chain[i], T));
+    for (let i = chain.length - 1; i >= 0; i--) append(chain[i]);
   };
   const appendGroups = (layer: any) => {
     for (const group of (PM.groupAncestors?.(layer) || []).slice().reverse()) {
       if (groups.has(group.id)) continue;
       groups.add(group.id);
       appendParents(group);
-      matrix = mul(matrix, PM.localMatrix(group, T));
+      append(group);
     }
   };
   appendGroups(L);
@@ -396,7 +408,7 @@ PM.worldMatrix = (L: any, T: any) => {
     if (Object.is(memoT, T) && !L.group && !cur.group) { const c = wmMemo.get(cur); if (c) { hit = c; break; } }
     cur = parentOf(cur);
   }
-  if (chain.some(layer => layer.group)) {
+  if (chain.some(layer => layer.group || layer!==L&&boundsControlSpace(layer))) {
     const matrix = mul(PM.transformParentMatrix(L, T), PM.localMatrix(L, T));
     if (Object.is(memoT, T)) wmMemo.set(L, matrix);
     return matrix;

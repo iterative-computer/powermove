@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { parent3D, world3D } from '../../legacy/core/space-3d';
-import { layer3DRole } from './layers';
+import { layer3DRole,isModelNull,isSceneNull } from './layers';
+import {nativeSceneBridge} from './native-transform';
 import { compositionRuntime } from './service';
 import { validateSceneChannel } from './schema';
 import { viewportCamera } from './viewport';
@@ -42,6 +43,29 @@ function cameraFor(PM: any, time: number, view: LightViewCamera) {
   const camera=(view==='camera' ? world.camera : viewportCamera(PM,world.camera)).clone();
   world.resizeCamera(comp.w,comp.h,camera);
   return camera;
+}
+
+/** Model-control pivots use scene units and the rendered scene camera. */
+export function nullViewerPosition(PM:any,layerId:string,time:number,rect:Scene3DViewerRect):Point2D|null {
+  return nullViewerState(PM,layerId,time,rect)?.viewerPosition??null;
+}
+
+/** The controller's own plane, independent of selection and render geometry. */
+export function nullViewerState(PM:any,layerId:string,time:number,rect:Scene3DViewerRect):{viewerPosition:Point2D;corners:Point2D[]}|null {
+  const layer=PM.L(layerId);
+  if(!isSceneNull(PM,layer)||!Number.isFinite(time)||!validRect(rect)||!PM.active(layer,time))return null;
+  const camera=cameraFor(PM,time,'viewer'),comp=PM.curComp?.()||PM.proj,model=isModelNull(PM,layer);
+  const world=new THREE.Matrix4().fromArray(world3D(PM,layer,time));if(!model)world.premultiply(nativeSceneBridge(comp));
+  const anchor=new THREE.Vector3(...['x','y','z'].map(axis=>Number(PM.ev(layer,`anchor.${axis}`,time))||0) as [number,number,number]);
+  const project=(position:THREE.Vector3):Point2D|null=>{
+    position.applyMatrix4(world);const local=position.clone().applyMatrix4(camera.matrixWorldInverse),ndc=position.project(camera);
+    if(local.z>=0||![ndc.x,ndc.y,ndc.z].every(Number.isFinite)||Math.abs(ndc.z)>1)return null;
+    return {x:rect.x+(ndc.x+1)*rect.width/2,y:rect.y+(1-ndc.y)*rect.height/2};
+  };
+  const viewerPosition=project(anchor.clone());if(!viewerPosition)return null;
+  const unit=model?6/Math.max(1,comp.h):1,w=(Number(layer.d?.w)||100)*unit/2,h=(Number(layer.d?.h)||100)*unit/2;
+  const corners=[[-1,-1],[1,-1],[1,1],[-1,1]].map(([x,y])=>project(anchor.clone().add(new THREE.Vector3(x!*w,y!*h,0))));
+  return {viewerPosition,corners:corners.every(Boolean)?corners as Point2D[]:[]};
 }
 
 /** Read-only marker data. Uses the same evaluated hierarchy/camera as rendering. */

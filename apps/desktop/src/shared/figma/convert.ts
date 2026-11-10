@@ -598,10 +598,10 @@ export function convertFigma(
             name: node.name,
             fill: color(fill).slice(0, 7),
             fillEnabled: !!fill,
-            fillOpacity: 100,
+            fillOpacity: (fill?.color?.a ?? 1) * (fill?.opacity ?? 1) * 100,
             stroke: color(stroke).slice(0, 7),
             strokeWidth: stroke ? (node.strokeWeight ?? 1) : 0,
-            strokeOpacity: 100,
+            strokeOpacity: (stroke?.color?.a ?? 1) * (stroke?.opacity ?? 1) * 100,
           }));
       }
       return d;

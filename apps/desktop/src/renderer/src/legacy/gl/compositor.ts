@@ -1,3 +1,5 @@
+import {stableMaterialSourceBounds} from '../../core/scene3d/material-source-bounds';
+import {materialCapturePixels,materialTextureSize} from '../../core/scene3d/material-resolution';
 import { BLEND_NAMES } from '../../../../shared/blend';
 import { rasterImageFill } from './drawing';
 import { isExtrudedLayer, isShared3DPlane } from '../../core/scene3d/extrusion-data';
@@ -21,12 +23,12 @@ import { createPresentedReadback } from './presented-readback';
 import { createAlphaReadback, createFloatReadback, createHalfReadback, type DeferredAlphaReader } from './half-readback';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, inversePlane, affinePlane, projectPoint } from '../core/space-3d';
-import { pathValues, groupMatrix, rasterPathsToViewport, tracePath } from '../core/vector-paths';
+import { pathValues, groupMatrix, pathRasterGeometry, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { createPreviewWarmup } from './preview-warmup';
 import { PreviewFrames } from './preview-frames';
 import { previewPlan } from './preview-plan';
 import { sourceTime } from '../core/retiming';
-import {layerMaterialMaps} from '../../core/scene3d/material-maps';
+import {layerMaterialMaps,materialGroupHas3D} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
@@ -352,6 +354,16 @@ let useVideoPreviews = false;
 let videoPath = '';
 // A nested material capture may be incomplete without failing the receiver's frame.
 let materialCapture:{loading:boolean}|null=null;
+const materialRasterScale=(matrix:readonly number[])=>{
+  if(!materialCapture)return continuousRasterScale(matrix);
+  // Material sources can be much larger than their output. Do not round a
+  // tiny density up to 0.25 and allocate a huge intermediate canvas.
+  const a=matrix[0] || 0,b=matrix[1] || 0,c=matrix[2] || 0,d=matrix[3] || 0;
+  const aa=a*a+b*b,bb=a*c+b*d,cc=c*c+d*d;
+  return Math.max(1e-8,Math.sqrt(Math.max(0,(aa+cc+Math.sqrt((aa-cc)**2+4*bb*bb))/2)));
+};
+const materialTargetSize=(width:number,height:number)=>materialCapture
+  ? materialTextureSize(width,height,undefined,GL.maxTextureSize || 8192,materialCapturePixels(PM)) : {width,height};
 let previewVideoTimes = new Map<string, number>();
 let isolatedVideoTexturePrefix: string | null = null;
 let isolatedVideoTextureGeneration = 0;
@@ -604,7 +616,7 @@ function canClipPreviewSources(W: number, H: number): boolean {
   return previewSourceClipping && PM.curComp?.() === PM.proj
     && W === GL.canvas.width && H === GL.canvas.height;
 }
-type SourceRaster = {layer:any;project:any;bounds:{x0:number;y0:number;w:number;h:number};extent?:{x0:number;y0:number;w:number;h:number};domain?:{x0:number;y0:number;w:number;h:number}};
+type SourceRaster = {layer:any;project:any;groupInverse?:number[];bounds:{x0:number;y0:number;w:number;h:number};extent?:{x0:number;y0:number;w:number;h:number};domain?:{x0:number;y0:number;w:number;h:number}};
 let sourceRaster: SourceRaster | null = null;
 const activeSourceRaster = () => sourceRaster && (PM.curComp?.() || PM.proj) === sourceRaster.project ? sourceRaster : null;
 function outputScale(W: number, H: number): [number, number] {
@@ -665,15 +677,23 @@ function inputGroupBounds(group: any, time: number) {
   }
   return Number.isFinite(x0) ? {x0,y0,x1,y1,w:x1-x0,h:y1-y0} : null;
 }
+GL.materialSourceBounds = (layer:any,time:number) => layer.type==='group'
+  ? stableMaterialSourceBounds(PM,PM.curComp?.() || PM.proj,layer,time) : GL.bounds(layer,time);
+function sourceWorld(layer:any,time:number):[number,number,number,number,number,number] {
+  const world=PM.worldMatrix(layer,time),raster=activeSourceRaster();
+  return raster?.groupInverse?PM.mul(raster.groupInverse,world):world;
+}
 function effectLayerCoordinates(L: any, T: number, W: number, H: number, input = false):{uv:Float32Array;resolution:number[];valid?:boolean} {
   const raster=activeSourceRaster();if(raster&&raster.layer===L){const e=raster.extent??raster.bounds,b=raster.bounds;return{uv:new Float32Array([e.w/(W*b.w),0,0,0,e.h/(H*b.h),0,(e.x0-b.x0)/b.w,(e.y0-b.y0)/b.h,1]),resolution:[b.w,b.h],valid:true};}
   const bounds = input && L.type === 'group' ? inputGroupBounds(L,T) : GL.bounds(L, T);
   const [sx, sy] = outputScale(W, H);
-  const world = PM.worldMatrix(L, T);
+  // Child effects use the same source-local basis as the group's picture.
+  const local=!!raster?.groupInverse,world=local?scaledWorld(L,T,W,H):PM.worldMatrix(L,T);
   const plane = is3DLayer(PM, L) ? planeMatrix(PM, L, T)
     : [world[0], world[1], 0, world[2], world[3], 0, world[4], world[5], 1];
-  const inverse = inversePlane([plane[0] * sx, plane[1] * sy, plane[2],
-    plane[3] * sx, plane[4] * sy, plane[5], plane[6] * sx, plane[7] * sy, plane[8]]);
+  const xs=local?1:sx,ys=local?1:sy;
+  const inverse = inversePlane([plane[0] * xs, plane[1] * ys, plane[2],
+    plane[3] * xs, plane[4] * ys, plane[5], plane[6] * xs, plane[7] * ys, plane[8]]);
   if (bounds && bounds.w > 0 && bounds.h > 0 && inverse) {
     return {
       uv: new Float32Array([0, 1, 2].flatMap(i => {
@@ -691,7 +711,8 @@ function effectLayerCoordinates(L: any, T: number, W: number, H: number, input =
 function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
   const [sx, sy] = outputScale(W, H);
   const raster=activeSourceRaster();if(raster&&raster.layer===layer){const e=raster.extent??raster.bounds;return[sx,0,0,sy,-e.x0*sx,-e.y0*sy];}
-  const world = PM.worldMatrix(layer, time);
+  const world = sourceWorld(layer, time);
+  if(raster?.groupInverse){const e=raster.extent??raster.bounds;return[world[0]*sx,world[1]*sy,world[2]*sx,world[3]*sy,(world[4]-e.x0)*sx,(world[5]-e.y0)*sy];}
   const viewport = activePreviewViewport(W, H);
   return [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, (world[4] - (viewport?.x || 0)) * sx, (world[5] - (viewport?.y || 0)) * sy];
 }
@@ -1137,7 +1158,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
   if (L.type === 'solid') {
     return { solid: PM.hex2rgb(d.color), solidAlpha: PM.hexAlpha(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
-  if (L.type === 'shape' && !L.d.compound && L.d.paths?.length && activePreviewViewport(W, H)
+  if (L.type === 'shape' && !d.compound && !d.fillGradient && !d.strokeGradient && !d.strokeStyle && L.d.paths?.length && activePreviewViewport(W, H)
       && (PM.previewResolution === '1' || PM.perf?.auto === false && PM.quality === 1)) {
     return viewportPathQuad(L, T, W, H, maxSourceBytes);
   }
@@ -1146,7 +1167,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
        cues there is nothing to draw; an export without burned-in captions
        draws none. */
     if (PM.captionsHidden) return null;
-    const r = PM.raster(L, continuousRasterScale(scaledWorld(L, T, W, H)), T, (key: string) => GL.texes.get('r:' + key)?.raster);
+    const r = PM.raster(L, materialRasterScale(scaledWorld(L, T, W, H)), T, (key: string) => GL.texes.get('r:' + key)?.raster);
     if (!r) return null;
     if (r.blank) frameFailed = true;
     const tex = texFor('r:' + r.key, r.cv, { version: r.blank ? 0 : 1 });
@@ -1159,7 +1180,11 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
        output. This is continuous rasterization: no fixed-resolution layer
        bitmap is enlarged when the layer is scaled, parented, or previewed at
        a different output resolution. */
-    const ss = continuousRasterScale(scaledWorld(L, T, W, H));
+    let ss = materialRasterScale(scaledWorld(L, T, W, H));
+    if(materialCapture){
+      const geometry=L.type==='shape'?(L.d.paths?.length?pathRasterGeometry(PM,L,T,1):shapeRasterGeometry(d,1)):PM.textRasterGeometry?.(L,1,T);
+      if(geometry){const size=materialTextureSize(geometry.w,geometry.h,{width:geometry.w*ss,height:geometry.h*ss},GL.maxTextureSize || 8192,materialCapturePixels(PM));ss=Math.min(ss,size.width/geometry.w,size.height/geometry.h);}
+    }
     let crop: RasterWindow | undefined;
     // Group effects sample the already-composited W×H group target. Pixels
     // outside that target are discarded before the effect, so its ordinary
@@ -1195,7 +1220,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     // Keep small path bitmaps reusable across animated transforms. Oversized
     // plain backgrounds only need visible pixels; a full 8192² bitmap can
     // otherwise evict all the sources prepared for the next scene.
-    const clipLargePaths = canClipPreviewSources(W, H) && !L.d.compound && L.d.paths?.length && !is3DLayer(PM, L)
+    const clipLargePaths = canClipPreviewSources(W, H) && !d.compound && !d.fillGradient && !d.strokeGradient && !d.strokeStyle && L.d.paths?.length && !is3DLayer(PM, L)
       && !hasRenderableEffects(L.fx, PM, L, T) && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut;
     const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop,
       clipLargePaths ? Math.min(maxSourceBytes, 4 * 1024 * 1024) : maxSourceBytes);
@@ -1255,13 +1280,15 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const shared = L.type === 'video' ? sharedPreparedVideoTexture(preparedVideo, textureKey) : null;
     if (shared) textureKey = shared.key;
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
-      const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
+      let dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H),materialCapture?GL.maxTextureSize || 8192:8192);
+      if(materialCapture){const size=materialTextureSize(dimensions.width,dimensions.height,undefined,GL.maxTextureSize || 8192,materialCapturePixels(PM));dimensions={...size,scale:size.width/sw};}
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
       textureSource = raster.cv;
       textureKey = 'r:' + raster.key;
     }
     if (L.type === 'image' && d.imageMapping) {
-      const density = continuousRasterScale(scaledWorld(L,T,W,H));
+      let density = materialRasterScale(scaledWorld(L,T,W,H));
+      if(materialCapture){const size=materialTargetSize(bw*density,bh*density);density=Math.min(density,size.width/bw,size.height/bh);}
       textureKey = 'r:image-fill:'+JSON.stringify([a.id,bw,bh,d.imageMapping,density]);
       textureSource = GL.texes.has(textureKey) ? el : rasterImageFill(el,sw,sh,bw,bh,d.imageMapping,density);
     }
@@ -1293,8 +1320,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const comp = PM.curComp?.() || PM.proj;
     const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
     const [sx, sy] = outputScale(W, H);
-    const targetW = Math.min(4096, Math.max(2, Math.round(w * sx)));
-    const targetH = Math.min(4096, Math.max(2, Math.round(hh * sy)));
+    const {width:targetW,height:targetH}=materialTargetSize(Math.min(4096,Math.max(2,Math.round(w*sx))),Math.min(4096,Math.max(2,Math.round(hh*sy))));
     const key = 'sh:' + L.id;
     const codeKey = key + ':' + hashStr(d.code);
     const p = program(codeKey, PM.SHADER_HEADER + '\n' + d.code, PM.VERT);
@@ -1337,8 +1363,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const comp = PM.curComp?.() || PM.proj;
     const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
     const [sx, sy] = outputScale(W, H);
-    const targetW = Math.min(4096, Math.max(2, Math.round(w * sx)));
-    const targetH = Math.min(4096, Math.max(2, Math.round(hh * sy)));
+    const {width:targetW,height:targetH}=materialTargetSize(Math.min(4096,Math.max(2,Math.round(w*sx))),Math.min(4096,Math.max(2,Math.round(hh*sy))));
     const definition: any = PM.layerDefinition?.(d.definition);
     if(definition?.renderer?.kind==='layer3d'){
       if(definition.renderer.role!=='object')return null;
@@ -1417,7 +1442,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
     const [sx, sy] = outputScale(W, H);
     const density = L.continuousRaster ? precompRasterDensity(L, T, w * sx, hh * sy) : 1;
-    const targetW = Math.max(2, Math.round(w * sx * density)), targetH = Math.max(2, Math.round(hh * sy * density));
+    const {width:targetW,height:targetH}=materialTargetSize(Math.max(2,Math.round(w*sx*density)),Math.max(2,Math.round(hh*sy*density)));
     const target = boundFbo;
     const f = grab(targetW, targetH);
     bind(f); clear(0, 0, 0, 0);
@@ -1454,6 +1479,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     huge scale cannot exhaust video memory. */
 const PRECOMP_RASTER_PIXELS = 24 * 1024 * 1024;
 function precompRasterDensity(L: any, T: number, baseW: number, baseH: number): number {
+  if(activeSourceRaster()?.layer===L)return 1;
   const world = is3DLayer(PM, L) ? affinePlane(planeMatrix(PM, L, T)) : PM.worldMatrix(L, T);
   const wanted = Math.max(1, continuousRasterScale(world));
   const side = Math.min(8192, GL.maxTextureSize ||= GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE) || 4096);
@@ -1673,7 +1699,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
     const assets=new Set<string>();const bytes=inputParams.reduce((sum:number,pd:any)=>{const ref=fx.inputs?.[pd.k];if(pd.type==='path'&&ref?.pathId)return sum+W*H*4;if(pd.type==='asset'&&ref?.assetId&&!assets.has(ref.assetId)){assets.add(ref.assetId);const a=PM.assets.get(ref.assetId);return sum+(a?.lut?.data.byteLength??(a?.w||0)*(a?.h||0)*4);}return sum;},0);if(bytes>(PM.Memory?.budget?.('textures')??128*1024*1024))throw new EffectInputError('Effect references exceed the texture memory budget');
     const orig = def.keepOrig ? cur : null;
     const scale = outputScale(W, H);
-    const world = def.sampling?.space === 'layer' ? activeSourceRaster()?.layer===L ? [1,0,0,1,0,0] : PM.worldMatrix(L, T) : undefined;
+    const world = def.sampling?.space === 'layer' ? activeSourceRaster()?.layer===L ? [1,0,0,1,0,0] : sourceWorld(L, T) : undefined;
     const kernelScale = effectPixelScale(scale, world);
     const parameter = (name: string) => {
       const pd = def.params.find((param: any) => param.k === name);
@@ -1783,29 +1809,51 @@ function sourceEffectDomain(L:any,fx:any,def:any,T:number,bounds:any){
 function sourceOwnerEffects(L:any,T:number,prefix?:number){return(L.fx??[]).slice(0,prefix).filter((fx:any)=>!fx.missing&&evaluatedValue(PM,L,fx.on,T,`${fx.id}.$enabled`)).map((fx:any)=>({fx,def:PM.effectDef(fx)})).filter((item:any)=>item.def);}
 /** Source-space references retain native content bounds before layer transforms,
  * opacity and composition clipping. Every lease belongs to the enclosing DAG. */
+function renderGroupMaterialSource(project:any,group:any,time:number,opt:any){
+  const previous=sourceRaster,previousClip=previewSourceClipping,previousViewport=previewViewportActive;
+  const bounds=GL.materialSourceBounds(group,time),world=PM.worldMatrix(group,time),det=world[0]*world[3]-world[1]*world[2];
+  if(Math.abs(det)<1e-10){const empty=grab(1,1);bind(empty);clear();return empty;}
+  const inverse=[world[3]/det,-world[1]/det,-world[2]/det,world[0]/det,
+    (world[2]*world[5]-world[3]*world[4])/det,(world[1]*world[4]-world[0]*world[5])/det];
+  sourceRaster={layer:group,project,bounds,groupInverse:inverse};previewSourceClipping=false;previewViewportActive=false;
+  try{
+    // Reuse the group compositor for nested transforms, masks, effects, blend
+    // modes and child timing. Capture its local bounds instead of the comp crop.
+    return GL.renderProject(project,time,opt.materialWidth,opt.materialHeight,{...opt,
+      materialSource:undefined,inputLayer:group.id,inputStage:'effects',inputSpace:'source',previewReuse:false});
+  }finally{sourceRaster=previous;previewSourceClipping=previousClip;previewViewportActive=previousViewport;}
+}
 function renderInputSource(project:any,L:any,T:number,stage:string,opt:any) {
+  if(L.type==='group' && opt.materialWidth)return renderGroupMaterialSource(project,L,T,opt);
   const previous=sourceRaster,previousClip=previewSourceClipping,previousViewport=previewViewportActive;
   const bounds=GL.bounds(L,T)||{x0:0,y0:0,w:1,h:1};
+  const limit=GL.maxTextureSize ||= GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE);
+  // Material captures may be magnified by the 3D camera. Rasterize the source
+  // at that density instead of enlarging a 1× text/shape/precomp bitmap later.
+  const requestedScale=opt.materialWidth && opt.materialHeight
+    ?Math.max(opt.materialWidth/bounds.w,opt.materialHeight/bounds.h):1;
+  const materialScale=opt.materialWidth?Math.min(requestedScale,limit/Math.max(bounds.w,bounds.h),Math.sqrt(materialCapturePixels(PM)/bounds.w/bounds.h)):1;
   const checkedSize=(w:number,h:number)=>{
     const limit=GL.maxTextureSize||GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE);
     if(!Number.isFinite(w*h)||w<=0||h<=0||Math.ceil(w)>limit||Math.ceil(h)>limit)throw new EffectInputError(`${L.name}: source raster exceeds GPU dimensions`);
   };
-  checkedSize(bounds.w,bounds.h);
+  checkedSize(bounds.w*materialScale,bounds.h*materialScale);
   sourceRaster={layer:L,project,bounds};previewSourceClipping=false;previewViewportActive=false;
   const check=()=>{if(opt.signal?.aborted||GL.contextLost||!GL.gl||GL.gl.isContextLost?.())throw new EffectInputError('Layer input rendering cancelled or context lost');};
   try{
     check();
     // Inactive video inputs need no decoded frame and remain transparent.
     if(!inputLayerActive(L,T,project,{inputLayer:L.id})) {const frame=grab(1,1);bind(frame);clear();frame.inputResolution=[bounds.w,bounds.h];frame.sourceExtent=bounds;return frame;}
-    const content=contentQuad(L,T,Math.ceil(bounds.w),Math.ceil(bounds.h));
+    const content=contentQuad(L,T,Math.ceil(bounds.w*materialScale),Math.ceil(bounds.h*materialScale));
     check();
     if(content?.screenSpace)throw new EffectInputError(`${L.name}: screen-space content cannot supply an unclipped source raster`);
     const full=content?{x0:-content.ax,y0:-content.ay,w:content.w,h:content.h}:bounds;
-    try{checkedSize(full.w,full.h);}catch(error){free(content?.tmp);throw error;}
+    try{checkedSize(full.w*materialScale,full.h*materialScale);}catch(error){free(content?.tmp);throw error;}
     const grow=stage==='effects'&&(opt.ownerGrow||L.effectSpace==='source');
-    const extent=grow?sourceOwnerEffects(L,T,opt.inputPrefix).reduce((bounds:any,item:any)=>sourceEffectDomain(L,item.fx,item.def,T,bounds),full):full;checkedSize(extent.w,extent.h);
+    const extent=grow?sourceOwnerEffects(L,T,opt.inputPrefix).reduce((bounds:any,item:any)=>sourceEffectDomain(L,item.fx,item.def,T,bounds),full):full;
+    const scale=opt.materialWidth?Math.min(materialScale,limit/Math.max(extent.w,extent.h),Math.sqrt(materialCapturePixels(PM)/extent.w/extent.h)):1;checkedSize(extent.w*scale,extent.h*scale);
     sourceRaster={layer:L,project,bounds:full,...(grow?{extent,domain:{...full}}:{})};
-    const W=Math.ceil(extent.w),H=Math.ceil(extent.h),src=grab(W,H);bind(src);clear();
+    const W=Math.ceil(extent.w*scale),H=Math.ceil(extent.h*scale),src=grab(W,H);bind(src);clear();
     if(content)drawContent(L,T,W,H,1,undefined,false,content);
     check();
     let result=src;
@@ -2241,7 +2289,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(opt.materialSource){
     const layer=proj.layers.find((l:any)=>l.id===opt.materialSource);
     if(!layer)throw new EffectInputError('Layer material source is unavailable');
-    const frame=renderInputSource(proj,layer,T,'effects',{...opt,materialSource:true});completed=true;return frame;
+    const frame=renderInputSource(proj,layer,T,'effects',{...opt,materialSource:true,materialWidth:W,materialHeight:H});completed=true;return frame;
   }
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   // Exports and agent frames render 3D at Studio's Final quality.
@@ -2350,7 +2398,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     if (!inputLayerActive(L, T, proj, opt)) continue;
     /* Each group owns an offscreen compositing boundary, so opacity is applied
        once at its own level instead of being multiplied into every descendant. */
-    const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
+    const alpha = opt.inputSpace==='source' && opt.inputLayer===L.id ? 1 : PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
     if (alpha <= .001) continue;
 
     try {
@@ -2818,9 +2866,12 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
 /** Nested material capture preserves the outer compositor's FBO ownership and
  * evaluation scope. renderToPixels is a top-level capture and must not run here. */
 GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number,sourceLayerId?:string) => {
+  if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1||width*height>materialCapturePixels(PM))throw new EffectInputError('Material capture exceeds the pixel and memory budget');
+  const source=sourceLayerId&&comp.layers.find((layer:any)=>layer.id===sourceLayerId);
+  if(source?.type==='group'&&materialGroupHas3D(PM.proj,comp,source))throw new EffectInputError('Group material sources cannot contain 3D descendants');
   const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews,previousCapture=materialCapture;
   const capture={loading:false};materialCapture=capture;
-  let frame:any;
+  let frame:any,converted:any;
   pmScopePush(comp);videoPath+=sourceLayerId?`material-layer:${sourceLayerId}/`:`material:${comp.compId || comp.id}/`;
   PM.beginEval(time);
   try{
@@ -2830,24 +2881,17 @@ GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,
     // keeps its previous material (or original color) and retries next paint.
     if(capture.loading)return null;
     if(frame.w!==width || frame.h!==height){const scaled=copyFbo(frame,width,height);free(frame);frame=scaled;}
-    bind(frame);
-    const pixels=new Uint8Array(width*height*4);
-    if(frame.colorDepth===8)GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
-    else{
-      const floats=new Float32Array(pixels.length);GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.FLOAT,floats);
-      for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
-    }
-    // GPU FBOs are bottom-up/premultiplied. glTF textures need top-down,
-    // straight-alpha sRGB bytes (v=0 at the top), without an extra UV flip.
-    const result=new Uint8Array(pixels.length);
-    for(let y=0;y<height;y++)for(let x=0;x<width;x++){
-      const src=((height-1-y)*width+x)*4,dst=(y*width+x)*4,alpha=pixels[src+3]!;
-      for(let c=0;c<3;c++)result[dst+c]=alpha?Math.min(255,Math.round(pixels[src+c]!*255/alpha)):0;
-      result[dst+3]=alpha;
-    }
+    converted=grab(width,height,false,8);bind(converted);
+    const p=program('capture-material',PM.FRAG_CAPTURE_MATERIAL);
+    if(!p){if(capture.loading)return null;throw new Error(GL.compileError('capture-material') || 'Could not compile material capture');}
+    const g=use(p);bindTex(0,frame.tex);setI(p,'u_tex',0);
+    g.u('u_m',fullQuad(width,height));g.u('u_res',width,height);g.u('u_uv',0,0,1,1);
+    GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);GL.stats.passes++;
+    const result=new Uint8Array(width*height*4);
+    GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,result);
     return result;
   }finally{
-    if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;materialCapture=previousCapture;
+    if(converted)free(converted);if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;materialCapture=previousCapture;
     if(previousCapture && capture.loading)previousCapture.loading=true;
     PM.beginEval(outerTime);bind(target);
   }
@@ -2941,10 +2985,20 @@ function nativeBounds(L: any, T: any) {
   const d = resolveContent(PM, L, T);
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
-  else if (L.type === 'null') { w = d.w || 100; h = d.h || 100; ax = 0; ay = 0; }
+  else if (L.type === 'null') {
+    w = d.w || 100; h = d.h || 100;
+    // Identity controls keep Position == Anchor so child animation is exact.
+    // Their editor rectangle must be centered on that pivot, not the origin.
+    ax = w / 2 - Number(PM.ev(L,'anchor.x',T) || 0);
+    ay = h / 2 - Number(PM.ev(L,'anchor.y',T) || 0);
+  }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'captions') return PM.captionBounds(L, T);
   else if (L.type === 'text') {
+    if(!d.richText&&!d.animators?.length&&!d.styles?.length&&!L.d.fontAnchorBounds){
+      const geometry=PM.textRasterGeometry?.(L,1,T);
+      if(geometry?.selection)return {...geometry.selection,ax:geometry.anchorX,ay:geometry.anchorY};
+    }
     const r = PM.raster(L, 1, T);
     if (r.selection) return { ...r.selection, ax: r.anchorX, ay: r.anchorY };
     w = r.w; h = r.h; ax = r.anchorX; ay = r.anchorY;
@@ -2954,10 +3008,8 @@ function nativeBounds(L: any, T: any) {
       const geometry = shapeRasterGeometry(d, 1);
       return { ...geometry.selection, ax: geometry.w / 2, ay: geometry.h / 2 };
     }
-    const r = PM.raster(L, 1, T);
-    if (r.selection) return { ...r.selection, ax: L.d.paths?.length?r.anchorX:r.w / 2, ay: L.d.paths?.length?r.anchorY:r.h / 2 };
-    w = r.w; h = r.h;
-    ax = w / 2; ay = h / 2;
+    const geometry=pathRasterGeometry(PM,L,T,1);
+    return {...geometry.selection,ax:-geometry.x0,ay:-geometry.y0};
   } else if (L.type === 'image' || L.type === 'video') {
     w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = w / 2; ay = h / 2;
   } else return null;

@@ -125,6 +125,7 @@ export interface SourceGroup { id: string; label: string; options: SourceOption[
 
 const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: SourceFilter[] }> = [
   { id: 'precomps', label: 'Pre-comp Layers', types: ['precomp'], filters: ['comps'] },
+  { id: 'groups', label: 'Groups', types: ['group'], filters: [] },
   { id: 'solids', label: 'Solid Layers', types: ['solid'], filters: [] },
   { id: 'footage', label: 'Footage Layers', types: ['image', 'video'], filters: ['footage'] },
   { id: 'text', label: 'Text & Shape Layers', types: ['text', 'shape'], filters: [] }
@@ -134,7 +135,6 @@ const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: 
 export function wrongTypeReason(layer: Layer): string {
   if (isModelLayer(layer) || String((layer.d as any)?.definition ?? '').startsWith('powermove.3d.')) return '3D layers can’t be painted onto a model';
   if (layer.type === 'audio') return 'Audio has no picture';
-  if (layer.type === 'group') return 'Pre-compose the group to use it';
   if (layer.type === 'adjustment') return 'Adjustment layers have no picture of their own';
   return 'This kind of layer can’t be used as a material';
 }
@@ -154,10 +154,12 @@ export function sourceGroups(api: PowermoveAPI, layerId: string, slot: MaterialS
     for (const group of GROUP_TYPES) {
       const options = layers.filter(layer => group.types.includes(layer.type) && !isModelLayer(layer)).map((layer): SourceOption => {
         const ok = eligible.has(layer.id);
+        const check=!ok?api.scene3d.canAssignMaterialMap?.(layerId,null,slot,{layerId:layer.id}):null;
+        const reason=check?.ok===false&&!/cycle/i.test(check.reason)?check.reason:'Uses this model, so it would loop';
         const hidden = layer.on === false || (layer.on as any)?.v === false;
         return {
           id: `layer:${layer.id}`, label: layer.name, icon: layerIcon(layer.type), map: { layerId: layer.id }, filters: group.filters, hidden,
-          disabled: !ok, detail: !ok ? 'Uses this model, so it would loop' : undefined
+          disabled: !ok, detail: !ok ? reason : undefined
         };
       });
       groups.push({ id: group.id, label: group.label, options });

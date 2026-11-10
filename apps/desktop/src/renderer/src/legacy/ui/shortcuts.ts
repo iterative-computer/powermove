@@ -479,7 +479,7 @@ def('toggle3DLayer', '3D Layer', null, () => toggleLayerSwitch('threeD', '3D lay
 def('toggleContinuousRaster', 'Continuously Rasterize', null, () => toggleLayerSwitch('continuousRaster', 'Continuously rasterize',
   (layer: any) => layer.type === 'precomp'), 'Layer');
 def('renameLayer', 'Rename Layer', '↩', () => PM.renameSelectedLayer?.() ?? false, 'Layer', preserveFalse);
-def('openComposition', 'Open composition', null, (id?: any) => PM.Comps.open(id), 'Composition', hidden);
+def('openComposition', 'Open composition', null, (id?: any, layerId?: string) => PM.Comps.open(id, { layerId }), 'Composition', hidden);
 def('closeComposition', 'Close composition', null, (id?: any) => PM.Comps.close(id ?? PM.Comps.active()), 'Composition', hidden);
 def('addCompositionToTimeline', 'Add composition to timeline', null, (id?: any, options?: any) => PM.Comps.addToTimeline(id, options), 'Composition', hidden);
 def('duplicateComposition', 'Duplicate composition', null, (id?: any) => PM.Comps.duplicate(id ?? PM.Comps.active()), 'Composition', hidden);

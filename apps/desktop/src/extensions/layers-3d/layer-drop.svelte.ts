@@ -39,7 +39,7 @@ function readable(api: PowermoveAPI, reason: string, slot: MaterialSlot, sourceI
   if (/UV coordinates/i.test(reason)) return 'This model has no UVs to wrap a layer around';
   if (/eligible source layer/i.test(reason)) {
     const source = api.model.layer(sourceId);
-    return source && ['precomp', 'solid', 'image', 'video', 'text', 'shape'].includes(source.type) && !(source.d as any)?.data?.object
+    return source && ['group', 'precomp', 'solid', 'image', 'video', 'text', 'shape'].includes(source.type) && !(source.d as any)?.data?.object
       ? 'Only layers in this model’s composition can be used'
       : source ? wrongTypeReason(source) : 'That layer is gone';
   }

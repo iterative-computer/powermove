@@ -77,6 +77,36 @@ There is no three.js picture-rendering mode.
   render, and the `screen` field remains available to agents.
 - **Drop to floor** (model inspector) rests a model on the floor.
 
+## Artwork as a material
+
+A material's **Base Color** and **Emissive** sources can be a composition or a
+layer in the model's composition, including a group of 2D artwork. A hidden
+source still works. A group's children keep their timing, visibility, masks,
+effects, blending and relative transforms. The source root's transform and
+opacity stay outside the captured artwork. Groups containing 3D layers cannot
+be used as material sources; source loops are rejected when assigning a link.
+
+A group keeps one canvas covering its artwork across its duration. Children
+entering, leaving or moving therefore keep their position within the material.
+Static artwork reuses its captured pixels during playback. Editing its
+children, replacing an image, loading a font or changing a mask/effect refreshes
+the source; moving only the receiving model or camera keeps those pixels when
+the existing detail is sufficient.
+
+Studio chooses source detail from the surface's UVs and the actual viewer or
+export camera. Closeups receive more detail within a pixel and memory budget;
+extreme magnification can reach that limit. Matching material slots share
+textures. SVG/Figma paint transparency is retained when the artwork is extruded.
+Opening a precomp follows its offset, trim and playback speed/remapping, so
+the playhead follows the same source frame seen on a 3D screen.
+
+Extensions can query `api.scene3d.geometryBounds(ids, time)` and create a shared
+controller with `api.groups.createBoundsNull(ids, position)`. Positions are
+0–8, top-left to bottom-right in a three-by-three grid, with middle depth.
+The controller preserves existing animation and hierarchy and is one Undo.
+`{replace:true}` moves a static identity controller's pivot; animated controllers
+must be wrapped in a new one. Null outlines follow the viewer's actual camera.
+
 ## Large models and CAD
 
 **FBX** files (up to 256 MB) import through the existing model picker or drop
@@ -220,8 +250,8 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
   preparation and transport readiness; closing a project releases sessions
   and late frames. See [`docs/studio/backend.md`](../../../docs/studio/backend.md)
   for the shared Rust/TypeScript scene and binary layout.
-- Live screens render their composition at each frame's time and update
-  only their texture.
+- Live screens sample their composition at the receiver's source time. Static
+  inputs reuse captured pixels; changing inputs update the shared texture.
 - CAD import uses [occt-import-js](https://github.com/kovacsv/occt-import-js)
   (OpenCascade compiled to WebAssembly, LGPL-2.1; licenses ship in the app's
   `Resources/cad`). It loads only when a CAD file is imported and runs in a

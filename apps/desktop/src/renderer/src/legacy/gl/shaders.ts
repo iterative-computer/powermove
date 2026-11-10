@@ -113,6 +113,15 @@ PM.FRAG_CAPTURE_OPAQUE = PRE + `void main(){
   o = vec4(texelFetch(u_tex, at, 0).rgb, 1.0);
 }`;
 
+// Material textures use top-down, straight-alpha RGBA8. Convert on the GPU
+// instead of flipping/unpremultiplying a million pixels on the editor thread.
+PM.FRAG_CAPTURE_MATERIAL = PRE + `void main(){
+  ivec2 at = ivec2(gl_FragCoord.xy);
+  at.y = textureSize(u_tex, 0).y - 1 - at.y;
+  vec4 c = floor(clamp(texelFetch(u_tex, at, 0), 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  o = vec4(c.a > 0.0 ? min(c.rgb / c.a, vec3(1.0)) : vec3(0.0), c.a);
+}`;
+
 PM.FRAG_SOLID = PRE + `uniform vec4 u_color; void main(){ o = u_color; }`;
 PM.FRAG_BACKGROUND_FILL = PRE + `
 uniform vec4 u_stops[8];

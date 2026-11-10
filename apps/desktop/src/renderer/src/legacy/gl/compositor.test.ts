@@ -427,10 +427,19 @@ describe('legacy compositor install', () => {
   });
 
   it('gives transparent null objects a compact canvas hit target', () => {
-    const PM = compositorRegistry();
+    const PM = compositorRegistry();PM.ev=()=>0;
     expect(PM.GL.bounds({ type: 'null', d: { w: 100, h: 100 } }, 0)).toEqual({
-      x0: -0, y0: -0, x1: 100, y1: 100, w: 100, h: 100, ax: 0, ay: 0
+      x0: -50, y0: -50, x1: 50, y1: 50, w: 100, h: 100, ax: 50, ay: 50
     });
+  });
+  it('rejects an oversized direct material capture before allocating any target',()=>{
+    const PM=compositorRegistry();
+    PM.Memory={budget:()=>128*1024*1024};
+    expect(()=>PM.GL.renderMaterialComposition({layers:[]},0,16384,16384,0)).toThrow(/pixel and memory budget/);
+  });
+  it('rejects direct group capture with nested 3D artwork before entering scene rendering',()=>{
+    const PM=compositorRegistry(),comp={layers:[{id:'art',type:'group'},{id:'mesh',type:'shape',group:'art',threeD:true}]};
+    expect(()=>PM.GL.renderMaterialComposition(comp,0,64,64,0,'art')).toThrow(/3D descendants/);
   });
 
   it('measures primitive selection bounds without allocating a source bitmap', () => {
@@ -438,6 +447,13 @@ describe('legacy compositor install', () => {
     PM.raster = vi.fn(() => { throw new Error('Bounds must not rasterize a primitive'); });
     const bounds = PM.GL.bounds({ type: 'shape', d: { w: 3000, h: 2000, stroke: 10 } }, 0);
     expect(bounds).toEqual({ x0: -1505, y0: -1005, x1: 1505, y1: 1005, w: 3010, h: 2010, ax: 1509, ay: 1009 });
+    expect(PM.raster).not.toHaveBeenCalled();
+  });
+  it('measures ordinary text source bounds without allocating its native-resolution bitmap',()=>{
+    const PM=compositorRegistry();
+    PM.raster=vi.fn(()=>{throw new Error('Bounds must not allocate text pixels');});
+    PM.textRasterGeometry=()=>({selection:{x0:0,y0:0,x1:10000,y1:10000,w:10000,h:10000},anchorX:0,anchorY:0});
+    expect(PM.GL.bounds({type:'text',d:{}},0).w).toBe(10000);
     expect(PM.raster).not.toHaveBeenCalled();
   });
 

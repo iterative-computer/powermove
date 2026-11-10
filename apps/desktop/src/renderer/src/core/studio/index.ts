@@ -269,6 +269,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const s = state(PM), final = !slot && !!PM._studioFinal, still = !slot && !!PM._studioStill;
   const width = Math.max(2, Math.min(8192, Math.round(w))), height = Math.max(2, Math.min(8192, Math.round(h)));
   runtime.resizeCamera(width, height, camera);
+  runtime.prepareMaterialTextures?.(width,height,camera,PM.GL?.maxTextureSize || 8192);
   const splat=studioSplatLayer(runtime,camera,objectId,depthIds,width,height,bottom);
   if(splat){s.rasterReady=true;s.frames++;return {canvas:splat,version:`splat:${runtime.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}`};}
   const cam = cameraOf(camera, width, height); if (!cam) throw new Error('Unsupported Studio camera');

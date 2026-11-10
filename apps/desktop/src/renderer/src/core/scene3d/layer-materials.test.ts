@@ -51,7 +51,7 @@ describe('layers as materials',()=>{
     for(const type of ['precomp','image','video','text','shape','adjustment','null','audio'])add(type,type);
     PM.L('paint').on=false;
     const groups=listEligibleMaterialLayers(PM,'model');
-    expect(groups.map(g=>g.group)).toEqual(['Comps','Footage','Solids','Text & Shapes']);
+    expect(groups.map(g=>g.group)).toEqual(['Comps','Groups','Footage','Solids','Text & Shapes']);
     expect(groups.flatMap(g=>g.layers.map(l=>l.id))).toEqual(['precomp','image','video','paint','text','shape']);
     const other=PM.Comps.create({name:'Other'},{open:false});PM.proj.comps[other].layers.push({...PM.mkLayer('solid'),id:'other-paint'});
     expect(groups.flatMap(g=>g.layers.map(l=>l.id))).not.toContain('other-paint');
@@ -109,7 +109,7 @@ describe('layers as materials',()=>{
     expect(PM.GL.renderMaterialComposition.mock.calls[0].slice(1)).toEqual([1,80,40,1,'paint']);
     expect(compositionTextureFrame(PM,PM.L('model'),{layerId:'paint'},1.001)).toBe(a);
     expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1.05)?.time).toBeCloseTo(31/30);
-    source.d.w=4096;source.d.h=2048;expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1)).toMatchObject({width:1024,height:512});
+    source.d.w=4096;source.d.h=2048;expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1)).toMatchObject({width:2896,height:1448});
     PM.proj.layers=PM.proj.layers.filter((l:any)=>l.id!=='paint');
     expect(compositionTextureFrame(PM,PM.L('model'),{layerId:'paint'},1)).toBeNull();
   });

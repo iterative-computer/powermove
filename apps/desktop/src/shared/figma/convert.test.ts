@@ -24,6 +24,12 @@ export const doc = (nodes = [node()]): FigmaDoc => ({
 });
 const plan = (n: FigmaNode) => convertFigma(doc([n]), { w: 640, h: 360 });
 describe('host-independent Figma commands', () => {
+  it('retains Figma path paint opacity for subsequent 3D extrusion',()=>{
+    const command=plan(node({type:'VECTOR',paths:[{data:'M0 0 L20 0 L20 20 Z',windingRule:'NONZERO'}],
+      fills:[{type:'SOLID',color:{r:1,g:0,b:0,a:.5},opacity:.5}],
+      strokes:[{type:'SOLID',color:{r:0,g:0,b:1,a:.4},opacity:.5}],strokeWeight:2})).commands[0]!;
+    expect(command.content.paths[0]).toMatchObject({fill:'#FF0000',fillOpacity:25,stroke:'#0000FF',strokeOpacity:20});
+  });
   it('validates and retains provenance without UI or registry state', () => {
     expect(validateFigmaDoc(doc())).toEqual(doc());
     expect(plan(node()).commands[0]).toMatchObject({

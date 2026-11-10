@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {splitPaintColor} from '../../../../shared/paint-color';
 import ClipperLib from 'clipper-lib';
 import type { ExtrusionValues } from './extrusion-data';
 
@@ -67,11 +68,12 @@ export function buildExtrusionGeometry(outlines:Outline[],options:ExtrusionValue
     const convert=(r:Point[])=>clean(r.map(([x,y])=>[x,-y] as Point));
     const outer=oriented(convert(outline.outer),true),holes=outline.holes.map(h=>oriented(convert(h),false));
     if(outer.length<3)continue;
-    const rings=[outer,...holes.filter(h=>h.length>=3)],flat=rings.flat(),color=new THREE.Color(outline.color || '#FFFFFF');
+    const paint=splitPaintColor(outline.color || '#FFFFFF'),opacity=(outline.opacity ?? 1)*paint.opacity;
+    const rings=[outer,...holes.filter(h=>h.length>=3)],flat=rings.flat(),color=new THREE.Color(paint.color);
     const triangles=THREE.ShapeUtils.triangulateShape(outer.map(p=>new THREE.Vector2(...p)),rings.slice(1).map(r=>r.map(p=>new THREE.Vector2(...p))));
     for(const tri of triangles){
-      for(const index of tri){const [x,y]=flat[index]!;vertex(0,[x,y,0],[0,0,1],[(x-bounds.x0)/w,(-y-bounds.y0)/h],color,!outline.color,outline.opacity ?? 1);}
-      if(depth>0)for(const index of [...tri].reverse()){const [x,y]=flat[index]!;vertex(3,[x,y,-depth],[0,0,-1],[(x-bounds.x0)/w,(-y-bounds.y0)/h],color,!outline.color,outline.opacity ?? 1);}
+      for(const index of tri){const [x,y]=flat[index]!;vertex(0,[x,y,0],[0,0,1],[(x-bounds.x0)/w,(-y-bounds.y0)/h],color,!outline.color,opacity);}
+      if(depth>0)for(const index of [...tri].reverse()){const [x,y]=flat[index]!;vertex(3,[x,y,-depth],[0,0,-1],[(x-bounds.x0)/w,(-y-bounds.y0)/h],color,!outline.color,opacity);}
     }
     if(!depth)continue;
     for(let ri=0;ri<rings.length;ri++){
@@ -119,7 +121,7 @@ export function buildExtrusionGeometry(outlines:Outline[],options:ExtrusionValue
           };
           // CCW contour: outward faces follow upper-left, lower-left, lower-right.
           for(const [index,row,u] of [[i,j,distances[i]!],[i,j+1,distances[i]!],[k,j+1,distances[i+1]!],[i,j,distances[i]!],[k,j+1,distances[i+1]!],[k,j,distances[i+1]!]])
-            vertex(surface,point(index!,row!),faceNormal(index!,row!),[u!/Math.max(1,perimeter),lengths[row!]!/Math.max(1,lengths.at(-1)!)],color,!outline.color,outline.opacity ?? 1);
+            vertex(surface,point(index!,row!),faceNormal(index!,row!),[u!/Math.max(1,perimeter),lengths[row!]!/Math.max(1,lengths.at(-1)!)],color,!outline.color,opacity);
         }
       }
     }
@@ -132,7 +134,9 @@ export function buildExtrusionGeometry(outlines:Outline[],options:ExtrusionValue
   if(p.length/3>500000)throw new Error('Extrusion exceeds the 500,000 vertex geometry budget; reduce quality or text length');
   geometry.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geometry.setAttribute('normal',new THREE.Float32BufferAttribute(n,3));
   geometry.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geometry.setAttribute('color',new THREE.Float32BufferAttribute(c,4));
-  geometry.userData.hasVertexAlpha=outlines.some(outline=>(outline.opacity ?? 1)<1);
+  geometry.userData.hasVertexAlpha=c.some((value,index)=>index%4===3&&value<1);
+  geometry.userData.sourceHasVertexAlpha=geometry.userData.hasVertexAlpha;
   geometry.userData.defaultColorVertices=defaults.flat().flatMap((value,index)=>value?[index]:[]);
+  geometry.userData.defaultColorOpacities=geometry.userData.defaultColorVertices.map((index:number)=>c[index*4+3]);
   geometry.computeBoundingBox();geometry.computeBoundingSphere();return geometry;
 }

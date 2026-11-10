@@ -62,6 +62,48 @@ Inventory sources: `apps/desktop/src/extensions/layers-3d`,
 `legacy/core/space-3d.ts`, `legacy/gl/compositor.ts`, `legacy/gl/raster.ts`,
 `apps/desktop/src/main/agent-tools/spec.ts`, and `apps/desktop/e2e/scene3d*.spec.ts`.
 
+## Material-source parity with main reviews #187 / #188
+
+Studio carries the independent material, bounds and navigation changes from
+#187 (`c6549c519`) and #188 (`cfd068abe`) on its native/WebGPU path. No
+three.js picture renderer is reintroduced.
+
+| Capability | Studio implementation | Regression coverage |
+| --- | --- | --- |
+| Groups as Base Color or Emissive | Same-composition group subtree, hidden root, nested child timing/visibility, transforms, opacity, masks and effects through the ordinary compositor | `material-parity`, `layer-materials`, `studio-group-materials` |
+| Cycles and local links | Group membership, nested compositions, effect inputs, single and stacked mattes participate in validation; source lookup stays local to the receiver | `material-parity`, `layer-materials` |
+| Stable group source canvas | Union of descendant bounds across the group's duration on the composition frame grid, plus property key times; cached until edits/assets/fonts change | `material-source-bounds` |
+| Safe group capture | Groups with 3D descendants, including nested precomps, are rejected before scene capture | `material-parity` |
+| Camera/UV-driven detail | Cached UV patch footprints evaluated with the final viewer/export camera; bucketed requests retain detail during small camera moves | `material-resolution` |
+| Capture budgets | At most 4,194,304 pixels per capture, additionally limited by the preview allowance divided by 64 working bytes/pixel and by device dimensions; direct oversized calls reject before allocation | `material-parity`, `material-resolution`, `compositor` |
+| Texture sharing/replacement | Matching source and UV/sampling settings share storage across a model's meshes and slots; replacement updates all 18 supported slots and fallback bindings before disposal | `material-parity`, `material-performance`, `material-resolution` |
+| Static capture reuse | Static source dependency trees retain pixels across playback and receiver-only edits; entrances/exits, descendant edits, fonts, assets, matte/effect programs and source clocks invalidate as needed | `material-performance` |
+| Evaluated bounds and bounds null | Mesh vertices include posed parts, morphs and skin; one nine-position identity null preserves existing channels, timing, parent/group branches and Undo; null outlines use the real viewer camera | `geometry-bounds`, `studio-bounds-null`, `studio-bounds-null-placement` |
+| Comp navigation clocks | Offset, trim, speed and remapping carry playhead time into/out of nested precomps, including repeated/frozen instances | `compositions` |
+| Imported paint alpha | SVG/Figma RGB and alpha remain separate; extrusion vertex/default paint alpha reaches both renderers | `material-parity`, `convert`, `extrusion` |
+| Path visual bounds | Segment half-width, actual joins/caps and transforms determine selection extent; bitmap padding stays outside geometry/pivot bounds | `material-parity`, `compositor` |
+
+Group duration bounds cover authored frame samples and property key times;
+arbitrary expressions can have unsampled sub-frame extrema. Capture-budget
+reductions preserve aspect ratio and can intentionally soften extreme closeups.
+A zero preview-cache allowance disables retained captures; transient captures
+still obey the hard pixel cap.
+Shared textures keep separate storage when UV transforms, wrapping, orientation
+or color-space requirements differ. This is functional parity evidence, not
+new performance acceptance or old-project appearance approval.
+
+After #187 merges: reconcile its `material-resolution`, `geometry-bounds`,
+`control-space`, group graph/compositor and null-overlay helpers with these
+Studio ports. Preserve Studio's pixel/working-byte cap, stable duration canvas,
+3D-descendant rejection and all-slot replacement. Bring over main's broader
+SVG/Figma stroke/compound-fill fidelity changes as one importer integration;
+this lane only changes paint alpha and measured path extent.
+
+After #188 merges: reconcile `material-static`, `composition-textures`,
+`composition-time` and the precomp-open call sites, retaining source-only
+invalidation and instance-aware clocks. No listed Studio material/bounds/time
+capability is waiting for either merge; these notes describe merge reconciliation.
+
 ## Requested AE 27.0 checklist
 
 These are acceptance targets supplied for this integration, not a claim that
