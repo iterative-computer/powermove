@@ -27,7 +27,28 @@ pub fn line(value: serde_json::Value) {
                 (start().elapsed().as_secs_f64() * 1000.).round().into(),
             );
         }
-        eprintln!("PM_MAIN {value}");
+        // A writer thread: stderr is a file, and a write that waited on a
+        // busy disk held the main thread for a second (soak, 2026-11-09).
+        static WRITER: OnceLock<Option<std::sync::mpsc::Sender<String>>> = OnceLock::new();
+        let writer = WRITER.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            std::thread::Builder::new()
+                .name("pm-diag".into())
+                .spawn(move || {
+                    for line in rx {
+                        eprintln!("{line}");
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        });
+        let line = format!("PM_MAIN {value}");
+        match writer {
+            Some(tx) => {
+                let _ = tx.send(line);
+            }
+            None => eprintln!("{line}"),
+        }
     }
 }
 
