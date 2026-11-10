@@ -100,6 +100,54 @@ afterEach(() => {
 });
 
 describe('legacy Electron shim install', () => {
+  it('releases closed project payloads only after persistence and reopens their exact document and Undo', async () => {
+    const { PM, bridge } = loadShim({ serializedBridge: true, bootstrapJSON: {} });
+    const persisted = new Map<string, string>();
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    bridge.store.setSerialized.mockImplementation(async (key: string, value: string) => {
+      await pending; persisted.set(key, value);
+    });
+    bridge.store.getEncodedSync.mockImplementation((key: string) => persisted.get(key) ?? null);
+    const document = { proj: { id: 'closed', layers: [{ id: 'sphere' }] } };
+    const history = { version: 1, index: 0, entries: [{ label: 'Add sphere',
+      forward: [{ path: ['layers'], exists: true, value: document.proj.layers }],
+      backward: [{ path: ['layers'], exists: true, value: [] }] }] };
+    const saved = PM.store.setSnapshotAsync('project.closed', document, () => true);
+    const savedHistory = PM.store.setAsync('projectHistory.closed', history);
+    const released = PM.store.releaseProject('closed');
+    finish(); await Promise.all([saved, savedHistory, released]);
+    expect(PM.store.has('project.closed')).toBe(true);
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    expect(PM.store.get('project.closed', null)).toEqual(document);
+    expect(PM.store.get('projectHistory.closed', null)).toEqual(history);
+    expect(bridge.store.getEncodedSync.mock.calls).toEqual([['project.closed'], ['projectHistory.closed']]);
+    expect(bridge.store.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed project writes in memory when releasing a closed project', async () => {
+    const { PM, bridge } = loadShim({ serializedBridge: true, bootstrapJSON: {} });
+    bridge.store.setSerialized.mockRejectedValue(new Error('Disk full'));
+    await PM.store.setAsync('projectHistory.closed', { unsaved: 'keep me' });
+    await PM.store.releaseProject('closed');
+    expect(PM.store.get('projectHistory.closed', null)).toEqual({ unsaved: 'keep me' });
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    await expect(PM.store.flush()).rejects.toThrow('Disk full');
+  });
+
+  it('keeps a project edited during cache release until that newer write is durable', async () => {
+    const { PM, bridge } = loadShim({ serializedBridge: true, bootstrapJSON: {} });
+    await PM.store.setAsync('projectHistory.closed', { revision: 1 });
+    let finish!: () => void;
+    bridge.store.flush.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+    const releasing = PM.store.releaseProject('closed');
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await PM.store.setAsync('projectHistory.closed', { revision: 2 });
+    finish(); await releasing;
+    expect(PM.store.get('projectHistory.closed', null)).toEqual({ revision: 2 });
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+  });
+
   it('checks checkpoint presence without cloning or reading deferred project data', () => {
     const { PM, bridge, window } = loadShim({ bootstrapJSON: {
       __powermoveLazyKeys: JSON.stringify(['project.large']),

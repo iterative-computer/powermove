@@ -197,7 +197,7 @@ export function createExtensionAPI(
 ): ExtensionHandle {
   const id = record.id;
   const manifest = record.manifest ?? FALLBACK_MANIFEST(id);
-  const disposers: Array<() => void> = [];
+  const disposers = new Set<() => void>();
   let disposed = false;
   let activating = false;
   const workspace = deps.workspace && record.scope !== 'builtin'
@@ -253,13 +253,17 @@ export function createExtensionAPI(
       disposable.dispose();
       return { dispose: () => {} };
     }
-    let released = false;
+    let resource: Disposable | null = disposable;
     const release = (): void => {
-      if (released) return;
-      released = true;
-      disposable.dispose();
+      if (!resource) return;
+      const current = resource;
+      resource = null;
+      // Components subscribe and unsubscribe throughout an activation. Keeping
+      // retired callbacks here retains their closures and detached inspector DOM.
+      disposers.delete(release);
+      current.dispose();
     };
-    disposers.push(release);
+    disposers.add(release);
     return { dispose: release };
   };
 
@@ -645,7 +649,7 @@ export function createExtensionAPI(
       if (disposed) return;
       disposed = true;
       // LIFO: later registrations unwind before the state they were built on.
-      for (const release of disposers.splice(0).reverse()) {
+      for (const release of [...disposers].reverse()) {
         try {
           release();
         } catch (error) {

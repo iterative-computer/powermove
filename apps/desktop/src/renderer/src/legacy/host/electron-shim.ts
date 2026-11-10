@@ -491,6 +491,27 @@ export function install(PM: PMRegistry): void {
       cached.delete(legacyKey(service));
       bridge.store.delete(service);
     },
+    /** Closed documents remain on disk, not in every window's payload cache.
+     * Reopening uses the same lazy read as a newly launched window. */
+    async releaseProject(id: string) {
+      if (!id || !(bridge.store.getEncodedSync || bridge.store.getSync)) return;
+      const services = ['project.', 'projectHistory.', 'projectState.', 'projectJournal.'].map(prefix => prefix + id);
+      const versions = new Map<string, number | undefined>();
+      try {
+        for (const service of services) {
+          while (asyncWrites.has(service)) await asyncWrites.get(service);
+          versions.set(service, writeVersions.get(service));
+        }
+        await bridge.store.flush();
+      } catch { return; }
+      for (const service of services) {
+        // Never evict the only up-to-date copy after a failed persistence write.
+        if (saveErrors.has(service) || asyncWrites.has(service) || writeVersions.get(service) !== versions.get(service)) continue;
+        const exists = lazy.has(service) || encoded.has(service) || cached.has(legacyKey(service));
+        cached.delete(legacyKey(service)); encoded.delete(service);
+        if (exists) lazy.add(service);
+      }
+    },
     async flush() {
       while (asyncWrites.size) await Promise.all([...asyncWrites.values()]);
       await bridge.store.flush();

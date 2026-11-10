@@ -1497,6 +1497,7 @@ async function dropTab(id: string) {
   discardParked(id);
   if (active) showNeighbourOf(index);
   await PM.windows?.releaseProject?.(id);
+  await PM.store.releaseProject?.(id);
   PM.bus.emit('projects:open');
   return true;
 }
