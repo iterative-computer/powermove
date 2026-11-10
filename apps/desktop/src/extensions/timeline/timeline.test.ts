@@ -24,7 +24,7 @@ import {
   toggleTimelineScaleLink,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
-import { expandScaleKeyIds, timelineProperties } from './property-tracks';
+import { expandScaleKeyIds, setPreferredDimensionsSeparated, timelineProperties } from './property-tracks';
 import {
   keysForBezierHandleDrag,
   materializeLinearBezierSegment,
@@ -233,6 +233,47 @@ describe('timeline runtime', () => {
     expect(timelineProperties(harness.api, layer).map(row => row.key)).toEqual(['position.x', 'position.y', 'position.z', 'opacity']);
     expect(expandScaleKeyIds(harness.api, ['x0'])).toEqual(['x0']);
     expect(JSON.stringify(layer.p)).toBe(before);
+  });
+
+  it('remembers Separate Dimensions for every layer once it is chosen', () => {
+    try {
+      const harness = fakePowermoveAPI(vi);
+      const axes = () => ({
+        'position.x': { v: 0, expr: null, kf: [] },
+        'position.y': { v: 0, expr: null, kf: [] },
+        'position.z': { v: 0, expr: null, kf: [] },
+      });
+      const card: any = { id: 'card', threeD: true, p: axes() };
+      const title: any = { id: 'title', threeD: true, separateDimensions: false, p: axes() };
+      harness.state.project.layers = [card, title];
+      const timeline: any = createTimelineRuntime(harness.api);
+      const keys = (layer: any) => timelineProperties(harness.api, layer).map(row => row.key);
+      expect(keys(card)).toEqual(['position']);
+      expect(timeline.dimensionsSeparated(card)).toBe(false);
+
+      // Separating once applies to every layer, including one joined before.
+      timeline.setDimensionsSeparated(true);
+      expect(harness.api.storage.get('separateDimensions')).toBe(true);
+      expect(keys(card)).toEqual(['position.x', 'position.y', 'position.z']);
+      expect(keys(title)).toEqual(['position.x', 'position.y', 'position.z']);
+      // A layer added later follows the remembered choice too.
+      const later: any = { id: 'later', threeD: true, p: axes() };
+      expect(keys(later)).toEqual(['position.x', 'position.y', 'position.z']);
+      // The choice is a preference, not a project edit.
+      expect(card.separateDimensions).toBeUndefined();
+      expect(title.separateDimensions).toBe(false);
+
+      // It follows the user into the next session, and Join is remembered too.
+      setPreferredDimensionsSeparated(null);
+      const next = fakePowermoveAPI(vi);
+      next.api.storage.set('separateDimensions', true);
+      createTimelineRuntime(next.api);
+      expect(keys(later)).toEqual(['position.x', 'position.y', 'position.z']);
+      timeline.setDimensionsSeparated(false);
+      expect(keys({ id: 'other', threeD: true, separateDimensions: true, p: axes() })).toEqual(['position']);
+    } finally {
+      setPreferredDimensionsSeparated(null);
+    }
   });
 
   it.each([-120, 120])('moves incoming and outgoing Bézier handles with the pointer on a %s-pixel slope', (height) => {

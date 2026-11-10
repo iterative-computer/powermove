@@ -29,13 +29,26 @@ export function keyMembers(key: any): any[] {
   return key.members ?? [{ key }];
 }
 
-/** Position's axes are one property unless the layer separates its
- * dimensions (After Effects' Separate Dimensions). As in After Effects it is
- * off unless turned on, so layers without the flag show one Position row. */
+/** Position's axes are one property unless dimensions are separated (After
+ * Effects' Separate Dimensions). As in After Effects it is off unless turned
+ * on, so layers without the flag show one Position row. Once the user picks
+ * Separate or Join, that choice is remembered and applies to every layer's
+ * Position, in every project; a layer's own flag only matters before then. */
 export const positionPaths = ['position.x', 'position.y', 'position.z'];
 
+let preferredSeparation: boolean | null = null;
+
+/** The user's remembered Separate Dimensions choice, or null if never made. */
+export function preferredDimensionsSeparated(): boolean | null {
+  return preferredSeparation;
+}
+
+export function setPreferredDimensionsSeparated(separated: unknown): void {
+  preferredSeparation = typeof separated === 'boolean' ? separated : null;
+}
+
 export function dimensionsSeparated(layer: any): boolean {
-  return layer?.separateDimensions === true;
+  return preferredSeparation ?? layer?.separateDimensions === true;
 }
 
 /** A row key that has dimensions to separate or join. */

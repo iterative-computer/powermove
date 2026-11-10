@@ -17,7 +17,7 @@ import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './ap
 import { createTrackView, normalizeTimelineMode, TIMELINE_MODES, TRACK_GUTTER, type TimelineMode } from './track-view';
 import { createCaptionTrack } from './caption-track';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import { dimensionsSeparated, expandScaleKeyIds, isPositionPath, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
+import { dimensionsSeparated, expandScaleKeyIds, isPositionPath, keyMembers, setPreferredDimensionsSeparated, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
   bezierHandleAtPoint,
   keysForBezierHandleDrag,
@@ -615,6 +615,7 @@ if (sessionTimeline) {
    style, so it follows the user across projects rather than the session. */
 T.mode = normalizeTimelineMode(previous?.mode ?? api.storage.get('mode'));
 T.trackSnap = previous?.trackSnap ?? api.storage.get('trackSnap') !== false;
+setPreferredDimensionsSeparated(api.storage.get('separateDimensions'));
 T.trackDrag = null; T.trackDrop = null; T.trackHover = null;
 T.trackScrollY = Number.isFinite(previous?.trackScrollY) ? previous.trackScrollY : 0;
 const tracksMode = () => T.mode === 'tracks';
@@ -3590,19 +3591,28 @@ function axisValueIndex(row: any, x: number) {
 function separateDimensionsItem(row: any) {
   if (!isPositionPath(row.key)) return null;
   const selected = api.selection.layers();
-  const layers = (selected.includes(row.L.id) ? selected.map(id => api.model.layer(id)) : [row.L])
-    .filter((layer: any) => layer && !layer.lock);
+  const layers = (selected.includes(row.L.id) ? selected.map(id => api.model.layer(id)) : [row.L]).filter(Boolean);
   const separated = dimensionsSeparated(row.L);
   return {
-    label: 'Separate Dimensions', on: separated, disabled: !layers.length,
+    label: 'Separate Dimensions', on: separated,
     run: () => {
-      api.edit.apply(layers.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { separateDimensions: !separated } })),
-        { label: separated ? 'Join Dimensions' : 'Separate Dimensions', origin: 'timeline' });
+      setDimensionsSeparated(!separated);
       for (const layer of layers) T.reveal(layer, ['position.x', 'position.y', 'position.z']);
-      rowsDirty = true; invalidate();
     }
   };
 }
+
+/* Separate Dimensions is a working style, like the layer/track mode: choosing
+   it once applies to every layer's Position and follows the user across
+   projects. It only changes how Position is presented and keyed, so it is a
+   remembered preference rather than an undoable project edit. */
+function setDimensionsSeparated(separated: boolean) {
+  setPreferredDimensionsSeparated(separated);
+  api.storage.set('separateDimensions', separated);
+  rowsDirty = true; invalidate();
+}
+T.setDimensionsSeparated = (separated: unknown) => setDimensionsSeparated(separated === true);
+T.dimensionsSeparated = (layer: any) => dimensionsSeparated(layer);
 
 function scaleValueCommand(row: any, index: number, time: number) {
   const binding = api.ui.controls.binding.channelBinding(row.L.id, trackChannels(row)[index]!.key, { time });

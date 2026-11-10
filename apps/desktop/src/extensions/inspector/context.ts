@@ -68,7 +68,12 @@ export interface InspectorEditAPI {
   mutate<T>(label: string, action: () => T, meta?: EditMeta): T | EditResult;
 }
 
-type InspectorTimelineService = TimelineService & { focusGraph?(layer: Layer, channel: string): void };
+type InspectorTimelineService = TimelineService & {
+  focusGraph?(layer: Layer, channel: string): void;
+  /** Separate Dimensions is one remembered choice for every layer's Position. */
+  dimensionsSeparated?(layer: Layer): boolean;
+  setDimensionsSeparated?(separated: boolean): void;
+};
 
 export interface InspectorContext {
   api: PowermoveAPI;

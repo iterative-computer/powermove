@@ -309,6 +309,21 @@
     refreshValues();
   }
 
+  /* The timeline remembers Separate Dimensions for every layer's Position;
+     without it, fall back to this layer's own flag. */
+  function separateDimensionsItem(locked: boolean): MenuContribution {
+    const service = timeline();
+    if (service?.setDimensionsSeparated) {
+      const separated = service.dimensionsSeparated?.(layer) ?? layer.separateDimensions === true;
+      return { label: 'Separate Dimensions', on: separated, run: () => service.setDimensionsSeparated?.(!separated) };
+    }
+    const separated = layer.separateDimensions === true;
+    return {
+      label: 'Separate Dimensions', on: separated, disabled: locked,
+      run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: !separated } }, { label: separated ? 'Join Dimensions' : 'Separate Dimensions', origin: 'inspector' })
+    };
+  }
+
   function contextMenu(event: MouseEvent): void {
     if (!allowContextMenu || !prop) return;
     event.preventDefault();
@@ -319,10 +334,7 @@
       { label: 'Add Keyframe at Playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
       animated ? { label: 'Remove Animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in Graph Editor', icon: 'graph', run: showGraphEditor },
-      isPosition ? {
-        label: 'Separate Dimensions', on: layer.separateDimensions === true, disabled: locked,
-        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions !== true } }, { label: layer.separateDimensions === true ? 'Join Dimensions' : 'Separate Dimensions', origin: 'inspector' })
-      } : null,
+      isPosition ? separateDimensionsItem(locked) : null,
       /* Easing only means something once the property has keyframes. */
       ...(animated ? ['-' as const, { header: 'Easing for All Keys' }, ...easing.map(([name, title]) => ({
         label: title,
