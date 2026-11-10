@@ -1375,6 +1375,8 @@ fn paint_keys(
     // The glyph drawn last and its device half-pixel: keys are in time
     // order, so an identical glyph on the same half-pixel follows it directly.
     let mut on_top: Option<(i64, (&str, u32, bool, Option<&str>))> = None;
+    // `key:["row","key"]`, the row's part escaped once.
+    let prefix = format!("key:[{},", serde_json::to_string(row).unwrap_or_default());
     for key in &keys[start..end] {
         let x = v.x(key.seconds);
         let shape = if summary.is_some() {
@@ -1391,8 +1393,11 @@ fn paint_keys(
             Some(ink) => ink,
             None => t.colors.text,
         };
+        let mut id = prefix.clone();
+        id.push_str(&serde_json::to_string(&key.id).unwrap_or_default());
+        id.push(']');
         let mut o = Op::new(
-            format!("key:{}", json!([row, key.id])),
+            id,
             shape,
             Rect::new(x - size / 2., y - size / 2., size, size),
             color,
@@ -2051,5 +2056,6 @@ mod key_cover_tests {
             [false, false, true, false, false, false, true, false]
         );
         assert_eq!(ops.len(), keys.len());
+        assert_eq!(ops[1].id, format!("key:{}", json!(["L1", "a"])));
     }
 }
