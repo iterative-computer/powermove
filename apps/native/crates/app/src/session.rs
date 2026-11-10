@@ -1612,6 +1612,10 @@ impl Controller {
             self.message = "Finish the recovery decision or current save first".into();
             return;
         }
+        let path = as_path.clone();
+        if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };

@@ -305,11 +305,56 @@ impl Controller {
         self.mcp.closing.store(false, Ordering::Release);
         cx.notify();
     }
+    /// Commits an open text edit on the canvas, as v1 flushed edits before a
+    /// save or close; `then` runs once the project holds no open entry (or
+    /// after three seconds). `false` when nothing was being edited.
+    pub(crate) fn finish_edits_then(
+        &mut self,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) -> bool {
+        let Some(gizmos) = self.builtins.gizmos.clone() else {
+            return false;
+        };
+        if !gizmos.update(cx, |g, cx| g.finish_text(true, cx)) {
+            return false;
+        }
+        let kernel = self.kernel.clone();
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        cx.spawn(async move |this, cx| {
+            for _ in 0..60 {
+                let open = project
+                    .as_ref()
+                    .and_then(|p| kernel.published(p))
+                    .is_some_and(|p| p.entry.is_some());
+                let editing = this
+                    .update(cx, |v, cx| {
+                        v.builtins
+                            .gizmos
+                            .as_ref()
+                            .is_some_and(|g| g.read(cx).text_open().is_some())
+                    })
+                    .unwrap_or(false);
+                if !open && !editing {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            }
+            let _ = this.update(cx, |v, cx| then(v, cx));
+        })
+        .detach();
+        true
+    }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
             }
+            return;
+        }
+        if self.finish_edits_then(cx, move |v, cx| v.request_close(intent, cx)) {
             return;
         }
         if intent == Intent::Quit && self.stop_hung_extensions_for_quit() {
