@@ -483,6 +483,7 @@ impl InputScratch {
 
 /// The coverage pipelines.
 pub struct AreaCoverage {
+    clear: LazyComputePipeline,
     raster: LazyComputePipeline,
     scan: LazyComputePipeline,
     scan_page: LazyComputePipeline,
@@ -534,6 +535,7 @@ impl AreaCoverage {
             source: wgpu::ShaderSource::Wgsl(include_str!("coverage.wgsl").into()),
         });
         AreaCoverage {
+            clear: compute(device, &module, "clear"),
             raster: compute(device, &module, "raster"),
             scan: compute(device, &module, "scan"),
             scan_page: compute(device, &module, "scan_page"),
@@ -556,7 +558,6 @@ impl AreaCoverage {
         if batch.len == 0 {
             return;
         }
-        encoder.clear_buffer(values, 0, Some(batch.bytes()));
         let (inputs, ranges) = input_buffer(device, batch);
         self.encode_inputs(
             device,
@@ -583,7 +584,6 @@ impl AreaCoverage {
             return Ok(());
         }
         batch.fits_gpu_limits(&device.limits())?;
-        encoder.clear_buffer(output.values, 0, Some(batch.bytes()));
         let (inputs, ranges) = scratch.upload(device, queue, batch)?;
         self.encode_inputs(device, encoder, batch, output, inputs, ranges);
         Ok(())
@@ -610,6 +610,22 @@ impl AreaCoverage {
             label: Some("pm coverage"),
             timestamp_writes: None,
         });
+        // Serial dispatches: each sees the previous one's writes.
+        let n = batch.rows.len() as u32;
+        let clear = self.clear.get();
+        let group = bind(
+            device,
+            &clear.get_bind_group_layout(0),
+            &[
+                (0, read(0)),
+                (1, read(1)),
+                (4, read(4)),
+                (6, output.values.as_entire_binding()),
+            ],
+        );
+        pass.set_pipeline(clear);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
         let raster = self.raster.get();
         let group = bind(
             device,
@@ -641,13 +657,13 @@ impl AreaCoverage {
         let group = bind(device, &scan.get_bind_group_layout(0), &entries);
         pass.set_pipeline(scan);
         pass.set_bind_group(0, &group, &[]);
-        let n = batch.rows.len() as u32;
         pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
     }
 
     #[cfg(test)]
-    pub(crate) fn pipelines(&self) -> [(&'static str, &LazyComputePipeline); 3] {
+    pub(crate) fn pipelines(&self) -> [(&'static str, &LazyComputePipeline); 4] {
         [
+            ("clear", &self.clear),
             ("raster", &self.raster),
             ("scan", &self.scan),
             ("scan page", &self.scan_page),

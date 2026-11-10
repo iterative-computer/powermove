@@ -886,8 +886,9 @@ mod tests {
         times.extend(text.probe_all());
         // 24 2D, 21 composite (7 ops), 6 resample draws and 3 mip writers
         // over rgba16float, rgba32float and colordepth's rgba8unorm; path
-        // masks and 6 text outline/image/blur.
-        assert_eq!(times.len(), 72);
+        // masks (with area coverage's clear, raster and scans) and 6 text
+        // outline/image/blur.
+        assert_eq!(times.len(), 73);
         assert_eq!(built(), times.len());
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");

@@ -1,6 +1,7 @@
 // Exact area coverage of filled outlines (`coverage.rs`).
 //
-// `raster` accumulates each edge's signed area per pixel of its item's
+// `clear` zeroes the items' cells; `raster` accumulates each edge's signed
+// area per pixel of its item's
 // bounds into integer atomics; `scan` (one workgroup per item row) turns
 // each row's running sum into nonzero coverage, `min(1, |area|)`, written
 // back in place as f32 bits and, for `scan_page`, into the item's cell of
@@ -145,6 +146,23 @@ fn scan_row(r: u32, t: u32) -> vec2<i32> {
         plain[row + u32(i)] = bitcast<i32>(min(1.0, f32(abs(run)) / AREA));
     }
     return vec2<i32>(start, end);
+}
+
+// Zeroes scan row `r`'s cells before `raster` deposits into them. The scan
+// rows cover every item cell, so the batch needs no buffer clear (a blit
+// encoder of its own) ahead of this pass.
+@compute @workgroup_size(256)
+fn clear(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let r = wg.x + wg.y * 65535u;
+    if (r >= counts.rows) {
+        return;
+    }
+    let at = rows_of[r];
+    let item = items[at.x];
+    let row = item.offset + at.y * item.width;
+    for (var i = t; i < item.width; i += 256u) {
+        plain[row + i] = 0;
+    }
 }
 
 @compute @workgroup_size(256)
