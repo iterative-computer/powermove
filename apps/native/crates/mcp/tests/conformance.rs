@@ -921,6 +921,46 @@ fn registry_definitions_back_effect_and_transition_commands() {
     );
 }
 
+/// The built-in transitions are providers from the start, as v1's were: an
+/// agent adds a crossfade with no extension installed.
+#[test]
+fn built_in_transitions_apply_without_an_extension() {
+    let state = pm_kernel::state::StateSnapshot::seeded();
+    for id in ["crossfade", "wipe", "slide", "zoom"] {
+        assert!(state.provider("transitions", id).is_some(), "{id}");
+    }
+    let f = Fixture::new();
+    let id = f.create();
+    let mut s = f.session();
+    start(&mut s);
+    add(&mut s, "L-a");
+    let p = f.host.lock().unwrap().read_document(&id).unwrap();
+    let batch = pm_mcp::commands::plan_with_definitions(
+        &p,
+        &[],
+        &[json!({"type":"set_transition","layer":"L-a","edge":"in",
+            "transition":{"type":"crossfade","dur":0.5}})],
+        0.,
+        Some(&state),
+    )
+    .unwrap();
+    let mut h = f.host.lock().unwrap();
+    let revision = h.revision(&id).unwrap();
+    h.apply_commands(
+        &id,
+        batch.commands,
+        "Crossfade",
+        pm_kernel::Origin::Agent,
+        revision,
+        905,
+    )
+    .unwrap();
+    assert_eq!(
+        h.read_document(&id).unwrap()["layers"][0]["transitionIn"]["type"],
+        "crossfade"
+    );
+}
+
 // Internal diagnostics retain codes/backing; MCP wire errors expose the tagged message.
 fn diagnostic(session: &mut McpSession, name: &str, args: Value) -> Value {
     serde_json::to_value(
