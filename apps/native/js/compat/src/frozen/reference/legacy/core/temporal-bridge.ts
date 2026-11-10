@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime, refreshAutoBezier, segmentControlPoints, solveCurveParam } from '../../core/anim/temporal-ease';
 const owners = new WeakMap<object,any[]>();
 type PreparedTrack = {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array; evaluatedTime?:number; evaluatedValue?:number; evaluatedSpring?:(time:number,config:any)=>number};

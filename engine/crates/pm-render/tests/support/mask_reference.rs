@@ -43,15 +43,19 @@ pub fn layer_mask<'d>(
         return Err("masks of a 3D layer".into());
     }
     let world = device.as_coeffs();
-    let coverage = match masks(scope, layer, seconds, world, None, w as u32, h as u32).map_err(fail)? {
-        MaskRoute::Unmasked => return Ok(None),
-        MaskRoute::Path(m) => {
-            let path = m.path.ok_or("the path route without its masks")?;
-            path_coverage(&path.masks, world, w, h)
-        }
-        MaskRoute::Parametric(m) => parametric(&m.masks, device, w, h),
-    };
-    let partial: Vec<bool> = coverage.iter().map(|v| *v > 1e-9 && *v < 1.0 - 1e-9).collect();
+    let coverage =
+        match masks(scope, layer, seconds, world, None, w as u32, h as u32).map_err(fail)? {
+            MaskRoute::Unmasked => return Ok(None),
+            MaskRoute::Path(m) => {
+                let path = m.path.ok_or("the path route without its masks")?;
+                path_coverage(&path.masks, world, w, h)
+            }
+            MaskRoute::Parametric(m) => parametric(&m.masks, device, w, h),
+        };
+    let partial: Vec<bool> = coverage
+        .iter()
+        .map(|v| *v > 1e-9 && *v < 1.0 - 1e-9)
+        .collect();
     let band = dilate(&partial, w, h, 1);
     Ok(Some((coverage, band)))
 }
@@ -77,7 +81,14 @@ pub fn mask_bands(
             continue;
         }
         let m = scope.world_matrix(layer, seconds).map_err(fail)?;
-        let device = Affine::new([m[0] * sx, m[1] * sy, m[2] * sx, m[3] * sy, m[4] * sx, m[5] * sy]);
+        let device = Affine::new([
+            m[0] * sx,
+            m[1] * sy,
+            m[2] * sx,
+            m[3] * sy,
+            m[4] * sx,
+            m[5] * sy,
+        ]);
         if let Some((_, band)) = layer_mask(&mut scope, layer, seconds, device, w, h)? {
             bands.iter_mut().zip(band).for_each(|(b, l)| *b |= l);
         }

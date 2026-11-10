@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import type { PowermoveAPI } from '../kernel/api';
 
 type ControlUtilAPI = Pick<PowermoveAPI, 'model' | 'util'>;

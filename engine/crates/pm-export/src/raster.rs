@@ -26,7 +26,6 @@ fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels)
     ));
 }
 
-
 /// Premultiplied float RGBA to RGBA8, with the request's alpha treatment.
 pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
@@ -35,7 +34,6 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     }
     out
 }
-
 
 /// Places a painted `crop` (`[x, y, w, h]` in canvas pixels) into the canvas
 /// `window` (or the whole canvas), returning the window's RGBA8 and its size.

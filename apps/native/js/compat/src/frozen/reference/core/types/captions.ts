@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /**
  * Captions layer content. Cue and word times are seconds in layer time
  * (relative to the layer's start), so moving or trimming the layer carries its

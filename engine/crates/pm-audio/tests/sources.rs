@@ -423,7 +423,10 @@ fn rebuilding_a_mix_releases_decoders_but_keeps_unchanged_sample_identity() {
     cache.block(&first, 0, true).unwrap();
     let released = std::sync::Arc::downgrade(&first);
     drop(first);
-    assert!(released.upgrade().is_none(), "the registry must not retain a decoder");
+    assert!(
+        released.upgrade().is_none(),
+        "the registry must not retain a decoder"
+    );
     let again = cache.open(&file, None).unwrap();
     assert_eq!(again.id(), id, "a mix rebuild must keep warm block keys");
     let hits = cache.stats().hits;

@@ -184,14 +184,21 @@ fn shape_edges_are_analytic_at_every_compat_level() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        assert_eq!(level1, level2, "{name}: `compat` does not change vector pixels");
+        assert_eq!(
+            level1, level2,
+            "{name}: `compat` does not change vector pixels"
+        );
         let e = edge_error(&level2, &reference);
         eprintln!(
             "{name}: {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}",
             e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
         assert!(e.edge_pixels > 300, "{name}: the shape has edges");
-        assert!(e.psnr_db >= 40.0, "{name}: edges are analytic ({:.1} dB)", e.psnr_db);
+        assert!(
+            e.psnr_db >= 40.0,
+            "{name}: edges are analytic ({:.1} dB)",
+            e.psnr_db
+        );
         assert!(e.max_any <= 0.03, "{name}: largest error {}", e.max_any);
     }
 }
@@ -205,7 +212,11 @@ fn solid_radius_is_honored() {
     let mut l = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
     let level1 = render_alpha(&mut renderer, vec![l.clone()]);
     l["compat"] = json!(2);
-    assert_eq!(level1, render_alpha(&mut renderer, vec![l]), "`compat` does not change solids");
+    assert_eq!(
+        level1,
+        render_alpha(&mut renderer, vec![l]),
+        "`compat` does not change solids"
+    );
     // The box, from its straight edges (the anchor is its top-left corner).
     let (x0, y0, x1, y1) = opaque_bounds(&level1);
     assert_eq!((x1 - x0, y1 - y0), (120, 80), "the full box");
@@ -268,7 +279,10 @@ fn solids_without_radius_have_analytic_edges() {
         );
         assert_eq!(
             ours,
-            render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 1, rotation, scale)]),
+            render_alpha(
+                &mut renderer,
+                vec![placed("solid", "solid", d.clone(), 1, rotation, scale)]
+            ),
             "{d}: `compat` does not change solids"
         );
         let reference = coverage(|x, y| {
@@ -479,7 +493,15 @@ fn svg_images_are_drawn_at_output_resolution() {
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
     let mut frames = Vec::new();
     for compat in [1, 2] {
-        let (doc, resolver, _svg) = svg_project(SOLID_SVG, &format!("solid{compat}.svg"), 100, 50, d.clone(), compat, 23.0);
+        let (doc, resolver, _svg) = svg_project(
+            SOLID_SVG,
+            &format!("solid{compat}.svg"),
+            100,
+            50,
+            d.clone(),
+            compat,
+            23.0,
+        );
         assert_eq!(
             unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
             vec![]
@@ -704,7 +726,11 @@ fn svgs_draw_where_libxml2_paints_them() {
         let name = format!("libxml2-{i}.svg");
         let (doc, resolver, _svg) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
         let doc = load(&doc);
-        assert_eq!(unsupported_with_media(&doc, "Ptest-root", &resolver), vec![], "{name}");
+        assert_eq!(
+            unsupported_with_media(&doc, "Ptest-root", &resolver),
+            vec![],
+            "{name}"
+        );
         let frame = renderer
             .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
             .unwrap();

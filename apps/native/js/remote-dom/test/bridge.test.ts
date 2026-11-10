@@ -226,7 +226,16 @@ describe('remote DOM mirror and real-document applier', () => {
     const real = applier.node(shim.id(caret)) as HTMLElement;
     let left = 30;
     real.getBoundingClientRect = () =>
-      ({ x: left, y: 4, width: 2, height: 18, left, top: 4, right: left + 2, bottom: 22 }) as DOMRect;
+      ({
+        x: left,
+        y: 4,
+        width: 2,
+        height: 18,
+        left,
+        top: 4,
+        right: left + 2,
+        bottom: 22
+      }) as DOMRect;
     let resized = 0;
     new shim.window.ResizeObserver(() => resized++).observe(caret);
     // Fresh without waiting for a page round trip in another task.

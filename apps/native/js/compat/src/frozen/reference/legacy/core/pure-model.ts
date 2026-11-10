@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Selection and media timing of legacy/core/model.ts and media.ts. */
 import { resolveContent } from "./content-properties";
 import { clipCuesToEnd, rebaseCuesForStart } from "../../captions/model";

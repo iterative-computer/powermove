@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /*
  * Document store — the hybrid at the heart of the renderer:
  *

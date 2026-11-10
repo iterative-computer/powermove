@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /*
  * Captions model: presets, normalisation and the pure cue operations the
  * edit commands, the timeline and the Captions panel share. Every operation

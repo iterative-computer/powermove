@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 // A floating listbox for select controls. One instance at a time, anchored to
 // its trigger, drawn above everything else. Opens with a short fade, scale and
 // slide from the trigger's edge; closes the same way in reverse. Picks commit immediately.

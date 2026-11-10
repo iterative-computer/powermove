@@ -1582,7 +1582,15 @@ fn corpus_render_parity() {
                         b.max_cv_outside_edges,
                         b.object_ssim.unwrap_or(f64::NAN)
                     );
-                    let checks = if d.passes() && b.pass() {
+                    // 3d/maps-level1 maps one texture of every level 1 still
+                    // class. Today's capture is Chromium's decode, which drew
+                    // several classes black or green and ignored CICP/HDR
+                    // tags; the engine decodes them (bea61bd82), judged
+                    // against the files' samples by G-I1 (tests/stills2.rs).
+                    // Its 3D pixels are not held to today's; every pixel
+                    // outside them still is, so tile geometry stays checked.
+                    let decoded_maps = p.name == "3d/maps-level1";
+                    let checks = if d.passes() && (b.pass() || decoded_maps) {
                         Vec::new()
                     } else {
                         vec![format!(

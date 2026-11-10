@@ -187,7 +187,9 @@ describe("Preact native host", () => {
     await root.render(view(["a", "b"], "Stop"));
     await root.dispatch(plan(seen), "click");
     expect(clicks).toBe(1);
-    await expect(root.dispatch(plan(seen + 5), "click")).rejects.toThrow("Stale");
+    await expect(root.dispatch(plan(seen + 5), "click")).rejects.toThrow(
+      "Stale",
+    );
     // Its label changes: an older click no longer lands.
     const before = root.inspect().revision;
     await root.render(view(["a", "b"], "Stopping"));
@@ -217,7 +219,9 @@ describe("Preact native host", () => {
       ...(semantic === undefined ? {} : { semantic }),
     });
     await expect(root.dispatch(plan(), "click")).rejects.toThrow("Stale");
-    await expect(root.dispatch(plan("row:b"), "click")).rejects.toThrow("Stale");
+    await expect(root.dispatch(plan("row:b"), "click")).rejects.toThrow(
+      "Stale",
+    );
     await root.dispatch(plan("row:a"), "click");
     expect(picks).toBe(1);
   });

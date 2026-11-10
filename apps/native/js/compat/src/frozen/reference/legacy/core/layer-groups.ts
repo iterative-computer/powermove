@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { is3DLayer, world3D, local3D, perspectiveAmount, CHANNELS_3D } from './space-3d';
 import type { PMRegistry } from '../registry';
 import { preserveWorldPose, worldPoseValues,worldAim3D,preserveWorldAim,aimProperties3D,aimValues3D } from './parenting';

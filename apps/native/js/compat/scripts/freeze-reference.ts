@@ -80,7 +80,8 @@ const blockOf = (text: string, from: string) => {
   let depth = 0;
   for (let at = text.indexOf("{", start); at < text.length; at++) {
     if (text[at] === "{") depth++;
-    else if (text[at] === "}" && --depth === 0) return text.slice(start, at + 1);
+    else if (text[at] === "}" && --depth === 0)
+      return text.slice(start, at + 1);
   }
   throw Error(`Unterminated source: ${from}`);
 };
@@ -88,7 +89,11 @@ seen.set(
   "legacy/core/pure-model.ts",
   `/* Selection and media timing of legacy/core/model.ts and media.ts. */\nimport { resolveContent } from "./content-properties";\nimport { clipCuesToEnd, rebaseCuesForStart } from "../../captions/model";\nimport { timelineService } from "./services";\nimport type { PMRegistry } from "../registry";\n${blockOf(model, "export function selectLayers")}\nexport function installMediaTiming(PM: any): void {\n${blockOf(media, "PM.MediaTiming = {")};\n}\n`,
 );
-queue.push("captions/model.ts", "legacy/core/services.ts", "legacy/registry.ts");
+queue.push(
+  "captions/model.ts",
+  "legacy/core/services.ts",
+  "legacy/registry.ts",
+);
 while (queue.length) {
   const file = queue.pop()!;
   if (seen.has(file)) continue;
@@ -128,6 +133,12 @@ seen.set(
   `/* The effect and shader-layer preambles of legacy/gl/shaders.ts. */\nexport const GLSL_PRE = ${literal("const PRE = `")};\nexport const SHADER_HEADER = ${literal("PM.SHADER_HEADER = `")};\n`,
 );
 await Bun.$`rm -rf ${target}`;
+// Type-only imports stay outside the closure, so the copies are not type-checked here.
+const unchecked =
+  "// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)\n";
 for (const [file, text] of seen)
-  await Bun.write(join(target, file), text);
+  await Bun.write(
+    join(target, file),
+    file.endsWith(".ts") ? unchecked + text : text,
+  );
 console.log(`${seen.size} files from ${reference}`, relative(root, target));

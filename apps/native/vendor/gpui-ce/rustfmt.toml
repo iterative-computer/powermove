@@ -1,0 +1,2 @@
+# Vendored upstream source: never reformatted here (cargo fmt --all reaches it as a path dependency).
+disable_all_formatting = true

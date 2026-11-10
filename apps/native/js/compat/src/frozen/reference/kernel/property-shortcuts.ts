@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /** Timeline presentation only: these shortcuts never mutate animation data. */
 export const propertyShortcuts = [
   ['p', 'revealPos', 'Position'], ['s', 'revealScale', 'Scale'],

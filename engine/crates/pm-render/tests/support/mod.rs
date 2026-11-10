@@ -204,10 +204,16 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
             let origin = string(source.and_then(|s| member(s, "origin"))).unwrap_or_default();
             let path = string(source.and_then(|s| member(s, "path"))).unwrap_or_default();
             let sha = string(source.and_then(|s| member(s, "sha256"))).unwrap_or_default();
-            // Captures record fixtures by their old repository path; they live in engine/fixtures now.
+            // Captures record fixtures by their repository path; the app's
+            // e2e fixtures moved to engine/fixtures, the stills2 ones did not.
             let path = if origin == "fixture" {
+                let recorded = repo_root().join(&path);
                 let name = Path::new(&path).file_name().unwrap_or_default();
-                repo_root().join("engine/fixtures").join(name)
+                if recorded.is_file() {
+                    recorded
+                } else {
+                    repo_root().join("engine/fixtures").join(name)
+                }
             } else {
                 let p = PathBuf::from(&path);
                 if p.is_absolute() { p } else { capture.join(p) }

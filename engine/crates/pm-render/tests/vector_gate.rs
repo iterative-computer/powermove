@@ -32,7 +32,11 @@ use pm_vector::shape::{ShapeColors, ShapeContent, ShapeKind, ShapeRaster, shape_
 use serde_json::Value;
 
 fn cases() -> Vec<Value> {
-    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/shape-cases.json")).unwrap();
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/shape-cases.json"
+    ))
+    .unwrap();
     let v: Value = serde_json::from_str(&text).unwrap();
     v["cases"].as_array().unwrap().clone()
 }
@@ -79,7 +83,12 @@ fn scene(c: &Value) -> Option<((u32, u32), CoverageScene)> {
         };
         let g = ShapeRaster::new(&content, scale);
         let geometry = shape_geometry(&content).ok()?;
-        scene.push_shape(&geometry, g.shape_to_pixels(), &colors.color, &colors.stroke_color);
+        scene.push_shape(
+            &geometry,
+            g.shape_to_pixels(),
+            &colors.color,
+            &colors.stroke_color,
+        );
         return Some(((g.width as u32, g.height as u32), scene));
     }
     let mut nodes = vec![];
@@ -134,11 +143,19 @@ fn scene(c: &Value) -> Option<((u32, u32), CoverageScene)> {
     let fills: Vec<String> = colors.iter().map(|c| c.fill.clone()).collect();
     let strokes: Vec<String> = colors.iter().map(|c| c.stroke.clone()).collect();
     scene.push_paths(&layer, to_pixels, &fills, &strokes);
-    Some(((raster.width.max(1.0) as u32, raster.height.max(1.0) as u32), scene))
+    Some((
+        (raster.width.max(1.0) as u32, raster.height.max(1.0) as u32),
+        scene,
+    ))
 }
 
 /// The engine's pixels of `scene` on the canvas, premultiplied, f32.
-fn engine(r: &Renderer, cache: &mut VectorCache, scene: &CoverageScene, (w, h): (u32, u32)) -> Vec<f64> {
+fn engine(
+    r: &Renderer,
+    cache: &mut VectorCache,
+    scene: &CoverageScene,
+    (w, h): (u32, u32),
+) -> Vec<f64> {
     let rect = PixelRect::new(0, 0, w, h);
     if scene.pixel_bounds(rect).is_none() {
         return vec![0.0; (w * h * 4) as usize];
@@ -147,7 +164,9 @@ fn engine(r: &Renderer, cache: &mut VectorCache, scene: &CoverageScene, (w, h): 
         scene: scene.clone(),
         rect,
     };
-    let view = cache.resolve(r.device(), r.queue(), &source, Precision::Float32).unwrap();
+    let view = cache
+        .resolve(r.device(), r.queue(), &source, Precision::Float32)
+        .unwrap();
     pm_gpu::readback::read_f32(r.device(), r.queue(), view.texture())
         .unwrap()
         .into_iter()
@@ -163,7 +182,9 @@ struct Pool {
 }
 
 fn cv(a: &[f64], b: &[f64]) -> f64 {
-    (0..4).map(|c| (a[c] - b[c]).abs() * 255.0).fold(0.0, f64::max)
+    (0..4)
+        .map(|c| (a[c] - b[c]).abs() * 255.0)
+        .fold(0.0, f64::max)
 }
 
 #[test]
@@ -190,7 +211,8 @@ fn shapes_and_paths_meet_the_reference() {
             let ref_alpha: Vec<f64> = reference.chunks(4).map(|p| p[3]).collect();
             let our_alpha: Vec<f64> = ours.chunks(4).map(|p| p[3]).collect();
             if ref_alpha.iter().sum::<f64>() > 0.0
-                && let Err(e) = same_geometry(&geometry(&our_alpha, wu), &geometry(&ref_alpha, wu), 1e-3)
+                && let Err(e) =
+                    same_geometry(&geometry(&our_alpha, wu), &geometry(&ref_alpha, wu), 1e-3)
             {
                 failures.push(format!("{id}: geometry {e}"));
             }
@@ -211,7 +233,11 @@ fn shapes_and_paths_meet_the_reference() {
             {
                 let dir = std::path::Path::new(&dir);
                 std::fs::create_dir_all(dir).unwrap();
-                let bytes = |f: &[f64]| -> Vec<u8> { f.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect() };
+                let bytes = |f: &[f64]| -> Vec<u8> {
+                    f.iter()
+                        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                        .collect()
+                };
                 let mut row = Vec::with_capacity(wu * hu * 12);
                 let (e, t, r) = (bytes(&ours), bytes(&today), bytes(&reference));
                 for y in 0..hu {
@@ -221,7 +247,10 @@ fn shapes_and_paths_meet_the_reference() {
                 }
                 support::write_png(&dir.join(format!("{id}.png")), w * 3, h, &row);
             }
-            let stroked = scene.items.iter().any(|i| matches!(i.style, ItemStyle::Stroke(_)));
+            let stroked = scene
+                .items
+                .iter()
+                .any(|i| matches!(i.style, ItemStyle::Stroke(_)));
             for (i, class) in classes.iter().enumerate() {
                 if *class != Class::Edge {
                     continue;
@@ -229,13 +258,19 @@ fn shapes_and_paths_meet_the_reference() {
                 let at = |f: &[f64]| f[i * 4..i * 4 + 4].to_vec();
                 let e = cv(&at(&ours), &at(&reference));
                 let t = cv(&at(&today), &at(&reference));
-                for pool in [Some(&mut all_pool), stroked.then_some(&mut stroked_pool)].into_iter().flatten() {
+                for pool in [Some(&mut all_pool), stroked.then_some(&mut stroked_pool)]
+                    .into_iter()
+                    .flatten()
+                {
                     pool.engine.push(e);
                     pool.today.push(t);
                 }
             }
         }
-        assert_eq!(compared, expected, "every authored case needs today's witness");
+        assert_eq!(
+            compared, expected,
+            "every authored case needs today's witness"
+        );
     }
     let show = |name: &str, p: Pool| {
         eprintln!(
@@ -247,7 +282,12 @@ fn shapes_and_paths_meet_the_reference() {
     eprintln!("{compared} cases compared with today");
     show("edge pixels, all cases (CV vs reference)", all_pool);
     show("edge pixels, stroked cases (CV vs reference)", stroked_pool);
-    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -268,24 +308,65 @@ fn authored_stroke_styles_meet_exact_regions() {
     curve.move_to((16.25, 96.5));
     curve.curve_to((31.0, 1.0), (107.0, 3.0), (119.25, 96.5));
     let cases = [
-        ("butt/bevel", open.clone(), Stroke::new(7.5).with_caps(Cap::Butt).with_join(Join::Bevel)),
-        ("square/miter", open.clone(), Stroke::new(7.5).with_caps(Cap::Square).with_join(Join::Miter).with_miter_limit(8.0)),
-        ("miter fallback", open, Stroke::new(7.5).with_caps(Cap::Round).with_join(Join::Miter).with_miter_limit(1.0)),
-        ("closed round", closed, Stroke::new(6.0).with_join(Join::Round)),
-        ("closed curve", Circle::new((68.0, 60.0), 38.0).to_path(1e-9), Stroke::new(6.0)),
-        ("dashed curve", curve, Stroke::new(5.0).with_caps(Cap::Round).with_dashes(3.5, [13.0, 8.0])),
+        (
+            "butt/bevel",
+            open.clone(),
+            Stroke::new(7.5).with_caps(Cap::Butt).with_join(Join::Bevel),
+        ),
+        (
+            "square/miter",
+            open.clone(),
+            Stroke::new(7.5)
+                .with_caps(Cap::Square)
+                .with_join(Join::Miter)
+                .with_miter_limit(8.0),
+        ),
+        (
+            "miter fallback",
+            open,
+            Stroke::new(7.5)
+                .with_caps(Cap::Round)
+                .with_join(Join::Miter)
+                .with_miter_limit(1.0),
+        ),
+        (
+            "closed round",
+            closed,
+            Stroke::new(6.0).with_join(Join::Round),
+        ),
+        (
+            "closed curve",
+            Circle::new((68.0, 60.0), 38.0).to_path(1e-9),
+            Stroke::new(6.0),
+        ),
+        (
+            "dashed curve",
+            curve,
+            Stroke::new(5.0)
+                .with_caps(Cap::Round)
+                .with_dashes(3.5, [13.0, 8.0]),
+        ),
     ];
     for (name, path, style) in cases {
-        let scene = CoverageScene { items: vec![CoverageItem {
-            path, transform: Affine::IDENTITY, style: ItemStyle::Stroke(style), color: [1.0; 4],
-        }] };
+        let scene = CoverageScene {
+            items: vec![CoverageItem {
+                path,
+                transform: Affine::IDENTITY,
+                style: ItemStyle::Stroke(style),
+                color: [1.0; 4],
+            }],
+        };
         let ours = engine(&r, &mut cache, &scene, (136, 120));
         let reference = support::reference::scene_pixels(&scene, 136, 120).unwrap();
         let wanted: Vec<f64> = reference.iter().map(|p| p.0[3]).collect();
         let actual: Vec<f64> = ours.chunks_exact(4).map(|p| p[3]).collect();
         same_geometry(&geometry(&actual, 136), &geometry(&wanted, 136), 1e-3)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let errors: Vec<f64> = actual.iter().zip(&wanted).map(|(a, b)| (a - b).abs() * 255.0).collect();
+        let errors: Vec<f64> = actual
+            .iter()
+            .zip(&wanted)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .collect();
         let stats = Stats::of(errors);
         eprintln!("{name}: {stats}");
         assert!(stats.max <= 1.0, "{name}: {stats}");

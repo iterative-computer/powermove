@@ -325,9 +325,11 @@ impl GpuProgram {
         if !self.pipelines.contains_key(&format) {
             // RGBA16F stores the nearest half of the program's output.
             if format == wgpu::TextureFormat::Rgba16Float && self.fragment_half.is_none() {
-                let half = self.fragment.msl.as_deref().and_then(|msl| {
-                    crate::glsl::half_store(msl, &self.fragment.entry_point)
-                });
+                let half = self
+                    .fragment
+                    .msl
+                    .as_deref()
+                    .and_then(|msl| crate::glsl::half_store(msl, &self.fragment.entry_point));
                 if let Some(source) = half {
                     let stage = crate::glsl::msl_stage(
                         device,

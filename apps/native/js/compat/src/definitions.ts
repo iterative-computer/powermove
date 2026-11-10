@@ -2,7 +2,10 @@
  * layers, wrapped by the reference's own generators with its own preambles.
  * The native renderer validates and translates them; a bad one fails alone.
  */
-import { GLSL_PRE, SHADER_HEADER } from "./frozen/reference/legacy/gl/shader-prelude";
+import {
+  GLSL_PRE,
+  SHADER_HEADER,
+} from "./frozen/reference/legacy/gl/shader-prelude";
 import { extensionLayerFragment } from "./frozen/host/extension-layers";
 import { toLegacyFx, toLegacyTransition } from "./frozen/host/glsl";
 import type { Data } from "./types";

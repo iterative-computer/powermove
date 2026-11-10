@@ -332,11 +332,9 @@ fn gltf_sweep_resolves_finite_linear_color() {
 /// displayed through f64 ACES and sRGB. Poses and ray-grid picks are checked
 /// by their separate exact tests.
 #[test]
+#[ignore = "external evidence: bun examples/scene3d_float_reference.ts --gltf --capture <capture> --out <dir>, then PM_GLTF_FLOAT_REF=<dir> cargo test -p pm-render --test scene3d_gltf -- --ignored gltf_displayed_pixels_prefer_supersampled_float_reference"]
 fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
-    let Some((capture, cases)) = selected() else {
-        eprintln!("NOT RUN: no private corpus glTF capture");
-        return;
-    };
+    let (capture, cases) = selected().expect("G-D1 needs a private corpus glTF capture");
     let path = std::env::var_os("PM_GLTF_FLOAT_REF")
         .map(PathBuf::from)
         .expect("G-D1 requires PM_GLTF_FLOAT_REF (examples/scene3d_float_reference.ts --gltf)");

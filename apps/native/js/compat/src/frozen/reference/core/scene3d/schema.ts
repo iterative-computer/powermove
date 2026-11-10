@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
 

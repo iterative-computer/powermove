@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 // A menu opened from a button. Native menus are for right-click; a button's
 // menu is ours, drawn as the select listbox is (select/menu.ts): a raised
 // sheet, 30px rows on a 6px corner, one hover layer gliding between rows, and

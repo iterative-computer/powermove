@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Pure math and time helpers of legacy/core/util.ts. */
 export function install(PM: any): void {
 /* ── math ──────────────────────────────────────────────── */

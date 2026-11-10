@@ -162,35 +162,35 @@ fn motion_corpus_parity() {
             let (w, h, reference) = read_png(&s.png);
             compared += 1;
             let (pass, line) = {
-            let mut mask = interior(&reference, w, h);
-            if blur_video {
-                // Only the unblurred clip, [280, 440) × [135, 225).
-                for (i, m) in mask.iter_mut().enumerate() {
-                    let (x, y) = (i as u32 % w, i as u32 / w);
-                    *m &= (280..440).contains(&x) && (135..225).contains(&y);
+                let mut mask = interior(&reference, w, h);
+                if blur_video {
+                    // Only the unblurred clip, [280, 440) × [135, 225).
+                    for (i, m) in mask.iter_mut().enumerate() {
+                        let (x, y) = (i as u32 % w, i as u32 / w);
+                        *m &= (280..440).contains(&x) && (135..225).contains(&y);
+                    }
                 }
-            }
-            let (max, n) = masked_max(&ours, &reference, &mask);
-            let mut pass = max <= 2 && n > 0;
-            let mut note = String::new();
-            if !pass && max <= FRAME_IDENTITY_CV && n > 0 {
-                let later = opaque8(&render(&mut renderer, &request, s.time + 1.0 / fps));
-                let (wrong, _) = masked_max(&later, &reference, &mask);
-                if wrong > WRONG_FRAME_CV {
-                    pass = true;
-                    note = format!(
-                        "; DEVIATION video decode (one frame later differs by {wrong})"
-                    );
+                let (max, n) = masked_max(&ours, &reference, &mask);
+                let mut pass = max <= 2 && n > 0;
+                let mut note = String::new();
+                if !pass && max <= FRAME_IDENTITY_CV && n > 0 {
+                    let later = opaque8(&render(&mut renderer, &request, s.time + 1.0 / fps));
+                    let (wrong, _) = masked_max(&later, &reference, &mask);
+                    if wrong > WRONG_FRAME_CV {
+                        pass = true;
+                        note = format!(
+                            "; DEVIATION video decode (one frame later differs by {wrong})"
+                        );
+                    }
                 }
-            }
-            let line = format!(
-                "{:<34} t={:<5} opaque 16  {n:>7} interior px (video class) max {max}{note}",
-                p.name, s.time
-            );
-            if !note.is_empty() {
-                deviations.push(line.clone());
-            }
-            (pass, line)
+                let line = format!(
+                    "{:<34} t={:<5} opaque 16  {n:>7} interior px (video class) max {max}{note}",
+                    p.name, s.time
+                );
+                if !note.is_empty() {
+                    deviations.push(line.clone());
+                }
+                (pass, line)
             };
             eprintln!("{line}");
             if !pass {
@@ -315,7 +315,11 @@ fn motion_corpus_parity() {
 }
 
 /// A white solid sliding right over a transparent background.
-fn slider(blur: bool, samples_field: Option<serde_json::Value>, color_depth: u32) -> pm_model::Document {
+fn slider(
+    blur: bool,
+    samples_field: Option<serde_json::Value>,
+    color_depth: u32,
+) -> pm_model::Document {
     let mut l = layer(
         "s",
         "solid",
@@ -377,8 +381,18 @@ fn accumulation_counts_covered_samples() {
     // f16 accumulation rounds every partial sum (as today's RGBA16F
     // target does): at most half an ulp of a value ≤ 1 per sample.
     for (precision, color_depth, per_sample, format) in [
-        (Precision::Float16, 16, 4.9e-4, wgpu::TextureFormat::Rgba16Float),
-        (Precision::Float32, 32, 6e-8, wgpu::TextureFormat::Rgba32Float),
+        (
+            Precision::Float16,
+            16,
+            4.9e-4,
+            wgpu::TextureFormat::Rgba16Float,
+        ),
+        (
+            Precision::Float32,
+            32,
+            6e-8,
+            wgpu::TextureFormat::Rgba32Float,
+        ),
     ] {
         let doc = slider(true, None, color_depth);
         for n in [1u32, 4, 7, 16, 20] {
@@ -619,9 +633,13 @@ fn planes_cover_what_their_homography_covers() {
                 .collect();
             let margin = 1e-3;
             let all_in = corners.iter().all(|c| {
-                c.is_some_and(|(u, v)| u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin)
+                c.is_some_and(|(u, v)| {
+                    u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin
+                })
             });
-            let off = |f: &dyn Fn(f64, f64) -> bool| corners.iter().all(|c| c.is_some_and(|(u, v)| f(u, v)));
+            let off = |f: &dyn Fn(f64, f64) -> bool| {
+                corners.iter().all(|c| c.is_some_and(|(u, v)| f(u, v)))
+            };
             let all_out = off(&|u, _| u < -margin)
                 || off(&|u, _| u > 1.0 + margin)
                 || off(&|_, v| v < -margin)
