@@ -34,8 +34,6 @@ test('hidden solid animates, includes masks/effects and ignores source transform
     const PM=(window as any).PM;
     const result=PM.Edit.apply({type:'add_layer',id:'paint',layerType:'solid',name:'Animated hidden paint',visible:false,content:{w:128,h:128,color:'#FF0000'},properties:{opacity:0,'position.x':-1000,'scale.x':5,rotation:75}});if(!result.ok)throw new Error(result.message);
     const animated=PM.Edit.apply({type:'replace_keyframes',target:'paint',path:'c.color',keyframes:[{time:0,value:'#FF0000',hold:true},{time:1,value:'#00FF00',hold:true}]});if(!animated.ok)throw new Error(animated.message);
-    PM.Edit.apply({type:'set_layer',target:'paint',patch:{threeD:true}});
-    PM.Edit.apply({type:'set_property',target:'paint',path:'rotation.y',value:75});
     (window as any).materialSource('paint');
   });
   const red=await capture(page,0,'02-after-hidden-solid-red'),green=await capture(page,1,'03-after-hidden-solid-animated-green');

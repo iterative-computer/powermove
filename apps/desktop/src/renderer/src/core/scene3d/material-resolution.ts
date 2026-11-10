@@ -14,6 +14,16 @@ export function materialTextureSize(width:number,height:number,minimum?:Material
   return {width:Math.max(2,Math.round(w*scale)),height:Math.max(2,Math.round(h*scale))};
 }
 
+/** Video is captured every frame. Start small, then satisfy the projected UV
+ * density before the model is drawn instead of copying a full 6K frame for a
+ * screen that occupies only a few hundred output pixels. Exports use the same
+ * output/camera demand and can request full detail. */
+export function materialVideoTextureSize(width:number,height:number,minimum?:MaterialTextureSize,limit=8192):MaterialTextureSize {
+  const w=Math.max(2,Number(width)||2),h=Math.max(2,Number(height)||2);
+  const scale=minimum?Math.max(minimum.width/w,minimum.height/h):Math.min(1,512/Math.max(w,h));
+  return materialTextureSize(w*Math.min(1,scale),h*Math.min(1,scale),undefined,limit);
+}
+
 type UVPatch={points:THREE.Vector3[];u:THREE.Vector3;v:THREE.Vector3};
 type GeometrySample = {position:unknown;uv:unknown;index:unknown;stamp:string;box:THREE.Box3;patches:UVPatch[]};
 const geometrySamples=new WeakMap<THREE.BufferGeometry,Map<string,GeometrySample>>();

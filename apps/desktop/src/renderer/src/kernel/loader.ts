@@ -245,6 +245,7 @@ export function createLoader(options: LoaderOptions): Loader {
         const sandbox = await createSandboxRuntime(kernel, record, hostDeps, await valuesFor(record), { timeoutMs });
         active.set(id, { record, module: null, handle: sandbox.handle, sandbox });
         activationFailures.delete(id);
+        clearFailureNotice(id);
         syncActive();
         reportHealth(id, { state: 'ok' });
         kernel.events.emit('extension:loaded', { id });
@@ -295,6 +296,7 @@ export function createLoader(options: LoaderOptions): Loader {
 
     active.set(id, { record, module, handle });
     activationFailures.delete(id);
+    clearFailureNotice(id);
     syncActive();
     reportHealth(id, { state: 'ok' });
     kernel.events.emit('extension:loaded', { id });
@@ -333,7 +335,7 @@ export function createLoader(options: LoaderOptions): Loader {
     reportHealth(id, { state: 'activation-error', error: errorText(error) });
     /* An extension that will not load is that extension's alert. The editor is
        still whole, and the notice belongs to whoever broke. */
-    deps.ui.toast(`${name} failed to load`, { sticky: true, source: { id, name } } as ToastArgs);
+    deps.ui.toast(`${name} failed to load`, { key: `extension-health:${id}`, sticky: true, source: { id, name } } as ToastArgs);
   }
 
   async function deactivate(id: string): Promise<void> {
@@ -422,7 +424,11 @@ export function createLoader(options: LoaderOptions): Loader {
   }
 
   function stoppedToast(id: string, name: string): void {
-    deps.ui.toast(`${name} stopped working — check Mods`, { sticky: true, source: { id, name } } as ToastArgs);
+    deps.ui.toast(`${name} stopped working — check Mods`, { key: `extension-health:${id}`, sticky: true, source: { id, name } } as ToastArgs);
+  }
+
+  function clearFailureNotice(id: string): void {
+    (deps.pm as { dismissToast?: (key: string) => void } | null)?.dismissToast?.(`extension-health:${id}`);
   }
 
   function enqueue(task: () => Promise<void>): Promise<void> {

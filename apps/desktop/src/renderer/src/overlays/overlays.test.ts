@@ -62,6 +62,17 @@ afterEach(async () => {
 });
 
 describe('installSvelteOverlays', () => {
+  it('replaces an old save error when its task retries, preserving unrelated errors', () => {
+    PM.toast('Could not save project', 6000, { key: 'project-save', error: true });
+    PM.toast('Unrelated failure', 6000, { key: 'other', error: true });
+    PM.toast('Saving project', 2200, { key: 'project-save', task: true, progress: .05 });
+    flushSync();
+    expect(document.querySelector('#toasts')?.textContent).not.toContain('Could not save project');
+    expect(document.querySelector('#toasts')?.textContent).toContain('Unrelated failure');
+    PM.toast('Could not save project again', 6000, { key: 'project-save', error: true });
+    flushSync();
+    expect(document.querySelector('#toasts')?.textContent).toContain('Could not save project again');
+  });
   it('renders a keyboard-accessible easing grid with actual Bézier paths', () => {
     vi.useFakeTimers();
     const run = vi.fn();

@@ -2753,9 +2753,81 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
     bind(null);
   }
 }
+// A plain video can transfer decoded pixels directly to the 3D renderer. No
+// readPixels barrier or CPU RGBA buffer is needed. Keep only the current frame
+// per source, rather than retaining mutable canvases under historical keys.
+const videoMaterialFrames=new Map<string,{stamp:unknown[];frame:any}>();
+const videoMaterialSizes=new Map<string,{time:number;width:number;height:number}>();
+const rememberMaterialVideoSize=(id:string,time:number,width:number,height:number)=>{
+  const previous=videoMaterialSizes.get(id);
+  videoMaterialSizes.delete(id);videoMaterialSizes.set(id,{time,width:Math.max(width,previous?.time===time?previous.width:0),height:Math.max(height,previous?.time===time?previous.height:0)});
+  if(videoMaterialSizes.size>64)videoMaterialSizes.delete(videoMaterialSizes.keys().next().value!);
+};
+GL.materialVideoSize=(id:string)=>videoMaterialSizes.get(id);
+const emptyMaterialPixels=new Uint8Array(0);
+let videoMaterialProject:any;
+PM.bus?.on('project',()=>{if(videoMaterialProject!==PM.proj){videoMaterialFrames.clear();videoMaterialSizes.clear();videoMaterialProject=PM.proj;}});
+GL.renderMaterialVideo=(comp:any,time:number,width:number,height:number,outerTime:number,sourceLayerId:string)=>{
+  if(!(useVideoPreviews || PM.playing) || PM.Export?.busy || PM.agentFrameCapture || PM.Preview?.preparing)return undefined;
+  const layer=comp.layers.find((l:any)=>l.id===sourceLayerId);
+  if(layer?.type!=='video' || layer.fx?.length || layer.masks?.length || layer.matteSource || layer.matteSources?.length
+    || layer.transitionIn || layer.transitionOut)return undefined;
+  pmScopePush(comp);PM.beginEval(time);
+  let decoded:VideoFrame|undefined;
+  try{
+    const d=resolveContent(PM,layer,time),asset=PM.assets.get(d.asset);if(!asset)return undefined;
+    const path=videoPath+`material-layer:${sourceLayerId}/`,id=path+layer.id;
+    rememberMaterialVideoSize(id,outerTime,width,height);
+    const prepared=idleVideoFrames?.get(id+'@'+time) || PM.preparedVideoFrames?.get(id+'@'+time) || PM.preparedVideoFrames?.get(layer.id+'@'+time);
+    const live=prepared?asset.el:layerVideoElement(PM,asset,id);
+    const playback=PM.playing&&!prepared?PM.playbackVideoFrame?.frames.get(id):undefined;
+    const at=videoPlaybackTime(asset,sourceTime(PM,layer,previewVideoTimes.get(id) ?? time));
+    const captured=!prepared&&!playback?previewSeekFrame(live,at):undefined;
+    let source=prepared || playback?.source || captured?.canvas || live;
+    const active=inputLayerActive(layer,time,comp,{inputLayer:layer.id});
+    if(active && source===live){
+      if(!PM.playing)seekPreviewVideo(live,at,.0005);
+      if(live.readyState<2 || !live.videoWidth || !live.videoHeight || live.seeking)return 'loading';
+      if(rememberingPreview && PM.playing){
+        try{
+          decoded=new VideoFrame(live);source=decoded;
+          const t=decoded.timestamp/1e6,duration=(decoded.duration || 0)/1e6;
+          if(!(Math.abs(t-at)<.0005 || t<=at+.0005 && duration>0 && at<t+duration-.0005))frameVideoExact=false;
+        }catch{frameVideoExact=false;}
+      }
+    }
+    const version=prepared?PM.preparedVideoVersion:playback?playback.version:captured?captured.version:videoTextureVersion(live);
+    const stamp=[PM.proj,asset,live,prepared,version,time,width,height,d.fit,active];
+    const key=id+`:${width}x${height}`;
+    let entry=videoMaterialFrames.get(key);
+    if(entry && entry.stamp.length===stamp.length && stamp.every((v,i)=>Object.is(v,entry!.stamp[i])))return entry.frame;
+    const surface=entry?.frame.surface || document.createElement('canvas');
+    if(surface.width!==width)surface.width=width;if(surface.height!==height)surface.height=height;
+    const context=surface.getContext('2d')!;
+    context.clearRect(0,0,width,height);context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';
+    if(active){
+      const sw=source.videoWidth || source.displayWidth || source.width || asset.w,sh=source.videoHeight || source.displayHeight || source.height || asset.h;
+      let w=width,h=height;
+      if(d.fit==='cover' || d.fit==='contain'){
+        const scale=d.fit==='cover'?Math.max(width/sw,height/sh):Math.min(width/sw,height/sh);w=sw*scale;h=sh*scale;
+      }
+      context.drawImage(source,(width-w)/2,(height-h)/2,w,h);
+    }
+    const frame={surface,pixels:emptyMaterialPixels,width,height,hasAlpha:true,key:`${id}:${time}:${version}:${width}x${height}`};
+    videoMaterialFrames.delete(key);videoMaterialFrames.set(key,{stamp,frame});
+    const budget=Math.min(128*1024*1024,PM.Memory?.budget?.('preview') ?? 128*1024*1024);
+    let bytes=0;for(const entry of videoMaterialFrames.values())bytes+=entry.frame.width*entry.frame.height*4;
+    while(videoMaterialFrames.size>1 && (videoMaterialFrames.size>8 || bytes>budget)){
+      const oldest=videoMaterialFrames.keys().next().value!;const stale=videoMaterialFrames.get(oldest)!;
+      bytes-=stale.frame.width*stale.frame.height*4;videoMaterialFrames.delete(oldest);
+    }
+    return frame;
+  }finally{decoded?.close();pmScopePop();PM.beginEval(outerTime);}
+};
 /** Nested material capture preserves the outer compositor's FBO ownership and
  * evaluation scope. renderToPixels is a top-level capture and must not run here. */
 GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number,sourceLayerId?:string) => {
+  if(sourceLayerId && comp.layers.find((l:any)=>l.id===sourceLayerId)?.type==='video')rememberMaterialVideoSize(videoPath+`material-layer:${sourceLayerId}/`+sourceLayerId,outerTime,width,height);
   const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews,previousCapture=materialCapture;
   const capture={loading:false};materialCapture=capture;
   let frame:any,converted:any;

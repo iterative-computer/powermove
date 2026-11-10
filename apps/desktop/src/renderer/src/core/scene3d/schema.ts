@@ -10,7 +10,8 @@ const id = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
 const color = z.string().regex(/^#[0-9a-f]{6}$/i);
 const num = (min = -100_000, max = 100_000) => z.number().finite().min(min).max(max);
 const channel = (value: z.ZodType) => z.union([value, z.object({
-  v: value, kf: z.array(z.object({ t: num(0), v: value }).passthrough()).max(2400),
+  // Trimming a layer retains earlier animation at negative layer-local times.
+  v: value, kf: z.array(z.object({ t: num(), v: value }).passthrough()).max(2400),
   expr: z.string().max(2000).nullable().optional()
 }).passthrough()]).transform((raw: any) => typeof raw === 'object' && raw !== null && 'v' in raw
   ? { ...raw, expr: raw.expr ?? null } : { v: raw, kf: [], expr: null });

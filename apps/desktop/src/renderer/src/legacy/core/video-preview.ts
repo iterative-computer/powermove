@@ -3,7 +3,22 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { isStreamedMedia, type StreamedMedia } from '../../host/streamed-media';
 import { trackVideo } from './video-residency';
 
-/** Full preview resolution and offline rendering always use the source. */
+type VideoDemand={width:number;height:number};
+const materialDemands=new WeakMap<object,WeakMap<object,VideoDemand|false>>();
+/** A material-only clip can decode editing media when it supplies every texel
+ * the visible surface needs. Ordinary footage keeps its chosen preview mode. */
+export function setMaterialVideoDemands(PM:any,clips:Iterable<{asset:any;id:string;materialSize?:VideoDemand}>):void {
+  const demands=new WeakMap<object,VideoDemand|false>();
+  for(const clip of clips){
+    if(!clip.materialSize){demands.set(clip.asset,false);continue;}
+    const previous=demands.get(clip.asset);if(previous===false)continue;
+    const size=PM.GL?.materialVideoSize?.(clip.id) ?? clip.materialSize;
+    demands.set(clip.asset,{width:Math.max(previous?.width || 0,size.width),height:Math.max(previous?.height || 0,size.height)});
+  }
+  materialDemands.set(PM,demands);
+}
+
+/** Offline rendering always uses the portable original. */
 export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
   // A derivative that finishes during playback joins on the next pause.
   // Replacing a running decoder would interrupt an otherwise smooth clip.
@@ -11,7 +26,9 @@ export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
     if (PM.playing) return asset.el;
     asset.preview.deferred = false;
   }
-  return asset.preview?.el && (PM.perf?.auto || PM.quality < 1)
+  const demand=materialDemands.get(PM)?.get(asset),preview=asset.preview?.el;
+  const enough=demand && preview?.videoWidth>=demand.width && preview?.videoHeight>=demand.height;
+  return preview && (demand?enough:PM.perf?.auto || PM.quality < 1)
     && !PM.Export?.busy && !PM.agentFrameCapture && !PM.Preview?.preparing
     ? asset.preview.el : asset.el;
 }

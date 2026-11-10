@@ -2,9 +2,9 @@ import { compositionById, compositionContains, materialOwner, materialLayerStatu
 import { sourceTime } from '../../legacy/core/retiming';
 import { trackStaticEffects } from '../../legacy/core/static-effects';
 import { materialStaticPlan } from './material-static';
-import { materialTextureLimit, materialTextureSize, type MaterialTextureSize } from './material-resolution';
+import { materialTextureLimit, materialTextureSize, materialVideoTextureSize, type MaterialTextureSize } from './material-resolution';
 
-export interface CompositionTextureFrame {pixels:Uint8Array<ArrayBuffer>;width:number;height:number;key:string;hasAlpha?:boolean}
+export interface CompositionTextureFrame {pixels:Uint8Array<ArrayBuffer>;surface?:HTMLCanvasElement;width:number;height:number;key:string;hasAlpha?:boolean}
 type StaticPlan = {source:ReturnType<typeof materialStaticPlan>['plan'];images:any[];sources:unknown[];version:number;renderStamp:unknown};
 type TextureCache = {frames:Map<string,CompositionTextureFrame>;plans:Map<string,StaticPlan>;versions:Map<string,{signature:string;version:number;renderStamp?:unknown}>;
   effects:Map<string,ReturnType<typeof trackStaticEffects>>;nextVersion:number;bytes:number;stamp:unknown[];editStamp:unknown[];dispose:()=>void};
@@ -87,7 +87,8 @@ export function materialCompositionSample(PM:any,layer:any,map:MaterialMap,time:
     const asset=source.type==='image'?PM.assets?.get?.(source.d?.asset):null,el=asset?.el || asset?.bitmap;
     const imageWidth=el?.naturalWidth || el?.width || asset?.w || w,imageHeight=el?.naturalHeight || el?.height || asset?.h || h;
     const nativeScale=asset?Math.max(1,imageWidth/w,imageHeight/h):1;
-    const {width,height}=materialTextureSize(w*nativeScale,h*nativeScale,minimum,materialTextureLimit(PM));
+    const size=source.type==='video'?materialVideoTextureSize:materialTextureSize;
+    const {width,height}=size(w*nativeScale,h*nativeScale,minimum,materialTextureLimit(PM));
     const contentKey=`layer:${owner.id}:${source.id}:${frame}:${PM.proj.revision || 0}:${PM._scene3dRevision || 0}`;
     return {comp,time:at,width,height,sourceLayerId:source.id,contentKey,key:`${contentKey}:${width}x${height}`};
   }
@@ -102,6 +103,11 @@ export function materialCompositionSample(PM:any,layer:any,map:MaterialMap,time:
 }
 export function compositionTextureFrame(PM:any,layer:any,map:MaterialMap,time:number,onLoading?:()=>void,minimum?:MaterialTextureSize):CompositionTextureFrame|null {
   const sample=materialCompositionSample(PM,layer,map,time,minimum);if(!sample || !PM.GL?.renderMaterialComposition)return null;
+  if(sample.sourceLayerId && PM.GL.renderMaterialVideo){
+    const frame=PM.GL.renderMaterialVideo(sample.comp,sample.time,sample.width,sample.height,time,sample.sourceLayerId);
+    if(frame==='loading'){onLoading?.();return null;}
+    if(frame)return frame;
+  }
   const cache=textureCache(PM),contentKey=sourceFrameKey(PM,cache,sample),key=`${contentKey}:${sample.width}x${sample.height}`;
   const cached=cache.frames.get(key);if(cached){cache.frames.delete(key);cache.frames.set(key,cached);return cached;}
   // Different material slots/UV islands can request different densities of

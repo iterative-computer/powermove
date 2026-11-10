@@ -82,6 +82,9 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   const members: OverlayMembers = {
     toast: (message: unknown, milliseconds = 2200, options: ToastOptions = {}): void => {
       if (options.task && options.key && message != null && !options.error) {
+        // Tasks live outside the toast queue. A retry must also replace its
+        // previous error notice, just as an ordinary keyed toast would.
+        toasts.dismissKey(options.key);
         upsertTask(options.key, {
           title: String(message), progress: options.progress ?? null, completed: !!options.completed,
           detail: options.detail, count: options.count, step: options.step, action: options.action,

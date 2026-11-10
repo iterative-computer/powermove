@@ -113,15 +113,15 @@ export class SceneRuntime {
       if(!frame){this.materialBindings.delete(bindingKey);this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
       this.usedTextures.add(key);
       let entry=this.textures.get(key);
-      if(!entry || entry.texture.image.width!==frame.width || entry.texture.image.height!==frame.height){
+      if(!entry || Boolean(frame.surface)!==Boolean((entry.texture as THREE.CanvasTexture).isCanvasTexture) || entry.texture.image.width!==frame.width || entry.texture.image.height!==frame.height){
         // GPU data-texture storage has fixed dimensions after its first upload.
         entry?.texture.dispose();
-        const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
+        const texture=frame.surface?new THREE.CanvasTexture(frame.surface):new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
         texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported && !nativeArtwork;
         texture.generateMipmaps=true;texture.minFilter=THREE.LinearMipmapLinearFilter;texture.magFilter=THREE.LinearFilter;texture.anisotropy=16;
         entry={source:null,texture};this.textures.set(key,entry);
       }
-      if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.texture.userData.materialHasAlpha='layerId' in id && frame.hasAlpha;entry.source=frame;}
+      if(entry.source!==frame){entry.texture.image=frame.surface || {data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.texture.userData.materialHasAlpha='layerId' in id && frame.hasAlpha;entry.source=frame;}
       this.materialBindings.set(bindingKey,{key,texture:entry.texture});
       this.textureCoordinates(entry.texture,original);return entry.texture;
     }
