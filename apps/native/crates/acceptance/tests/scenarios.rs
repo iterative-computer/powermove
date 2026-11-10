@@ -37,13 +37,45 @@ fn corpus_pmv3() {
 fn corpus_pmv4() {
     fixture::corpus_fixture("pmv4").unwrap();
 }
+/// Shipped bindings with no v1.2.0 registry row in w1-keymap.md: native
+/// additions, pinned here (id, chord, command) so none goes unchecked.
+const NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
+    ("K196", "`", "maximizePanel"),
+    ("K197", "m", "toggleLayerStrips"),
+    ("main.viewer.tab", "tab", "composition.flowchart"),
+    ("native.skimming", "alt+s", "toggleSkimming"),
+    ("native.audioSkimming", "alt+shift+s", "toggleAudioSkimming"),
+];
 #[test]
-fn all_198_real_bindings_under_seven_routing_contexts() {
+fn all_200_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
-    assert_eq!(keyboard::production::shipped().len(), 198);
-    for binding in &c.bindings {
+    let shipped = keyboard::production::shipped();
+    assert_eq!(shipped.len(), 200);
+    assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
+    for real in &shipped {
+        let binding = match c.bindings.iter().find(|b| b.id == real.id) {
+            Some(b) => b.clone(),
+            None => {
+                let (id, chord, command) = *NATIVE_BINDINGS
+                    .iter()
+                    .find(|n| n.0 == real.id)
+                    .unwrap_or_else(|| panic!("{} is neither in the catalog nor pinned", real.id));
+                pm_acceptance::catalog::Binding {
+                    id: id.into(),
+                    chord: chord.into(),
+                    command: command.into(),
+                    args: serde_json::json!([]),
+                    priority: i64::from(real.priority),
+                    in_fields: real.in_fields,
+                    repeat: real.repeat,
+                    loose: real.loose,
+                    workflow: String::new(),
+                    source: String::new(),
+                }
+            }
+        };
         for context in keyboard::CONTEXTS {
-            keyboard::check(binding, context).unwrap();
+            keyboard::check(&binding, context).unwrap();
         }
     }
 }
