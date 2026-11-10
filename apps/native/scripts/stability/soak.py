@@ -211,10 +211,15 @@ def main():
     log = a.scratch / 'app.log'
     pid = launch(app, profile, project, log)
     started = time.monotonic()
-    samples, events, failures = [], {}, []
+    samples, events, failures, refusals = [], {}, [], {}
 
-    def note(kind):
+    def note(kind, reason=None):
         events[kind] = events.get(kind, 0) + 1
+        # Each refusal kind keeps its first reasons, for the summary.
+        if reason is not None and len(refusals.setdefault(kind, [])) < 3:
+            text = reason if isinstance(reason, str) else json.dumps(reason)
+            if text[:300] not in refusals[kind]:
+                refusals[kind].append(text[:300])
 
     def connect():
         for _ in range(240):
@@ -289,12 +294,12 @@ def main():
             command(a.lane, 'gotoStart')
             note('playback')
             # Render cache.
-            ok, _ = mcp.tool('render_frames', {'times': [rng.uniform(0, 5) for _ in range(4)], 'width': 480}, timeout=120)
-            note('render_frames' if ok else 'render_frames_refused')
+            ok, value = mcp.tool('render_frames', {'times': [rng.uniform(0, 5) for _ in range(4)], 'width': 480}, timeout=120)
+            note('render_frames' if ok else 'render_frames_refused', None if ok else value)
             # Export.
             if time.monotonic() - last_export > a.export_every * 60:
                 ok, value = mcp.tool('export_video', {'name': f'soak-{cycle}', 'format': 'mp4', 'range': 'work'}, timeout=600)
-                note('export' if ok else 'export_refused')
+                note('export' if ok else 'export_refused', None if ok else value)
                 last_export = time.monotonic()
             # Crash and recover, once, half-way.
             if not crashed_once and time.monotonic() - started > a.minutes * 30:
@@ -357,7 +362,7 @@ def main():
                'growth_last_two_thirds': growth, 'first': samples[0] if samples else None,
                'last': samples[-1] if samples else None, 'stalls_over_50ms': len(stalls),
                'worst_stall_ms': round(max(stalls)) if stalls else 0, 'activations': activations,
-               'failures': failures}
+               'refusals': refusals, 'failures': failures}
     (a.scratch / 'summary.json').write_text(json.dumps({'summary': summary, 'samples': samples}, indent=1))
     print(json.dumps(summary, indent=1))
     sys.exit(1 if failures else 0)
