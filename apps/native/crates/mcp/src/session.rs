@@ -834,7 +834,12 @@ impl McpSession {
                 let (ack, descriptions, results, strips_result) = if let Some(plan) = video {
                     clip = plan.clip;
                     let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
-                    (ack, vec![], vec![], None)
+                    let applied = if ack.revision != revision {
+                        vec![crate::video::describe(args)]
+                    } else {
+                        vec![]
+                    };
+                    (ack, applied, vec![], None)
                 } else if let Some(plan) = strips {
                     let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
                     let result = if plan.state {
