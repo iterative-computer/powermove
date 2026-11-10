@@ -45,9 +45,9 @@
   --green:var(--success);
   --red:var(--danger);
   --yellow:var(--warning);
-  --r-base:4px;
+  --r-base:2.6666666666666665px;
   --r-xs:4px;
-  --r-sm:calc(var(--r-base) * 1.5);
+  --r-sm:calc(var(--r-base) * 2.25);
   --r-md:calc(var(--r-base) * 2);
   --r-lg:calc(var(--r-base) * 3);
   --r-xl:calc(var(--r-base) * 4);
@@ -56,7 +56,7 @@
   --fw-medium:500;
   --fw-semibold:600;
   --row-h:28px;
-  --hdr-h:32px;
+  --hdr-h:38px;
   --ctl-h:28px;
   --gut:10px;
   --panel-edge-inset:10px;
@@ -78,7 +78,7 @@
   --ctl-raised:var(--bg-field);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #ff8a55;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #9a9a9a;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
     0 1px 1px rgb(var(--ink-rgb) / .04),
@@ -95,7 +95,7 @@
 }
 :root[data-density="compact"]{
   --row-h:24px;
-  --hdr-h:26px;
+  --hdr-h:32px;
   --ctl-h:24px;
   --fs-md:12px;
   --gut:7px;
@@ -104,7 +104,7 @@
 }
 :root[data-density="comfy"]{
   --row-h:32px;
-  --hdr-h:36px;
+  --hdr-h:42px;
   --ctl-h:30px;
   --fs-md:14px;
   --gut:12px;
@@ -151,7 +151,7 @@
   --ctl-raised:var(--bg-field);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(0 0 0 / .3),
     inset 0 calc(var(--hairline) * -1) 0 rgb(var(--ink-rgb) / .08);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #ff8a55;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #9a9a9a;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
     0 1px 1px rgb(0 0 0 / .3),
