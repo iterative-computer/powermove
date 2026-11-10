@@ -47,10 +47,15 @@ The chosen path is:
    spawned helper before resolving a local reference. The random bootstrap
    service name routes messages; it is not the authentication boundary.
 3. Electron imports and transfers the texture to a sandboxed preload receiver.
-4. The renderer draws the managed VideoFrame into its canvas. There is no CPU
-   frame readback or pixel upload on this path. There are GPU copies.
+4. The renderer retains the managed VideoFrame and imports it directly into
+   the WebGL compositor, avoiding an intermediate Canvas2D copy. There is no
+   CPU frame readback on this path. GPU copies into the compositor remain.
 5. `allReferencesReleased` releases the local reference and returns the surface
-   slot to the host. A busy pool or unavailable API uses binary frames.
+   slot to the host. Each layer keeps one completed image across quality tiers;
+   superseding or disposing it closes its VideoFrame once. Buffered, cancelled
+   and late frames also close on their respective release paths. A busy pool
+   or unavailable API uses binary frames; conversion closes those VideoFrames
+   even if Canvas2D throws.
 
 The receiver follows Electron's
 [managed preload example](https://github.com/electron/electron/blob/v44.0.0/spec/fixtures/api/shared-texture/managed/preload.js).
@@ -128,13 +133,22 @@ photorealistic environment quality or universal 60 fps. The room's 64 finite
 point lights exercise bounded direct-light resampling. The forest fixture has
 5,772 triangles; it is not a production foliage/large-world stress test.
 
-Live normally traces at 50% of output dimensions; scenes above 128 instances
-or 32 lights start at 40%. `STUDIO_LIVE_SCALE` fixes a diagnostic scale between
-one third and one half. An optional `STUDIO_ADAPTIVE_LIVE=1` budget reduces
-resolution after sustained slow frames and recovers slowly. Its 120-edit
-experiment improved steady timings, but recreating a target/MetalFX scaler
-caused **0.8–1.57 s pauses**. It is **disabled by default** until resizing can
-retain the scaler and pipelines. Refine/Final always use the requested size.
+Live initially traces at 50% of output dimensions; scenes above 128 instances
+or 32 lights start at 40%, and participating media start at one third.
+`STUDIO_LIVE_SCALE` fixes a diagnostic scale between one third and one half.
+The adaptive budget is enabled by default (`STUDIO_ADAPTIVE_LIVE=0` disables
+it for diagnosis): twelve frames above the 13 ms moving-average budget reduce
+resolution; 120 frames below 8 ms allow recovery. Refine/Final retain the
+requested output dimensions.
+
+The historical 120-edit experiment rebuilt the renderer for resolution steps
+and caused **0.8–1.57 s pauses**. P5b retains the device, pipelines, scene and
+acceleration structures while replacing image buffers. When only tracing size
+changes, MetalFX retains its guide/pack pipelines and output textures and
+recreates its input textures/scaler with background pipeline optimization.
+Resized Final images match fresh renderers exactly in the pixel regression;
+MetalFX output-size tests cover shrinking, growing and returning to a prior
+size. Full-editor timing acceptance remains separate from these regressions.
 
 The integration script also killed the live native process deliberately.
 Scene replay into WebGPU produced verified pixels in **38–52 ms** in two runs.
@@ -554,8 +568,9 @@ shared-texture transfers, changing render sizes, a native Final MP4 checked by
 ffprobe, killing the host with unsaved edits, portable recovery, another edit,
 save/quit/reopen and a fresh native render. Persistent layer/scene data is
 compared with absent `solo` normalized to `false`, matching project migration.
-The managed texture callback closes its VideoFrame and returns each host slot
-once, including failed receive/import/transfer paths; retained surface handles
+The managed receiver releases its import reference after delivery; the backend
+owns the VideoFrame until replacement or disposal. Each host slot returns once,
+including failed receive/import/transfer paths, and retained surface handles
 remain valid after the receiver port closes.
 
 Synthetic evidence goes to `/tmp/pm-shots/studio3d/laneP1/` by default
