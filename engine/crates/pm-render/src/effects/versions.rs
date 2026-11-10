@@ -103,6 +103,22 @@ pub fn builtin_snapshot() -> DefinitionSetSnapshot {
     set
 }
 impl Effects {
+    /// The saved revision of `id` when this build has the effect but cannot
+    /// resolve that revision (a newer app saved it): bypassed in the viewer,
+    /// refused by exports, the saved data untouched.
+    pub(crate) fn unavailable_revision(
+        &self,
+        id: &str,
+        version: Option<&pm_model::Node>,
+    ) -> Option<String> {
+        self.saved_key(id, version).err().map(|_| match version {
+            Some(v) if !pm_eval::node::is_nullish(Some(v)) => {
+                pm_eval::node::to_js_string(Some(v)).to_string_lossy()
+            }
+            _ => "1".to_owned(),
+        })
+    }
+
     pub(crate) fn saved_key(
         &self,
         id: &str,
@@ -218,22 +234,32 @@ pub fn for_document(document: &pm_model::Document) -> DefinitionSetSnapshot {
     set
 }
 
+/// Whether this build can draw an effect, given its type and saved version:
+/// `Some(None)` no provider, `Some(Some(revision))` no such revision.
+pub type Unavailable<'a> = dyn Fn(&str, Option<&pm_model::Node>) -> Option<Option<String>> + 'a;
+
 /// An effect type the document uses that no definition in its set provides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingEffect {
     pub effect: String,
+    /// Set when this build has the effect but not the saved revision (a
+    /// newer Powermove saved it); `None` when no provider is installed.
+    pub revision: Option<String>,
     /// Layers that use it.
     pub layers: usize,
 }
 
-/// The enabled effect types the layers drawn by `composition` (and the
-/// compositions it nests) use that `known` has no definition for, commonest
-/// first. Effects switched off, on layers switched off, in hidden groups or in
-/// compositions it never reaches don't count: they never draw.
+/// The enabled effects the layers drawn by `composition` (and the
+/// compositions it nests) use that this build cannot draw, commonest first:
+/// `unavailable(type, saved version)` is `Some(None)` when no provider is
+/// installed, `Some(Some(revision))` when this build lacks the saved
+/// revision, `None` when it draws. Effects
+/// switched off, on layers switched off, in hidden groups or in compositions
+/// it never reaches don't count: they never draw.
 pub fn missing_effects(
     document: &pm_model::Document,
     composition: &str,
-    known: &dyn Fn(&str) -> bool,
+    unavailable: &Unavailable<'_>,
 ) -> Vec<MissingEffect> {
     use pm_eval::node;
     use pm_model::{Node, NodeKind};
@@ -259,7 +285,7 @@ pub fn missing_effects(
         }
         _ => false,
     };
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut counts = std::collections::BTreeMap::<(String, Option<String>), usize>::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = vec![composition.to_owned()];
     while let Some(id) = stack.pop() {
@@ -317,8 +343,8 @@ pub fn missing_effects(
                 }
                 if let Some(ty) = node::string(node::member(Some(fx), "type")) {
                     let ty = ty.to_string_lossy();
-                    if !known(&ty) {
-                        types.insert(ty);
+                    if let Some(revision) = unavailable(&ty, node::member(Some(fx), "version")) {
+                        types.insert((ty, revision));
                     }
                 }
             }
@@ -329,7 +355,11 @@ pub fn missing_effects(
     }
     let mut out: Vec<_> = counts
         .into_iter()
-        .map(|(effect, layers)| MissingEffect { effect, layers })
+        .map(|((effect, revision), layers)| MissingEffect {
+            effect,
+            revision,
+            layers,
+        })
         .collect();
     out.sort_by_key(|m| std::cmp::Reverse(m.layers));
     out

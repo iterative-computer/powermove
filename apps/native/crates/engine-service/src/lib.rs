@@ -294,9 +294,15 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let what = match &missing.revision {
+            Some(revision) => format!(
+                "Effect saved by a newer Powermove: {} version {revision}",
+                missing.effect
+            ),
+            None => format!("Effect not installed: {}", missing.effect),
+        };
         Some(format!(
-            "Effect not installed: {}, bypassed on {}{}",
-            missing.effect,
+            "{what}, bypassed on {}{}",
             layers(missing.layers),
             more(self.missing_effects.len() - 1)
         ))
@@ -2221,6 +2227,7 @@ mod worker_tests {
     fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
         let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
             effect: effect.into(),
+            revision: None,
             layers,
         };
         let mut status = ViewerStatus {
@@ -2230,6 +2237,17 @@ mod worker_tests {
         assert_eq!(
             status.notice().as_deref(),
             Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+        );
+        let newer = ViewerStatus {
+            missing_effects: vec![pm_render::effects::versions::MissingEffect {
+                revision: Some("99".into()),
+                ..missing("blur", 1)
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            newer.notice().as_deref(),
+            Some("Effect saved by a newer Powermove: blur version 99, bypassed on 1 layer")
         );
         status.layer_failures = vec![pm_render::LayerFailure {
             composition: "c".into(),
