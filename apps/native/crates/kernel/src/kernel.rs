@@ -593,7 +593,11 @@ impl Kernel {
         }
         if workspace_write {
             let ws = self.project(id).unwrap().workspace().clone();
-            if let Some(ws_id) = ws.get("id").and_then(Value::as_str) {
+            // A workspace another window deleted is not filed (or made the
+            // last activated one) again; its window moves to the fallback.
+            if let Some(ws_id) = ws.get("id").and_then(Value::as_str)
+                && !crate::state::trashed(&self.state.settings, ws_id)
+            {
                 let tx = crate::state::StateTransaction {
                     expected_revision: None,
                     ops: vec![

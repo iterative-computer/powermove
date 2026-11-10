@@ -49,7 +49,17 @@ impl Controller {
             .map(json)
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default();
+        let trashed = state
+            .settings
+            .get("workspaceTrash")
+            .map(json)
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|w| w["id"].as_str().map(str::to_owned))
+            .collect();
         let store = Rc::new(Store {
+            trashed,
             records: seeded(&stored),
             current: setting("workspace"),
             default: setting("defaultWorkspace"),
@@ -349,6 +359,57 @@ mod tests {
             .find(|w| w["id"] == id)
             .cloned()
             .unwrap()
+    }
+
+    #[test]
+    fn a_workspace_another_project_deleted_is_never_filed_again() {
+        use pm_kernel::state::{StateOp, StateTransaction};
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        for id in ["A", "B"] {
+            open(&kernel, id);
+        }
+        // A saved workspace both projects show (as Save Workspace… writes it).
+        let mut mine = workspace::preset("edit").unwrap();
+        mine["id"] = "mine".into();
+        mine["name"] = "Mine".into();
+        mine["builtin"] = false.into();
+        replace(&kernel, "A", &mine);
+        replace(&kernel, "B", &mine);
+        // A deletes it (Write::Archive).
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::ArchiveWorkspace {
+                    id: "mine".into(),
+                    deleted_at: 1.,
+                }],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        // B, not having heard yet, edits: unchanged, then a dock resize.
+        replace(&kernel, "B", &mine);
+        let mut layout = workspace::layout(&mine);
+        layout.docks[0].size = Some(301.);
+        replace(&kernel, "B", &workspace::write(&layout, &mine));
+        let ids = |key: &str| -> Vec<String> {
+            kernel
+                .state()
+                .settings
+                .get(key)
+                .map(json)
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|w| w["id"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert!(
+            !ids("workspaces").contains(&"mine".to_owned()),
+            "resurrected"
+        );
+        assert_eq!(ids("workspaceTrash"), ["mine"]);
     }
 
     #[test]

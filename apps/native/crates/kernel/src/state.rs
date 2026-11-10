@@ -353,10 +353,21 @@ pub(crate) fn upsert_workspace(
                 None => record,
             }
         }
+        // Deleted (in the trash) while its writer still held it: never back.
+        None if trashed(settings, &id) => return Ok(()),
         None => all.push(record),
     }
     settings.insert("workspaces".into(), Value::Array(all));
     Ok(())
+}
+/// Whether workspace `id` is in `workspaceTrash` and not in `workspaces`.
+pub(crate) fn trashed(settings: &BTreeMap<String, Value>, id: &str) -> bool {
+    let has = |key: &str| {
+        workspace_list(settings, key)
+            .iter()
+            .any(|w| workspace_id(w) == Some(id))
+    };
+    has("workspaceTrash") && !has("workspaces")
 }
 /// Three-way merge of JSON: `ours` and `theirs` both started from `base`.
 /// Objects merge key by key, recursively; arrays of identifiable items (each

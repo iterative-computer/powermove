@@ -543,6 +543,8 @@ pub struct Store {
     pub project: Option<Value>,
     /// The window's project id (project-scoped records of other projects hide).
     pub project_id: Option<String>,
+    /// Ids in `workspaceTrash` (deleted, possibly by another window).
+    pub trashed: Vec<String>,
 }
 impl Store {
     pub fn local() -> Self {
@@ -574,6 +576,11 @@ impl Store {
     /// default for new projects, else the last activated one (v1's `workspace`).
     pub fn active(&self, preferred: Option<&str>) -> Value {
         if let Some(p) = self.project.as_ref().filter(|p| usable(p)) {
+            if self.deleted(p) {
+                // Deleted elsewhere while this project used it: v1's
+                // `WS.remove` moves to the fallback.
+                return self.fallback();
+            }
             return p.clone();
         }
         let default = self
@@ -585,6 +592,20 @@ impl Store {
             .flatten()
             .find_map(|id| self.get(id))
             .or_else(|| self.get(FALLBACK))
+            .cloned()
+            .or_else(|| preset(FALLBACK))
+            .unwrap_or_default()
+    }
+    /// `record` was deleted (it's in the trash, not among the records).
+    pub fn deleted(&self, record: &Value) -> bool {
+        record_id(record).is_some_and(|id| {
+            self.trashed.iter().any(|t| t == id)
+                && !self.records.iter().any(|r| record_id(r) == Some(id))
+        })
+    }
+    /// The fallback built-in as stored, else as shipped.
+    pub fn fallback(&self) -> Value {
+        self.get(FALLBACK)
             .cloned()
             .or_else(|| preset(FALLBACK))
             .unwrap_or_default()
@@ -608,7 +629,10 @@ impl Store {
                 }
             }
             Write::Upsert(record) => upsert(&mut self.records, record),
-            Write::Archive(id) => self.records.retain(|r| record_id(r) != Some(id)),
+            Write::Archive(id) => {
+                self.records.retain(|r| record_id(r) != Some(id));
+                self.trashed.push(id.clone());
+            }
             Write::Default(id) => self.default = Some(id.clone()),
         }
     }
@@ -632,6 +656,23 @@ pub enum Write {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_on_a_deleted_workspace_shows_the_fallback() {
+        let mut mine = preset("edit").unwrap();
+        mine["id"] = "mine".into();
+        mine["builtin"] = false.into();
+        let mut s = Store {
+            records: seeded(std::slice::from_ref(&mine)),
+            project: Some(mine.clone()),
+            project_id: Some("p".into()),
+            ..Default::default()
+        };
+        assert_eq!(record_id(&s.active(None)), Some("mine"));
+        s.apply(&Write::Archive("mine".into()));
+        assert!(s.deleted(&mine));
+        assert_eq!(record_id(&s.active(Some("mine"))), Some(FALLBACK));
+    }
 
     #[test]
     fn presets_round_trip_through_layout_and_write() {
