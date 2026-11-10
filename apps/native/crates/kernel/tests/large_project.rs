@@ -495,3 +495,51 @@ fn an_edited_dictionary_history_is_not_archived() {
     let reopened = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
     assert_eq!(reopened.history.unwrap().len(), 2, "both edits are kept");
 }
+
+/// A large project's history holds this kernel's own operations (an insert
+/// into a large layer list): reopened, edited and saved, it is not archived.
+#[test]
+fn an_edited_operation_history_is_not_archived() {
+    let dir = TempDir::new("operation-history");
+    let source = dir.path("source.pmv");
+    let mut untitled = DocumentStore::new_untitled(project());
+    common::save_as(&mut untitled, &source).unwrap();
+    drop(untitled);
+    let document = |path: &std::path::Path| {
+        let file = std::fs::File::open(path).unwrap();
+        read_container(
+            &file,
+            ReadOptions {
+                verify_media: false,
+            },
+        )
+        .unwrap()
+        .document
+    };
+    let mut previous = source;
+    for round in 0..2 {
+        let mut kernel = Kernel::new(KernelConfig::default());
+        let session = open_file(&mut kernel, &previous);
+        call(
+            &mut kernel,
+            commands("Add", vec![add_layer(&format!("r{round}"))]),
+        );
+        let path = dir.path(&format!("round-{round}.pmv"));
+        let plan = kernel
+            .prepare_session_save(session, Some(path.clone()), false)
+            .unwrap();
+        kernel.finish_session_save(plan.run()).unwrap();
+        drop(kernel);
+        let saved = document(&path);
+        let history = to_canonical_string(saved.get("history").unwrap());
+        assert!(
+            history.contains(r#""op":"insert""#),
+            "round {round} keeps operations"
+        );
+        assert!(
+            saved.get("nativeHistoryArchive").is_none(),
+            "round {round} archived the kernel's own history"
+        );
+        previous = path;
+    }
+}

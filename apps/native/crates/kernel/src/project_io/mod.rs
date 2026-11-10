@@ -755,9 +755,19 @@ pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
                             .get(side)
                             .and_then(Value::as_array)
                             .is_none_or(|patches| {
-                                patches
-                                    .iter()
-                                    .any(|patch| unknown(patch, &["path", "exists", "value"]))
+                                patches.iter().any(|patch| {
+                                    // A leaf patch, or one of this
+                                    // kernel's operations (`Op::to_value`).
+                                    let known: &[&str] =
+                                        match patch.get("op").and_then(Value::as_str) {
+                                            None => &["path", "exists", "value"],
+                                            Some("order") => &["op", "path", "ids"],
+                                            Some("insert") => &["op", "path", "index", "value"],
+                                            Some("delete") => &["op", "path", "id"],
+                                            Some(_) => return true,
+                                        };
+                                    unknown(patch, known)
+                                })
                             })
                     })
             })
