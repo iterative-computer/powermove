@@ -135,6 +135,13 @@ pub enum TransportCommand {
     AudioScrub {
         enabled: bool,
     },
+    /// A skim grain: a short stretch of the mix at `time`, in the direction
+    /// and at the speed of `rate` (a J/K/L rate), while paused; whether or
+    /// not audio scrub is on. The transport position is left where it was.
+    Grain {
+        time: Ticks,
+        rate: PlaybackRate,
+    },
 }
 
 /// The mix's monitor and its data for the renderer's audio panels (plan
@@ -328,6 +335,9 @@ impl Validate for TransportCommand {
                 post_roll,
             } => ensure(pre_roll.get() >= 0 && post_roll.get() >= 0, C, || {
                 "rolls are non-negative".into()
+            }),
+            TransportCommand::Grain { rate, .. } => ensure(JKL_RATES.contains(rate), C, || {
+                "a grain plays at a J/K/L rate".into()
             }),
             _ => Ok(()),
         }
