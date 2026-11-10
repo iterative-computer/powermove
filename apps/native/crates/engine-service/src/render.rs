@@ -832,6 +832,12 @@ impl Engine {
             .unwrap_or_default()
     }
 }
+/// Delays every completion handler (tests: Metal's completion queue running
+/// late under load).
+#[cfg(test)]
+pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl Submission {
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();
@@ -896,6 +902,10 @@ impl Submission {
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                std::thread::sleep(std::time::Duration::from_millis(
+                    LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),
+                ));
                 let mut t = t.lock().unwrap();
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);

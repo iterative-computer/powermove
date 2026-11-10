@@ -1257,10 +1257,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
         while i < flights.len() {
+            // Retired once its completion handler has recorded the outcome:
+            // Metal reports the status before that handler runs on its own
+            // queue, and a frame read in between looked failed (gpu_ok still
+            // false) and was never drawn again.
             if !matches!(
                 flights[i].submission.command.status(),
                 metal::MTLCommandBufferStatus::Completed | metal::MTLCommandBufferStatus::Error
-            ) {
+            ) || flights[i].submission.trace.lock().unwrap().completed == 0.
+            {
                 i += 1;
                 continue;
             }
@@ -2358,6 +2363,39 @@ mod worker_tests {
             new.as_ptr(),
             "the layer follows the rebuild"
         );
+    }
+
+    /// Metal reports a command buffer complete before its completion handler
+    /// runs; a frame retired in between must not read as failed. Under load
+    /// the dragged frame then never showed (the bench's "scrub stuck").
+    #[test]
+    fn a_late_completion_handler_never_loses_a_dragged_frame() {
+        let service = EngineService::start(pm_gpu::Gpu::new("late-completion-test").unwrap())
+            .unwrap();
+        let v = shapes_viewer(&service, None);
+        crate::render::LATE_COMPLETION_MS.store(30, std::sync::atomic::Ordering::Relaxed);
+        for (i, at) in (1..=8).map(|i| (i, Ticks::new(i * pm_protocol::common::TICKS_PER_SECOND / 6).unwrap())) {
+            v.scrub(at).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                // Display ticks keep the worker polling, as a display link and
+                // the bench do: it looks at its flights while the handler is late.
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status.frame.as_ref().is_some_and(|f| {
+                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "drag step {i} never showed: {status:?}"
+                );
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+        crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
     }
 
     /// A slow project's drag draws reduced; the stopped frame is drawn again
