@@ -77,6 +77,8 @@ pub struct Controller {
     pub workspace_store: crate::workspaces::Cache,
     /// The Workspaces panel's last action, for its status line.
     pub workspaces_status: String,
+    /// Cloud media offered and downloading in this window.
+    pub cloud: crate::cloud_media::State,
     pub captions: crate::captions_panel::State,
     pub shader: crate::shader_panel::State,
     pub takes: crate::takes_panel::State,
@@ -446,6 +448,7 @@ impl Controller {
             mixer: Default::default(),
             workspace_store: Default::default(),
             workspaces_status: String::new(),
+            cloud: Default::default(),
             captions: Default::default(),
             shader: Default::default(),
             takes: Default::default(),

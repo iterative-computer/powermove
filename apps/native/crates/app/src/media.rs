@@ -25,6 +25,8 @@ pub struct Resolution {
     pub catalog: MediaCatalog,
     /// Items left offline; one bad item never hides the rest of the project.
     pub failed: Vec<String>,
+    /// Linked originals still in the cloud: offline until downloaded.
+    pub cloud: Vec<crate::cloud_media::Cloud>,
 }
 
 pub fn cache_root(profile: &Path) -> PathBuf {
@@ -195,7 +197,14 @@ pub fn for_session(
     path: Option<&Path>,
     cache: &Path,
 ) -> Result<Resolution> {
-    for_session_within(snapshot, media, path, cache, CACHE_BUDGET)
+    for_session_within(
+        snapshot,
+        media,
+        path,
+        cache,
+        CACHE_BUDGET,
+        &*crate::cloud_media::files(),
+    )
 }
 
 fn for_session_within(
@@ -204,12 +213,14 @@ fn for_session_within(
     path: Option<&Path>,
     cache: &Path,
     budget: u64,
+    files: &dyn crate::cloud_media::CloudFiles,
 ) -> Result<Resolution> {
     let _writer = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let objects = cache.join(OBJECTS);
     fs::create_dir_all(&objects)?;
     let mut catalog = MediaCatalog::default();
     let mut failed = vec![];
+    let mut cloud = vec![];
     let root = snapshot.root();
     let versions = root.and_then(|r| r.get("nativeMediaVersions"));
     let originals = versions.and_then(|m| m.get("originals"));
@@ -220,6 +231,18 @@ fn for_session_within(
         // Immutable versions stay in PMV/history but are not renderer aliases.
         if originals.and_then(|m| m.get(&id)).is_some() && assets.and_then(|a| a.get(&id)).is_none()
         {
+            continue;
+        }
+        // A linked clip still in the cloud waits for the person (cloud_media).
+        if let MediaSource::File { path, .. } = &item.source
+            && path.extension().is_some_and(|e| e != "media")
+            && let Some(provider) = files.provider(path)
+        {
+            cloud.push(crate::cloud_media::Cloud {
+                id,
+                path: path.clone(),
+                provider,
+            });
             continue;
         }
         let resolved = match resolve(item, assets.and_then(|a| a.get(&id)), &objects) {
@@ -262,8 +285,19 @@ fn for_session_within(
                         .unwrap_or(Path::new("."))
                         .join(p)
                 };
-                if p.is_file() {
-                    catalog.originals.insert(id, p);
+                if !p.is_file() {
+                    continue;
+                }
+                // Reading a cloud placeholder would download it unasked.
+                match files.provider(&p) {
+                    Some(provider) => cloud.push(crate::cloud_media::Cloud {
+                        id,
+                        path: p,
+                        provider,
+                    }),
+                    None => {
+                        catalog.originals.insert(id, p);
+                    }
                 }
             }
         }
@@ -275,7 +309,11 @@ fn for_session_within(
         .map(PathBuf::as_path)
         .collect();
     prune(&objects, &pinned, budget)?;
-    Ok(Resolution { catalog, failed })
+    Ok(Resolution {
+        catalog,
+        failed,
+        cloud,
+    })
 }
 
 /// Remove what earlier builds left: one full copy of every project's media per
@@ -443,7 +481,15 @@ mod tests {
         for_session(&snapshot(), &old, None, &cache).unwrap();
         assert_eq!(objects(&cache).len(), 1);
         let current = table(&[("a", b"current project")]);
-        let resolved = for_session_within(&snapshot(), &current, None, &cache, 0).unwrap();
+        let resolved = for_session_within(
+            &snapshot(),
+            &current,
+            None,
+            &cache,
+            0,
+            &crate::cloud_media::Fixture::new(&[], &[], 0),
+        )
+        .unwrap();
         assert_eq!(objects(&cache).len(), 1, "the unused object is evicted");
         assert_eq!(objects(&cache)[0], resolved.catalog.originals["a"]);
     }
@@ -549,5 +595,46 @@ mod attachment_tests {
                 .iter()
                 .all(|r| r["id"].is_string() && r["size"].is_u64())
         );
+    }
+
+    #[test]
+    fn a_cloud_only_original_stays_offline_and_named_until_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, remote) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        std::fs::write(&local, b"a").unwrap();
+        std::fs::write(&remote, b"b").unwrap();
+        let project = pm_model::json::parse(&format!(
+            r##"{{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{{"a":{{"name":"a.png","kind":"image","sourcePath":{a:?}}},"b":{{"name":"b.png","kind":"image","sourcePath":{b:?}}}}},"comps":{{}},"layers":[]}}"##,
+            a = local.to_string_lossy(),
+            b = remote.to_string_lossy(),
+        ))
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let cache = dir.path().join("cache");
+        let cloud = crate::cloud_media::Fixture::new(&[remote.clone()], &[], 0);
+        let resolve = |files: &dyn crate::cloud_media::CloudFiles| {
+            crate::media::for_session_within(
+                &snapshot,
+                &pm_kernel::project_io::MediaTable::default(),
+                None,
+                &cache,
+                0,
+                files,
+            )
+            .unwrap()
+        };
+        let first = resolve(&cloud);
+        assert!(first.catalog.originals.contains_key("a"));
+        assert!(!first.catalog.originals.contains_key("b"));
+        assert_eq!(first.cloud.len(), 1);
+        assert_eq!(
+            (first.cloud[0].id.as_str(), first.cloud[0].provider.as_str()),
+            ("b", "iCloud")
+        );
+        use crate::cloud_media::CloudFiles;
+        cloud.download(&remote, &|_, _| {}).unwrap();
+        let after = resolve(&cloud);
+        assert!(after.catalog.originals.contains_key("b"));
+        assert!(after.cloud.is_empty());
     }
 }

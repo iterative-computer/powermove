@@ -4,6 +4,7 @@ mod builtins;
 #[cfg(test)]
 mod builtins_tests;
 mod cloud;
+mod cloud_media;
 #[cfg(test)]
 mod cloud_tests;
 mod colour;
@@ -391,6 +392,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--dev-store-key" => Some("PM_DEV_STORE_KEY"),
         // A scratch home whose agent apps a review registers (agent_clients).
         "--dev-agent-home" => Some("PM_DEV_AGENT_HOME"),
+        // A stand-in cloud for files on demand (cloud_media::Fixture).
+        "--cloud-fixture" => Some("PM_CLOUD_FIXTURE"),
         _ => None,
     }
 }
@@ -428,6 +431,7 @@ mod review_override_tests {
             "--dev-store-origin",
             "--dev-store-key",
             "--dev-agent-home",
+            "--cloud-fixture",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
