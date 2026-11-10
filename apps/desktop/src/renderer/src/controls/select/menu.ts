@@ -138,7 +138,7 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   let picking = false;
   function pick(i: number): void {
     const option = req.options[i];
-    if (!option || option.disabled || picking) return;
+    if (closed || !option || option.disabled || picking) return;
     picking = true;
     setActive(i);
     blink(items[i]!, () => { close(); req.onPick(option.value); });
@@ -195,6 +195,10 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     window.removeEventListener('blur', close);
     document.removeEventListener('scroll', onScroll, true);
     el.removeEventListener('keydown', onKey);
+    // The fade is visual only. Retired options must leave focus, pointer and
+    // accessibility navigation before the next listbox opens.
+    el.inert = true;
+    el.setAttribute('aria-hidden', 'true');
     req.onClose?.();
     let finished = false;
     const finish = () => { if (!finished) { finished = true; el.remove(); } };
