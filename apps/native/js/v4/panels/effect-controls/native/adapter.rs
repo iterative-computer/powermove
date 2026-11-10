@@ -381,12 +381,18 @@ fn replaced_document_rejects_old_intent_and_rebuilds_same_revision_rows() {
     f.select("a");
     let after = f.project();
     assert_ne!(after.get("documentId"), before.get("documentId"));
+    // The label is a display field (words since 2387e2f39); identity stays the raw key.
+    let parameter = rows(&after)[1].get("parameter").unwrap();
     assert_eq!(
-        rows(&after)[1]
-            .get("parameter")
-            .and_then(|p| p.get("label"))
-            .and_then(Value::as_str),
-        Some("other")
+        parameter.get("label").and_then(Value::as_str),
+        Some("Other")
+    );
+    let address = parse(parameter.get("id").and_then(Value::as_str).unwrap()).unwrap();
+    assert!(
+        address
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|p| p.ends_with(".other"))
     );
     assert!(
         f.panel
