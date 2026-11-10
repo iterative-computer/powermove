@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
 import { inspectorService, timelineService } from './services';
 

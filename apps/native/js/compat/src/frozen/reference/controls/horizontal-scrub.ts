@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /** Group a horizontal trackpad gesture into one edit, leaving vertical scrolling alone. */
 import { bridge } from '../kernel/bridge';
 export function horizontalScrub(node: HTMLElement, options: {

@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import type { PMRegistry } from '../registry';
 
 export function layerPropertyChannels(PM: PMRegistry, layer: any): any[] {

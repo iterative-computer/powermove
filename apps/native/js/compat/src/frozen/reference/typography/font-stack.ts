@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* CSS font stacks for previewing a family by name.
 
    Chromium cannot resolve Apple's system families ("SF Pro Display",

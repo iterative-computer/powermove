@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 // Replace a native <select> with a button trigger and our own listbox, while
 // the <select> stays in the DOM as the source of truth: its options, value,
 // disabled state and change events keep working for the code that owns it.

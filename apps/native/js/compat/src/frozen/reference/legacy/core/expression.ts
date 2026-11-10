@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /**
  * Bounded project-expression parser and interpreter.
  *

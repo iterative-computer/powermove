@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import * as THREE from 'three';
 import { world3D,parent3D,depthOrderedLayers } from '../../legacy/core/space-3d';
 import { SceneRuntime } from './runtime';

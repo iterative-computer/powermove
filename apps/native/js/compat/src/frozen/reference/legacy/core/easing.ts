@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Ported from js/core/easing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 

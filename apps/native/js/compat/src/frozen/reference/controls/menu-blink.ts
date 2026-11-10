@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 // Kept as the shared selection boundary for custom menus. Commands commit in
 // the input event; a visual confirmation must never delay the chosen action.
 export const BLINK_MS = 0;

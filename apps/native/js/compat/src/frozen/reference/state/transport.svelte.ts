@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Transport + tool state — scalars only, safe as deep $state.
    `time` is written once per frame during playback; only leaf readouts and
    controls may read it (structural deriveds key on doc.tick instead). */

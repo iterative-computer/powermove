@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { createPathTiming, type PathTiming } from '../../core/anim/motion-path';
 import { structuredProperties } from './vector-paths';
 import { sceneProperties } from '../../core/scene3d/schema';

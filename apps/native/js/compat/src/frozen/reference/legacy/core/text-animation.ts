@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Text animators. Each animator selects characters, words or lines and pushes
    them away from their resting pose by its property values, scaled by a
    per-unit weight in 0…1 (Back and Spring easing briefly overshoot it).

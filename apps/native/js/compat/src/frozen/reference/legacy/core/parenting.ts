@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { is3DLayer, world3D, parent3D, poseValues3D, CHANNELS_3D,inverse3D } from './space-3d';
 import {layer3DRole} from '../../core/scene3d/layers';
 export function aimProperties3D(layer:any):Array<{key:string;prop:any}> {

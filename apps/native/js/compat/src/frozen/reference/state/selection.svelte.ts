@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Selection state — small, id-only, safe as deep $state. */
 import type { Selection } from '../runtime/ports';
 
