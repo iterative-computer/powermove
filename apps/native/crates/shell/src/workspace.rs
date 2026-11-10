@@ -30,7 +30,7 @@ const RETIRED: [&str; 3] = ["chat", "layers", "library"];
 
 fn panel(id: &str, size: Option<f32>) -> Value {
     match size {
-        Some(size) => json!({"id": id, "size": size}),
+        Some(size) => json!({"id": id, "size": rounded(size)}),
         None => json!({"id": id, "flex": true}),
     }
 }
@@ -40,7 +40,7 @@ fn tab(id: &str) -> Value {
 fn dock(id: &str, size: Option<f32>, panels: Vec<Value>) -> Value {
     let mut d = json!({"id": id, "panels": panels});
     match size {
-        Some(size) => d["size"] = size.into(),
+        Some(size) => d["size"] = rounded(size),
         None => d["flex"] = true.into(),
     }
     d
@@ -361,8 +361,15 @@ pub fn layout(record: &Value) -> Layout {
     }
 }
 
+/// A size as the kernel stores it: tenths of a point, a whole number as an
+/// integer, so a record reads back exactly as it was written.
 fn rounded(n: f32) -> Value {
-    json!((f64::from(n) * 10.).round() / 10.)
+    let n = (f64::from(n) * 10.).round() / 10.;
+    if n.fract() == 0. && n.abs() < 1e15 {
+        json!(n as i64)
+    } else {
+        json!(n)
+    }
 }
 /// `record` with its docks replaced by `layout`. Each panel and dock keeps its
 /// own extra fields (a title, a `min`, extension metadata); only placement
@@ -463,6 +470,35 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
     Value::Object(out)
 }
 
+/// A Workspace Definition as typed (S100): JSON for an object whose
+/// `layout.docks`, when present, is a list of docks with panel lists. The
+/// message says what to fix; nothing is applied until this passes.
+pub fn check_definition(text: &str) -> Result<Value, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|e| format!("This isn’t valid JSON. {e}"))?;
+    let bad = |why: &str| Err(format!("This workspace can’t be used. {why}"));
+    if !value.is_object() {
+        return bad("A workspace is an object in braces.");
+    }
+    if let Some(layout) = value.get("layout") {
+        let Some(docks) = layout.get("docks") else {
+            return bad("Its layout needs a list of docks.");
+        };
+        let Some(docks) = docks.as_array() else {
+            return bad("Its docks must be a list.");
+        };
+        if docks
+            .iter()
+            .any(|d| !d.is_object() || !d.get("panels").is_some_and(Value::is_array))
+        {
+            return bad("Each dock needs a list of panels.");
+        }
+    }
+    if value.get("custom").is_some_and(|c| !c.is_array()) {
+        return bad("Its generated panels (custom) must be a list.");
+    }
+    Ok(value)
+}
 /// The generated panels `record` defines (its `custom` sections): id, title.
 pub fn generated(record: &Value) -> Vec<(String, String)> {
     record
@@ -655,6 +691,19 @@ mod tests {
         let l = layout(&json!(null));
         assert_eq!(l.open_panels(), ["viewer"]);
         l.validate().unwrap();
+    }
+
+    #[test]
+    fn written_sizes_read_back_exactly_after_the_kernel_round_trip() {
+        let mut l = layout(&preset("edit").unwrap());
+        l.docks[0].size = Some(312.);
+        l.docks[3].size = Some(287.25);
+        let w = write(&l, &preset("edit").unwrap());
+        // The kernel writes canonical JSON; integral numbers come back as integers.
+        let back: Value = serde_json::from_str(&w.to_string().replace(".0,", ",")).unwrap();
+        assert_eq!(back, w);
+        assert_eq!(w["layout"]["docks"][0]["size"], json!(312));
+        assert_eq!(w["layout"]["docks"][3]["size"], json!(287.3));
     }
 
     #[test]

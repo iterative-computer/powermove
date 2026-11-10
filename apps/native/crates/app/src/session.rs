@@ -75,6 +75,8 @@ pub struct Controller {
     pub mixer: crate::mixer_panel::State,
     /// The workspace store this window last built (`crate::workspaces`).
     pub workspace_store: crate::workspaces::Cache,
+    /// The Workspaces panel's last action, for its status line.
+    pub workspaces_status: String,
     pub captions: crate::captions_panel::State,
     pub shader: crate::shader_panel::State,
     pub takes: crate::takes_panel::State,
@@ -184,6 +186,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -195,6 +198,10 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
+    }
+    fn note(&self, text: &str, cx: &mut App) {
+        let text = text.to_owned();
+        self.0.update(cx, |v, cx| v.note(text, cx));
     }
     fn write_workspace(&self, write: pm_shell::workspace::Write, cx: &mut App) {
         self.0.read(cx).write_workspace(write);
@@ -437,6 +444,7 @@ impl Controller {
             perf: Default::default(),
             mixer: Default::default(),
             workspace_store: Default::default(),
+            workspaces_status: String::new(),
             captions: Default::default(),
             shader: Default::default(),
             takes: Default::default(),

@@ -68,6 +68,8 @@ pub struct Editor {
     preferred: Option<String>,
     /// Writes for the kernel, sent on the next frame.
     outbox: Vec<workspace::Write>,
+    /// The status last passed to the app's status line.
+    noted: String,
     project: String,
     split_focus: Option<Divider>,
     /// Session window id; 0 until the window is registered (tests, smoke).
@@ -118,6 +120,7 @@ impl Editor {
             seen: None,
             preferred: None,
             outbox: vec![],
+            noted: String::new(),
             project,
             split_focus: None,
             window_id: 0,
@@ -246,6 +249,12 @@ impl Editor {
         let Some(integration) = self.integration.clone() else {
             return;
         };
+        if self.status != self.noted {
+            self.noted = self.status.clone();
+            if !self.status.is_empty() {
+                integration.note(&self.status, cx);
+            }
+        }
         for write in std::mem::take(&mut self.outbox) {
             integration.write_workspace(write, cx);
         }
@@ -269,6 +278,40 @@ impl Editor {
             self.show_record(target);
             self.persist_session();
         }
+    }
+    /// Applies a Workspace Definition (S100): `args` are the text and the
+    /// definition the sheet opened with. A workspace changed meanwhile is
+    /// left alone; a built-in is never overwritten, it is saved as a copy.
+    fn define_workspace(&mut self, args: &[serde_json::Value]) {
+        let text = args.first().and_then(|v| v.as_str()).unwrap_or_default();
+        let opened = args.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+        if serde_json::from_str::<serde_json::Value>(opened)
+            .ok()
+            .as_ref()
+            != Some(&self.record)
+        {
+            self.status = "This workspace changed while you were editing. Edit it again to see the latest version.".into();
+            return;
+        }
+        let mut value = match workspace::check_definition(text) {
+            Ok(v) => v,
+            Err(why) => {
+                self.status = why;
+                return;
+            }
+        };
+        if workspace::is_builtin(&self.record) {
+            let name = workspace::record_name(&self.record);
+            if workspace::record_name(&value) == name {
+                value["name"] = format!("{name} Copy").into();
+            }
+            value["id"] = workspace::new_id().into();
+            value["builtin"] = false.into();
+        } else {
+            value["id"] = self.layout.workspace.clone().into();
+        }
+        self.activate_record(value);
+        self.status = "Workspace updated".into();
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
@@ -542,6 +585,13 @@ impl Editor {
                 self.activate_record(copy);
                 self.status = format!("Saved workspace “{name}”");
             }),
+            ("layout", "edit") => {
+                if let Some(h) = &self.host {
+                    let json = serde_json::to_string_pretty(&self.record).unwrap_or_default();
+                    h.borrow().edit_workspace_definition(&json);
+                }
+                Ok(())
+            }
             ("layout", "delete") => match self.workspaces.get(rest).cloned() {
                 Some(r) if workspace::is_builtin(&r) => {
                     Err(anyhow::anyhow!("Built-in workspaces can’t be deleted."))
@@ -770,6 +820,7 @@ impl Editor {
                     }
                 }
             }
+            "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
             "newTab" => crate::open_editor_tab(cx, self.window_id),

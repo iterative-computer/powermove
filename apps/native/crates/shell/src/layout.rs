@@ -1040,6 +1040,7 @@ fn builtin_title(id: &str) -> &str {
         "scopes" => "Scopes",
         "mixer" => "Mixer",
         "captions" => "Captions",
+        "workspaces" => "Workspaces",
         _ => id,
     }
 }
@@ -1054,7 +1055,7 @@ pub fn stacks(id: &str) -> bool {
     id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 14] = [
+pub const PANELS: [&str; 15] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1069,6 +1070,7 @@ pub const PANELS: [&str; 14] = [
     "scopes",
     "mixer",
     "captions",
+    "workspaces",
 ];
 /// Window edges that can receive a docked panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
