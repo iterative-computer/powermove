@@ -408,6 +408,14 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
     }
     out
 }
+/// A 3D object, light or camera layer: the layers `validate_layer` checks.
+pub(crate) fn is_scene_layer(layer: &pm_model::Node) -> bool {
+    layer
+        .get("d")
+        .and_then(|d| d.get("definition"))
+        .and_then(crate::model::str_of)
+        .is_some_and(|d| matches!(d, schema::OBJECT | schema::LIGHT | schema::CAMERA))
+}
 pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
     let definition = layer
         .get("d")

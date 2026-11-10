@@ -2411,8 +2411,12 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
         };
         let mut ids = HashSet::with_capacity(items.len());
         for layer in items.iter() {
-            crate::commands::scene3d::validate_layer(&layer.to_value())
-                .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            // Only 3D layers have a schema to check; reading the rest out of
+            // the tree made every Undo on a long project convert all of it.
+            if crate::commands::scene3d::is_scene_layer(layer) {
+                crate::commands::scene3d::validate_layer(&layer.to_value())
+                    .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            }
             let id = layer.get("id").and_then(model::str_of);
             match id {
                 Some(id) if !id.is_empty() => {
