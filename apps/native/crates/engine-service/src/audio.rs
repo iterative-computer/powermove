@@ -249,6 +249,10 @@ impl SkimGrains {
     fn started(&mut self, at: i64, now: Instant) {
         self.last = Some((at, now));
     }
+    /// The skimmer's position is dropped: nothing is due until it moves.
+    fn decline(&mut self) {
+        self.target = None;
+    }
 }
 
 /// What the audio thread reports (the engine's status).
@@ -436,35 +440,7 @@ struct Control {
 impl Control {
     fn run(mut self) {
         loop {
-            // Feed warmed devices while paused too: their mixers decode and
-            // pre-roll at the playhead before the first Play arrives.
-            let feeding = self.playback.is_some();
-            let timeout = match (feeding, self.dirty, self.last_project) {
-                (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
-                (true, true, None) => Duration::ZERO,
-                _ if self.playback.is_none() && self.warm_due.is_some() => {
-                    self.warm_due.map_or(Duration::ZERO, |due| {
-                        due.saturating_duration_since(Instant::now())
-                    })
-                }
-                // Paused preparation and device health continue changing
-                // without controls or levels; keep diagnostics current too.
-                _ if feeding => LEVELS_INTERVAL,
-                _ => Duration::from_secs(3600),
-            };
-            // Levels while the device plays (or is about to).
-            let watching = self.watch_until.is_some_and(|w| Instant::now() < w);
-            let timeout = if self.running() || self.levels_running || watching {
-                timeout.min(self.last_levels.map_or(Duration::ZERO, |l| {
-                    LEVELS_INTERVAL.saturating_sub(l.elapsed())
-                }))
-            } else {
-                timeout
-            };
-            // A moved skimmer waits for the grain playing to end.
-            let timeout = self.skim.next_due().map_or(timeout, |due| {
-                timeout.min(due.saturating_duration_since(Instant::now()))
-            });
+            let timeout = self.wait();
             let first = match self.rx.recv_timeout(timeout) {
                 Ok(ctl) => Some(ctl),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -534,6 +510,40 @@ impl Control {
         }
     }
 
+    /// How long the control thread may sleep before it has work: the next
+    /// project push, warm-up check, levels message or skim grain.
+    fn wait(&self) -> Duration {
+        // Feed warmed devices while paused too: their mixers decode and
+        // pre-roll at the playhead before the first Play arrives.
+        let feeding = self.playback.is_some();
+        let timeout = match (feeding, self.dirty, self.last_project) {
+            (true, true, Some(last)) => PROJECT_INTERVAL.saturating_sub(last.elapsed()),
+            (true, true, None) => Duration::ZERO,
+            _ if self.playback.is_none() && self.warm_due.is_some() => {
+                self.warm_due.map_or(Duration::ZERO, |due| {
+                    due.saturating_duration_since(Instant::now())
+                })
+            }
+            // Paused preparation and device health continue changing
+            // without controls or levels; keep diagnostics current too.
+            _ if feeding => LEVELS_INTERVAL,
+            _ => Duration::from_secs(3600),
+        };
+        // Levels while the device plays (or is about to).
+        let watching = self.watch_until.is_some_and(|w| Instant::now() < w);
+        let timeout = if self.running() || self.levels_running || watching {
+            timeout.min(self.last_levels.map_or(Duration::ZERO, |l| {
+                LEVELS_INTERVAL.saturating_sub(l.elapsed())
+            }))
+        } else {
+            timeout
+        };
+        // A moved skimmer waits for the grain playing to end.
+        self.skim.next_due().map_or(timeout, |due| {
+            timeout.min(due.saturating_duration_since(Instant::now()))
+        })
+    }
+
     /// Starts the next skim grain once the one playing ends, at the latest
     /// skimmer position: grains follow the pointer back to back, each faded
     /// in and out (no clicks), and none starts while the pointer rests.
@@ -542,6 +552,9 @@ impl Control {
             return;
         };
         if self.transport_running || (self.playback.is_none() && !self.open()) {
+            // Playing (or no device): no grain, and no deadline left behind
+            // that would keep the control thread from sleeping.
+            self.skim.decline();
             return;
         }
         if self.dirty {
@@ -1559,6 +1572,81 @@ mod tests {
 #[cfg(test)]
 mod skim_tests {
     use super::*;
+
+    fn control() -> (Control, Arc<SourceCache>) {
+        let cache = SourceCache::new(1 << 20, 0);
+        let (playback, _side) = Playback::start_headless(
+            MixFormat::stereo(48_000),
+            cache.clone(),
+            PlaybackConfig::default(),
+            48_000,
+            2,
+            0,
+        )
+        .unwrap();
+        let (_tx, rx) = channel();
+        let control = Control {
+            rx,
+            clock: Arc::new(Mutex::new(None)),
+            status: Arc::new(Mutex::new(AudioStatus::default())),
+            doc: Arc::new(pm_model::Document::new(None, 1)),
+            composition: "C".into(),
+            media: MediaMap::default(),
+            playback: Some(playback),
+            sim: None,
+            plays: 0,
+            pending_commands: VecDeque::new(),
+            dirty: false,
+            broken: false,
+            loop_range: None,
+            last_project: None,
+            audio_scrub: false,
+            skim: SkimGrains::default(),
+            solo: None,
+            levels: Box::new(|_| {}),
+            last_levels: None,
+            levels_running: false,
+            watch_until: None,
+            warm: false,
+            warm_due: None,
+            paused_at: 0,
+            transport_running: false,
+            open_device: default_device_opener(),
+        };
+        (control, cache)
+    }
+
+    /// Skim, start playback, move the pointer: the grain is declined and
+    /// nothing stays due, so the control thread sleeps instead of polling
+    /// with a zero timeout (review: a busy spin).
+    #[test]
+    fn a_declined_grain_leaves_nothing_due_and_the_control_thread_sleeps() {
+        let (mut c, cache) = control();
+        let skim = |c: &mut Control, at| {
+            c.apply(
+                AudioCtl::Skim {
+                    at: Some(at),
+                    rate: PlaybackRate::NORMAL,
+                    grain_ms: 20,
+                },
+                None,
+            );
+        };
+        c.apply(AudioCtl::SkimAudio(true), None);
+        skim(&mut c, 48_000);
+        c.skim_grain();
+        assert!(c.skim.last.is_some(), "a grain started");
+        c.transport_running = true;
+        skim(&mut c, 96_000);
+        std::thread::sleep(Duration::from_millis(30));
+        c.skim_grain();
+        // The headless device makes no levels; past the grain's levels
+        // watch only the skim could keep the thread awake.
+        c.watch_until = None;
+        assert_eq!(c.skim.next_due(), None);
+        assert!(c.wait() >= Duration::from_millis(1), "{:?}", c.wait());
+        cache.shutdown();
+    }
 
     /// Grains follow the skimmer back to back: one at a time, the next at
     /// the latest position once the playing one ends, none while it rests.
