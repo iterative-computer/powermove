@@ -4002,7 +4002,8 @@ function gutterDown(e: any, x: any, y: any) {
       const roots = api.project.get().layers.filter((layer: any) => selected.includes(layer.id) && !api.groups.ancestors(layer).some((g: any) => selected.includes(g.id)));
       api.edit.mutate('Move layers', () => {
         const changing = roots.filter((layer: any) => (layer.group || null) !== drop.group);
-        if (changing.length) api.groups.moveToGroup(changing.map((layer: any) => layer.id), drop.group);
+        // A group the drag empties stays until the drop has its place: it may be the drop target.
+        const emptied = changing.length ? api.groups.moveToGroup(changing.map((layer: any) => layer.id), drop.group, { keepEmptyGroups: true })?.emptied ?? [] : [];
         const block = api.project.get().layers.filter((layer: any) => moving.includes(layer.id));
         const remaining = api.project.get().layers.filter((layer: any) => !moving.includes(layer.id));
         let index = remaining.findIndex((layer: any) => layer.id === drop.target);
@@ -4011,7 +4012,7 @@ function gutterDown(e: any, x: any, y: any) {
           if (drop.mode === 'after') while (index < remaining.length && remaining[index] && api.groups.ancestors(remaining[index]!).some((g: any) => g.id === drop.target)) index++;
         }
         remaining.splice(index, 0, ...block); api.project.get().layers = remaining;
-        api.groups.normalizeStack(); api.anim.touch();
+        api.groups.normalizeStack(); api.groups.removeEmptyGroups?.(emptied); api.anim.touch();
       }, { origin: 'timeline' });
       invalidate();
     },

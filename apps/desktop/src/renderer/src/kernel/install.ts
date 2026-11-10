@@ -273,7 +273,8 @@ function makeGroups(PM: LegacyPM): GroupsAPI {
     span: (group) => PM?.groupSpan?.(group) ?? { from: 0, dur: 0 },
     expand: (ids) => PM?.expandGroups?.(ids) ?? [...ids],
     normalizeStack: () => PM?.normalizeStack?.(),
-    moveToGroup: (ids, target) => PM?.moveToGroup?.(ids, target) ?? { ids: [...ids], group: target }
+    moveToGroup: (ids, target, options) => PM?.moveToGroup?.(ids, target, options) ?? { ids: [...ids], group: target },
+    removeEmptyGroups: (ids) => PM?.removeEmptyGroups?.(ids) ?? []
   };
 }
 

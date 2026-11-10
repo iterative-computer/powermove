@@ -738,7 +738,11 @@ export interface GroupsAPI {
   span(group: Layer): { from: number; dur: number };
   expand(ids: string[]): string[];
   normalizeStack(): void;
-  moveToGroup(ids: string[], target: string | null): { ids: string[]; group: string | null };
+  /** Moving the last layer out of a group removes the emptied group. Pass
+   * keepEmptyGroups to reorder first; then call removeEmptyGroups(emptied). */
+  moveToGroup(ids: string[], target: string | null, options?: { keepEmptyGroups?: boolean }): { ids: string[]; group: string | null; emptied?: string[] };
+  /** Removes these groups if they have no layers and nothing uses them as a parent or matte, then any enclosing group that leaves empty. Returns removed IDs. */
+  removeEmptyGroups(ids: string[]): string[];
 }
 
 export interface TransportPerformance { fps: number; ms: number; drops: number; budget: number; auto: boolean }

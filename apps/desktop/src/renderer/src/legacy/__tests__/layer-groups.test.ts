@@ -33,6 +33,39 @@ describe('editable timeline groups',()=>{
     expect(PM.Edit.apply({type:'ungroup_layers',targets:[outer.id]}).ok).toBe(true);
     expect(PM.L(outer.id)).toBeNull(); expect(PM.L(b.id).group).toBeNull();
   });
+  it('removes a group once its last layer is moved out, and Undo brings it back',()=>{
+    const {PM,a,b,c}=editor(); const g=PM.groupLayers([a.id,b.id],'Titles');
+    expect(PM.Edit.apply({type:'move_to_group',targets:[a.id],group:null}).ok).toBe(true);
+    expect(PM.L(g.id)).toBeTruthy();
+    const pose=PM.worldMatrix(b,2);
+    expect(PM.Edit.apply({type:'move_to_group',targets:[b.id],group:null}).ok).toBe(true);
+    expect(PM.L(g.id)).toBeNull(); expect(PM.worldMatrix(b,2)).toEqual(pose);
+    expect(PM.proj.layers.map((l:any)=>l.id).sort()).toEqual([a.id,b.id,c.id].sort());
+    expect(PM.sel.layers).not.toContain(g.id);
+    expect(PM.hist.undo()).toBe(true); expect(PM.L(g.id)?.type).toBe('group'); expect(PM.L(b.id).group).toBe(g.id);
+  });
+  it('removes enclosing groups the move leaves empty, but keeps groups that still hold or drive layers',()=>{
+    const {PM,a,b}=editor(); const inner=PM.groupLayers([a.id],'Inner'), outer=PM.groupLayers([inner.id],'Outer');
+    expect(PM.Edit.apply({type:'move_to_group',targets:[a.id],group:null}).ok).toBe(true);
+    expect(PM.L(inner.id)).toBeNull(); expect(PM.L(outer.id)).toBeNull();
+    // A group another layer uses as its transform parent stays, so that layer does not move.
+    const rig=PM.groupLayers([a.id],'Rig'); b.parent=rig.id;
+    expect(PM.Edit.apply({type:'move_to_group',targets:[a.id],group:null}).ok).toBe(true);
+    expect(PM.L(rig.id)).toBeTruthy(); expect(PM.L(b.id).parent).toBe(rig.id);
+    // A group made empty on purpose is left alone by unrelated moves.
+    const empty=PM.mkLayer('group',{name:'Empty'}); PM.proj.layers=[empty,...PM.proj.layers]; PM.ProjectIndex.invalidate();
+    const holder=PM.groupLayers([a.id],'Holder');
+    expect(PM.Edit.apply({type:'move_to_group',targets:[a.id],group:empty.id}).ok).toBe(true);
+    expect(PM.L(holder.id)).toBeNull(); expect(PM.L(empty.id)).toBeTruthy(); expect(PM.L(a.id).group).toBe(empty.id);
+  });
+  it('removes the emptied group after reordering its last layer out',()=>{
+    const {PM,a,b,c}=editor(); const g=PM.groupLayers([a.id],'Solo');
+    expect(PM.proj.layers.map((l:any)=>l.id)).toEqual([g.id,a.id,b.id,c.id]);
+    expect(PM.Edit.apply({type:'reorder_layer',target:a.id,index:2}).ok).toBe(true);
+    expect(PM.L(g.id)).toBeNull();
+    expect(PM.proj.layers.map((l:any)=>l.id)).toEqual([b.id,a.id,c.id]);
+    expect(PM.L(a.id).group).toBeNull();
+  });
   it('inherits visibility and locks without overwriting individual switches',()=>{
     const {PM,a,b}=editor(); b.on=false; const g=PM.groupLayers([a.id,b.id]);
     g.on=false; expect(PM.active(a,2)).toBe(false);

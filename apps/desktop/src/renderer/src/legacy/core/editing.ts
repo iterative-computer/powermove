@@ -780,10 +780,11 @@ function reorderLayer(command: any) {
     const index = remaining.indexOf(target) + (to > from ? 1 : 0);
     if (target?.lock || (PM.groupAncestors?.(target) || []).some((group: any) => group.lock)) throw new Error('Unlock the destination before moving layers');
     const destination = target?.type === 'group' ? target.id : target?.group || null;
-    if ((layer.group || null) !== destination) PM.moveToGroup([layer.id], destination);
+    const emptied = (layer.group || null) !== destination ? PM.moveToGroup([layer.id], destination, { keepEmptyGroups: true })?.emptied ?? [] : [];
     remaining.splice(Math.max(0, index), 0, ...block);
     PM.proj.layers = remaining;
     PM.normalizeGroupStack?.();
+    PM.removeEmptyGroups?.(emptied);
     PM.bus.emit('layers');
   }
   return { id: layer.id, index: to };

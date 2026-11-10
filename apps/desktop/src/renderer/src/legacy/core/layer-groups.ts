@@ -320,7 +320,32 @@ export function installLayerGroups(PM: PMRegistry): void {
     }
     changed(); PM.selectLayers(children.filter(id => PM.L(id))); return { ids: children };
   };
-  PM.moveToGroup = (ids: string[], target: string | null) => {
+  /* Taking the last item out of a group removes the group, and any enclosing
+     group that leaves empty, as in Figma. Only groups a move emptied are
+     considered: a group made empty on purpose stays. So does one another
+     layer still uses as its transform parent or matte, since removing it
+     would move or restyle that layer. */
+  const referenced = (id: string) => PM.proj.layers.some((layer: any) => layer.parent === id
+    || layer.matteSource === id || layer.matteSources?.some?.((matte: any) => matte?.source === id));
+  PM.removeEmptyGroups = (ids: Array<string | null | undefined>) => {
+    const removed: string[] = [];
+    const pending = [...new Set(ids.filter((id): id is string => typeof id === 'string'))];
+    while (pending.length) {
+      const group = PM.proj.layers.find((layer: any) => layer.id === pending[0]);
+      pending.shift();
+      if (!group || group.type !== 'group' || group.lock) continue;
+      if (PM.proj.layers.some((layer: any) => layer.group === group.id) || referenced(group.id)) continue;
+      PM.proj.layers = PM.proj.layers.filter((layer: any) => layer !== group);
+      removed.push(group.id);
+      if (group.group) pending.push(group.group);
+    }
+    if (removed.length) {
+      PM.sel.layers = PM.sel.layers.filter((id: string) => !removed.includes(id));
+      PM.touch(); changed();
+    }
+    return removed;
+  };
+  PM.moveToGroup = (ids: string[], target: string | null, options: { keepEmptyGroups?: boolean } = {}) => {
     const group = target ? PM.L(target) : null;
     if (target && (!group || group.type !== 'group')) throw new Error('Group not found');
     const selected = PM.proj.layers.filter((layer: any) => ids.includes(layer.id));
@@ -331,10 +356,16 @@ export function installLayerGroups(PM: PMRegistry): void {
     const poses = new Map<string,number[]>(roots.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
     const perspectives = new Map(roots.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
     const aims = new Map<string,number[]|null>(roots.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
+    const left = [...new Set(roots.map((layer: any) => layer.group).filter((id: any) => id && id !== (group?.id || null)))] as string[];
     roots.forEach((layer: any) => { layer.group = group?.id || null; });
     PM.touch(); rebase(roots, poses);
     for(const layer of roots)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);
     for (const layer of roots) if (layer.threeD && !ancestors(layer,PM.proj.layers).some(group => group.threeD)) layer.p.perspective = PM.P(perspectives.get(layer.id));
-    changed(); return { ids: selected.map((layer: any) => layer.id), group: target };
+    changed();
+    /* Callers that reorder layers right after moving them remove the emptied
+       groups once their reorder is done. */
+    const emptied = left.filter(id => !PM.proj.layers.some((layer: any) => layer.group === id));
+    if (!options.keepEmptyGroups) PM.removeEmptyGroups(emptied);
+    return { ids: selected.map((layer: any) => layer.id), group: target, ...(options.keepEmptyGroups ? { emptied } : {}) };
   };
 }
