@@ -1307,7 +1307,7 @@ impl Properties {
             self.adapter.dispose(handle);
         }
         match result.map_err(|e| e.to_string())? {
-            V4Plan::Request(request) => Ok(Some(request)),
+            V4Plan::Request(request) => Ok(Some(*request)),
             V4Plan::Service(_) => Err("Graph service unavailable".into()),
         }
     }
