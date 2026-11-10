@@ -18,6 +18,7 @@ mod extension_authoring;
 mod extensions;
 mod figma_paste;
 mod first_run;
+mod generated_panel;
 mod gizmo;
 mod keyframe_sheets;
 

@@ -187,6 +187,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
+                .or_else(|| crate::generated_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -1496,6 +1497,9 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::generated_panel::pick(self, &cmd.name, cx) {
+            return true;
+        }
         if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
             self.restore_take(id, cx);
             return true;
