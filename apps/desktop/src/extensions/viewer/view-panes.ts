@@ -227,7 +227,15 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
 
   const observer = new ResizeObserver(() => apply());
   observer.observe(body);
-  const subscription = scene.views.onChange(() => { apply(); runtime.layout?.(); });
+  const subscription = scene.views.onChange(() => {
+    const next: Views = scene.views.get();
+    // Camera poses change on every orbit event. Only pane geometry and
+    // labels need layout; the display loop already reads the latest pose.
+    if (next.layout === state.layout && next.active === state.active &&
+        next.panes.length === state.panes.length &&
+        next.panes.every((pane, index) => pane.view === state.panes[index]?.view)) return;
+    apply(); runtime.layout?.();
+  });
   const structure = api.events.on('project:changed', ({ kind }: any) => { if (kind !== 'values') apply(); });
   apply();
 

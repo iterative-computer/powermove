@@ -15,15 +15,20 @@ it('presents every ready side pane on each display tick and leaves unchanged pic
   Object.defineProperties(body,{clientWidth:{value:801},clientHeight:{value:601}});
   const picture=document.createElement('canvas');
   const render=vi.fn(()=>({canvas:picture,version:String(version)}));
-  const subscription={dispose:vi.fn()},structure={dispose:vi.fn()};
-  const api:any={scene3d:{views:{get:()=>({layout:4,active:3,panes:['top','front','right','camera'].map(view=>({view}))}),options:[],render,selection:()=>[],onChange:()=>subscription}},model:{curComp:()=>({layers:[{threeD:true}]})},project:{get:()=>({w:1920,h:1080})},ui:{icon:()=>''},events:{on:()=>structure}};
-  const cleanup=mountViewPanes(api,body,{stage});
+  const subscription={dispose:vi.fn()},structure={dispose:vi.fn()},layout=vi.fn();
+  let notify=()=>{},activeView='camera';
+  const api:any={scene3d:{views:{get:()=>({layout:4,active:3,panes:['top','front','right',activeView].map(view=>({view}))}),options:[],render,selection:()=>[],onChange:(callback:()=>void)=>{notify=callback;return subscription;}}},model:{curComp:()=>({layers:[{threeD:true}]})},project:{get:()=>({w:1920,h:1080})},ui:{icon:()=>''},events:{on:()=>structure}};
+  const cleanup=mountViewPanes(api,body,{stage,layout});
   const tick=(at:number)=>{const [id,callback]=frames.entries().next().value!;frames.delete(id);callback(at);};
   try{
     tick(0);expect(render.mock.calls.map((call:any[])=>call[0])).toEqual([0,1,2]);expect(drawImage).toHaveBeenCalledTimes(3);
     version++;tick(8.3);expect(drawImage).toHaveBeenCalledTimes(6);
     tick(16.7);expect(drawImage).toHaveBeenCalledTimes(6);
     version++;tick(25);expect(drawImage).toHaveBeenCalledTimes(9);
+    // Orbit pose notifications do not change any pane's size or view label.
+    for(let i=0;i<100;i++)notify();expect(layout).not.toHaveBeenCalled();
+    activeView='custom';notify();expect(layout).toHaveBeenCalledOnce();
+    for(let i=0;i<100;i++)notify();expect(layout).toHaveBeenCalledOnce();
   }finally{cleanup();}
   expect(frames.size).toBe(0);expect(subscription.dispose).toHaveBeenCalledOnce();expect(structure.dispose).toHaveBeenCalledOnce();
 });
