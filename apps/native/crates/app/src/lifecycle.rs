@@ -114,6 +114,57 @@ fn next_quit(cx: &mut App) {
             return;
         }
     }
+    // The window session's queued writes land first; a failed one is asked
+    // about while the library is still held, so Cancel leaves all as it was.
+    cx.spawn(async move |cx| {
+        let flushed = cx
+            .background_executor()
+            .spawn(async { pm_shell::session::flush() })
+            .await;
+        cx.update(|cx| match flushed {
+            Ok(()) => finish_quit(cx),
+            Err(error) => ask_session_failed(&error, cx),
+        });
+    })
+    .detach();
+}
+/// The quit alert for a window session that couldn't be written.
+fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    Alert::new(
+        "Powermove couldn’t save your window arrangement.",
+        format!("{error}. If you quit anyway, your windows open as they were last saved."),
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new("Quit Anyway", true),
+        ],
+    )
+}
+fn ask_session_failed(error: &str, cx: &mut App) {
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    let Some(window) = window else {
+        return finish_quit(cx);
+    };
+    let answer = session_failed_alert(error).sheet(&window);
+    cx.spawn(async move |cx| {
+        let quit = answer.recv().await.ok().flatten() == Some(true);
+        cx.update(|cx| {
+            if quit {
+                finish_quit(cx)
+            } else {
+                cancel_quit(cx)
+            }
+        });
+    })
+    .detach();
+}
+/// Compacts and releases the library, then quits.
+fn finish_quit(cx: &mut App) {
     let host = cx.global::<QuitCoordinator>().host.clone();
     cx.spawn(async move |cx| {
         let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
@@ -126,10 +177,6 @@ fn next_quit(cx: &mut App) {
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
             crate::error_log::session_ended().await;
-            // The window session's queued writes land before the process ends.
-            cx.background_executor()
-                .spawn(async { pm_shell::session::flush() })
-                .await;
         }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
@@ -467,6 +514,23 @@ impl Controller {
 mod tests {
     use super::*;
     use pm_kernel::*;
+
+    #[test]
+    fn a_window_session_that_fails_to_save_asks_before_quitting() {
+        // A session file the writer must not overwrite (a newer version):
+        // the flush quit runs fails, and the quit alert carries why.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, br#"{"version":9,"windows":[]}"#).unwrap();
+        pm_shell::session::write(&path, pm_shell::session::Change::Remove(1));
+        let error = pm_shell::session::flush().unwrap_err();
+        let _ = pm_shell::session::take_error();
+        let alert = session_failed_alert(&error);
+        assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.informative.contains("Unsupported window session"));
+    }
     use std::{
         future::Future,
         sync::Arc,

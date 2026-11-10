@@ -137,7 +137,7 @@ pub enum Change {
 }
 enum Job {
     Change(PathBuf, Change),
-    Flush(Sender<()>),
+    Flush(Sender<Result<(), String>>),
 }
 struct Writer {
     jobs: Mutex<Sender<Job>>,
@@ -163,6 +163,8 @@ fn writer() -> &'static Writer {
 /// The writer: every window's changes, read-modify-written in the order they
 /// were asked for, a burst at a time, never on the main thread (N8).
 fn serve(inbox: Receiver<Job>) {
+    // The first write that failed since the last flush, for that flush.
+    let mut failed: Option<String> = None;
     while let Ok(first) = inbox.recv() {
         let _gate = writer().gate.lock().unwrap_or_else(|e| e.into_inner());
         let mut batch = vec![first];
@@ -172,15 +174,20 @@ fn serve(inbox: Receiver<Job>) {
             match job {
                 Job::Change(path, change) => changes.push((path, change)),
                 Job::Flush(done) => {
-                    apply(std::mem::take(&mut changes));
-                    let _ = done.send(());
+                    if let Err(e) = apply(std::mem::take(&mut changes)) {
+                        failed.get_or_insert(e);
+                    }
+                    let _ = done.send(failed.take().map_or(Ok(()), Err));
                 }
             }
         }
-        apply(changes);
+        if let Err(e) = apply(changes) {
+            failed.get_or_insert(e);
+        }
     }
 }
-fn apply(changes: Vec<(PathBuf, Change)>) {
+fn apply(changes: Vec<(PathBuf, Change)>) -> Result<(), String> {
+    let mut result = Ok(());
     let mut paths: Vec<&PathBuf> = Vec::new();
     for (path, _) in &changes {
         if !paths.contains(&path) {
@@ -189,10 +196,14 @@ fn apply(changes: Vec<(PathBuf, Change)>) {
     }
     for path in paths {
         if let Err(e) = update(path, changes.iter().filter(|(p, _)| p == path)) {
-            *writer().error.lock().unwrap() =
-                Some(format!("Window session could not be saved: {e}"));
+            let message = format!("Window session could not be saved: {e}");
+            *writer().error.lock().unwrap() = Some(message.clone());
+            if result.is_ok() {
+                result = Err(message);
+            }
         }
     }
+    result
 }
 /// A malformed or newer file is reported and never overwritten.
 fn update<'a>(
@@ -227,12 +238,18 @@ pub fn write(path: &Path, change: Change) {
         .unwrap()
         .send(Job::Change(path.to_owned(), change));
 }
-/// Waits until every change queued before it is on disk (quit, tests).
-pub fn flush() {
+/// Waits until every change queued before it has been written (quit,
+/// tests); the first failure since the last flush, if any write failed.
+pub fn flush() -> Result<(), String> {
+    let stopped = || "The window session writer stopped.".to_owned();
     let (done, wait) = mpsc::channel();
-    if writer().jobs.lock().unwrap().send(Job::Flush(done)).is_ok() {
-        let _ = wait.recv();
-    }
+    writer()
+        .jobs
+        .lock()
+        .unwrap()
+        .send(Job::Flush(done))
+        .map_err(|_| stopped())?;
+    wait.recv().map_err(|_| stopped())?
 }
 /// The last write's failure, once.
 pub fn take_error() -> Option<String> {
@@ -316,7 +333,7 @@ mod writer_tests {
             );
             assert!(!path.exists(), "a write blocked its caller on the disk");
         }
-        flush();
+        flush().unwrap();
         let s = Session::load(&path).unwrap();
         assert_eq!(s.windows, [window(1, 30.), window(3, 40.)]);
         assert_eq!(s.key, None, "the closed key window is no longer key");
@@ -325,8 +342,11 @@ mod writer_tests {
         let newer = b"{\"version\":9,\"windows\":[]}";
         std::fs::write(&path, newer).unwrap();
         write(&path, Change::Remove(1));
-        flush();
+        // The flush itself says so: quit asks before going on.
+        assert!(flush().is_err_and(|e| e.contains("could not be saved")));
         assert!(take_error().is_some_and(|e| e.contains("could not be saved")));
+        // Said once: the next flush with nothing failing is fine.
+        assert!(flush().is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), newer);
         let _ = std::fs::remove_dir_all(&dir);
     }
