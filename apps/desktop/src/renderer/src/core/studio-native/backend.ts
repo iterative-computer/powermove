@@ -46,16 +46,18 @@ export class NativeStudioBackend implements StudioBackend {
   private generation = 0;
   private closed = false;
   private graph: import('three').Scene | null = null;
-  private textureFrames=new Map<number,HTMLCanvasElement>();
-  private textureWaiters=new Map<number,{resolve:(source:HTMLCanvasElement)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
+  private textureFrames=new Map<number,VideoFrame>();
+  private textureResources=new Set<VideoFrame>();
+  private textureWaiters=new Map<number,{resolve:(source:VideoFrame)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   private textureUnsubscribe:(()=>void)|null=null;
-  private lastTextureMs=0;
+  private textureTimings=new WeakMap<VideoFrame,{at:number;ms:number}>();
   private queue: Promise<unknown> = Promise.resolve();
   private width = 1;
   private height = 1;
   private rendered = '';
   /** Last measurements are available to the diagnostic harness, outside product UI. */
-  lastFrame: { host: any; roundTripMs: number; uploadMs: number; pixelsMs: number } | null = null;
+  lastFrame: { host: any; roundTripMs: number; uploadMs: number; pixelsMs: number;
+    timestamps: { queuedAt: number; startedAt: number; uploadedAt: number; sentAt: number; replyAt: number; textureAt?: number; readyAt: number } } | null = null;
   diagnostics() { return { session:this.session,hostPid:this.hostPid,native:this.lastFrame,cancelledRefineFrames:this.cancelledRefineFrames }; }
   cancelRefine():void{
     if(this.closed)return;this.refineGeneration++;
@@ -69,13 +71,14 @@ export class NativeStudioBackend implements StudioBackend {
     this.textureUnsubscribe=this.bridge.onTexture?.((info,texture)=>{
       if(info.session!==this.session)return;
       const start=performance.now(), frame=texture.getVideoFrame() as VideoFrame;
-      const source=document.createElement('canvas');source.width=info.width;source.height=info.height;
-      try {source.getContext('2d',{alpha:true})!.drawImage(frame,0,0);}finally{frame.close();}
-      if(this.closed){source.width=0;source.height=0;return;}
-      this.lastTextureMs=performance.now()-start;
+      if(this.closed){frame.close();return;}
+      // WebGL accepts VideoFrame directly. Its own reference keeps the managed
+      // IOSurface alive through GPU use; avoid a full Canvas2D copy every frame.
+      this.textureResources.add(frame);
+      this.textureTimings.set(frame,{at:start,ms:performance.now()-start});
       const waiter=this.textureWaiters.get(info.frame);
-      if(waiter){this.textureWaiters.delete(info.frame);clearTimeout(waiter.timer);waiter.resolve(source);}else{this.textureFrames.set(info.frame,source);}
-      for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;old.width=0;old.height=0;this.textureFrames.delete(key);}
+      if(waiter){this.textureWaiters.delete(info.frame);clearTimeout(waiter.timer);waiter.resolve(frame);}else{const previous=this.textureFrames.get(info.frame);if(previous)this.releaseTexture(previous);this.textureFrames.set(info.frame,frame);}
+      for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;this.releaseTexture(old);this.textureFrames.delete(key);}
     })??null;
     const hello = await this.send({ op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
     this.supportsChunkedUpload=hello.result?.capabilities?.includes('preparedUpload')??false;
@@ -203,6 +206,7 @@ export class NativeStudioBackend implements StudioBackend {
     this.uploadedMaps = [...maps];this.uploadedMapSize=mapSize;
   }
   render(request: StudioRenderRequest): Promise<StudioFrame> {
+    const queuedAt=performance.now();
     const generation=this.refineGeneration;
     const cancelled=()=>{if(request.tier==='refine'&&generation!==this.refineGeneration)throw Object.assign(new Error('Studio Refine superseded by input'),{name:'StudioFrameCancelled'});};
     return this.serial(async () => {
@@ -212,6 +216,7 @@ export class NativeStudioBackend implements StudioBackend {
       if(width/height!==this.width/this.height)this.revision++;
       this.width = width; this.height = height;
       const start = performance.now(); await this.upload(); const uploadMs = performance.now() - start;
+      const uploadedAt=performance.now();
       cancelled();
       const objects = this.prepared?.objects ?? (this.document ?? this.description?.())?.layer_ids ?? [];
       const index = request.layer === undefined ? undefined : objects.indexOf(request.layer);
@@ -219,17 +224,25 @@ export class NativeStudioBackend implements StudioBackend {
       // optional backdrop, without treating their pixels as the whole scene.
       const layer = index === -1 ? objects.length : index;
       const renderKey=`${this.revision}:${this.time}:${this.width}:${this.height}:${request.tier}:${request.samples}:${request.denoise!==false}`;
+      const sentAt=performance.now();
       const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, adaptive: request.adaptive === true, timeBudgetMs: request.timeBudgetMs ?? 0, temporal: request.temporal === true, time: this.time });
-      if (request.signal?.aborted) throw new Error('Studio frame cancelled');
-      cancelled();
+      const replyAt=performance.now();
       const meta = reply.result;
+      try {
+        if (request.signal?.aborted) throw new Error('Studio frame cancelled');
+        cancelled();
+      } catch(error) {
+        const buffered=this.textureFrames.get(meta.surface);
+        if(buffered){this.textureFrames.delete(meta.surface);this.releaseTexture(buffered);}
+        throw error;
+      }
       if(meta.cancelled){this.cancelledRefineFrames++;throw Object.assign(new Error('Studio Refine superseded by input'),{name:'StudioFrameCancelled'});}
       const pixelsAt = performance.now();
-      let source:HTMLCanvasElement;
+      let source:HTMLCanvasElement|VideoFrame;
       if(meta.transport==='sharedTexture' && typeof meta.surface==='number') {
         const frame=this.textureFrames.get(meta.surface);
         if(frame){source=frame;this.textureFrames.delete(meta.surface);}else{
-          source=await new Promise<HTMLCanvasElement>((resolve,reject)=>{
+          source=await new Promise<VideoFrame>((resolve,reject)=>{
             const timer=setTimeout(()=>{this.textureWaiters.delete(meta.surface);reject(new Error('Studio shared texture timed out'));},1000);
             this.textureWaiters.set(meta.surface,{resolve,reject,timer});
           });
@@ -239,11 +252,14 @@ export class NativeStudioBackend implements StudioBackend {
         // The host packs straight RGBA for WebCodecs/Canvas2D.
         const frame = new VideoFrame(reply.binary, { format: 'RGBA', codedWidth: meta.width, codedHeight: meta.height, timestamp: Math.round(this.time * 1_000_000), colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'rgb', fullRange: true } });
         source = document.createElement('canvas'); source.width = this.width; source.height = this.height;
-        source.getContext('2d', { alpha: true })!.drawImage(frame, 0, 0, source.width, source.height); frame.close();
+        try {source.getContext('2d', { alpha: true })!.drawImage(frame, 0, 0, source.width, source.height);}
+        finally {frame.close();}
       }
-      this.lastFrame = { host: meta, roundTripMs: reply.roundTripMs, uploadMs, pixelsMs:meta.transport==='sharedTexture'?this.lastTextureMs:performance.now()-pixelsAt };
+      const textureTiming='close' in source?this.textureTimings.get(source):undefined;
+      this.lastFrame = { host: meta, roundTripMs: reply.roundTripMs, uploadMs, pixelsMs:textureTiming?.ms??performance.now()-pixelsAt,
+        timestamps:{queuedAt,startedAt:start,uploadedAt,sentAt,replyAt,...(textureTiming?{textureAt:textureTiming.at}:{}),readyAt:performance.now()} };
       this.rendered=renderKey;
-      return { source, width: this.width, height: this.height, samples: meta.samples, diagnostics:{native:this.lastFrame,time:meta.time,tier:meta.tier,inputAt:request.inputAt}, version: `${this.revision}:${this.time}:${request.tier}:${meta.samples}:${request.layer ?? '*'}`, release: () => { source.width = 0; source.height = 0; } };
+      return { source, width: this.width, height: this.height, samples: meta.samples, diagnostics:{native:this.lastFrame,time:meta.time,tier:meta.tier,inputAt:request.inputAt}, version: `${this.revision}:${this.time}:${request.tier}:${meta.samples}:${request.layer ?? '*'}`, release: () => { if('close' in source)this.releaseTexture(source);else{source.width = 0; source.height = 0;} } };
     });
   }
   pick(x: number, y: number): Promise<StudioPick | null> {
@@ -261,5 +277,6 @@ export class NativeStudioBackend implements StudioBackend {
     this.graph?.traverse((o: any) => { o.geometry?.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m?.dispose(); });
     this.graph = null;
   }
-  dispose(): void { if (this.closed) return; this.disposeGraph(); this.closed = true; this.textureUnsubscribe?.();this.textureUnsubscribe=null;for(const frame of this.textureFrames.values()){frame.width=0;frame.height=0;}this.textureFrames.clear();for(const waiter of this.textureWaiters.values()){clearTimeout(waiter.timer);waiter.reject(new Error('Studio backend is closed'));}this.textureWaiters.clear(); void this.bridge.release(this.session).catch(() => {}); }
+  private releaseTexture(frame:VideoFrame):void {if(this.textureResources.delete(frame))frame.close();}
+  dispose(): void { if (this.closed) return; this.disposeGraph(); this.closed = true; this.textureUnsubscribe?.();this.textureUnsubscribe=null;for(const frame of this.textureResources)this.releaseTexture(frame);this.textureFrames.clear();for(const waiter of this.textureWaiters.values()){clearTimeout(waiter.timer);waiter.reject(new Error('Studio backend is closed'));}this.textureWaiters.clear(); void this.bridge.release(this.session).catch(() => {}); }
 }

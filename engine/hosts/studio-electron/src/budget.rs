@@ -18,7 +18,7 @@ impl LiveBudget {
             frames: 0,
             quiet: 0,
             slow: 0,
-            adaptive: std::env::var_os("STUDIO_ADAPTIVE_LIVE").is_some(),
+            adaptive: std::env::var("STUDIO_ADAPTIVE_LIVE").as_deref()!=Ok("0"),
             fixed: std::env::var("STUDIO_LIVE_SCALE")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())

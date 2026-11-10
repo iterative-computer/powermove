@@ -443,6 +443,22 @@ describe('legacy engine install', () => {
     expect(PM.GL.render).toHaveBeenCalledTimes(3);
   });
 
+  it('presents a newly completed native image on the next display tick within the same project frame', () => {
+    const { PM, runFrame } = engine();
+    let ready = false;
+    PM.Studio = { hasUnpresentedFrame: () => ready };
+    PM.GL.gl = {};
+    PM.GL.render = vi.fn(() => { ready = false; });
+    PM.play(); runFrame(1); runFrame(8);
+    expect(PM.GL.render).toHaveBeenCalledTimes(1);
+    ready = true;
+    runFrame(16);
+    expect(PM.GL.render).toHaveBeenCalledTimes(2);
+    expect(PM.GL.render.mock.calls.map((call: any[]) => call[0])).toEqual([0, 0]);
+    runFrame(24);
+    expect(PM.GL.render).toHaveBeenCalledTimes(2);
+  });
+
   it('plans video decoders once per presented project frame while audio keeps ticking at display refresh', () => {
     const media = delayedVideo();
     const layer = { id: 'video', type: 'video', from: 0, dur: 2, d: { asset: 'asset-1', speed: 1 } };

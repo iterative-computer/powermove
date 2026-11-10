@@ -32,7 +32,9 @@ describe('Studio backend lifecycle',()=>{
   expect(requests).toHaveLength(1);
   complete({source:document.createElement('canvas'),width:64,height:64,samples:1,version:'completed-during-drag',release});
   await vi.waitFor(()=>expect(requests).toHaveLength(2));
+  expect(PM.Studio.hasUnpresentedFrame()).toBe(true);
   expect(draw(100)?.version).toContain('completed-during-drag');
+  expect(PM.Studio.hasUnpresentedFrame()).toBe(false);
   expect(release).not.toHaveBeenCalled();
   disposeSceneRuntimes(PM);
   complete({source:document.createElement('canvas'),width:64,height:64,samples:1,version:'closed',release});
@@ -46,6 +48,21 @@ describe('Studio backend lifecycle',()=>{
   draw();await studioIdle(PM);draw();await studioIdle(PM);
   expect(fallback.disposals).toBeGreaterThan(before);expect(fallback.renders).toBeGreaterThan(frames);
   disposeSceneRuntimes(PM);
+ });
+ it('lets a side pane present its own image without forcing a duplicate main-view composite',async()=>{
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async()=>({source:document.createElement('canvas'),width:64,height:64,samples:1,version:'side'}),dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,runtime}=fixture(),draw=()=>studioLayer(PM,runtime,64,64,'',new Set(['model']),true,runtime.camera,undefined,0,{slot:'pane-0'});
+  draw();await studioIdle(PM);draw();await studioIdle(PM);
+  expect(PM.Studio.hasUnpresentedFrame()).toBe(false);
+  expect(draw()?.version).toContain('side');disposeSceneRuntimes(PM);
+ });
+ it('releases the previous quality tier instead of occupying another native surface slot',async()=>{
+  const releases={live:vi.fn(),final:vi.fn()};
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>({source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:r.tier,release:releases[r.tier as keyof typeof releases]}),dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);expect(draw()?.version).toContain('final');
+  PM._studioFinal=false;PM.store.get=()=> 'fast';draw();await studioIdle(PM);
+  expect(releases.final).toHaveBeenCalledOnce();expect(draw()?.version).toContain('live');
+  expect(releases.live).not.toHaveBeenCalled();disposeSceneRuntimes(PM);expect(releases.live).toHaveBeenCalledOnce();
  });
  it('waits for native initialization and async per-layer frames, then reuses the completed frame',async()=>{
   const requests:any[]=[],dispose=vi.fn(),source=document.createElement('canvas');

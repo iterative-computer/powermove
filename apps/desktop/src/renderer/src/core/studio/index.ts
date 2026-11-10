@@ -30,6 +30,7 @@ type Job = {
   inputs?:Map<string,{operation:()=>void|Promise<void>}>;
   latest?:{request:StudioRenderRequest;key:string};
   presentedVersion?: string;
+  completedVersion?: string;
   frameTime?: number;
   frameTier?: string;
   frameDiagnostics?: Record<string, unknown>;
@@ -52,6 +53,7 @@ const state = (PM: any): State => {
       whenReady: () => studioReady(PM), idle: () => studioIdle(PM),
       diagnostics: () => [...st.jobs.values()].filter(j=>!j.synchronous).map(j => ({ slot:j.slot, backend:j.backend.id, pending:j.pending.size, version:j.presentedVersion ?? '', time:j.frameTime, tier:j.frameTier, samples:j.samples,triangles:j.scene.triangles,instances:j.scene.instanceCount,lights:j.scene.lightCount, ...(j.backend.diagnostics?.() ?? {}),...j.frameDiagnostics })),
       captureDiagnostics:()=>[...(st.capture?.frames.values()??[])].map(frame=>({backend:frame.backendId,samples:frame.samples,width:frame.width,height:frame.height,...frame.diagnostics})),
+      hasUnpresentedFrame:()=>{for(const job of st.jobs.values())if(!job.synchronous&&!job.slot&&job.completedVersion&&job.completedVersion!==job.presentedVersion)return true;return false;},
       interruptRefine:()=>{for(const job of st.jobs.values())if([...job.pending.keys()].some(key=>key.includes(':refine:')))job.backend.cancelRefine?.();},
       liveHistory:async()=>{await studioIdle(PM);for(const job of st.jobs.values()){const stats=await (job.backend as any).liveHistory?.();if(stats)return stats;}return null;},
     };
@@ -76,7 +78,7 @@ export function setStudioPreview(PM: any, q: StudioPreview): void {
 }
 export function onStudioPreview(PM: any, listener: (q: StudioPreview) => void): () => void { const s = state(PM); s.previewListeners.add(listener); return () => s.previewListeners.delete(listener); }
 export function studioPreviewKey(PM: any): string { const s = states.get(PM); return `${s?.enabled}:${s?.preview}:${s?.revision}:${studioBackendRevision()}:${studioGpuGeneration()}`; }
-export function studioUnsettled(PM: any): boolean { const s = states.get(PM); return !!s && [...s.jobs.values()].some(j => !j.slot && (j.pending.size || s.preview === 'quality' && j.samples < REFINE_SAMPLES)); }
+export function studioUnsettled(PM: any): boolean { const s = states.get(PM); return !!s && [...s.jobs.values()].some(j => !j.slot && (j.pending.size || j.completedVersion&&j.completedVersion!==j.presentedVersion || s.preview === 'quality' && j.samples < REFINE_SAMPLES)); }
 function preparingOf(s: State): StudioPending | null { if (!s.preparing.size) return null; return [...s.preparing.values()].reduce((a, p) => ({ pending: a.pending + p.pending, total: a.total + p.total }), { pending: 0, total: 0 }); }
 export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean; preparing?: StudioPending } | null {
   const s = state(PM), preparing = preparingOf(s); if (preparing) return { samples: 0, goal: REFINE_SAMPLES, refining: false, preparing };
@@ -218,10 +220,12 @@ function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: stri
       // on the GPU before another scene/time patch can change their pixels.
       retainCapture(capture,captureKey,frame,job.backend.id);
     }
-    // One current frame for each layer/tier; release superseded transport buffers.
-    const prefix = `${request.layer ?? ''}:${request.tier}:`;
+    // One current image per layer, across tiers. Native images own host surface
+    // slots; retaining Live + Refine + Final would fill the three-slot ring.
+    // Captures already own immutable snapshots of their shutter samples.
+    const prefix = `${request.layer ?? ''}:`;
     for (const [oldKey, old] of job.frames) if (oldKey.startsWith(prefix) && oldKey !== key) { old.release?.(); job.frames.delete(oldKey); }
-    job.frames.set(key, frame); job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); if(!job.slot){state(PM).frames++;if(!job.synchronous){state(PM).backend=job.backend.id;state(PM).frameSamples=frame.samples;}}
+    job.frames.set(key, frame); job.completedVersion=frame.version;job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); if(!job.slot){state(PM).frames++;if(!job.synchronous){state(PM).backend=job.backend.id;state(PM).frameSamples=frame.samples;}}
   };
   try {
     const render=()=>{if(request.tier==='refine'&&job.generation!==generation)throw Object.assign(new Error('Studio Refine superseded by input'),{name:'StudioFrameCancelled'});return job.backend.render(request);};

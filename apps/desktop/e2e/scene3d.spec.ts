@@ -56,9 +56,11 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
       pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};
   });
   const sample=()=>page.evaluate(()=>{
-    const PM=(window as any).PM;PM.GL.render(0,{mblur:false,previewReuse:false});
-    const gl=PM.GL.gl,pixels=new Uint8Array(gl.drawingBufferWidth*gl.drawingBufferHeight*4);
-    gl.readPixels(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    const PM=(window as any).PM;
+    // Compare a fixed, deterministic image through the editor camera. The
+    // visible canvas can resize or present a newly completed Live image while
+    // a gesture is cancelled; neither changes the viewpoint being restored.
+    const pixels=PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false,previewReuse:false,editorViewport:true});
     let hash=2166136261;for(const value of pixels)hash=Math.imul(hash^value,16777619);return hash;
   });
   const original=await sample();
@@ -70,7 +72,9 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
   const drag=async(dx:number,dy:number)=>{await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+dx,point.y+dy,{steps:8});await page.mouse.up();};
   await drag(65,-30);await expect(page.getByRole('tab',{name:'Free View',exact:true})).toHaveAttribute('aria-selected','true');
   await expect.poll(sample).not.toBe(original);const orbited=await sample();
+  const orbitState=await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.views.get());
   await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+45,point.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();
+  expect(await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.views.get())).toEqual(orbitState);
   expect(await sample()).toBe(orbited);
   await tool('Pan','pan');await drag(40,25);await expect.poll(sample).not.toBe(orbited);const panned=await sample();
   await page.mouse.wheel(0,100);await expect.poll(sample).not.toBe(panned);const dollied=await sample();

@@ -583,10 +583,10 @@ impl Host {
                 } else {
                     &mut self.full
                 };
-                if slot.as_ref().is_some_and(|t| t.renderer.size() != (w, h)) {
-                    *slot = None;
-                }
                 let init = Instant::now();
+                if let Some(target)=slot.as_mut() {
+                    if target.renderer.resize(w,h)? {target.time=f64::NAN;}
+                }
                 if slot.is_none() {
                     let mut renderer = Renderer::new(w, h)?;
                     if let Some((sw, sh, layers, p)) = &self.screen {

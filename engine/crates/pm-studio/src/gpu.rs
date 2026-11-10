@@ -454,6 +454,30 @@ impl Renderer {
         Ok(r)
     }
 
+    /// Resize image storage without rebuilding the device, shaders, scene or
+    /// acceleration structures. Live's adaptive budget uses this between frames.
+    pub fn resize(&mut self, width:u32, height:u32)->Result<bool,String> {
+        crate::validation::target_bytes(width,height,u64::from(self.device.limits().max_storage_buffer_binding_size))?;
+        if (width,height)==(self.width,self.height) {return Ok(false);}
+        let pixels=u64::from(width)*u64::from(height);
+        // Drop the bindings before replacing their buffers, so they cannot
+        // keep a complete old target alive alongside the replacement.
+        self.trace_group=None;
+        let rw=wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::COPY_SRC;
+        let buffer=|label,size,usage|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some(label),size,usage,mapped_at_creation:false});
+        self.accum=buffer("accum",pixels*16,rw);
+        self.bgsum=buffer("bgsum",pixels*16,rw);
+        self.gbuf=buffer("gbuf",pixels*16,rw);
+        self.ebuf=buffer("ebuf",pixels*16,rw);
+        self.aov=buffer("aov",pixels*32,rw);
+        self.display=[buffer("display a",pixels*16,rw),buffer("display b",pixels*16,rw)];
+        self.packed=buffer("packed",pixels*4,rw);
+        self.readback=buffer("readback",pixels*4,wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST);
+        self.history=[buffer("history a",64,rw),buffer("history b",64,rw)];
+        self.width=width;self.height=height;self.samples=0;self.history_valid=false;self.history_index=0;
+        Ok(true)
+    }
+
     /// The display composition, sRGB RGBA8.
     pub fn set_screen(&mut self, rgba: &[u8], w: u32, h: u32) {
         self.screen = self.device.create_texture_with_data(

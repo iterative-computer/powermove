@@ -443,10 +443,11 @@ function frame(now: any) {
     if (synchronizedFrame && !sameVideoClips(synchronizedFrame.time, drawn)) synchronizedFrame = null;
     // A high-refresh display must not redo decoder ownership, lookahead and
     // timeline evaluation between project frames. Only skip a frame that was
-    // actually presented: pending decodes still retry on every display tick.
+    // actually presented: pending decodes and newly completed native images
+    // still retry on every display tick.
     if (!synchronizedFrame && drawn === lastRenderTime && p === lastProject
         && renderedGeneration === contentGeneration && lastPresentedSeekGeneration === videoSeekGeneration
-        && lastPresentedFps === drawnFps()) {
+        && lastPresentedFps === drawnFps() && !PM.Studio?.hasUnpresentedFrame?.()) {
       PM.bus.emit('overlay');
       return;
     }
@@ -495,7 +496,8 @@ function frame(now: any) {
     }
   }
   if (PM.playing && renderTime === lastRenderTime && p === lastProject && renderedGeneration === contentGeneration
-      && lastPresentedSeekGeneration === videoSeekGeneration && lastPresentedFps === drawnFps()) {
+      && lastPresentedSeekGeneration === videoSeekGeneration && lastPresentedFps === drawnFps()
+      && !PM.Studio?.hasUnpresentedFrame?.()) {
     synchronizedFrame = null;
     // The requested project frame was new (the fast duplicate check above
     // already handled display-only ticks), but the decoder is still holding.

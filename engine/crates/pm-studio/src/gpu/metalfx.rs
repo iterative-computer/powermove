@@ -42,6 +42,7 @@ struct Pack {
 pub(super) struct MetalFX {
     context: *mut c_void,
     output_size: (u32, u32),
+    input_size: (u32, u32),
     guides: wgpu::ComputePipeline,
     distance_pipeline: wgpu::ComputePipeline,
     distance_group: wgpu::BindGroup,
@@ -316,6 +317,7 @@ fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
         Ok(Self {
             context,
             output_size: (ow, oh),
+            input_size: (iw, ih),
             guides,
             distance_pipeline,
             distance_group,
@@ -343,6 +345,25 @@ fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
             empty_layout,
             valid: false,
         })
+    }
+    /// Keep the guide/pack pipelines and output textures when only Live's
+    /// tracing resolution changes. Recompiling the whole renderer stalls drags.
+    fn resize_inputs(&mut self,device:&wgpu::Device,iw:u32,ih:u32)->Result<(),String> {
+        // SAFETY: the guard keeps the device alive for construction; the
+        // returned native scaler retains its own device reference.
+        let hal=unsafe{device.as_hal::<wgpu::hal::api::Metal>()}.ok_or("MetalFX needs Metal")?;
+        let raw=(&**hal.raw_device() as *const _ as *mut c_void).cast();
+        let context=unsafe{studio_metalfx_create(raw,iw,ih,self.output_size.0,self.output_size.1)};
+        drop(hal);
+        if context.is_null(){return Err("MetalFX temporal denoised scaling is unavailable on this Mac".into());}
+        let inputs=self.inputs.iter().map(|texture|device.create_texture(&wgpu::TextureDescriptor{
+            label:Some("MetalFX"),size:wgpu::Extent3d{width:iw,height:ih,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:texture.format(),usage:texture.usage(),view_formats:&[],
+        })).collect();
+        let previous=std::mem::replace(&mut self.context,context);
+        unsafe{studio_metalfx_destroy(previous)};
+        self.inputs=inputs;self.input_size=(iw,ih);self.valid=false;
+        Ok(())
     }
 }
 impl Renderer {
@@ -380,6 +401,9 @@ impl Renderer {
         }
         if self.metalfx.is_none() {
             self.metalfx = Some(MetalFX::new(self, ow, oh)?);
+        }
+        if self.metalfx.as_ref().unwrap().input_size!=(self.width,self.height) {
+            self.metalfx.as_mut().unwrap().resize_inputs(&self.device,self.width,self.height)?;
         }
         let fx = self.metalfx.as_ref().unwrap();
         let j = jitter(self.frame);

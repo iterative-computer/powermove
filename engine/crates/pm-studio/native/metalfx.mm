@@ -31,7 +31,9 @@ extern "C" void *studio_metalfx_create(void *rawDevice, unsigned iw, unsigned ih
             d.roughnessTextureFormat=MTLPixelFormatR32Float;
             d.specularHitDistanceTextureFormat=MTLPixelFormatR32Float;d.specularHitDistanceTextureEnabled=YES;
             d.outputTextureFormat=MTLPixelFormatRGBA16Float;
-            d.autoExposureEnabled=YES;d.requiresSynchronousInitialization=YES;
+            // Return the usable scaler immediately; MetalFX optimizes its
+            // pipelines in the background instead of pausing a resolution step.
+            d.autoExposureEnabled=YES;d.requiresSynchronousInitialization=NO;
             id<MTLFXTemporalDenoisedScaler> scaler=[d newTemporalDenoisedScalerWithDevice:device];
             if (!scaler) return nullptr;
             auto *ctx=new StudioMetalFX;ctx->scaler=scaler;ctx->queue=[device newCommandQueue];
