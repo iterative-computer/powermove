@@ -174,7 +174,14 @@ pub fn pairs(list: &[(&str, f64)]) -> V {
 pub type Check<'a> = dyn FnMut(&str, &dyn Fn() -> String, V, &V) + 'a;
 
 /// Runs every case in `vectors`, passing each answer to `check`.
+#[allow(dead_code)]
 pub fn replay(vectors: &Value, check: &mut Check<'_>) {
+    replay_with(vectors, false, check);
+}
+
+/// [`replay`], each case's scope memoizing transforms when `memoize` (as a
+/// renderer's plan scope does).
+pub fn replay_with(vectors: &Value, memoize: bool, check: &mut Check<'_>) {
     for entry in get(vectors, "docs").unwrap().as_array().unwrap() {
         let root = parse(get(entry, "doc").unwrap().as_str().unwrap()).unwrap();
         let comp_id = get(&root, "compId").unwrap().as_str().unwrap().to_owned();
@@ -187,6 +194,9 @@ pub fn replay(vectors: &Value, check: &mut Check<'_>) {
             let t = hexf(get(case, "t").unwrap());
             let want = dec(get(case, "out").unwrap());
             let mut scope = Scope::open(&mut ev, &comp);
+            if memoize {
+                scope.memoize_transforms();
+            }
             let index = get(case, "layer").map(|i| match i {
                 Value::Number(n) => *n as usize,
                 _ => unreachable!(),

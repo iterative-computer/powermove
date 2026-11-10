@@ -20,7 +20,7 @@ use pm_model::json::{Value, parse};
 #[path = "support/layer_replay.rs"]
 mod layer_replay;
 
-use layer_replay::{V, replay};
+use layer_replay::{V, replay_with};
 
 #[derive(Default)]
 struct Stats {
@@ -121,10 +121,21 @@ fn load() -> Value {
 }
 #[test]
 fn layer_queries_match_typescript() {
+    layer_queries_match(false);
+}
+
+/// The same answers from a scope that memoizes transforms (local, 3D local,
+/// and 3D parent matrices), as each frame's plan scope does.
+#[test]
+fn memoized_layer_queries_match_typescript() {
+    layer_queries_match(true);
+}
+
+fn layer_queries_match(memoize: bool) {
     let vectors = load();
     let mut stats = Stats::default();
     let (mut fragile, mut fragile_differ) = (0, 0);
-    replay(&vectors, &mut |op, what, ours, want| {
+    replay_with(&vectors, memoize, &mut |op, what, ours, want| {
         *stats.ops.entry(op.to_owned()).or_default() += 1;
         if op.ends_with("(fragile)") {
             // A 1e-12 change of time, a 1e-7 move of the point, or a point
