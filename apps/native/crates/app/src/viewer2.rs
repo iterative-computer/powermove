@@ -10,8 +10,10 @@ use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
     runtime::AnyObject, sel,
 };
-use objc2_app_kit::{NSBackingStoreType, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask};
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_app_kit::{
+    NSBackingStoreType, NSMenu, NSMenuDelegate, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
+};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use pm_engine_service::{MediaMode, OverlayGeometry, OverlayLine, color::Mastering};
 use std::{cell::RefCell, rc::Rc};
 
@@ -161,6 +163,8 @@ pub enum Action {
     RenderSelection,
     KeepRendered,
     DeleteRendered,
+    Skimming,
+    AudioSkimming,
 }
 /// View › Viewer Media, in the order of the menu.
 const MEDIA_MODES: [(MediaMode, &str); 4] = [
@@ -170,7 +174,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 24] = [
+    const ALL: [Action; 26] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -195,6 +199,8 @@ impl Action {
         Action::RenderSelection,
         Action::KeepRendered,
         Action::DeleteRendered,
+        Action::Skimming,
+        Action::AudioSkimming,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -225,8 +231,39 @@ define_class!(
     }
 );
 
+/// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`.
+#[repr(transparent)]
+struct SelOut(*mut std::ffi::c_void);
+unsafe impl objc2::encode::Encode for SelOut {
+    const ENCODING: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Sel);
+}
+define_class!(
+    /// The Skimming menu shows its shortcuts (⌥S, ⌥⇧S) without matching
+    /// them: the shell's chord resolver owns them, so in a text field ⌥S
+    /// still types.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeSkimMenuDelegate"]
+    struct DisplayOnly;
+    unsafe impl NSObjectProtocol for DisplayOnly {}
+    unsafe impl NSMenuDelegate for DisplayOnly {
+        #[unsafe(method(menuHasKeyEquivalent:forEvent:target:action:))]
+        fn has_key_equivalent(
+            &self,
+            _: &NSMenu,
+            _: &objc2_app_kit::NSEvent,
+            _: *mut *mut AnyObject,
+            _: SelOut,
+        ) -> bool {
+            false
+        }
+    }
+);
+
 struct Menu {
     _target: Retained<MenuTarget>,
+    _skim_delegate: Option<Retained<DisplayOnly>>,
     items: Vec<(Action, Retained<NSMenuItem>)>,
     controllers: Vec<WeakEntity<Controller>>,
 }
@@ -248,6 +285,7 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
             ]
         };
         let mut items = vec![];
+        let mut skim_delegate = None;
         if let Some(view) = view_menu(mtm) {
             view.addItem(&NSMenuItem::separatorItem(mtm));
             let output =
@@ -303,6 +341,31 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
                 view.addItem(&menu_item(mtm, label, action, &target, ""));
             }
             view.addItem(&NSMenuItem::separatorItem(mtm));
+            let skim = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Skimming"));
+            let display_only: Retained<DisplayOnly> =
+                unsafe { msg_send![DisplayOnly::alloc(mtm), init] };
+            skim.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+                &*display_only,
+            )));
+            for (label, action, shift) in [
+                ("Skimming", Action::Skimming, false),
+                ("Audio Skimming", Action::AudioSkimming, true),
+            ] {
+                let item = menu_item(mtm, label, action, &target, "s");
+                let mut mask = objc2_app_kit::NSEventModifierFlags::Option;
+                if shift {
+                    mask |= objc2_app_kit::NSEventModifierFlags::Shift;
+                }
+                item.setKeyEquivalentModifierMask(mask);
+                skim.addItem(&item);
+                items.push((action, item));
+            }
+            let parent = menu_item(mtm, "Skimming", Action::Skimming, &target, "");
+            unsafe { parent.setAction(None) };
+            parent.setSubmenu(Some(&skim));
+            view.addItem(&parent);
+            skim_delegate = Some(display_only);
+            view.addItem(&NSMenuItem::separatorItem(mtm));
             view.addItem(&menu_item(mtm, "Apply LUT…", Action::ApplyLut, &target, ""));
             let interpret = NSMenu::initWithTitle(
                 NSMenu::alloc(mtm),
@@ -341,6 +404,7 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
         MENU.with(|m| {
             *m.borrow_mut() = Some(Menu {
                 _target: target,
+                _skim_delegate: skim_delegate,
                 items,
                 controllers: vec![],
             })
@@ -425,8 +489,24 @@ pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: b
                     | Action::RenderSelection
                     | Action::KeepRendered
                     | Action::DeleteRendered => false,
+                    Action::Skimming | Action::AudioSkimming => continue,
                 };
                 item.setState(if on { 1 } else { 0 });
+            }
+        }
+    });
+}
+
+/// Checkmarks of View ▸ Skimming.
+pub fn update_skim_checks(skimming: bool, audio: bool) {
+    MENU.with(|m| {
+        if let Some(m) = &*m.borrow() {
+            for (action, item) in &m.items {
+                match action {
+                    Action::Skimming => item.setState(if skimming { 1 } else { 0 }),
+                    Action::AudioSkimming => item.setState(if audio { 1 } else { 0 }),
+                    _ => {}
+                }
             }
         }
     });
@@ -696,6 +776,8 @@ impl Controller {
     pub fn viewer_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
             Action::Output(mode) => self.set_output_mode(mode, cx),
+            Action::Skimming => self.toggle_skimming(cx),
+            Action::AudioSkimming => self.toggle_audio_skimming(cx),
             Action::SafeAreas => self.set_overlays(!self.safe_areas, self.guides, cx),
             Action::Guides => self.set_overlays(self.safe_areas, !self.guides, cx),
             Action::Popout => self.toggle_popout(cx),

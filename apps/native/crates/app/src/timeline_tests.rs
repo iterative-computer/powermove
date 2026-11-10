@@ -20,6 +20,8 @@ pub(crate) struct Recorder {
     pub commands: RefCell<Vec<String>>,
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
+    pub skims: RefCell<Vec<Option<f64>>>,
+    pub skimming: std::cell::Cell<bool>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -35,6 +37,12 @@ impl Delegate for Recording {
     }
     fn report(&self, message: String, _: &mut App) {
         self.0.reports.borrow_mut().push(message);
+    }
+    fn skim(&self, seconds: Option<f64>, _: &mut App) {
+        self.0.skims.borrow_mut().push(seconds);
+    }
+    fn skimming(&self, _: &App) -> bool {
+        self.0.skimming.get()
     }
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.to_owned());
@@ -1078,4 +1086,46 @@ fn a_long_clip_name_ends_in_an_ellipsis_that_fits() {
         Some("Ün…")
     );
     assert_eq!(crate::timeline_surface::fit_tail("Clip", fits(1)), None);
+}
+/// Final Cut's skimming through the real pointer path: hovering the tracks
+/// moves the skimmer (what the viewer shows) and never the playhead;
+/// leaving the timeline clears it; a click moves the playhead to it. With
+/// skimming off nothing skims.
+#[gpui::test]
+fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let near = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() <= 1. / 30. + 1e-9);
+    let hover = |s: &mut Stage, cx: &mut TestAppContext, at: Point<Pixels>| {
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+    };
+    // Off: no skimmer.
+    let at = s.at(0, 1.0);
+    hover(&mut s, cx, at);
+    assert!(s.recorder.skims.borrow().is_empty());
+    s.recorder.skimming.set(true);
+    for seconds in [1.0, 2.0, 1.5] {
+        let at = s.at(0, seconds);
+        hover(&mut s, cx, at);
+        let last = *s.recorder.skims.borrow().last().unwrap();
+        assert!(near(last, seconds), "{last:?} for {seconds}");
+        let shown = s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+        assert_eq!(shown, last, "the ghost playhead is drawn there");
+    }
+    assert!(s.recorder.seeks.borrow().is_empty(), "skimming never seeks");
+    hover(&mut s, cx, point(px(2.), px(2.)));
+    assert_eq!(
+        *s.recorder.skims.borrow().last().unwrap(),
+        None,
+        "leaving clears it"
+    );
+    let at = s.at(1, 2.5);
+    hover(&mut s, cx, at);
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(
+        near(seeks.first().copied(), 2.5),
+        "a click puts the playhead at the skimmer: {seeks:?}"
+    );
 }

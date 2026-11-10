@@ -74,6 +74,7 @@ pub struct Controller {
     pub perf: crate::perf_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
+    pub skimming: crate::skimming::Skimming,
     pub popout: Option<crate::viewer2::Popout>,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
@@ -419,6 +420,7 @@ impl Controller {
             perf: Default::default(),
             safe_areas: false,
             guides: false,
+            skimming: Default::default(),
             popout: None,
             main_output: Default::default(),
             selected: None,
@@ -915,7 +917,7 @@ impl Controller {
             .and_then(|v| v.status().clock)
             .map_or(0., |c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64)
     }
-    fn event_time() -> f64 {
+    pub(crate) fn event_time() -> f64 {
         objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap())
             .currentEvent()
             .map(|e| e.timestamp())
@@ -1300,6 +1302,8 @@ impl Controller {
             Ok(viewer) => {
                 // The editor's viewer drags a slow project at reduced resolution.
                 let _ = viewer.adapt_drags(true);
+                let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
+                self.skimming.at = None;
                 self.viewer = Some(viewer)
             }
             Err(e) => self.message = format!("Viewer failed: {e}"),
@@ -1524,6 +1528,8 @@ impl Controller {
                 };
                 return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
             }
+            "toggleSkimming" => self.toggle_skimming(cx),
+            "toggleAudioSkimming" => self.toggle_audio_skimming(cx),
             "toggleLayerControls" => {
                 if let Some(gizmos) = self.builtins.gizmos.clone() {
                     let shown = gizmos.update(cx, |g, cx| {
@@ -1712,6 +1718,17 @@ impl Controller {
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
             | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
             | "nextVisibleEvent" => {
+                // Final Cut: Space plays from the skimmer.
+                if cmd.name == "play"
+                    && let Some(at) = self.skimming.at
+                    && self.viewer.as_ref().is_some_and(|v| {
+                        v.status()
+                            .clock
+                            .is_some_and(|c| c.state == TransportState::Stopped)
+                    })
+                {
+                    self.seek(at);
+                }
                 let Some(v) = &self.viewer else { return false };
                 let command = match cmd.name.as_str() {
                     "play" => {

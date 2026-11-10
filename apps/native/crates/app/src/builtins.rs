@@ -1243,6 +1243,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
+    fn skim(&self, seconds: Option<f64>, cx: &mut App) {
+        let input = crate::session::Controller::event_time();
+        let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
+    }
+    fn skimming(&self, cx: &App) -> bool {
+        crate::skimming::on(&self.0, cx)
+    }
     fn seek(&self, seconds: f64, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             v.seek(seconds);

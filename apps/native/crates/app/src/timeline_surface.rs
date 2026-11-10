@@ -46,6 +46,12 @@ pub trait Delegate: 'static {
     fn painters_revision(&self, _cx: &App) -> u64 {
         0
     }
+    /// The skimmer moved to `seconds` (`None`: it left the timeline).
+    fn skim(&self, _seconds: Option<f64>, _cx: &mut App) {}
+    /// Whether skimming is on (View ▸ Skimming).
+    fn skimming(&self, _cx: &App) -> bool {
+        false
+    }
     /// A context menu whose native rows come first, then what extensions add
     /// for each of `locations` (v1–3's `MenuLocation` and what it was opened on).
     fn extension_menu(
@@ -206,6 +212,9 @@ pub struct TimelineSurface {
     late: Option<std::time::Instant>,
     /// The service facts last told to the delegate.
     told: Option<serde_json::Value>,
+    /// The skimmer's time while the pointer hovers the time area (Final
+    /// Cut's skimming): a ghost playhead; the playhead itself stays.
+    skimmer: Option<f64>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -258,6 +267,7 @@ impl TimelineSurface {
             painted: None,
             painting: false,
             told: None,
+            skimmer: None,
             late: None,
         };
         this.restore_view();
@@ -803,6 +813,12 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // Final Cut: a click moves the playhead to the skimmer; the gesture
+        // (selection, a drag) goes on from there, without a skimmer.
+        if let Some(at) = self.skimmer {
+            self.delegate.seek(at, cx);
+            self.set_skimmer(None, cx);
+        }
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -1433,8 +1449,34 @@ impl TimelineSurface {
             }),
         );
     }
+    /// The skimmer follows the pointer over the time area (ruler, tracks
+    /// and clips); over the layer column or with skimming off it hides.
+    fn skim_to(&mut self, x: f64, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.size.width) as f64;
+        let at = (self.delegate.skimming(cx) && x >= self.view.layer_column && x <= width)
+            .then(|| frame_time(&self.model, self.time_at(x)).clamp(0., self.model.index.duration));
+        self.set_skimmer(at, cx);
+    }
+    fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
+        if at != self.skimmer {
+            self.skimmer = at;
+            self.delegate.skim(at, cx);
+            cx.notify();
+        }
+    }
+    /// View ▸ Skimming changed: hide the skimmer when it went off.
+    pub fn skimming_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.delegate.skimming(cx) {
+            self.set_skimmer(None, cx);
+        }
+    }
+    #[cfg(test)]
+    pub fn skimmer(&self) -> Option<f64> {
+        self.skimmer
+    }
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
+        self.skim_to(x, cx);
         let m = self.tokens.metrics;
         let cursor =
             if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
@@ -2029,6 +2071,8 @@ impl Render for TimelineSurface {
                                         cx.stop_propagation();
                                     } else if s.bounds.contains(&e.position) {
                                         s.hover(e.position, cx);
+                                    } else {
+                                        s.set_skimmer(None, cx);
                                     }
                                 });
                             }
@@ -2047,6 +2091,56 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(tip)
+            .children(self.skimmer_marks())
+    }
+}
+impl TimelineSurface {
+    /// The skimmer: a hairline of text ink across the ruler and tracks
+    /// (the playhead is the accent), with its timecode on the ruler.
+    fn skimmer_marks(&self) -> Vec<AnyElement> {
+        let Some(at) = self.skimmer else {
+            return vec![];
+        };
+        let t = &self.tokens;
+        let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+        let width = f32::from(self.bounds.size.width) as f64;
+        if x < self.view.layer_column || x > width {
+            return vec![];
+        }
+        let fps = self.model.index.fps.max(1.);
+        let frames = (at * fps).round().max(0.) as u64;
+        let nominal = fps.round().max(1.) as u64;
+        let sec = frames / nominal;
+        let code = format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        );
+        let ink = (t.colors.text << 8) | 0x99;
+        let line = div()
+            .id("timeline-skimmer")
+            .absolute()
+            .left(px(x as f32 - t.metrics.border / 2.))
+            .top_0()
+            .bottom_0()
+            .w(px(t.metrics.border))
+            .bg(rgba(ink));
+        let label = div()
+            .absolute()
+            .left(px(x as f32 + t.metrics.border * 2.))
+            .top(px(t.metrics.border))
+            .px(px(t.metrics.gap / 2.))
+            .rounded(px(t.metrics.control_radius))
+            .bg(rgb(t.colors.floating))
+            .border(px(t.metrics.border))
+            .border_color(rgb(t.colors.separator))
+            .text_size(px(t.typography.minimum))
+            .text_color(rgb(t.colors.text))
+            .whitespace_nowrap()
+            .child(code);
+        vec![line.into_any_element(), label.into_any_element()]
     }
 }
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {

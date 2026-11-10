@@ -44,6 +44,7 @@ mod raster_overrides;
 mod render_frames;
 mod rows;
 mod session;
+mod skimming;
 mod shape_tool;
 mod sheets;
 mod smoke;
@@ -290,6 +291,10 @@ fn main() -> Result<()> {
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
+                entity.update(cx, |c, cx| {
+                    c.apply_skimming(cx);
+                    c.load_skimming(cx);
+                });
                 // Each window owns its project: MCP's slot for this window, and
                 // the window wakes only when MCP changes that slot.
                 let key = window.window_handle().window_id().as_u64();
