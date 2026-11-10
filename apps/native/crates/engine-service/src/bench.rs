@@ -26,6 +26,15 @@ fn arg(name: &str, default: &str) -> String {
         .unwrap_or(default.into())
 }
 
+/// Media seconds a skim sweep covers.
+const SKIM_SPAN_SECONDS: f64 = 2.;
+
+/// Pointer events (60 Hz) for a skim sweep over `span` media seconds at
+/// `speed` media seconds per wall second: the sweep takes `span / speed`.
+fn skim_events(speed: f64, span: f64) -> usize {
+    ((span / speed.max(1e-3)) * 60.).round().max(1.) as usize
+}
+
 fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
     sorted
         .get(((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1))
@@ -343,13 +352,13 @@ pub fn run() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_micros(100));
     };
-    // Skimming: pointer events at 60 Hz move the skimmer `--skim` seconds of
-    // media per second over two seconds forward, then back over the same
-    // span; each frame shown counts from the event that asked for its time.
+    // Skimming: pointer events at 60 Hz move the skimmer at `--skim` media
+    // seconds per wall second over two media seconds forward, then back over
+    // them; each frame shown counts from the event that asked for its time.
     let skim_speed: f64 = arg("skim", "1").parse()?;
     let mut skim_pass = |forward: bool| -> anyhow::Result<Vec<f64>> {
-        let events = 120;
-        let span = (2. * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
+        let events = skim_events(skim_speed, SKIM_SPAN_SECONDS);
+        let span = (SKIM_SPAN_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
         let mut asked: std::collections::HashMap<i64, f64> = Default::default();
         let mut out = Vec::new();
         let mut seen = None;
@@ -375,7 +384,7 @@ pub fn run() -> anyhow::Result<()> {
                 collect(&mut out, &asked, &mut seen);
                 std::thread::sleep(Duration::from_micros(200));
             }
-            let along = (i as f64 / events as f64 * skim_speed * 2.).min(1.);
+            let along = i as f64 / events as f64;
             let offset = (along * span as f64) as i64;
             let t = if forward {
                 scrub_from + offset
@@ -517,4 +526,21 @@ fn walk_frames(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// The sweep moves at the reported speed (review: `--skim=1` covered
+    /// two media seconds in one wall second, then rested).
+    #[test]
+    fn a_skim_sweep_moves_at_its_reported_speed() {
+        for speed in [0.5, 1., 2., 4.] {
+            let events = super::skim_events(speed, super::SKIM_SPAN_SECONDS);
+            let wall = events as f64 / 60.;
+            assert!(
+                (super::SKIM_SPAN_SECONDS / wall - speed).abs() < 0.05,
+                "{speed}: {events} events"
+            );
+        }
+    }
 }
