@@ -78,12 +78,21 @@ impl FrameSpec {
         } else {
             MotionBlurKind::PreviewPaused
         });
-        request.sampling = if playing {
+        request.sampling = self.sampling();
+        Ok(request)
+    }
+
+    /// Frames while playing, and a drag's reduced frames (a preview the
+    /// final resampler redraws once the playhead settles), take the
+    /// playback resampler (pm-render's rule for scrub frames); paused
+    /// frames and drags at full resolution, which nothing redraws, the
+    /// final one.
+    fn sampling(&self) -> pm_render::sampling::Sampling {
+        if self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.) {
             pm_render::sampling::Sampling::Playback
         } else {
             pm_render::sampling::Sampling::Final
-        };
-        Ok(request)
+        }
     }
 }
 /// A frame that could not be drawn yet: the picture stays and it is drawn again.
@@ -968,6 +977,33 @@ fn gpu_time(b: &metal::CommandBufferRef, start: bool) -> f64 {
         } else {
             msg_send![p, GPUEndTime]
         }
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+    use pm_render::sampling::Sampling;
+
+    #[test]
+    fn only_frames_a_final_one_replaces_take_the_playback_resampler() {
+        let output = Output {
+            width: 64,
+            height: 36,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = |moment, scale| FrameSpec {
+            moment,
+            scale,
+            ..FrameSpec::exact(Ticks::new(0).unwrap(), output)
+        };
+        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Playback);
+        assert_eq!(spec(Moment::Scrub, 0.5).sampling(), Sampling::Playback);
+        assert_eq!(spec(Moment::Scrub, 1.).sampling(), Sampling::Final);
+        assert_eq!(spec(Moment::Paused, 0.5).sampling(), Sampling::Final);
+        assert_eq!(spec(Moment::Paused, 1.).sampling(), Sampling::Final);
     }
 }
 
