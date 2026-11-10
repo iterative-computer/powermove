@@ -332,11 +332,9 @@ fn sweep_resolves_finite_linear_color() {
 /// ACES and sRGB. Geometry is also checked from the untoned alpha planes;
 /// document picks and the real compositor seam have their own direct tests.
 #[test]
+#[ignore = "external evidence: bun examples/scene3d_float_reference.ts --capture <capture> --out <dir>, then PM_SCENE3D_FLOAT_REF=<dir> cargo test -p pm-render --test scene3d -- --ignored displayed_pixels_prefer_supersampled_float_reference"]
 fn displayed_pixels_prefer_supersampled_float_reference() {
-    let Some((capture, cases)) = selected() else {
-        eprintln!("NOT RUN: no private corpus scene3d capture");
-        return;
-    };
+    let (capture, cases) = selected().expect("G-D1 needs a private corpus scene3d capture");
     let path = std::env::var_os("PM_SCENE3D_FLOAT_REF")
         .map(PathBuf::from)
         .expect("G-D1 requires PM_SCENE3D_FLOAT_REF (examples/scene3d_float_reference.ts)");
