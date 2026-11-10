@@ -13,9 +13,10 @@
 //!   its nearest answer (plan 3.6.4: "a late override reuses its last-good
 //!   surface") and is redrawn exact when the answer lands. The viewer never
 //!   blocks on JavaScript, and never stops showing frames for it.
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node};
@@ -262,6 +263,77 @@ const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
 /// Transient failures a frame waits through before it reports the error.
 const REPORT_AFTER: u32 = 3;
+
+type Redraw = Arc<dyn Fn() + Send + Sync>;
+
+/// Redraws the viewers at each pending retry's time, earliest first, so
+/// every unavailable need is asked again at its own backoff (a frame asks
+/// for what is due). One thread per store while retries are pending.
+#[derive(Default)]
+struct Wakes(Arc<WakeQueue>);
+#[derive(Default)]
+struct WakeQueue {
+    state: Mutex<WakeState>,
+    changed: Condvar,
+}
+#[derive(Default)]
+struct WakeState {
+    at: BinaryHeap<Reverse<Instant>>,
+    redraw: Option<Redraw>,
+    running: bool,
+    closed: bool,
+}
+impl Wakes {
+    fn at(&self, deadlines: Vec<Instant>, redraw: Redraw) {
+        let mut state = self.0.state.lock().unwrap();
+        state.at.extend(deadlines.into_iter().map(Reverse));
+        state.redraw = Some(redraw);
+        if state.running {
+            self.0.changed.notify_one();
+            return;
+        }
+        state.running = true;
+        drop(state);
+        let queue = self.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name("pm-compat-retry".into())
+            .spawn(move || queue.run());
+        if spawned.is_err() {
+            self.0.state.lock().unwrap().running = false;
+        }
+    }
+}
+impl WakeQueue {
+    fn run(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.closed {
+            let Some(&Reverse(next)) = state.at.peek() else {
+                break;
+            };
+            let now = Instant::now();
+            if next > now {
+                state = self.changed.wait_timeout(state, next - now).unwrap().0;
+                continue;
+            }
+            while state.at.peek().is_some_and(|Reverse(at)| *at <= now) {
+                state.at.pop();
+            }
+            let redraw = state.redraw.clone();
+            drop(state);
+            if let Some(redraw) = redraw {
+                redraw();
+            }
+            state = self.state.lock().unwrap();
+        }
+        state.running = false;
+    }
+}
+impl Drop for Wakes {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().closed = true;
+        self.0.changed.notify_all();
+    }
+}
 struct Previous {
     map: HashMap<NeedKey, CompatAnswer>,
     by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
@@ -367,6 +439,8 @@ pub struct CompatStore {
     sink: Mutex<Option<CompatSink>>,
     /// Redraws the viewers when answers land.
     redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Redraws again when each unavailable need's backoff ends.
+    wakes: Wakes,
     /// The code the wrappers come from (`set_code`); 0 while unknown.
     code: std::sync::atomic::AtomicU64,
 }
@@ -564,7 +638,7 @@ impl CompatStore {
             });
         }
         let mut drew = false;
-        let mut again = None;
+        let mut again = Vec::new();
         for (need, reply) in answered {
             let key = need_key(&need);
             answers.asked.remove(&key);
@@ -593,16 +667,16 @@ impl CompatStore {
                         answers.unavailable.clear();
                     }
                     let attempts = answers.unavailable.get(&key).map_or(0, |u| u.attempts) + 1;
-                    let wait = backoff(attempts);
+                    let again_at = Instant::now() + backoff(attempts);
                     answers.unavailable.insert(
                         key,
                         Unavailable {
                             message,
                             attempts,
-                            again_at: Instant::now() + wait,
+                            again_at,
                         },
                     );
-                    again = Some(again.map_or(wait, |w: Duration| w.min(wait)));
+                    again.push(again_at);
                     continue;
                 }
             };
@@ -642,11 +716,8 @@ impl CompatStore {
             if drew {
                 redraw();
             }
-            if let Some(wait) = again {
-                std::thread::spawn(move || {
-                    std::thread::sleep(wait);
-                    redraw();
-                });
+            if !again.is_empty() {
+                self.wakes.at(again, redraw);
             }
         }
     }
@@ -927,6 +998,60 @@ mod tests {
         store.answer_all(7, 1, vec![(need("y"), Reply::Failed("boom".into()))]);
         store.request(vec![need("y")]);
         assert_eq!(asked.lock().unwrap().len(), 3 + REPORT_AFTER as usize);
+    }
+    /// Two layers the realm could not answer wait different backoffs: each
+    /// gets a redraw when its own wait ends and is asked again then, even
+    /// after the earlier one was answered (no wake is lost to the shortest).
+    #[test]
+    fn every_pending_retry_wakes_at_its_own_time() {
+        let store = CompatStore::default();
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
+            log.lock()
+                .unwrap()
+                .extend(needs.iter().map(|n| n.layer.as_str().to_owned()));
+        })));
+        let redraws = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let times = redraws.clone();
+        store.set_redraw(Arc::new(move || times.lock().unwrap().push(Instant::now())));
+        store.set_state(true, 7, 1);
+        let unavailable = || Reply::Unavailable("readback".into());
+        // "slow" has failed once already, so its next wait is twice as long.
+        store.answer_all(7, 1, vec![(need("slow"), unavailable())]);
+        store.request(vec![need("fast"), need("slow")]);
+        store.answer_all(
+            7,
+            1,
+            vec![(need("fast"), unavailable()), (need("slow"), unavailable())],
+        );
+        let due = |layer: &str| {
+            let answers = store.answers.lock().unwrap();
+            answers.unavailable[&need_key(&need(layer))].again_at
+        };
+        let (fast, slow) = (due("fast"), due("slow"));
+        assert!(slow > fast);
+        let redrawn_after = |at: Instant| {
+            let start = Instant::now();
+            while !redraws.lock().unwrap().iter().any(|t| *t >= at) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "no redraw when the wait ended"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        redrawn_after(fast);
+        asked.lock().unwrap().clear();
+        store.request(vec![need("fast"), need("slow")]);
+        if Instant::now() < slow {
+            assert_eq!(*asked.lock().unwrap(), ["fast"]);
+        }
+        store.answer_all(7, 1, vec![(need("fast"), draw(1))]);
+        redrawn_after(slow);
+        asked.lock().unwrap().clear();
+        store.request(vec![need("fast"), need("slow")]);
+        assert_eq!(*asked.lock().unwrap(), ["slow"], "asked at its own time");
     }
     fn at(layer: &str, seconds: f64) -> CompatNeed {
         let mut n = need(layer);
