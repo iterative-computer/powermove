@@ -84,7 +84,7 @@ impl TimelineModel {
         let selection_changed = self.selection.layers() != published.selection.layers();
         self.selection = published.selection.clone();
         if changed {
-            self.index = Arc::new(TimelineIndex::from_snapshot(&published.snapshot));
+            self.index = Arc::new(self.index.updated(&published.snapshot));
             self.rebuild_rows();
         }
         if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {

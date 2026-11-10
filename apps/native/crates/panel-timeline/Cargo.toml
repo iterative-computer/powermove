@@ -14,3 +14,8 @@ pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-surface = { path = "../surface" }
 
 [dev-dependencies]
+pm-kernel = { path = "../kernel", features = ["synthetic"] }
+
+[[bench]]
+name = "timeline_scale"
+harness = false

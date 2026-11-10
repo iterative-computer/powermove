@@ -837,6 +837,7 @@ impl TimelineModel {
                 .layers
                 .iter()
                 .filter(|l| selected.contains(&l.id))
+                .map(|l| &**l)
                 .collect()
         } else {
             vec![source]
