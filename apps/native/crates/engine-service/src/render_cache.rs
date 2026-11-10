@@ -192,6 +192,15 @@ struct Inner {
     reader: Reader,
 }
 
+/// What Keep Rendered (or its undo) did to a range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Rendered frames that changed state.
+    pub changed: u64,
+    /// Rendered frames that already were in the asked state.
+    pub already: u64,
+}
+
 /// The engine's render cache, shared by the engine thread (observation,
 /// reads) and the app (commands, the render bar).
 #[derive(Clone)]
@@ -564,21 +573,30 @@ impl DiskFrames {
     }
 
     /// Keep Rendered: the rendered frames in `[from, to)` are pinned against
-    /// the limit and Clear… (`keep`), or unpinned. Returns frames changed.
-    /// Disk work: off the main thread.
-    pub fn keep_range(&self, from: f64, to: f64, keep: bool) -> std::io::Result<u64> {
+    /// the limit and Clear… (`keep`), or unpinned. Returns the frames changed
+    /// and the rendered frames that already were. Disk work: off the main
+    /// thread.
+    pub fn keep_range(&self, from: f64, to: f64, keep: bool) -> std::io::Result<Kept> {
         let plan = self.with(|s| {
             let (Some(cache), Some(frames)) = (s.cache.clone(), s.frames.as_ref()) else {
                 return (None, false);
             };
-            let keys: Vec<(i64, RenderKey)> = frame_range(frames, from, to)
-                .filter(|n| frames.present.contains(n) && frames.kept.contains(n) != keep)
+            let rendered: Vec<i64> = frame_range(frames, from, to)
+                .filter(|n| frames.present.contains(n))
+                .collect();
+            let already = rendered
+                .iter()
+                .filter(|n| frames.kept.contains(n) == keep)
+                .count() as u64;
+            let keys: Vec<(i64, RenderKey)> = rendered
+                .into_iter()
+                .filter(|n| frames.kept.contains(n) != keep)
                 .filter_map(|n| Some((n, frames.key(n)?)))
                 .collect();
-            (Some((cache, keys, s.generation)), false)
+            (Some((cache, keys, already, s.generation)), false)
         });
-        let Some((cache, keys, generation)) = plan else {
-            return Ok(0);
+        let Some((cache, keys, already, generation)) = plan else {
+            return Ok(Kept::default());
         };
         let mut changed = Vec::new();
         for (n, key) in keys {
@@ -599,7 +617,10 @@ impl DiskFrames {
             }
             _ => ((), false),
         });
-        Ok(count)
+        Ok(Kept {
+            changed: count,
+            already,
+        })
     }
 
     /// Delete Rendered Frames: every frame of the open composition's current
@@ -1133,8 +1154,22 @@ mod tests {
         let mut edited = scene.clone();
         edited.content = 2;
         assert!(disk.read(&edited, time).is_none());
-        assert_eq!(disk.keep_range(0., 3., true).unwrap(), 1);
+        assert_eq!(
+            disk.keep_range(0., 3., true).unwrap(),
+            Kept {
+                changed: 1,
+                already: 0
+            }
+        );
         assert_eq!(disk.bars().bars[0].2, BarState::Kept);
+        // Keeping it again says it already is (not "render it first").
+        assert_eq!(
+            disk.keep_range(0., 3., true).unwrap(),
+            Kept {
+                changed: 0,
+                already: 1
+            }
+        );
         assert_eq!(disk.delete_all().unwrap(), 1);
         assert!(disk.bars().bars.is_empty());
         assert!(read_eventually(&disk, &scene, time).is_none());

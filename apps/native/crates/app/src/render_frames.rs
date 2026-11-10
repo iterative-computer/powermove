@@ -172,8 +172,7 @@ impl Controller {
             .spawn(async move { disk.keep_range(from, to, true) });
         cx.spawn(async move |this, cx| {
             let message = match done.await {
-                Ok(0) => "Render the selection first, then keep it".to_owned(),
-                Ok(n) => format!("Kept {n} rendered frames"),
+                Ok(kept) => keep_message(kept),
                 Err(e) => format!("Couldn't keep the rendered frames: {e}"),
             };
             let _ = this.update(cx, |v, cx| {
@@ -201,6 +200,15 @@ impl Controller {
             });
         })
         .detach();
+    }
+}
+
+/// The status line after Keep Rendered.
+fn keep_message(kept: pm_engine_service::render_cache::Kept) -> String {
+    match (kept.changed, kept.already) {
+        (0, 0) => "Render the selection first, then keep it".to_owned(),
+        (0, n) => format!("Already kept: {n} rendered frames"),
+        (n, _) => format!("Kept {n} rendered frames"),
     }
 }
 
@@ -274,4 +282,18 @@ fn follow(
             }
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeping_kept_frames_again_says_so() {
+        use pm_engine_service::render_cache::Kept;
+        let kept = |changed, already| keep_message(Kept { changed, already });
+        assert_eq!(kept(0, 0), "Render the selection first, then keep it");
+        assert_eq!(kept(0, 300), "Already kept: 300 rendered frames");
+        assert_eq!(kept(12, 288), "Kept 12 rendered frames");
+    }
 }
