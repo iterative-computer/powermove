@@ -572,6 +572,7 @@ impl ExtensionHost {
             realm: None,
             router: None,
             records: vec![],
+            folders: BTreeMap::new(),
             canvases: BTreeMap::new(),
             dom_waiting: VecDeque::new(),
             deferred: VecDeque::new(),
@@ -894,6 +895,9 @@ struct Owner {
     realm: Option<Live>,
     router: Option<RemoteDomPanel>,
     records: Vec<Value>,
+    /// Where each discovered extension's folder is (recorded in its entry, so
+    /// an entry whose folder vanished outside Powermove can be forgotten).
+    folders: BTreeMap<String, PathBuf>,
     canvases: BTreeMap<(u64, String), u64>,
     /// Batches taken from the realm that the page queue has no room for yet.
     dom_waiting: VecDeque<Value>,
@@ -1571,6 +1575,9 @@ impl Owner {
                     if stopped {
                         summary["stopped"] = json!(true);
                     }
+                    if let Some(folder) = self.folders.get(id) {
+                        summary["folder"] = json!(folder.to_string_lossy());
+                    }
                     source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
                     let next = pm_kernel::state::ExtensionEntry {
                         id: id.to_owned(),
@@ -1585,6 +1592,32 @@ impl Owner {
             Ok((!ops.is_empty()).then_some(ops))
         });
         FIRST_ENTRIES.store(false, Ordering::Release);
+        self.forget_vanished();
+    }
+    /// An installed extension whose recorded folder is gone and that no root
+    /// still provides was deleted outside Powermove: its entry goes, so
+    /// Settings never lists a ghost. Archived entries (Delete…) stay.
+    fn forget_vanished(&self) {
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            let ops: Vec<StateOp> = state
+                .extensions
+                .values()
+                .filter(|e| e.installed && !self.folders.contains_key(&e.id))
+                .filter(|e| {
+                    let record = e.source.get("hostRecord");
+                    record
+                        .and_then(|r| r.get("archived"))
+                        .and_then(pm_model::Value::as_bool)
+                        != Some(true)
+                        && record
+                            .and_then(|r| r.get("folder"))
+                            .and_then(pm_model::Value::as_str)
+                            .is_some_and(|f| !std::path::Path::new(f).exists())
+                })
+                .map(|e| StateOp::RemoveExtension { id: e.id.clone() })
+                .collect();
+            Ok((!ops.is_empty()).then_some(ops))
+        });
     }
     /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
     fn follow_state(&mut self) {
@@ -1834,7 +1867,12 @@ impl Owner {
     }
     fn boot(&mut self) {
         let found = discovery::scan(&self.config.roots);
+        self.folders = found
+            .iter()
+            .map(|f| (f.id.clone(), f.directory.clone()))
+            .collect();
         if found.is_empty() {
+            self.forget_vanished();
             // Nothing to run: no realm, no memory, no bundle evaluation.
             self.shared.update(|p| p.ready = true);
             return;
@@ -1903,6 +1941,10 @@ impl Owner {
             return;
         }
         let found = discovery::scan(&self.config.roots);
+        self.folders = found
+            .iter()
+            .map(|f| (f.id.clone(), f.directory.clone()))
+            .collect();
         let live = self.realm.as_ref().unwrap();
         let Ok(compiler) = SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024)
         else {
@@ -2298,6 +2340,40 @@ mod tests {
         });
         later.close();
         let _ = later.worker.take().map(thread::JoinHandle::join);
+    }
+    #[test]
+    fn an_extension_folder_deleted_outside_powermove_leaves_settings_on_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        for id in ["ghost-mod", "kept-mod"] {
+            extension(
+                &extensions,
+                id,
+                &[(
+                    "index.ts",
+                    "export default function activate(api: any): void {}",
+                )],
+            );
+        }
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let entry = |id: &str| fixture.kernel.state().extensions.get(id).cloned();
+        fixture.until("entries with their folders", |_| {
+            ["ghost-mod", "kept-mod"].iter().all(|id| {
+                entry(id).is_some_and(|e| {
+                    e.source
+                        .get("hostRecord")
+                        .and_then(|r| r.get("folder"))
+                        .is_some()
+                })
+            })
+        });
+        fs::remove_dir_all(extensions.join("ghost-mod")).unwrap();
+        rescan_all();
+        fixture.until("the ghost entry is forgotten", |_| {
+            entry("ghost-mod").is_none()
+        });
+        assert!(entry("kept-mod").is_some());
     }
     #[test]
     fn discovered_typescript_and_svelte_extensions_contribute_and_edit_the_live_project() {

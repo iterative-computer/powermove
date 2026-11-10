@@ -239,6 +239,17 @@ impl StateSnapshot {
                         .insert("extensions".into(), Value::Object(enabled));
                     Arc::make_mut(&mut next.extensions).insert(entry.id.clone(), entry);
                 }
+                StateOp::RemoveExtension { id } => {
+                    if Arc::make_mut(&mut next.extensions).remove(&id).is_some()
+                        && let Some(Value::Object(enabled)) = next.settings.get("extensions")
+                        && enabled.get(id.as_str()).is_some()
+                    {
+                        let mut enabled = enabled.clone();
+                        enabled.remove(id.as_str());
+                        Arc::make_mut(&mut next.settings)
+                            .insert("extensions".into(), Value::Object(enabled));
+                    }
+                }
                 StateOp::Workspace { record } => {
                     upsert_workspace(Arc::make_mut(&mut next.settings), record)?;
                 }
@@ -370,6 +381,11 @@ pub enum StateOp {
         owner: Writer,
     },
     Extension(ExtensionEntry),
+    /// Forgets an extension whose folder is gone (deleted outside Powermove):
+    /// its entry and on/off preference go; its saved values stay.
+    RemoveExtension {
+        id: String,
+    },
     /// Adds or replaces the `workspaces` record with this record's id, keeping
     /// the others and their order (one writer's edit never drops another's).
     Workspace {
