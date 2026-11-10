@@ -193,10 +193,10 @@ final full suite; its cause remains OPEN and the exact-pixel assertion remains u
 | Gate | Before (quiet P4 unless stated) | P5b evidence so far | Status |
 | --- | --- | --- | --- |
 | Disposed inspector controls retained after GC | 40 / 40 in the focused P5b reproduction | 0 / 40; callbacks and real controls collectible in the editor regression | PASS for the reproduced leak |
-| 30-minute retained memory | +59.8% over 1,152 measured cycles | Full quiet repeat pending | FAIL; acceptance not revalidated |
+| 30-minute retained memory | +59.8% over 1,152 measured cycles | 30.10 measured minutes / 506 cycles under contention; RSS +9.89%, slope -0.78 MiB/min | FAIL; quiet protocol not completed |
 | Input → completed image, p95 | Worst case 59.8 ms | Early loaded macro diagnostic: 60.9 ms drag / 86.1 ms playback; no quiet final-code result yet | FAIL; loaded diagnostic only |
 | Product playback | 47.4–59.4 fps; p95 17.2–33.4 ms | Early loaded macro diagnostic: 52.6 fps / p95 32.0 ms; final-code quiet repeat pending | FAIL; full matrix open |
-| Main-thread tasks | Cold setup 186 ms; stress 84 ms | Synchronous thumbnail/swatch waits removed; initial million-triangle draw still 118 ms under load | FAIL; quiet cold and stress repeats required |
+| Main-thread tasks | Cold setup 186 ms; stress 84 ms | Specific thumbnail/swatch waits removed; long diagnostic editing task max 167 ms / p95 100 ms under contention | FAIL; quiet cold and stress repeats required |
 | Refine at 1080p | 1.40–3.16 s | Quiet final-code repeat pending | FAIL; acceptance not revalidated |
 | Final at 1080p | 1.72–4.81 s at 64 samples | DN2 quality floor preserved; no comparable quiet 30-frame measurement | FAIL; quality and protocol differ |
 
@@ -210,6 +210,40 @@ flat whole-app memory. Peak app RSS was 1,906.9 MiB, host 341.8 MiB; swap fell
 (p95 147 ms), so the main-thread gate also remains FAIL. DN2's editor tests
 were active throughout; these results are diagnostic, not acceptance. The
 strict 30-minute launch at 02:45 CST correctly refused that competing workload.
+
+The final growing-catalog diagnostic completed **30.10 measured minutes,
+506 measured cycles**, after five minutes / 72 warmup cycles.
+Closed-project RSS averaged 937.9→1030.6 MiB
+(first/last three checkpoints), +9.89%, with fitted slope
+-0.78 MiB/min across 50 closed-project checkpoints. DOM counters
+were 4,966→4,965; listeners
+1,037→1,037;
+JS heap 31.95→38.59 MiB.
+The growing catalog is retained; no saved projects or Undo were cleared.
+Peak whole-app RSS was 2292.9 MiB, host 341.8 MiB;
+system swap changed -736.2 MiB. No host was orphaned.
+Measured main-thread tasks reached 167 ms (p95 100 ms).
+
+**This is diagnostic evidence, not a quiet-memory PASS.** The strict launch
+was initially quiet at 02:47 CST but stopped after 15 warmup cycles when DN2
+started another suite. The replacement diagnostic began at 02:49 CST; other
+lanes' tests remained active during portions of its measured period. Only
+625 of 901 machine polls were quiet.
+The full quiet 30-minute retention protocol and quiet final-code performance
+matrix remain required. Controller/docs commit is `0916fe9de`; runtime and
+native binary are the tested P5b build specified in this section.
+
+Paired long-run heaps contain 655,653→763,731 total nodes and
+159→180 detached HTML elements. This includes
+warmup, JIT and legitimate catalog content; the focused weak-reference
+regression remains the causal proof of inspector collection. Both snapshots
+were summarised and deleted outside Git.
+
+The final-code quiet macro launch at 03:25 CST also refused a competing
+video-test workload. No final-code quiet latency/frame-rate measurement was
+obtained; the full matrix remains blocked. The upstream opt-in progress-film
+test added at `2238f07b4` was also integrated; it changes no production
+code and was not part of the earlier 72-case regression run.
 
 The early macro diagnostic used Apple M5 / 16 GiB, macOS 27.3, Electron 44,
 AC power, Low Power Mode off and the 120 Hz internal display. It used ten-second
