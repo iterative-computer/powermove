@@ -305,3 +305,89 @@ impl Controller {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pm_kernel::{
+        Caller, KernelActor, KernelConfig, KernelHandle, OpenSource, Request, WorkspaceCall,
+    };
+    use pm_shell::workspace;
+    use serde_json::{Value, json};
+
+    fn model(v: &Value) -> pm_model::Value {
+        pm_model::json::parse(&v.to_string()).unwrap()
+    }
+    fn json(v: &pm_model::Value) -> Value {
+        serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap()
+    }
+    fn open(kernel: &KernelHandle, id: &str) {
+        let doc = pm_model::json::parse(&crate::v4_view_tests::project_json(1)).unwrap();
+        kernel
+            .open(id, OpenSource::Untitled(doc))
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    /// What a window sends for its project: `WorkspaceCall::Replace`.
+    fn replace(kernel: &KernelHandle, id: &str, next: &Value) {
+        let expected = kernel.published(id).unwrap().workspace.clone();
+        let call = WorkspaceCall::Replace {
+            expected,
+            next: model(next),
+        };
+        kernel
+            .call(id, Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    fn stored(kernel: &KernelHandle, id: &str) -> Value {
+        json(&kernel.state().settings["workspaces"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["id"] == id)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn two_projects_resizing_different_docks_and_sections_keep_both() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        for id in ["A", "B"] {
+            open(&kernel, id);
+        }
+        // The Gradient workspace with a second generated section.
+        let mut start = workspace::preset("gradient").unwrap();
+        let mut knobs = start["custom"][0].clone();
+        knobs["id"] = "knobs".into();
+        knobs["title"] = "Knobs".into();
+        start["custom"].as_array_mut().unwrap().push(knobs);
+        replace(&kernel, "A", &start);
+        replace(&kernel, "B", &start);
+        // A resizes the first dock and sets a value in the first section;
+        // B resizes the last dock and sets one in the second.
+        let resized = |dock: usize, size: f32, section: usize, key: &str| {
+            let mut layout = workspace::layout(&start);
+            layout.docks[dock].size = Some(size);
+            let mut next = workspace::write(&layout, &start);
+            next["custom"][section]["state"][key] = json!(7);
+            next
+        };
+        let last = workspace::layout(&start).docks.len() - 1;
+        replace(&kernel, "A", &resized(0, 311., 0, "angle"));
+        replace(&kernel, "B", &resized(last, 277., 1, "midpoint"));
+        let ws = stored(&kernel, "gradient");
+        let merged = workspace::layout(&ws);
+        assert_eq!(merged.docks[0].size, Some(311.), "A's dock size was lost");
+        assert_eq!(merged.docks[last].size, Some(277.));
+        assert_eq!(
+            ws["custom"][0]["state"]["angle"], 7,
+            "A's section edit was lost"
+        );
+        assert_eq!(ws["custom"][1]["state"]["midpoint"], 7);
+        assert_eq!(ws["custom"][0]["id"], "gradient-controls");
+        assert_eq!(ws["custom"].as_array().unwrap().len(), 2);
+    }
+}

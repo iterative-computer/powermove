@@ -359,15 +359,22 @@ pub(crate) fn upsert_workspace(
     Ok(())
 }
 /// Three-way merge of JSON: `ours` and `theirs` both started from `base`.
-/// Objects merge key by key, recursively; anything else one side left alone
-/// takes the other side's value; where both changed the same non-object
-/// value, `ours` (the later writer) wins.
+/// Objects merge key by key, recursively; arrays of identifiable items (each
+/// an object with a string `id`, or a bare string such as a panel id; ids
+/// unique) merge item by item (`merge_items`); anything else one side left
+/// alone takes the other side's value; where both changed the same value,
+/// `ours` (the later writer) wins.
 pub(crate) fn merge3(base: &Value, ours: Value, theirs: &Value) -> Value {
     if ours == *base {
         return theirs.clone();
     }
     if theirs == base {
         return ours;
+    }
+    if let (Value::Array(b), Value::Array(o), Value::Array(t)) = (base, &ours, theirs)
+        && let (Some(bk), Some(ok), Some(tk)) = (item_ids(b), item_ids(o), item_ids(t))
+    {
+        return Value::Array(merge_items((b, &bk), (o, &ok), (t, &tk)));
     }
     let (Value::Object(b), Value::Object(o), Value::Object(t)) = (base, &ours, theirs) else {
         return ours;
@@ -392,6 +399,68 @@ pub(crate) fn merge3(base: &Value, ours: Value, theirs: &Value) -> Value {
         }
     }
     Value::Object(merged)
+}
+/// Each item's id (`id` of an object, or the string itself), when every item
+/// has one and none repeats.
+fn item_ids(items: &[Value]) -> Option<Vec<&str>> {
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| match item {
+            Value::String(_) => item.as_str(),
+            _ => workspace_id(item),
+        })
+        .collect::<Option<_>>()?;
+    let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+    (unique.len() == ids.len()).then_some(ids)
+}
+/// `merge3` of id-keyed arrays: items present on all sides merge three ways;
+/// an item one side added is added, one side removed is removed (unless the
+/// other changed it, then the later writer, `ours`, decides). The order is
+/// that of the writer who reordered, else `theirs`; items it lacks keep their
+/// place after the item they followed on their own side.
+fn merge_items(
+    (b, bk): (&[Value], &[&str]),
+    (o, ok): (&[Value], &[&str]),
+    (t, tk): (&[Value], &[&str]),
+) -> Vec<Value> {
+    let find = |items: &[Value], keys: &[&str], id: &str| {
+        keys.iter().position(|k| *k == id).map(|i| items[i].clone())
+    };
+    let merged = |id: &str| -> Option<Value> {
+        match (find(b, bk, id), find(o, ok, id), find(t, tk, id)) {
+            (Some(bv), Some(ov), Some(tv)) => Some(merge3(&bv, ov, &tv)),
+            // We removed it; or they removed it and we left it alone.
+            (Some(_), None, _) => None,
+            (Some(bv), Some(ov), None) => (ov != bv).then_some(ov),
+            (None, Some(ov), _) => Some(ov),
+            (None, None, tv) => tv,
+        }
+    };
+    // Did `ours` move items that both it and the base hold?
+    let common = |keys: &[&str], other: &[&str]| -> Vec<String> {
+        keys.iter()
+            .filter(|k| other.contains(k))
+            .map(|k| (*k).to_owned())
+            .collect()
+    };
+    let (primary, secondary) = if common(ok, bk) != common(bk, ok) {
+        (ok, tk)
+    } else {
+        (tk, ok)
+    };
+    let mut order: Vec<&str> = primary.to_vec();
+    for (i, id) in secondary.iter().enumerate() {
+        if order.contains(id) {
+            continue;
+        }
+        let at = secondary[..i]
+            .iter()
+            .rev()
+            .find_map(|prev| order.iter().position(|o| o == prev))
+            .map_or(0, |p| p + 1);
+        order.insert(at, id);
+    }
+    order.into_iter().filter_map(merged).collect()
 }
 #[derive(Clone, Debug, Default)]
 pub struct StateTransaction {
@@ -607,6 +676,30 @@ mod workspace_tests {
             v(r#"{"a":3,"b":{"x":2,"y":3},"c":[2],"e":1}"#)
         );
         assert_eq!(merge3(&base, base.clone(), &theirs), theirs);
+    }
+    #[test]
+    fn id_keyed_arrays_merge_item_by_item_and_keep_the_reorderers_order() {
+        let v = |j: &str| parse(j).unwrap();
+        let base = v(r#"[{"id":"left","size":1},"viewer",{"id":"right","size":1},{"id":"gone"}]"#);
+        // They resize `right`, add `bottom` after `right`, drop `gone`.
+        let theirs =
+            v(r#"[{"id":"left","size":1},"viewer",{"id":"right","size":3},{"id":"bottom"}]"#);
+        // We resize `left`, move `viewer` to the front, add `tools` at the end.
+        let ours = v(
+            r#"["viewer",{"id":"left","size":2},{"id":"right","size":1},{"id":"gone"},{"id":"tools"}]"#,
+        );
+        assert_eq!(
+            merge3(&base, ours, &theirs),
+            v(
+                r#"["viewer",{"id":"left","size":2},{"id":"right","size":3},{"id":"bottom"},{"id":"tools"}]"#
+            )
+        );
+        // Items without ids (generated controls) stay one value.
+        let plain = v(r#"[{"label":"A"}]"#);
+        assert_eq!(
+            merge3(&plain, v(r#"[{"label":"B"}]"#), &v(r#"[{"label":"C"}]"#)),
+            v(r#"[{"label":"B"}]"#)
+        );
     }
     #[test]
     fn workspace_records_upsert_in_place_and_archive_to_the_trash_front() {
