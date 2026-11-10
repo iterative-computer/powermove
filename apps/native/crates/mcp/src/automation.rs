@@ -164,6 +164,7 @@ pub struct Automation {
     pub agent_grants: Option<AgentGrants>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
     pub media_importer: Option<Arc<dyn crate::services::MediaImporter>>,
+    pub speech: Option<Arc<dyn crate::services::Speech>>,
     pub threads: Option<Arc<dyn crate::services::ThreadArchive>>,
     pub export_jobs: Arc<crate::export_jobs::ExportJobs>,
     /// Loaded 3D geometry from the native import/engine worker, for snapshot-bound placement and exploded views.
@@ -225,6 +226,7 @@ impl Automation {
             agent_grants: None,
             media_registry: None,
             media_importer: None,
+            speech: None,
             threads: None,
             export_jobs: Arc::new(crate::export_jobs::ExportJobs::default()),
             scene3d_assets: None,

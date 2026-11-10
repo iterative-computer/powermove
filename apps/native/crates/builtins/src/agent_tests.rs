@@ -54,6 +54,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
         ]),
         tools: vec!["get_project_state".into()],
         composition_tools: vec!["get_project_state".into()],
+        compatible: None,
     }
 }
 struct Agent {
@@ -129,9 +130,17 @@ impl Agent {
             let p = self.latest.as_ref().expect("agent publication");
             (p.generation, p.surface.revision())
         };
-        let driven = self
-            .panels
-            .event("agent", generation, revision, target, event, detail);
+        // As the app's SurfaceView::send does: by the node's semantic id, so a
+        // republish between seeing the button and the press still lands.
+        let driven = self.panels.activate(
+            "agent",
+            generation,
+            revision,
+            target,
+            Some(id),
+            event,
+            detail,
+        );
         match driven.map(wait) {
             Ok(Ok(_)) => {
                 self.text();
@@ -1475,5 +1484,295 @@ fn a_result_that_cant_be_saved_is_kept_until_it_is() {
         saved["records"][0]["task"]["status"], "completed",
         "{saved}"
     );
+    panel.panels.close();
+}
+#[test]
+fn media_a_reply_names_gets_a_card_that_opens_only_that_file() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // The fake provider answers "Saw: <last line>".
+    panel.send("![Before](/tmp/before.png) and https://example.com/a.png and /tmp/take.wav");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Before") && text.contains("Image"),
+        "{text}\n{}",
+        panel.agent().lock().unwrap().panel.raw_archive()
+    );
+    assert!(
+        text.contains("take.wav") && text.contains("Sound"),
+        "{text}"
+    );
+    // A web address written as a link (not an image) is no card.
+    assert!(!text.contains("Image on the web"), "{text}");
+    let open = |panel: &mut Agent, suffix: &str| {
+        let id = panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+            .find(|id| id.ends_with(suffix))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("no {suffix}"));
+        panel.panels.take_platform_requests();
+        panel.click(&id);
+        panel.panels.take_platform_requests()
+    };
+    let requests = open(&mut panel, "-media-0");
+    let request = requests
+        .iter()
+        .find(|r| r.operation == "agent.media")
+        .expect("open request");
+    assert_eq!(
+        request.input,
+        json!({"path":"/tmp/before.png","remote":false,"reveal":false})
+    );
+    let requests = open(&mut panel, "-media-1-reveal");
+    assert_eq!(
+        requests
+            .iter()
+            .find(|r| r.operation == "agent.media")
+            .unwrap()
+            .input,
+        json!({"path":"/tmp/take.wav","remote":false,"reveal":true})
+    );
+    // Only a file a reply names: anything else is refused, nothing opens.
+    let refused = {
+        let backend = panel
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
+        backend
+            .native_command(
+                "panel.agent.dispatch",
+                &json!({"action":{"type":"openMedia","path":"/tmp/elsewhere.png","reveal":false}}),
+            )
+            .err()
+    };
+    assert_eq!(
+        refused.as_deref(),
+        Some("This file can't be opened from here.")
+    );
+    assert!(
+        !panel
+            .panels
+            .take_platform_requests()
+            .iter()
+            .any(|r| r.operation == "agent.media")
+    );
+    panel.panels.close();
+}
+
+/// The fake OpenAI-compatible server (fixtures/fake-openai.py), recording
+/// each request; killed on drop.
+struct FakeModel {
+    child: std::process::Child,
+    port: u16,
+    record: PathBuf,
+}
+impl FakeModel {
+    fn start(root: &Path) -> Self {
+        use std::io::BufRead;
+        let record = root.join("requests.jsonl");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-openai.py");
+        let mut child = std::process::Command::new(script)
+            .env("PM_FAKE_OPENAI_RECORD", &record)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        Self {
+            child,
+            port: line.trim().parse().unwrap(),
+            record,
+        }
+    }
+    fn requests(&self) -> Vec<Value> {
+        std::fs::read_to_string(&self.record)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+}
+impl Drop for FakeModel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+/// A plain-HTTP stand-in for the app's NSURLSession chat host.
+#[derive(Debug)]
+struct TestChat {
+    saved: pm_agents::compatible::Saved,
+}
+impl pm_agents::compatible::ChatHost for TestChat {
+    fn saved(&self) -> Option<pm_agents::compatible::Saved> {
+        Some(self.saved.clone())
+    }
+    fn key(&self, _: &str) -> Option<String> {
+        Some("fixture-key".into())
+    }
+    fn stream(
+        &self,
+        url: &str,
+        key: Option<&str>,
+        body: Vec<u8>,
+        stop: &std::sync::atomic::AtomicBool,
+        sink: &mut dyn FnMut(&[u8]) -> std::result::Result<(), String>,
+    ) -> std::result::Result<u16, String> {
+        use std::io::{Read, Write};
+        let rest = url.strip_prefix("http://").unwrap();
+        let (address, path) = rest.split_at(rest.find('/').unwrap());
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
+        write!(socket, "POST {} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n", path, body.len()).unwrap();
+        socket.write_all(&body).unwrap();
+        let (mut head, mut status, mut buffer) = (true, 0, [0; 4096]);
+        let mut pending = Vec::new();
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("Stopped.".into());
+            }
+            let n = match socket.read(&mut buffer) {
+                Ok(0) => return Ok(status),
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+            if head {
+                pending.extend_from_slice(&buffer[..n]);
+                let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                status = String::from_utf8_lossy(&pending[9..12]).parse().unwrap();
+                head = false;
+                let rest = pending.split_off(end + 4);
+                if (200..300).contains(&status) {
+                    sink(&rest)?;
+                }
+            } else if (200..300).contains(&status) {
+                sink(&buffer[..n])?;
+            }
+        }
+    }
+}
+fn compatible_environment(root: &Path, model: &FakeModel) -> Environment {
+    let mut environment = environment(root, "reply");
+    environment.executable = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-mcp.py");
+    environment.tools = pm_mcp_tools();
+    environment.composition_tools = vec!["get_project_state".into()];
+    environment.compatible = Some(std::sync::Arc::new(TestChat {
+        saved: pm_agents::compatible::Saved {
+            base_url: format!("http://127.0.0.1:{}/v1", model.port),
+            model: "fixture-model".into(),
+            vision: false,
+            models: vec!["fixture-model".into(), "other-model".into()],
+        },
+    }));
+    environment
+}
+#[test]
+fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.change("agent-provider", "compatible");
+    panel.connected(Provider::Compatible);
+    assert!(!panel.text().contains("Connect Your Agent"));
+    panel.send("Use a tool please");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Tool said: get_project_state ran: Synthetic, 0 layers"),
+        "{text}"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[0]["auth"], "Bearer fixture-key");
+    let first = &requests[0]["body"];
+    assert_eq!(first["model"], "fixture-model");
+    assert_eq!(first["stream"], true);
+    // Composition only: the Composition tools, nothing else.
+    let offered = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(offered, ["get_project_state"]);
+    assert!(
+        first["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("powermove tools")
+    );
+    let second = &requests[1]["body"]["messages"];
+    let calls = &second[2]["tool_calls"][0];
+    assert_eq!(calls["function"]["name"], "get_project_state");
+    assert_eq!(second[3]["role"], "tool");
+    assert_eq!(second[3]["tool_call_id"], "call_1");
+    let agent = panel.agent();
+    let archive = agent.lock().unwrap().panel.raw_archive().clone();
+    assert_eq!(archive["threads"][0]["lastRunStatus"], "completed");
+    let stored = archive.to_string();
+    assert!(stored.contains("get_project_state"), "{stored}");
+    drop(agent);
+    panel.panels.close();
+}
+#[test]
+fn a_connected_model_streams_and_stop_cancels_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.change("agent-provider", "compatible");
+    panel.connected(Provider::Compatible);
+    panel.send("Answer slow");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !panel.text().contains("token1") {
+        assert!(Instant::now() < deadline, "no stream");
+        thread::sleep(Duration::from_millis(20));
+    }
+    panel.click("agent-stop");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let state = agent.lock().unwrap();
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn choosing_another_listed_model_sends_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.change("agent-provider", "compatible");
+    panel.connected(Provider::Compatible);
+    panel.change("agent-model", "other-model");
+    panel.send("Hello there");
+    panel.wait(idle);
+    assert!(panel.text().contains("Saw: Hello there"));
+    assert_eq!(model.requests()[0]["body"]["model"], "other-model");
     panel.panels.close();
 }

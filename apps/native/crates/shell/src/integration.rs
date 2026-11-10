@@ -47,6 +47,16 @@ pub trait Integration {
     ) -> Option<Vec<crate::native::MenuEntry>> {
         Some(entries)
     }
+    /// The kernel's workspace store as this window sees it, the same `Rc`
+    /// until something in it changes. `None`: the window keeps its own copy.
+    fn workspaces(&self, _cx: &App) -> Option<std::rc::Rc<crate::workspace::Store>> {
+        None
+    }
+    /// Sends one change to the kernel's workspace store, without waiting.
+    fn write_workspace(&self, _write: crate::workspace::Write, _cx: &mut App) {}
+    /// A passing note in the status line (the shell's own messages: a
+    /// workspace saved or deleted, a definition that can't be used).
+    fn note(&self, _text: &str, _cx: &mut App) {}
     /// Panels this window's extensions contribute: id and title.
     fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()

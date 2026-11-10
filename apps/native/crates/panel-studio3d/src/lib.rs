@@ -10,6 +10,39 @@ use pm_kernel::{
 use pm_scene3d::{from_model, to_model};
 use serde_json::{Value, json};
 use std::sync::Arc;
+/// Properties' 3D section (3d-studio.md §8) for one selected 3D layer: its
+/// keyframeable fields and the typed edits behind its pop-ups and checkboxes.
+pub mod properties {
+    pub use crate::fields::Field;
+    use crate::{Result, view};
+    use pm_kernel::{Command, Published};
+    pub use pm_scene3d::schema::Role;
+    use serde_json::Value;
+    /// The role and its channel fields (stored keys, Title Case labels,
+    /// ranges and groups), or `None` for a layer that isn't 3D.
+    pub fn fields(layer: &Value) -> Option<(Role, Vec<Field>)> {
+        let role = pm_scene3d::schema::role(layer)?;
+        Some((
+            role,
+            crate::fields::catalog(role.key(), &layer["d"]["data"]),
+        ))
+    }
+    /// The undo label and commands for control `id` (`screen`, `type`,
+    /// `projection`, `castShadow`, ...) set to `arg` on the selected layer.
+    pub fn command(
+        p: &Published,
+        time: f64,
+        id: &str,
+        arg: Value,
+    ) -> Result<(String, Vec<Command>)> {
+        view::commands(p, time, id, arg)
+    }
+    /// `Screen`'s options: None, then the project's compositions, those that
+    /// would play inside themselves disabled.
+    pub fn screens(p: &Published, layer: &str) -> Result<Vec<Value>> {
+        view::screen_options(p, layer)
+    }
+}
 pub const CHANNEL: &str = "studio3d";
 pub const COMMAND: &str = "studio3d.drive";
 #[derive(Debug, Clone, PartialEq, Eq)]

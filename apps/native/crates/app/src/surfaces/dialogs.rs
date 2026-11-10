@@ -68,6 +68,8 @@ pub struct Field {
     pub warning: bool,
     pub tooltip: Option<&'static str>,
     pub error: Option<&'static str>,
+    /// A secure text field (`NSSecureTextField`): what is typed never shows.
+    pub secure: bool,
 }
 impl Field {
     pub fn new(id: &str, label: &str, piece: NativePiece, values: Vec<String>) -> Self {
@@ -84,6 +86,7 @@ impl Field {
             warning: false,
             tooltip: None,
             error: None,
+            secure: false,
         }
     }
     pub fn number(id: &str, label: &str, values: Vec<String>, unit: &str) -> Self {
@@ -146,6 +149,8 @@ pub struct Surface {
     pub expression_editor: bool,
     pub result_line: Option<String>,
     pub result_error: bool,
+    /// A sheet-wide problem (a failed sign-in, a publish check) under the fields.
+    pub warning: Option<String>,
 }
 impl Surface {
     pub fn sheet(
@@ -173,6 +178,7 @@ impl Surface {
             expression_editor: false,
             result_line: None,
             result_error: false,
+            warning: None,
         }
     }
     pub fn valid(&mut self) {

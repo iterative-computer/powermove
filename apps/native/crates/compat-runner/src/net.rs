@@ -149,6 +149,9 @@ mod system {
         redirects: Mutex<usize>,
         fallback: String,
         result: Slot,
+        /// Streamed requests: the status, then body bytes as they arrive.
+        chunks: Option<std::sync::mpsc::Sender<Streamed>>,
+        streamed: Mutex<usize>,
     }
     define_class!(
         #[unsafe(super(NSObject))]
@@ -239,6 +242,13 @@ mod system {
             ) {
                 // A declared size over the limit stops before any body arrives.
                 let delivery = self.ivars();
+                if let Some(chunks) = &delivery.chunks {
+                    let object: &AnyObject = response.as_ref();
+                    let status = object
+                        .downcast_ref::<NSHTTPURLResponse>()
+                        .map_or(200, |http| http.statusCode() as u16);
+                    let _ = chunks.send(Streamed::Status(status));
+                }
                 if response.expectedContentLength() > delivery.limit as i64 {
                     *delivery.failure.lock().unwrap() = Some(Error::Quota("response bytes"));
                     task.cancel();
@@ -252,10 +262,17 @@ mod system {
             fn received(&self, _: &NSURLSession, task: &NSURLSessionDataTask, data: &NSData) {
                 let delivery = self.ivars();
                 let mut body = delivery.body.lock().unwrap();
-                if body.len().saturating_add(data.len()) > delivery.limit {
+                let mut streamed = delivery.streamed.lock().unwrap();
+                *streamed = streamed.saturating_add(data.len());
+                if body.len().saturating_add(data.len()) > delivery.limit
+                    || *streamed > delivery.limit
+                {
                     body.clear();
                     *delivery.failure.lock().unwrap() = Some(Error::Quota("response bytes"));
                     task.cancel();
+                } else if let Some(chunks) = &delivery.chunks {
+                    // Counted against the limit, never kept.
+                    let _ = chunks.send(Streamed::Data(data.to_vec()));
                 } else {
                     body.extend_from_slice(&data.to_vec());
                 }
@@ -304,7 +321,12 @@ mod system {
 
     /// One session per request: ephemeral, with nowhere to keep or find cookies,
     /// cached bodies or credentials. It is invalidated when its task completes.
-    pub fn start(input: &FetchRequest, reach: Reach, result: Slot) -> Result<Task> {
+    pub fn start(
+        input: &FetchRequest,
+        reach: Reach,
+        result: Slot,
+        chunks: Option<std::sync::mpsc::Sender<Streamed>>,
+    ) -> Result<Task> {
         let url = NSURL::URLWithString(&NSString::from_str(&input.url))
             .ok_or(Error::Invalid("request URL"))?;
         let request = NSMutableURLRequest::requestWithURL(&url);
@@ -336,6 +358,8 @@ mod system {
                 redirects: Mutex::default(),
                 fallback: input.url.clone(),
                 result,
+                chunks,
+                streamed: Mutex::default(),
             });
             // SAFETY: NSObject's designated initializer on a freshly allocated object.
             unsafe { msg_send![super(this), init] }
@@ -375,6 +399,28 @@ impl HostRequest for Http {
 /// Starts `request` and returns at once. The body stops at the caller's limit
 /// while it arrives; it is never buffered past it.
 pub fn fetch(request: FetchRequest, reach: Reach, _: Cancellation) -> Result<Box<dyn HostRequest>> {
+    begin(request, reach, None)
+}
+/// What a streamed request delivers before it completes.
+#[derive(Debug)]
+pub enum Streamed {
+    Status(u16),
+    Data(Vec<u8>),
+}
+/// Starts `request`, sending its status and then its body bytes to `chunks`
+/// as they arrive (nothing is buffered); polling settles it with an empty body.
+pub fn stream(
+    request: FetchRequest,
+    reach: Reach,
+    chunks: std::sync::mpsc::Sender<Streamed>,
+) -> Result<Box<dyn HostRequest>> {
+    begin(request, reach, Some(chunks))
+}
+fn begin(
+    request: FetchRequest,
+    reach: Reach,
+    chunks: Option<std::sync::mpsc::Sender<Streamed>>,
+) -> Result<Box<dyn HostRequest>> {
     let http = Http {
         result: Arc::default(),
         task: Arc::default(),
@@ -388,7 +434,7 @@ pub fn fetch(request: FetchRequest, reach: Reach, _: Cancellation) -> Result<Box
     // Name resolution blocks, and the caller may be serving other requests.
     std::thread::spawn(move || {
         let started = admit(&request.url, reach)
-            .and_then(|()| system::start(&request, reach, result.clone()));
+            .and_then(|()| system::start(&request, reach, result.clone(), chunks));
         match started {
             Ok(started) => {
                 let mut slot = task.lock().unwrap();
@@ -421,19 +467,22 @@ pub fn download(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchRespon
     request(url, max_bytes, seconds, Reach::Media)
 }
 fn request(url: &str, max_bytes: usize, seconds: u64, reach: Reach) -> Result<FetchResponse> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-    let mut request = fetch(
+    send(
         FetchRequest {
             url: url.to_owned(),
             method: "GET".into(),
             headers: vec![],
             body: vec![],
             max_response_bytes: max_bytes,
-            deadline,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
         },
         reach,
-        Cancellation::default(),
-    )?;
+    )
+}
+/// Worker-only: any method, headers and body, waited for until its deadline.
+pub fn send(request: FetchRequest, reach: Reach) -> Result<FetchResponse> {
+    let deadline = request.deadline;
+    let mut request = fetch(request, reach, Cancellation::default())?;
     loop {
         if let Some(result) = request.poll() {
             return result;

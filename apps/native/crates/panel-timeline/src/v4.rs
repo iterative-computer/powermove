@@ -495,49 +495,48 @@ fn track_window(
     use crate::tracks::Area;
     let layout = crate::tracks::layout(&model.index, &model.reveal);
     let mut rows = vec![];
-    for (area, count, short, audio) in [
-        (Area::Video, layout.video, "V", false),
-        (Area::Audio, layout.audio, "A", true),
-        (Area::Captions, layout.captions, "C", false),
-    ] {
-        for lane in 0..count {
-            let clips: Vec<_> = layout
-                .items
-                .iter()
-                .filter(|i| i.area == area && i.lane == lane)
-                .filter_map(|i| model.index.layer(&i.id))
-                .collect();
-            let label = format!("{short}{}", lane + 1);
-            let enabled = clips
-                .iter()
-                .all(|l| if audio { !l.audio_muted } else { l.visible });
-            // What the track holds, quietly after its name (v1): the clip's
-            // name, or how many clips.
-            let summary = match clips.as_slice() {
-                [] => String::new(),
-                [one] => one.name.to_string_lossy(),
-                many => format!("{} clips", many.len()),
+    for (area, lane) in layout.display_order() {
+        let (short, audio) = match area {
+            Area::Video => ("V", false),
+            Area::Audio => ("A", true),
+            Area::Captions => ("C", false),
+        };
+        let clips: Vec<_> = layout
+            .items
+            .iter()
+            .filter(|i| i.area == area && i.lane == lane)
+            .filter_map(|i| model.index.layer(&i.id))
+            .collect();
+        let label = format!("{short}{}", lane + 1);
+        let enabled = clips
+            .iter()
+            .all(|l| if audio { !l.audio_muted } else { l.visible });
+        // What the track holds, quietly after its name (v1): the clip's
+        // name, or how many clips.
+        let summary = match clips.as_slice() {
+            [] => String::new(),
+            [one] => one.name.to_string_lossy(),
+            many => format!("{} clips", many.len()),
+        };
+        rows.push(json!({
+            "id": json!(["track", format!("{area:?}"), lane]).to_string(),
+            "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
+            "summary": summary,
+            "enabled": enabled, "expanded": false, "selected": false,
+            "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
+        }));
+        for row in model.rows() {
+            let RowId::Property { layer_id, channel } = &row.id else {
+                continue;
             };
-            rows.push(json!({
-                "id": json!(["track", format!("{area:?}"), lane]).to_string(),
-                "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
-                "summary": summary,
-                "enabled": enabled, "expanded": false, "selected": false,
-                "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
-            }));
-            for row in model.rows() {
-                let RowId::Property { layer_id, channel } = &row.id else {
-                    continue;
-                };
-                if clips.iter().any(|l| l.id == *layer_id) {
-                    rows.push(json!({
-                        "id": row_id(&row.id), "depth": row.depth, "kind": "property",
-                        "layer": layer_id, "path": channel, "selected": false,
-                        "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
-                        "channels": model.track_channels(layer_id, channel).iter()
-                            .map(|c| c.path.as_str()).collect::<Vec<_>>(),
-                    }));
-                }
+            if clips.iter().any(|l| l.id == *layer_id) {
+                rows.push(json!({
+                    "id": row_id(&row.id), "depth": row.depth, "kind": "property",
+                    "layer": layer_id, "path": channel, "selected": false,
+                    "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
+                    "channels": model.track_channels(layer_id, channel).iter()
+                        .map(|c| c.path.as_str()).collect::<Vec<_>>(),
+                }));
             }
         }
     }

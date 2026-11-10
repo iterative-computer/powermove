@@ -40,6 +40,14 @@ impl Layout {
     pub fn item(&self, id: &str) -> Option<&Item> {
         self.by_id.get(id).map(|i| &self.items[*i])
     }
+    /// Lanes top to bottom, as v1 and Premiere stack them: captions, then
+    /// video from the highest track down to V1, then audio from A1 down.
+    pub fn display_order(&self) -> Vec<(Area, usize)> {
+        let captions = (0..self.captions).rev().map(|l| (Area::Captions, l));
+        let video = (0..self.video).rev().map(|l| (Area::Video, l));
+        let audio = (0..self.audio).map(|l| (Area::Audio, l));
+        captions.chain(video).chain(audio).collect()
+    }
 }
 #[derive(Clone, Debug, Default)]
 struct Unit {

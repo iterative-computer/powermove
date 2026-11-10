@@ -511,3 +511,147 @@ fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
     );
     assert_eq!(fs::read(&source).unwrap(), b"synthetic original");
 }
+
+/// A profile written by the shipped app at current main (FileStore through
+/// main's Projects/takes, gzip disk envelopes, separate and combined session
+/// history, journal, and a storage-upgrade checkpoint paused at its browser
+/// stage; `pm-kernel/tests/main_current/generate.mjs`) migrates without a
+/// changed source byte, keeps the checkpoint exactly, and its project loads
+/// with every field of main's document.
+#[test]
+fn current_main_profile_records_migrate_with_every_project_field_and_the_checkpoint_kept() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kernel/tests/fixtures/main-current");
+    let t = private_tempdir();
+    let root = t.path().canonicalize().unwrap();
+    let config = profile(&root);
+    let store = config.electron_profile.join("store");
+    for entry in fs::read_dir(fixtures.join("profile/store")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() != "projects.json" {
+            fs::copy(entry.path(), store.join(entry.file_name())).unwrap();
+        }
+    }
+    // Both registries' projects: the synthetic base profile's and main's.
+    let mut registry: Value = read(&store.join("projects.json"));
+    let main: Value = read(&fixtures.join("profile/store/projects.json"));
+    registry
+        .as_array_mut()
+        .unwrap()
+        .extend(main.as_array().unwrap().iter().cloned());
+    write(&store.join("projects.json"), &registry);
+    let checkpoint_bytes = fs::read(fixtures.join("profile/storage-upgrade-v1.json")).unwrap();
+    fs::write(
+        config.electron_profile.join("storage-upgrade-v1.json"),
+        &checkpoint_bytes,
+    )
+    .unwrap();
+
+    let before = files(&config.electron_profile);
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(
+        matches!(
+            result,
+            Outcome::Complete {
+                projects: 2,
+                blocked_owners: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        before,
+        files(&config.electron_profile),
+        "source profile changed"
+    );
+    assert_eq!(
+        fs::read(
+            config
+                .native_profile
+                .join("legacy-main/storage-upgrade-v1.json")
+        )
+        .unwrap(),
+        checkpoint_bytes,
+        "the storage-upgrade checkpoint must be kept exactly"
+    );
+
+    // Main's project: the gzip slot decoded, its journal not newer than the
+    // slot, and the same document main saved to its project file.
+    let saved = {
+        let file = fs::File::open(fixtures.join("current.pmv")).unwrap();
+        pm_model::container::read_container(
+            &file,
+            pm_model::container::ReadOptions { verify_media: true },
+        )
+        .unwrap()
+        .document
+    };
+    let cp = checkpoint(&config);
+    let library = LibraryStore::open(&config.native_profile);
+    let project = library.load(&cp.projects["P-1"]).unwrap().unwrap();
+    // The library keys the project by its migrated id (the checkpoint maps
+    // main's id to it); every other field is main's.
+    assert_eq!(
+        project.project.get("id").and_then(pm_model::Value::as_str),
+        Some(cp.projects["P-1"].as_str())
+    );
+    let mut changed = vec![];
+    diff_paths(
+        &project.project,
+        saved.get("proj").unwrap(),
+        "proj",
+        &mut changed,
+    );
+    assert_eq!(changed, ["proj.id"], "migration changed main's project");
+    let history = project.history.expect("main's session history");
+    let history = pm_model::json::to_canonical_string(&history);
+    assert!(history.contains("Renamed then undone"), "{history}");
+    let workspace = project.workspace.expect("main's project workspace");
+    assert_eq!(
+        workspace
+            .get("futureWorkspaceField")
+            .and_then(pm_model::Value::as_f64),
+        Some(1.0)
+    );
+    // Takes (gzip) carry over decodable; a second run is idempotent.
+    let takes = pm_model::json::parse(
+        &fs::read_to_string(config.native_profile.join("store/takes.json")).unwrap(),
+    )
+    .unwrap();
+    let takes = pm_kernel::library::decode_disk_value(takes, 768 << 20).unwrap();
+    assert!(pm_model::json::to_canonical_string(&takes).contains("Before review"));
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::Complete { projects: 2, .. }
+    ));
+}
+
+/// Paths (`a.b.3.c`) at which two JSON values differ.
+fn diff_paths(a: &pm_model::Value, b: &pm_model::Value, at: &str, out: &mut Vec<String>) {
+    use pm_model::Value as V;
+    match (a, b) {
+        (V::Object(x), V::Object(y)) => {
+            let mut keys: Vec<String> = x
+                .keys()
+                .chain(y.keys())
+                .map(|k| k.to_string_lossy())
+                .collect();
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                match (x.get(k.as_str()), y.get(k.as_str())) {
+                    (Some(p), Some(q)) => diff_paths(p, q, &format!("{at}.{k}"), out),
+                    _ => out.push(format!("{at}.{k}")),
+                }
+            }
+        }
+        (V::Array(x), V::Array(y)) if x.len() == y.len() => {
+            for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                diff_paths(p, q, &format!("{at}.{i}"), out);
+            }
+        }
+        _ if a == b => {}
+        _ => out.push(at.to_owned()),
+    }
+}

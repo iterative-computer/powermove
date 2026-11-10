@@ -169,7 +169,11 @@ fn rows(surface: &Surface) -> usize {
         .iter()
         .map(|f| usize::from(f.error.is_some()) + usize::from(f.description.is_some()))
         .sum::<usize>();
-    controls + lines + surface.groups.len() + usize::from(surface.line.is_some())
+    controls
+        + lines
+        + surface.groups.len()
+        + usize::from(surface.line.is_some())
+        + usize::from(surface.warning.is_some())
 }
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
@@ -233,7 +237,7 @@ pub fn from_surface(
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
             }
-            _ => sheet.text(&field.id, &field.label, value, false, field.enabled),
+            _ => sheet.text(&field.id, &field.label, value, field.secure, field.enabled),
         }
         if let (Some(placeholder), Some(control)) = (field.placeholder, sheet.fields.get(&field.id))
         {
@@ -261,6 +265,13 @@ pub fn from_surface(
                 tokens.colors.danger,
             );
         }
+    }
+    if let Some(warning) = &surface.warning {
+        sheet.line(
+            warning,
+            tokens.typography.minimum.into(),
+            tokens.colors.warning,
+        );
     }
     let mut order = Vec::new();
     for button in &surface.buttons {

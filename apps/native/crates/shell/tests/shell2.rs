@@ -211,27 +211,11 @@ fn close_and_show_panels_round_trip_to_their_home_dock() {
 }
 
 #[test]
-fn saved_layouts_round_trip_validate_and_apply_to_the_current_workspace() {
-    let mut s = LayoutStore::default();
-    let mut l = Layout::preset("edit");
-    l.docks[0].size = Some(333.);
-    assert!(s.save_named("  ", &l).is_err());
-    assert!(s.save_named(&"x".repeat(LAYOUT_NAME_MAX + 1), &l).is_err());
-    assert!(s.save_named("Bad\nName", &l).is_err());
-    assert_eq!(s.save_named("  Colour pass ", &l).unwrap(), "Colour pass");
-    let applied = s.named("Colour pass", "design").unwrap();
-    assert_eq!(applied.workspace, "design");
-    assert_eq!(applied.docks, l.docks);
-    let path = std::env::temp_dir().join(format!("pm-shell2-saved-{}.json", std::process::id()));
-    s.save(&path).unwrap();
-    let loaded = LayoutStore::load(&path).unwrap();
-    assert_eq!(loaded, s);
-    // Old stores without `saved` still load.
-    std::fs::write(&path, br#"{"version":1,"projects":{}}"#).unwrap();
-    assert!(LayoutStore::load(&path).unwrap().saved.is_empty());
-    std::fs::remove_file(&path).unwrap();
-    assert!(s.delete_named("Colour pass"));
-    assert!(!s.delete_named("Colour pass"));
+fn workspace_names_are_trimmed_and_bounded() {
+    assert!(layout_name("  ").is_err());
+    assert!(layout_name(&"x".repeat(LAYOUT_NAME_MAX + 1)).is_err());
+    assert!(layout_name("Bad\nName").is_err());
+    assert_eq!(layout_name("  Colour pass ").unwrap(), "Colour pass");
 }
 
 fn win(id: u64, tab: Option<u64>) -> WindowState {

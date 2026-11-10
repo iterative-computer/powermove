@@ -249,7 +249,7 @@ pub const PLANNED: [&str; 24] = [
     "splitTextLines",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 3] = ["help", "importSequence", "importFolder"];
+pub const UNAVAILABLE: [&str; 2] = ["help", "importFolder"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         label: "Select".into(),
@@ -664,7 +664,8 @@ const SELECTION: [&str; 16] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 18] = [
+const DOCUMENT: [&str; 19] = [
+    "importSequence",
     "delete",
     "copyLayers",
     "cutLayers",
@@ -684,6 +685,12 @@ const DOCUMENT: [&str; 18] = [
     "newComposition",
     "compositionSettings",
 ];
+
+/// A command that acts on the project: asked for while one is still
+/// arriving, it waits for it (`Controller::command`) instead of finding none.
+pub fn waits_for_project(name: &str) -> bool {
+    DOCUMENT.contains(&name) || name == "export" || crate::keyframe_sheets::Kind::of(name).is_some()
+}
 
 /// The sheet's starting state; Leave All Attributes needs one layer with a source.
 pub fn precompose_draft(published: &Published) -> Option<PrecomposeDraft> {

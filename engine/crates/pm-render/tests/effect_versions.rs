@@ -242,6 +242,7 @@ fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in
         renderer.missing_effects(),
         [pm_render::effects::versions::MissingEffect {
             effect: "acme.glow".into(),
+            revision: None,
             layers: 1
         }]
     );
@@ -266,7 +267,14 @@ fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in
     renderer.set_main_effects_for_document(&plain).unwrap();
     assert!(renderer.missing_effects().is_empty());
     // Switched off, or in a composition nothing draws: it never renders.
-    let mut chip = layer("chip", "solid", json!({"w":16,"h":16,"color":"#4080C0"}), 0., 0., 1.);
+    let mut chip = layer(
+        "chip",
+        "solid",
+        json!({"w":16,"h":16,"color":"#4080C0"}),
+        0.,
+        0.,
+        1.,
+    );
     chip["fx"] = json!([{"id":"f","type":"acme.glow","on":false,"missing":true,"p":{}}]);
     let mut project = project(16, 16, 1., Value::Null, vec![chip.clone()]);
     chip["fx"][0]["on"] = json!(true);
@@ -276,4 +284,53 @@ fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in
     assert!(renderer.missing_effects().is_empty());
     assert!(renderer.missing_effects_in(&quiet, "Ptest-root").is_empty());
     assert_eq!(renderer.missing_effects_in(&quiet, "unused").len(), 1);
+}
+
+/// A revision a newer Powermove saved (current main writes revisions this
+/// build may not have): the viewer draws the layer without that effect and
+/// names it; an export refuses; the saved effect is never rewritten.
+#[test]
+fn a_saved_revision_this_build_lacks_is_bypassed_and_named_in_the_viewer_and_refused_in_exports() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut newer = doc("invert", Some(999));
+    newer.set_saving_app_version(Some("1.3.0".into()));
+    renderer.set_main_effects_for_document(&newer).unwrap();
+    assert_eq!(
+        renderer.missing_effects(),
+        [pm_render::effects::versions::MissingEffect {
+            effect: "invert".into(),
+            revision: Some("999".into()),
+            layers: 1
+        }]
+    );
+    assert_eq!(
+        renderer.missing_effects_in(&newer, "Ptest-root"),
+        renderer.missing_effects()
+    );
+    let request = RenderRequest::sized(Size::new(16, 16), Precision::Float16);
+    assert!(
+        renderer
+            .render(
+                &newer,
+                "Ptest-root",
+                ticks(0.),
+                &request,
+                &MapResolver::default()
+            )
+            .is_err(),
+        "an export never omits an effect silently"
+    );
+    renderer.set_isolate_layers(true);
+    let bypassed = draw(&mut renderer, &newer);
+    renderer.set_isolate_layers(false);
+    let center = &bypassed[(8 * 16 + 8) * 4..][..4];
+    let chip = [64. / 255., 128. / 255., 192. / 255., 1.];
+    for (got, want) in center.iter().zip(chip) {
+        assert!((got - want).abs() < 2e-3, "{center:?}");
+    }
+    // A revision this build has draws as before and names nothing.
+    let mut current = doc("invert", Some(2));
+    current.set_saving_app_version(Some("1.3.0".into()));
+    renderer.set_main_effects_for_document(&current).unwrap();
+    assert!(renderer.missing_effects().is_empty());
 }

@@ -3,7 +3,7 @@
 use crate::{
     Access, ApprovalMode, Provider,
     approvals::Authority,
-    claude_launch, codex, codex_exec,
+    claude_launch, codex, codex_exec, compatible,
     runtime::{self, Runtime},
     transport::{self, Action, Handle, Machine, ProcessSpec},
 };
@@ -109,6 +109,8 @@ pub struct Environment {
     pub tools: Vec<String>,
     /// The Composition-only subset of `tools`.
     pub composition_tools: Vec<String>,
+    /// The API or local model connection (Settings › Accounts), when the app has one.
+    pub compatible: Option<std::sync::Arc<dyn compatible::ChatHost>>,
 }
 impl Environment {
     /// Reads this process. Safe mode would drop the run's own MCP server.
@@ -129,6 +131,7 @@ impl Environment {
             vars,
             tools,
             composition_tools,
+            compatible: None,
         }
     }
     /// Explicit override, then an updated managed runtime, then the bundled one.
@@ -154,7 +157,10 @@ impl Environment {
         match provider {
             Provider::Claude => self.binary(Runtime::Claude).is_some(),
             Provider::Chatgpt => self.binary(Runtime::Codex).is_some(),
-            Provider::Compatible => false,
+            Provider::Compatible => self
+                .compatible
+                .as_ref()
+                .is_some_and(|c| c.saved().is_some()),
         }
     }
     /// The run's tool server: the running app, given the run's grant token so
@@ -292,11 +298,37 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             codex_app(environment, request, &token)
         }
         Provider::Chatgpt => codex_project(environment, request, authority, &token),
-        Provider::Compatible => Err(
-            "Compatible providers can't run in this build yet. Choose ChatGPT or Claude.".into(),
-        ),
+        Provider::Compatible => compatible(environment, request, &token),
     }?;
     Ok(handle.hold(grant))
+}
+/// A run on the saved API or local model: the same tools, through this app's
+/// tool server; Composition-only runs get the Composition tools.
+fn compatible(env: &Environment, request: Request, token: &str) -> Result<Handle, String> {
+    let host = env
+        .compatible
+        .clone()
+        .filter(|host| host.saved().is_some())
+        .ok_or("Connect an API or local model in Settings to start chatting.")?;
+    let (command, args) = env.mcp(token);
+    let allowed = if request.access == Access::Editor {
+        env.composition_tools.clone()
+    } else {
+        env.tools.clone()
+    };
+    let run = compatible::Run {
+        instructions: format!("{INSTRUCTIONS}\n\n{}", request.additional()),
+        id: request.run,
+        prompt: request.prompt,
+        model: request.model,
+        effort: request.effort,
+        access: request.access,
+        images: request.images,
+        tools: (command.into(), args),
+        tool_env: env.vars.clone(),
+        allowed,
+    };
+    Ok(compatible::start(host, run))
 }
 fn missing(name: &str) -> String {
     format!("Powermove's built-in {name} runtime is missing. Reinstall Powermove.")

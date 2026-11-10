@@ -143,6 +143,15 @@ pub struct AddLayer {
     pub time: f64,
 }
 
+/// One record of [`LayerCommand::InsertBlock`]: a layer built as `add` would
+/// build it, in the group `group` (a group record earlier in the block).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockLayer {
+    pub add: AddLayer,
+    pub group: Option<String>,
+    pub locked: bool,
+}
+
 /// Stacking shortcuts (Cmd+[ / Cmd+] and their Shift variants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Restack {
@@ -192,6 +201,14 @@ pub enum LayerCommand {
         index: Option<usize>,
         time: Option<f64>,
     },
+    /// Figma paste (`PM.proj.layers.unshift(...plan.layers)`): layers built
+    /// like [`LayerCommand::Add`] at the top of the open composition, in
+    /// this stack order, with their group membership and lock; names and
+    /// group-local transforms stay exactly as given. Label `label`.
+    InsertBlock {
+        label: String,
+        layers: Vec<BlockLayer>,
+    },
     /// `reorder_layer` (`reorderLayer`): moves the layer (with a group's
     /// members) to `index`, entering or leaving the destination's group.
     /// `Unlock the destination before moving layers`. Entering or leaving a
@@ -226,6 +243,7 @@ impl LayerCommand {
             LayerCommand::Delete { .. } => "Delete Layers",
             LayerCommand::Duplicate { .. } => "Duplicate",
             LayerCommand::Paste { .. } => "Paste",
+            LayerCommand::InsertBlock { label, .. } => return label.clone(),
             LayerCommand::Reorder { .. } => "Reorder Layer",
             LayerCommand::Restack { to, .. } => match to {
                 Restack::Forward => "Bring forward",
@@ -251,6 +269,7 @@ impl LayerCommand {
                 index,
                 time,
             } => paste(cx, comp.as_deref(), layers, new_ids, *index, *time),
+            LayerCommand::InsertBlock { layers, .. } => insert_block(cx, layers),
             LayerCommand::Reorder {
                 layer_id,
                 index,
@@ -941,6 +960,68 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
 
 /// `addLayer(command)`.
 fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
+    let mut layer = build_layer(cx, c)?;
+    let layers = cx.layers(c.comp.as_deref());
+    if let Some(pid) = &c.parent {
+        let parent = layers
+            .iter()
+            .find(|l| values::text(l, "id") == Some(pid.as_str()));
+        let ok = parent.is_some_and(|p| {
+            transformable(values::text(p, "type").unwrap_or_default())
+                && !would_cycle(&layers, &layer, pid)
+        });
+        if !ok || pid == &c.id {
+            return Err(CommandError::Invalid("Invalid parent layer".into()));
+        }
+        values::obj(&mut layer).insert("parent", values::s(pid));
+    }
+    let index = c.index.unwrap_or(0).min(layers.len());
+    cx.insert_layer(c.comp.as_deref(), index, layer)
+}
+
+/// The block's records at the top of the open composition, as one write.
+fn insert_block(cx: &mut Cx<'_>, block: &[BlockLayer]) -> Result<(), CommandError> {
+    let mut built: Vec<Value> = Vec::with_capacity(block.len());
+    let mut groups: HashSet<&str> = HashSet::new();
+    let mut ids: HashSet<&str> = HashSet::new();
+    for record in block {
+        let c = &record.add;
+        if c.comp.is_some() || c.parent.is_some() || c.index.is_some() {
+            return Err(CommandError::Invalid(
+                "Block layers go to the top of the open composition, without parents".into(),
+            ));
+        }
+        if !ids.insert(c.id.as_str()) {
+            return Err(CommandError::Invalid(format!(
+                "Layer id already exists: {}",
+                c.id
+            )));
+        }
+        let mut layer = build_layer(cx, c)?;
+        let m = values::obj(&mut layer);
+        match &record.group {
+            Some(group) if !groups.contains(group.as_str()) => {
+                return Err(CommandError::Invalid(format!(
+                    "Unknown group layer: {group}"
+                )));
+            }
+            Some(group) => m.insert("group", values::s(group)),
+            None => m.insert("group", Value::Null),
+        };
+        m.insert("lock", Value::Bool(record.locked));
+        if c.layer_type == "group" {
+            groups.insert(c.id.as_str());
+        }
+        built.push(layer);
+    }
+    let comp = cx.comp_id(None);
+    let mut layers = cx.layers(comp.as_deref());
+    layers.splice(0..0, built);
+    write_layers(cx, comp.as_deref(), normalize_group_stack(layers))
+}
+
+/// `PM.mkLayer` with an add command's options, not yet in a composition.
+fn build_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<Value, CommandError> {
     if !LAYER_TYPES.contains(&c.layer_type.as_str()) {
         return Err(CommandError::Invalid(format!(
             "Unknown layer type: {}",
@@ -1055,22 +1136,7 @@ fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
             m.insert("collapsed", Value::Bool(v));
         }
     }
-    let layers = cx.layers(c.comp.as_deref());
-    if let Some(pid) = &c.parent {
-        let parent = layers
-            .iter()
-            .find(|l| values::text(l, "id") == Some(pid.as_str()));
-        let ok = parent.is_some_and(|p| {
-            transformable(values::text(p, "type").unwrap_or_default())
-                && !would_cycle(&layers, &layer, pid)
-        });
-        if !ok || pid == &c.id {
-            return Err(CommandError::Invalid("Invalid parent layer".into()));
-        }
-        values::obj(&mut layer).insert("parent", values::s(pid));
-    }
-    let index = c.index.unwrap_or(0).min(layers.len());
-    cx.insert_layer(c.comp.as_deref(), index, layer)
+    Ok(layer)
 }
 
 /// `setAudioContent(layer, patch)` for a new audio layer.

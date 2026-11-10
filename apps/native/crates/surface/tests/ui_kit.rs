@@ -334,8 +334,14 @@ fn accessibility_actions_are_typed_revision_guarded_and_disabled_aware() {
     let mut s = surface(Component::NumberField);
     let tree = accessibility_tree(&s, &Layout::new(), None);
     let node = &tree.nodes[1].1;
-    assert_eq!(node.value(), Some("10.0 pixels"));
+    assert_eq!(node.value(), Some("10 pixels"));
     assert_eq!(node.numeric_value(), Some(10.));
+    // A long fraction reads like the sheets show it; the exact value is kept.
+    let mut long = surface(Component::NumberField);
+    patch(&mut long, json!({"value":73.53333333333333,"unit":"s"}));
+    let tree = accessibility_tree(&long, &Layout::new(), None);
+    assert_eq!(tree.nodes[1].1.value(), Some("73.533 seconds"));
+    assert_eq!(tree.nodes[1].1.numeric_value(), Some(73.53333333333333));
     assert_eq!(
         accessibility_action(&s, s.revision(), request(Action::Increment, None)).unwrap(),
         NativeAction::Step(1, true)
@@ -709,4 +715,7 @@ fn design_review_shapes_follow_the_panel_specs() {
     );
     assert_eq!(pm_surface::kit::spoken_unit("%"), "percent");
     assert_eq!(pm_surface::kit::spoken_unit("°"), "degrees");
+    assert_eq!(pm_surface::kit::spoken_number(73.53333333333333), "73.533");
+    assert_eq!(pm_surface::kit::spoken_number(100.0), "100");
+    assert_eq!(pm_surface::kit::spoken_number(-0.0001), "0");
 }

@@ -37,6 +37,10 @@ impl Controller {
             {
                 let _ = this.update(cx, |v, cx| {
                     let place_at = (place && replace.is_none()).then(|| v.time());
+                    // Numbered stills ask whether they are one clip.
+                    if replace.is_none() && crate::media_sequence::candidate(&paths) {
+                        return v.choose_sequence(paths, false, place_at, None, cx);
+                    }
                     v.import(
                         ImportRequest {
                             paths,
@@ -80,9 +84,22 @@ impl Controller {
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let media = self.open_dropped_project(paths, cx);
+        // SubRip and WebVTT files become captions layers at the playhead.
+        let (captions, media): (Vec<_>, Vec<_>) = media
+            .into_iter()
+            .partition(|p| crate::captions_panel::is_caption_file(p));
+        if self.session.is_some() {
+            let at = self.time();
+            for path in captions {
+                self.import_captions(path, at, cx);
+            }
+        }
         if !media.is_empty() && self.session.is_none() {
             self.message = "Open a project before importing media".into();
             cx.notify();
+        } else if crate::media_sequence::candidate(&media) {
+            let place_at = Some(self.time());
+            self.choose_sequence(media, false, place_at, None, cx);
         } else if !media.is_empty() {
             let place_at = Some(self.time());
             self.import(
@@ -103,7 +120,9 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         let paths = self.open_dropped_project(paths, cx);
-        if !paths.is_empty() {
+        if crate::media_sequence::candidate(&paths) {
+            self.choose_sequence(paths, false, None, folder, cx);
+        } else if !paths.is_empty() {
             let request = ImportRequest {
                 paths,
                 folder,
@@ -265,6 +284,39 @@ impl Controller {
         })
         .detach();
     }
+    /// The encode's progress line in the status bar until the import ends.
+    fn show_sequence_progress(
+        &mut self,
+        progress: Arc<std::sync::Mutex<String>>,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let line = progress.lock().map(|p| p.clone()).unwrap_or_default();
+                let running = this
+                    .update(cx, |v, cx| {
+                        let current = v
+                            .importing
+                            .as_ref()
+                            .is_some_and(|c| Arc::ptr_eq(c, &cancel));
+                        if current && !line.is_empty() && v.message != line {
+                            v.message = line;
+                            cx.notify();
+                        }
+                        current
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
     fn next_import(&mut self, cx: &mut Context<Self>) {
         if self.importing.is_some() {
             return;
@@ -293,8 +345,12 @@ impl Controller {
         self.importing = Some(cancel.clone());
         self.message = "Importing…".into();
         cx.notify();
+        if let Some(sequence) = &request.sequence {
+            self.show_sequence_progress(sequence.progress.clone(), cancel.clone(), cx);
+        }
         let document = published.snapshot.doc_id;
         let profile = self.profile.clone();
+        let note = request.note.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -312,7 +368,10 @@ impl Controller {
                         // Settings › Media › Create Proxies, once the
                         // catalog resolves the new files.
                         v.pro_media.after_import(outcome.assets.clone());
-                        outcome.summary()
+                        match note {
+                            Some(note) if outcome.failed.is_empty() && !outcome.cancelled => note,
+                            _ => outcome.summary(),
+                        }
                     }
                     Err(error) => error,
                 };

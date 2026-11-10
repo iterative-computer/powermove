@@ -236,9 +236,16 @@ impl Controller {
         })
         .detach();
     }
-    fn adopt_media(&mut self, resolution: crate::media::Resolution, cx: &mut Context<Self>) {
+    pub(crate) fn adopt_media(
+        &mut self,
+        resolution: crate::media::Resolution,
+        cx: &mut Context<Self>,
+    ) {
         if !resolution.failed.is_empty() {
             self.message = crate::media::failure_note(resolution.failed.len());
+        }
+        if !resolution.cloud.is_empty() {
+            self.offer_cloud_media(resolution.cloud, cx);
         }
         self.media_base = resolution.catalog;
         self.media_resolved = true;

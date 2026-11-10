@@ -66,6 +66,10 @@ pub fn connect_engine(
     let mut automation = tools.automation.lock().unwrap();
     automation.export_child = jobs.clone();
     automation.media_importer = Some(jobs.clone());
+    automation.speech = Some(crate::agent_speech::AgentSpeech::new(
+        tools.host.kernel.clone(),
+        tools.host.profile.clone(),
+    ));
     automation.media_registry = Some(jobs.clone());
     automation.threads = Some(jobs.clone());
     automation.engine = Some(jobs);
@@ -447,8 +451,10 @@ pub(crate) struct Look {
     alpha: AlphaOutput,
     motion_blur: bool,
 }
+/// An agent's still and contact sheet: opaque over the composition's
+/// background, as the viewer shows it (v1's snapshots were JPEGs).
 const MCP_LOOK: Look = Look {
-    alpha: AlphaOutput::Straight,
+    alpha: AlphaOutput::None,
     motion_blur: false,
 };
 fn never() -> bool {

@@ -4,52 +4,77 @@
     "priority": " P01 HIGH",
     "commits": "`b7b302d1e`, `6a457a304`, `88b701c97`, `bf26d9b3e`",
     "expected": "Bottom timeline dock; migrate project-saved workspaces on restore; rerun migration as version 4, later prototype/default-workspace migration 5 and timeline chrome schema 6. Saved groups/active tabs, Default/Animation names, Effects workspace and stock-only migrations preserve customized values. `legacy/core/workspace.ts`, `layout/model.ts`. Bottom docking is a tag carry; later schema/default changes survive.",
-    "coverage_before_reference_change": "Partial \u2014 K preserves workspace JSON; S/B models/specs cover layout. Complete historical migrations and user customizations need fixtures and Mac review. ",
+    "coverage_before_reference_change": "Partial \u2014 K preserves workspace JSON; S/B models/specs cover layout. Complete historical migrations and user customizations need fixtures and Mac review. **2026-11-04 data lane:** Data/model `65c497123`: global and project workspace migrations 4\u20135, idempotence, saved groups and unknown/custom chrome retained; native schema-6 presentation remains with S/B/D. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Project workspace (agentDockMigration 3, custom docks, unknown field) round-trips untouched through V2 save and main's reader; profile projectWorkspace migrates exactly. pm-kernel tests/main_current.rs; pm-first-launch current_main_profile_records_migrate_*. Main's 4-6 migrations run in main on reopen; V2 workspace restore from these records not proven."
+    }
   },
   {
     "id": "P02",
     "priority": " P02 HIGH",
     "commits": "`32ffd5432`",
     "expected": "Adds `Comp.memory[]` and `memoryEnabled`; goal/constraint/decision/rejected/feedback/open entries with identity, author, reason, timestamps/resolution. One goal, bounded history, disabled state retains notes, autosave without edit-revision/Undo bump. Settings Memory page. `core/{memory.ts,types/project.ts}`, `settings/SettingsScreen.svelte`. True tag delta.",
-    "coverage_before_reference_change": "Gap \u2014 K can preserve unknown JSON, but that does not implement memory indexing, mutation or Settings. A/M/S own behavior; frozen MCP lacks the tool. ",
+    "coverage_before_reference_change": "Partial \u2014 the data model now implements Memory indexing/mutation; Settings and actor/tool integration are still outstanding. A/M/S own behavior; frozen MCP lacks the tool. **2026-11-04 data lane:** Data/model `64528efad` + `6f53efa80`: lossless Memory fields, pure CRUD/index/list, disabled retention and bounded active history with archives; kernel actor/MCP/Settings binding remains. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Comp.memory/memoryEnabled:false written by main's memory tool round-trip untouched. pm-kernel tests/main_current.rs. Memory feature itself deferred (backlog: main features)."
+    }
   },
   {
     "id": "P03",
     "priority": " P03 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Ordinary disk imports become verified source links; normal Save/Save As retain links, while portable Project export embeds available media. Pasted/generated/converted bytes stay owned; missing links remain editable and cannot block unrelated saves. `main/library-media.ts`, `host/library-media.ts`, `legacy/core/{media,project-file}.ts`, `shared/library-media.ts`; compare `apps/desktop/docs/project-files.md` directly with tag.",
-    "coverage_before_reference_change": "Partial \u2014 K PMV4 and E/P source/proxy provenance exist. Native source resolution, durable import/replacement/Undo, save/export closure and rollback must prove both linked and embedded cases. HIGH even though PMV magic is unchanged. ",
+    "coverage_before_reference_change": "Partial \u2014 K PMV4 and E/P source/proxy provenance exist. Native source resolution, durable import/replacement/Undo, save/export closure and rollback must prove both linked and embedded cases. HIGH even though PMV magic is unchanged. **2026-11-04 data lane:** Data/model `424c30c42` + `65c497123`: verified main disk media import, explicit source-link provenance, linked Save/Save As, portable receipts with offline IDs, owned fallback bytes and raw metadata retention; production admission/resolver binding remains. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Linked asset (sourcePath, no range) stays a link and owned PNG stays embedded across V2 Save As; main's reader sees identical media. pm-kernel tests/main_current.rs"
+    }
   },
   {
     "id": "P04",
     "priority": " P04 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Disk gzip envelope `__powermoveDiskValue:1`, `encoding:gzip`, declared bytes and base64 data for project/history/session/journal/takes; decode bounds, lazy recompression and atomic queue. `main/{storage-codec,storage}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K persistence/library and P first-launch decode/preserve gzip; real profiles, interrupted recovery and reverse handoff still need acceptance. ",
+    "coverage_before_reference_change": "Partial \u2014 K persistence/library and P first-launch decode/preserve gzip; real profiles, interrupted recovery and reverse handoff still need acceptance. **2026-11-04 data lane:** Data fixtures `424c30c42`: main gzip envelope exact decode, bounds/corruption failures and all five heavy value families exercised through existing codec; physical interrupted writes remain Mac work. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Main FileStore gzip envelopes (project, takes) decode in first-launch migration; source profile byte-identical. pm-first-launch current_main_profile_records_migrate_*"
+    }
   },
   {
     "id": "P05",
     "priority": " P05 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "One-time `storage-upgrade-v1.json` stages recovery/browser/source/cleanup, origin-specific browser progress, checksum-before-retirement, lease across windows, interruption retry, task progress and persisted completion acknowledgment. `main/storage-upgrade.ts`, `host/storage-upgrade.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 P snapshot/checkpoint/verified-object primitives exist; Electron's exact upgrade receipt/state machine and task UI are not the native migration. Preserve old browser/conflicting bytes; never adopt deletion merely to imitate main (N4). ",
+    "coverage_before_reference_change": "Partial \u2014 P snapshot/checkpoint/verified-object primitives exist; Electron's exact upgrade receipt/state machine and task UI are not the native migration. Preserve old browser/conflicting bytes; never adopt deletion merely to imitate main (N4). **2026-11-04 data lane:** Data/model `65c497123`: origin-scoped receipt reader, verified-step/lease/retry/ack state machine and immutable capture of the actual receipt; native worker/receipt-store and task UI binding remains. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "storage-upgrade-v1.json from main's StorageUpgrade (paused at browser stage) kept byte for byte in the migration checkpoint. pm-first-launch current_main_profile_records_migrate_*"
+    }
   },
   {
     "id": "P06",
     "priority": " P06 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Storage Settings reports categories/reclaimable bytes, automatic cleanup and backup budgets; retention/dedup rules change. Successful saves stop retaining five full backup generations; publication rollback copy is temporary, uncertain recovery survives. `main/{storage-management,backup-retention,project-files}.ts`, `settings/StorageSettings.svelte`.",
-    "coverage_before_reference_change": "Disposition + Partial \u2014 P services deliberately archive all generations (N4/N2); do not port deletion. Storage/task surface and recovery-version selection remain incomplete. ",
+    "coverage_before_reference_change": "Disposition + Partial \u2014 P services deliberately archive all generations (N4/N2); do not port deletion. Storage/task surface and recovery-version selection remain incomplete. **2026-11-04 data lane:** Retention `65c497123` + `424c30c42`: backups, uncertain recovery, pending association receipts and unused payloads are archived, never deleted; budgets/cleanup UI remains with P/S. **2026-11-05 data lane:** one exception, for owner review: a save that fails on a full disk deletes archived backup generations, oldest first, and retries. Active versions and retained originals stay. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -58,7 +83,7 @@
     "priority": " P07 HIGH",
     "commits": "`bf26d9b3e`, `70ffd6494`",
     "expected": "Background autosave queue tracks per-project revisions, pending/failure/retry, unnamed recovery and named files; version listing/open-as-copy includes recovery/file/macOS sources. Export later waits for background save. `legacy/core/autosave-queue.ts`, `main/{project-files,native-versions}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K journals/session/dirty/hash guards and P immutable backups exist. Queue/version UI, native NSFileVersion and export-save arbitration require app/Mac checks; preserve recovery on conflicts. ",
+    "coverage_before_reference_change": "Partial \u2014 K journals/session/dirty/hash guards and P immutable backups exist. Queue/version UI, native NSFileVersion and export-save arbitration require app/Mac checks; preserve recovery on conflicts. **2026-11-04 data lane:** Data/model `424c30c42`: independent per-project autosave revisions, bounded debounce, failure/retry/cancel/stale completion and close/export flush barrier; worker/actor and NSFileVersion binding remains. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -67,7 +92,7 @@
     "priority": " P08 HIGH (carry)",
     "commits": "`16087057b`, `921687251`, `6cfdc59ae`, `87cdf3ea4`, `136f546d3`",
     "expected": "Bounded large-document/media save/open, range-based PMV4 document, reliable whole-file hashing, transient macOS read recovery, async parsing/validation and lazy heavy store values. These are mostly baseline recovery/performance work; PMV4/PMV3/JSON support itself is already in the tag. `main/{project-files,project-document-validator,project-file-hash,storage}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K has readers/checksums/streaming writer/history and P old-profile import. Validate large/low-space/concurrent saves and actual Mac filesystem behavior; never claim a new PMV5 format. ",
+    "coverage_before_reference_change": "Partial \u2014 K has readers/checksums/streaming writer/history and P old-profile import. Validate large/low-space/concurrent saves and actual Mac filesystem behavior; never claim a new PMV5 format. **2026-11-04 data lane:** Formats `424c30c42` + `64528efad`: synthetic JSON, PMV3 and noncontiguous range PMV4 round-trip, whole-file/media hashing, future header/index metadata and checksum-validated archive ranges; Mac filesystem/large-profile qualification remains. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -76,16 +101,21 @@
     "priority": " P09 HIGH (carry)",
     "commits": "`f868f7901`",
     "expected": "Composition-relative history dictionaries intern repeated layer/edit records while retaining forward/backward patches, Undo/Redo cursor and pending redo. Tag and main versions of `shared/history-memory.ts` are identical.",
-    "coverage_before_reference_change": "Partial \u2014 K history imports/unpacks dictionaries and exports logical history; P retains history-only media. Full real-history/rollback closure remains open. ",
+    "coverage_before_reference_change": "Partial \u2014 K history imports/unpacks dictionaries and exports logical history; P retains history-only media. Full real-history/rollback closure remains open. **2026-11-04 data lane:** History `424c30c42`: original dictionaries survive repeated saves; redo/Undo cursor replay and history-only media are tested; changed unknown/refused inputs remain archived. ",
     "owner": "delta-data",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Main's saved Undo history (pending redo) replays in V2 equal to main's own replay through its hydrate; main imports and undoes V2's history. pm-kernel tests/main_current.rs"
+    }
   },
   {
     "id": "P10",
     "priority": " P10 HIGH",
     "commits": "`d8d887e0e`",
     "expected": "Reopens join unchanged in-flight video conversion; each caller gets its own output, final consumer/crash cancels. If original moved/changed, provided owned bytes are stored rather than rejecting project open. Superseded recovery checkpoint is not reported as a failed save. `main/{media-proxy,library-media}.ts`, `legacy/core/projects.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E/P queues, source identity and proxy provenance exist. Native consumer-sharing and open/save binding need proof with original offline; proxy must never become an original. ",
+    "coverage_before_reference_change": "Partial \u2014 E/P queues, source identity and proxy provenance exist. Native consumer-sharing and open/save binding need proof with original offline; proxy must never become an original. **2026-11-04 data lane:** Data/model `424c30c42`: source/recipe conversion coalescing, distinct consumer outputs, final-consumer cancellation and supplied owned-byte fallback; real conversion-worker binding remains. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -94,7 +124,7 @@
     "priority": " P11 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Close/Quit waits for imports, recovery and staged publication; failed flush keeps edits open, multiwindow cancellation preserves earlier approved work. Last-window close quits; failed/late preparation is retryable. `main/editor-close.ts`, `legacy/core/close-preparation.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K close/session and S/P lifecycle models exist; cross-window real app and signed termination checks remain. ",
+    "coverage_before_reference_change": "Partial \u2014 K close/session and S/P lifecycle models exist; cross-window real app and signed termination checks remain. **2026-11-04 data lane:** Data/model `424c30c42`: flush barrier remains false on pending/failure/cancellation and never acknowledges newer edits with an older completion; actual close/quit/multiwindow host remains S/P work. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -103,7 +133,7 @@
     "priority": " P12 HIGH (carry + UI)",
     "commits": "`bf26d9b3e`",
     "expected": "Home drops open media/projects without modifying previous document; nested local/cloud folder import, download/import task state; unsupported Figma paste offers informed cancel/fallback. Underlying Figma/import/easing algorithms already exist at tag; later presentation changes are mixed. `legacy/core/figma/`, `legacy/core/{folder-import,import-progress}.ts`, `library/LibraryScreen.svelte`.",
-    "coverage_before_reference_change": "Partial \u2014 K import metadata, E/P admission/queue and S library models exist. Real clipboard/Finder/cloud/Figma byte paths and task UI remain; never hydrate unavailable sources automatically. ",
+    "coverage_before_reference_change": "Partial \u2014 K import metadata, E/P admission/queue and S library models exist. Real clipboard/Finder/cloud/Figma byte paths and task UI remain; never hydrate unavailable sources automatically. **2026-11-04 data lane:** Data fixtures `424c30c42`: nested folder/cloud/import metadata and prior-document references survive opaque round-trip; actual Finder/cloud/Figma admission and task UI remain unimplemented by this lane. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -112,7 +142,7 @@
     "priority": " P13 HIGH",
     "commits": "`929102722`",
     "expected": "Removes saved export format `web` from `core/export-defaults.ts` and desktop web/React/player/agent-handoff output; website preview/copy now advertises Video/Images/Project and website player remains. `legacy/core/exporter.ts`, `player/`, `apps/www/src/lib/{AppPreview,Features}.svelte`. Existing project export preferences must remain recoverable even though the action is retired.",
-    "coverage_before_reference_change": "Disposition + Partial \u2014 recorded owner removal in P0/W1. K/P preserve original records/unknown fields, S/E remove only retired delivery, W retains player consumers; no source/project deletion (N4/prune). ",
+    "coverage_before_reference_change": "Disposition + Partial \u2014 recorded owner removal in P0/W1. K/P preserve original records/unknown fields, S/E remove only retired delivery, W retains player consumers; no source/project deletion (N4/prune). **2026-11-04 data lane:** Retention `6f53efa80` + `424c30c42`: retired web export preferences/unknown delivery fields round-trip without enabling the retired action; website/player consumers untouched. ",
     "owner": "delta-data",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -121,34 +151,49 @@
     "priority": " E01 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Saved `Effect.version` (absent means 1), historical full `legacy` definitions, `effects.get(id, version)`, missing-version diagnostics and capability detection. Prevents updated built-ins from reinterpreting old artwork. `kernel/{api,effect-versions}.ts`, `core/types/project.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K `commands/effects.rs` carries definition revision and inputs; X frozen registry/backend and E renderer must prove exact revision resolution, legacy pixels and missing-provider behavior. ",
+    "coverage_before_reference_change": "Partial \u2014 K `commands/effects.rs` carries definition revision and inputs; X frozen registry/backend and E renderer must prove exact revision resolution, legacy pixels and missing-provider behavior.  **2026-11-04 lane:** Version catalog and historical Gradient collision recorded; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 Mac hooks (partial):** Saving-file provenance now travels outside authored JSON through kernel snapshots and export children; version-specific native program keys and exact tagged pixel regressions added. Winning extension-history publication and all saved-revision/project coverage remain open. ",
     "owner": "delta-fx",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "degrades safely",
+      "evidence": "Revisions current/legacy/99/unknown type preserved untouched; a revision newer than the build is bypassed and named in the viewer, refused by exports (pm-render effect_versions, pm-engine-service playback a_current_main_*). Historical rendering deferred (backlog)."
+    }
   },
   {
     "id": "E02",
     "priority": " E02 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Static `Effect.inputs`: layer/stage (`source`, `masks`, `effects`), source/composition space; typed path/mask and image/LUT asset refs, four-input scheduling, stable remap on copy/delete/Undo, cycle/error diagnostics. `core/effect-inputs.ts`, `kernel/{api,install}.ts`, `legacy/gl/effect-path.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K typed input edits preserve refs; E graph/resources and X feature flags need complete producer/consumer gates. Unknown-data retention alone cannot render references. ",
+    "coverage_before_reference_change": "Partial \u2014 K typed input edits preserve refs; E graph/resources and X feature flags need complete producer/consumer gates. Unknown-data retention alone cannot render references.  **2026-11-04 lane:** Typed input validation and bounded request scheduler added; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 hooks2 (partial):** Composition-space producers and typed asset leases now execute; `metal_hidden_reference_stages_produce_before_the_consumer_and_cycles_fail` passes source/masks/effects and cycle pixels. General source-space/group/matte/backdrop and lifecycle closure remains open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** Source/composition leases now distinguish output size, scale and crop origin; `metal_reference_cache_keeps_each_precomp_density_independent` checks both child densities. Source-stage, mask-stage and effect-stage local rasters execute for supported 2D providers. General group/matte/backdrop policy and full lifecycle/remap conformance remain open. ",
     "owner": "delta-fx",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved, not rendered",
+      "evidence": "Typed inputs (stage/space, path, asset) preserved untouched; Stroke path input draws as a named layer failure in the viewer. Rendering deferred (backlog)."
+    }
   },
   {
     "id": "E03",
     "priority": " E03 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Layer `effectSpace`, owner/source rasters before transforms/opacity, off-composition bounds, source geometry/padding, exact subframe video/precomp input sampling and owner validity uniforms. `legacy/gl/{compositor,raster,effect-path}.ts`, `core/render-samples.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K `commands/layers.rs` accepts effect space; E source/evaluator/compositing foundations exist. Historical source-space fixtures, hidden sources, singular transforms, shutter phases and lease failures remain unqualified. ",
+    "coverage_before_reference_change": "Partial \u2014 K `commands/layers.rs` accepts effect space; E source/evaluator/compositing foundations exist. Historical source-space fixtures, hidden sources, singular transforms, shutter phases and lease failures remain unqualified.  **2026-11-04 lane:** Exact source request identities and extent operations added; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 Mac hooks (partial):** Sized 2D owner matrices/resolutions now bind for versioned native programs. Source-space/3D/singular owners still refuse unavailable bindings; source-before-transform rasters and leases remain open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** Local source effects now run before inherited transform and opacity, with complete shape/path raster bounds, prefix padding/clipping, exact video/precomp times and additive shutter samples. `metal_source_reference_retains_hidden_offscreen_singular_content_and_stages`, `metal_source_precomp_subframes_seek_and_preview_export_are_exact`, `metal_source_video_subframes_keep_native_frame_selection_and_seek_identity`, and the source allocation/refusal tests supply focused evidence. Source temporal/brush domains, text/captions, arbitrary extension/3D rasters and complete lifetime/cancellation coverage remain open.  Allocation accounting `8a11a8f45` adds passing atlas/pass/asset/replay admission checks without changing the budget; full lifetime/cancellation qualification remains open. ",
     "owner": "delta-fx",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved, not rendered",
+      "evidence": "effectSpace:'source' preserved untouched. Source-space processing deferred (backlog)."
+    }
   },
   {
     "id": "E04",
     "priority": " E04 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Spatial sampling/mip contracts, bounded cell grids, layer-space radii and viewport padding; source-dimension defaults, parameter disclosures and undoable color-swap actions. Adds `supportsVersions`, `supportsLayerInputs`, `supportsInputSubframes`, `supportsSpatialSampling`, `supportsSourceRasters`, `supportsSourceOwners`, `supportsTypedReferences`, `supportsBrushGeometry`, `supportsLutAssets`, `supportsOwnerValidity`, `supportsTemporalInputs`. `kernel/api.ts`; `extensions/effects-basic/index.ts` refuses activation unless every required flag and `parameterDefault` are present.",
-    "coverage_before_reference_change": "Partial \u2014 E GLSL/native resources, K effect commands and B/X controls are pieces. No complete flag-by-flag native conformance identified; report only a demonstrated capability (N3/N6). ",
+    "coverage_before_reference_change": "Partial \u2014 E GLSL/native resources, K effect commands and B/X controls are pieces. No complete flag-by-flag native conformance identified; report only a demonstrated capability (N3/N6).  **2026-11-04 lane:** Source-tested mip/grid/default calculations added; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 hooks2 (partial):** Native mip/grid binding is exercised by `metal_mosaic_cell_atlas_and_wide_gaussian_mips_preserve_reference_values`; source owners, full defaults/actions and complete capability conformance remain open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** Local source owner/resolution/validity uniforms and per-prefix spatial domains now bind. No capability flag is promoted; complete defaults/actions, source brush/temporal and flag-by-flag conformance remain open. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -157,7 +202,7 @@
     "priority": " E05 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "New/revised color families: Tint + Swap Colors, Channel Mixer, Invert/Levels revisions, Levels (Individual Controls), Threshold, Shift Channels, Exposure, Tritone, Color Balance (HLS), Brightness & Contrast, Black & White. Straight/premultiplied alpha, signed HDR and channel persistence matter. `extensions/effects-basic/{color-correction,core-image,tonal}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E color/GLSL/effects and B controls exist; X must load correct definitions and E verify each historical/current revision at working depth. Old Invert/Levels already existed at tag. ",
+    "coverage_before_reference_change": "Partial \u2014 Renderer and panel-model evidence pass at fx3 (`advanced_effects`, serial, on Metal; application tests in `builtins/src/tests/effect_delta.rs`). **Not product-closed:** the oracles run constant or synthetic inputs through `pm_render::Renderer`, decoded output is PNG only, and no whole project or Opus screen review stands behind it. Seeded definitions do reach the viewer path (`every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path`). Prior record: `35ce14350` + application `b1bb0d036`: every current/historical color-family program passes independent signed-HDR/alpha/depth/control pixels, saved-channel reopen/reverse seek and decoded output. Tint Swap Colors executes through the actual v4 panel and actor as one Undo/Redo transaction. [Complete named test set](../engine/main-delta-fx.md#e05-saved-color-family-qualification). ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -166,7 +211,7 @@
     "priority": " E06 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Gaussian Blur and Mosaic revisions, Unsharp Mask, Find Edges; wide kernels and layer-local cells preserve edges/HDR at cropped zoom. `extensions/effects-basic/spatial.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E spatial/GLSL support; complete per-revision source/preview/export pixel qualification remains. ",
+    "coverage_before_reference_change": "Partial \u2014 Renderer and panel-model evidence pass at fx3 (`advanced_effects`, serial, on Metal; application tests in `builtins/src/tests/effect_delta.rs`). **Not product-closed:** the oracles run constant or synthetic inputs through `pm_render::Renderer`, decoded output is PNG only, and no whole project or Opus screen review stands behind it. Seeded definitions do reach the viewer path (`every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path`). Prior record: `a5c080839`: all six saved spatial programs pass independent edge/HDR/alpha pixels at every working depth, exact crop/zoom and source-contract checks, wide kernels/cells, viewer/final equality and decoded export. Sampling pyramids retain separate lifetimes. [Complete named test set](../engine/main-delta-fx.md#e06-saved-spatial-family-qualification). ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -175,7 +220,7 @@
     "priority": " E07 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Revised Drop Shadow and Gradient Ramp: layer-coordinate softness/offset, Shadow Only, source-sized ramp/reset points and historical versions. `extensions/effects-basic/shadow-ramp.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E native shader path and K channels preserve authored values. Corpus still has historical generated shader failures; no completed full-project proof. ",
+    "coverage_before_reference_change": "Partial \u2014 Renderer and panel-model evidence pass at fx3 (`advanced_effects`, serial, on Metal; application tests in `builtins/src/tests/effect_delta.rs`). **Not product-closed:** the oracles run constant or synthetic inputs through `pm_render::Renderer`, decoded output is PNG only, and no whole project or Opus screen review stands behind it. Seeded definitions do reach the viewer path (`every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path`). Prior record: renderer `a5c080839` + application `b1bb0d036`: both main shadow/ramp revisions retain their own pixels and controls; softness/offset, Shadow Only, owner coordinates and inherited transforms pass. Source-sized defaults, Reset at the playhead, Swap Colors and atomic Undo/Redo execute through the actual application. [Complete named test set](../engine/main-delta-fx.md#e07-saved-shadow-and-ramp-qualification). ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -184,7 +229,7 @@
     "priority": " E08 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Set Matte, Displacement Map, Compound Blur, Texturize, Set Channels, Blend, Calculations and Channel Combiner, including later displacement/combiner revisions. Reference stages/spaces, hidden sources, channel/alpha math and four-source scheduling. `extensions/effects-basic/{layer-effects,compound-blur,texturize,set-channels,layer-compositing}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 K inputs and E graph/render primitives; no complete consumer-family native acceptance identified. Missing inputs/cycles must remain failures/diagnostics. ",
+    "coverage_before_reference_change": "Partial \u2014 K inputs and E graph/render primitives; no complete consumer-family native acceptance identified. Missing inputs/cycles must remain failures/diagnostics.  **2026-11-04 lane:** Consumer shaders and typed references retained; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 hooks2 (partial):** Hidden source-stage, mask-stage and effect-stage Set Matte pixels pass `metal_hidden_reference_stages_produce_before_the_consumer_and_cycles_fail`; the complete consumer families and four-source qualification remain open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** Set Matte now consumes supported unclipped source-space 2D rasters across source/masks/effects stages, including hidden/off-composition/singular providers. Complete consumer families, four-source and group/matte/backdrop qualification remain open. **fx3:** Displacement Map (both revisions), Compound Blur, Set Channels, Blend and Calculations now have independent per-pixel oracles (`tests/advanced/layer_consumers.rs`); they exposed one bug, the map midpoint ignored byte projects, now fixed. Compound Blur above mip level zero, group/adjustment/3D/backdrop providers and four-source DAGs remain unproven. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -193,7 +238,7 @@
     "priority": " E09 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Stroke typed animated path/mask geometry, brush hardness/spacing/trims/sequential masks; Apply Color LUT loads durable `.cube` assets with 1D/3D domain interpolation. `extensions/effects-basic/{stroke,apply-color-lut}.ts`, `core/cube-lut.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E/P LUT/pro-media jobs and K references exist. UI, exact Stroke behavior and durable LUT media/Undo/export closure still require integration. ",
+    "coverage_before_reference_change": "Partial \u2014 E/P LUT/pro-media jobs and K references exist. UI, exact Stroke behavior and durable LUT media/Undo/export closure still require integration.  **2026-11-04 lane:** Brush/LUT definitions and typed references retained; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 hooks2 (partial):** Typed LUT and image pixels pass `metal_typed_lut_1d_3d_domain_alpha_replacement_and_missing_lease` and `metal_typed_image_samples_the_reference_texturize_slope`; typed soft mask and saved hard brush cases have named tests in `advanced_effects`. Full animated path/mask, durable import/Undo/export closure remains open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** `metal_typed_stroke_reads_provider_geometry_in_the_consuming_owner_space` proves geometry evaluation on the provider with placement through the consuming owner. Source brush-domain expansion, complete animated geometry and durable LUT/Undo/export acceptance remain open. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -202,7 +247,7 @@
     "priority": " E10 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Color Profile Converter (explicit D65/transfer/clipping) and signed HDR Compander; Channel Combiner's multichannel conversion revision. `extensions/effects-basic/{color-transforms,layer-compositing}.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E color management is stronger than SDR-only output but needs each saved definition/version and decoded output comparison. Do not blindly copy browser clipping (N3). ",
+    "coverage_before_reference_change": "Partial \u2014 Renderer and panel-model evidence pass at fx3 (`advanced_effects`, serial, on Metal; application tests in `builtins/src/tests/effect_delta.rs`). **Not product-closed:** the oracles run constant or synthetic inputs through `pm_render::Renderer`, decoded output is PNG only, and no whole project or Opus screen review stands behind it. Seeded definitions do reach the viewer path (`every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path`). Prior record: `35ce14350`: all saved profile/compander/combiner programs pass at 8/16/32-bit working depths, including signed HDR, alpha, explicit D65/transfer/clipping, all conversion channels and decoded PNG8/PNG16. [Complete named test set](../engine/main-delta-fx.md#e10-saved-color-conversion-qualification). ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -211,7 +256,7 @@
     "priority": " E11 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "Echo bounded owner-prefix temporal samples, seven operators, historical masks/references, multiple echo convolution and reverse-seek determinism. `extensions/effects-basic/echo.ts`, `kernel/api.ts`, `legacy/gl/compositor.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E time/graph/worker machinery exists; full exact prefix/seek/hidden-source/cancellation/memory native acceptance remains. ",
+    "coverage_before_reference_change": "Partial \u2014 E time/graph/worker machinery exists; full exact prefix/seek/hidden-source/cancellation/memory native acceptance remains.  **2026-11-04 lane:** Echo shader, exact times/prefix keys and bounded scheduler added; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 hooks2 (partial):** `metal_echo_exact_prefix_subframes_seven_operators_and_reverse_seek` passes exact seven-operator prefix/subframe/seek pixels. General source owners, convolution, cancellation and full memory/lifecycle closure remain open.  **Source-raster implementation `23ea75d89` (Partial/OPEN):** Source-owner shutter samples use exact local times and additive accumulation. Source Echo prefix/domain expansion, general convolution/cancellation/memory and complete temporal lifecycle evidence remain open. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -220,16 +265,21 @@
     "priority": " E12 HIGH",
     "commits": "`bf26d9b3e`",
     "expected": "`continuousRaster` is formalized in saved layer/type/command fields; precomp raster at displayed size, sharper scaling; Release Pre-comp/layer switches exposed in AE-style UI. `core/types/{project,commands}.ts`, `legacy/core/compositions.ts`. Continuous-raster rendering tests already exist at tag; this is a mixed API/UI delta.",
-    "coverage_before_reference_change": "Partial \u2014 K layer patch and E precomp rendering exist. B UI plus picture/rig-preserving release/Undo and real output need acceptance. ",
+    "coverage_before_reference_change": "Partial \u2014 K layer patch and E precomp rendering exist. B UI plus picture/rig-preserving release/Undo and real output need acceptance.  **2026-11-04 lane:** No continuous-raster output closure claimed; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 Mac hooks (partial):** The saved continuousRaster switch now selects the existing display-density precomp raster; a real output/child-size regression was added. Release/precomp rig preservation, Undo and UI acceptance remain open. **fx3:** Properties has Rasterize and Release Pre-comp, the Composition menu reaches both, and the `precomp_delta` tests pass unchanged, with picture-preserving Undo/Redo through the real export path. A released rotated pre-comp edge and the timeline Rasterize switch are not covered; no screen review. ",
     "owner": "delta-fx",
-    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "continuousRaster (precomp) and separateDimensions:false preserved untouched. pm-kernel tests/main_current.rs"
+    }
   },
   {
     "id": "E13",
     "priority": " E13 HIGH",
     "commits": "`cc6adc885`",
     "expected": "HDR/log import interpretation: MP4 nclc/video tags, PQ/HLG tone-map to tagged SDR preview, BT.2020 log code values retained for grading; GPU helper with FFmpeg fallback, opaque-vs-alpha routing. `shared/video-color.ts`, `legacy/core/video-preview.ts`, `main/media-proxy.ts`, `packages/macos-haptics/src/hdr-proxy.m`.",
-    "coverage_before_reference_change": "Partial \u2014 E native color/source metadata/proxy path exists. Native spec and authored color intent govern (N3); verify tagged originals, grading, EDR/SDR/export and fallback on Mac. Main's SDR proxy is not a universal native HDR requirement. ",
+    "coverage_before_reference_change": "Partial \u2014 E native color/source metadata/proxy path exists. Native spec and authored color intent govern (N3); verify tagged originals, grading, EDR/SDR/export and fallback on Mac. Main's SDR proxy is not a universal native HDR requirement.  **2026-11-04 lane:** Source-tested legacy preview interpretation helper added; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 Mac hooks (partial):** Real Metal video-reading pixel suite passes for native HDR/alpha fixtures and viewer/export parity at existing depth bounds. Physical EDR/SDR and complete helper/fallback import qualification remain open. **2026-11-05 colour lane:** default-reading refusals removed; HDR projects, delivery and camera log in [hdr.md](../engine/hdr.md). Physical EDR remains open. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -238,7 +288,7 @@
     "priority": " E14 HIGH",
     "commits": "`cdab66cb4`",
     "expected": "Sequential MP4 sample decode with B-frame/edit-list timing, fallback when WebCodecs cannot reproduce media; bounded encoder/IPC queue, VideoToolbox capability probe/fallback and matching color tags. `shared/mp4-{boxes,samples}.ts`, `legacy/core/export-video-decoder.ts`, `main/render-encoder.ts`.",
-    "coverage_before_reference_change": "Partial \u2014 E native decode/export workers supply an alternative implementation; exact frames/timestamps/color and cancellation/backpressure need same-source output comparison. No WebCodecs/Chromium port (N8). ",
+    "coverage_before_reference_change": "Partial \u2014 E native decode/export workers supply an alternative implementation; exact frames/timestamps/color and cancellation/backpressure need same-source output comparison. No WebCodecs/Chromium port (N8).  **2026-11-04 lane:** No sequential decoder closure claimed; [integration remains open](../engine/main-delta-fx.md). **2026-11-05 Mac hooks (partial):** Added same-source B-frame and edit-list sequential/random-access qualification using native backends. Bounded encoder/cancellation/VideoToolbox delivery coverage remains open; no whole-row closure claimed. ",
     "owner": "delta-fx",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },
@@ -391,7 +441,7 @@
     "priority": " U13 HIGH (carry)",
     "commits": "`16087057b`, `aff932bc2`",
     "expected": "8/16/32-bit working precision/settings; embedded/nested audio gains/mute and composition output gain, Mixer strips/undoable faders/solo/meters; source-time caption cues, captions inspector/timeline/edit/export/sidecars; transcription model selection/download/cancel/cache and onboarding handoff. `core/types/project.ts`, `captions/`, `transcription/`, `mixer/`. These already exist at tag, not newly discovered main features.",
-    "coverage_before_reference_change": "Partial \u2014 K caption command declarations (their planner still returns `NotImplemented`) and audio edit primitives, E `pm-captions`/audio, B cue/Mixer models; transcription/model host, complete UI and MCP caption generation remain open. N4 preserves all cues/words/gains/model preferences. ",
+    "coverage_before_reference_change": "Partial \u2014 K caption command declarations (their planner still returns `NotImplemented`) and audio edit primitives, E `pm-captions`/audio, B cue/Mixer models; transcription/model host, complete UI and MCP caption generation remain open. N4 preserves all cues/words/gains/model preferences. **2026-11-04 data lane:** Data `6f53efa80` + `424c30c42`: precision, exact cue/word times, nested animated audio gain/mute, output gain and model preferences round-trip; renderer/transcription/caption UI and MCP bodies remain with their owners. ",
     "owner": "later UI lane",
     "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
   },

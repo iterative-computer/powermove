@@ -37,6 +37,12 @@ pub fn ask_recovery(
         buttons,
     )
 }
+/// [`ask_recovery`] when the person chose Reopen after an internal error
+/// stopped the project (`documents::stopped`): the app never quit.
+pub fn after_stop(mut alert: Alert<Action>, name: &str) -> Alert<Action> {
+    alert.message = format!("“{name}” stopped after an internal error with unsaved changes.");
+    alert
+}
 pub fn unrecoverable(name: &str, saved_file_exists: bool) -> Alert<Action> {
     let mut buttons = Vec::new();
     if saved_file_exists {

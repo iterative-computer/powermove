@@ -58,6 +58,8 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
+pm-captions = { path = "../../../../engine/crates/pm-captions" }
+pm-transcribe = { path = "../transcribe" }
 pm-update-policy = { path = "../update-policy" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }
 objc2-user-notifications = "0.3"
@@ -83,6 +85,21 @@ path = "../../../../engine/crates/pm-proxy"
 features = ["test-hooks"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
+[dev-dependencies.ed25519-dalek]
+version = "2.2"
+
+[dev-dependencies.sha1]
+version = "0.10"
+
+[dev-dependencies.tar]
+version = "0.4"
+
+[dev-dependencies.flate2]
+version = "1"
+
+[dev-dependencies.pm-store-host]
+path = "../store-host"
+
 [dev-dependencies.fs2]
 version = "0.4"
 [dev-dependencies.pm-export]
@@ -93,6 +110,10 @@ path = "../../../../engine/crates/pm-audio"
 path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"
+# Tests stop a project with an injected kernel panic (never in the app).
+[dev-dependencies.pm-kernel]
+path = "../kernel"
+features = ["fault-injection"]
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
 gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }

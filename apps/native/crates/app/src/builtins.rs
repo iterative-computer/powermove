@@ -160,14 +160,15 @@ impl Controller {
                 return;
             }
         };
-        runtime.set_agent_environment(
-            pm_agents::launch::Environment::current(
-                self.mcp.profile.clone(),
-                pm_mcp::catalog::names(),
-                pm_mcp::catalog::composition_names(),
-            ),
-            Arc::new(pm_agents::account::open_in_browser),
+        let mut environment = pm_agents::launch::Environment::current(
+            self.mcp.profile.clone(),
+            pm_mcp::catalog::names(),
+            pm_mcp::catalog::composition_names(),
         );
+        environment.compatible = Some(Arc::new(crate::providers::Chat {
+            profile: self.mcp.profile.clone(),
+        }));
+        runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];
@@ -248,8 +249,18 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
-            crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
+            // Bound to the open that brought `project`: they run only if this
+            // window still shows it.
+            let shown = self.session.as_ref().is_some_and(|s| s.project == project);
+            let (run, dropped) = self.after_open.settle(self.settling_open, shown);
+            if let Some(note) = dropped {
+                self.message = note;
+            }
+            for (name, args) in run {
+                self.host.borrow().send_command(&name, args);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -370,7 +381,7 @@ impl Controller {
         })
         .detach();
     }
-    fn facts(&self) -> Value {
+    fn facts(&self, cx: &App) -> Value {
         let status = self.viewer.as_ref().map(|v| v.status());
         let playing = status.as_ref().is_some_and(|s| {
             s.clock
@@ -382,7 +393,7 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact()})
+            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -422,7 +433,7 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
-        let facts = self.facts();
+        let facts = self.facts(cx);
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
         let show_missing = std::mem::take(&mut self.builtins.show_missing);
@@ -1081,6 +1092,50 @@ impl Controller {
                     // An ordinary window: forward only while Powermove is
                     // active, otherwise behind the other apps (P-CHILD).
                     gpui_macos::child_window::present(&viewer, true);
+                    Ok(Value::Null)
+                }
+                "agent.media" => {
+                    // A file or address a reply names. The reply chose the path,
+                    // so the file is resolved and checked off the main thread
+                    // (a real image, video or sound, never an app or a link to
+                    // one) and opened as a document; a web address goes to the
+                    // browser only when it is http(s).
+                    let input = request.input.clone();
+                    let path = input["path"].as_str().unwrap_or_default().to_owned();
+                    let reveal = input["reveal"] == true;
+                    if input["remote"] == true {
+                        if !(pm_services::surfaces::agent_reply::safe_link(&path)
+                            && crate::platform::open_url(&path))
+                        {
+                            self.errors
+                                .borrow_mut()
+                                .tell("Agent", "That address couldn’t be opened.");
+                        }
+                    } else {
+                        cx.spawn(async move |this, cx| {
+                            let outcome = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    let file = crate::platform::media_document(
+                                        std::path::Path::new(&path),
+                                    )?;
+                                    if reveal {
+                                        crate::platform::reveal(&file);
+                                    } else if !crate::platform::open_document(&file) {
+                                        return Err("No app on this Mac opens that file.");
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                            if let Err(message) = outcome {
+                                let _ = this.update(cx, |v, cx| {
+                                    v.errors.borrow_mut().tell("Agent", message);
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
+                    }
                     Ok(Value::Null)
                 }
                 "agent.close" => {

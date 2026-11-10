@@ -344,8 +344,16 @@ impl Host {
         }
     }
 }
+/// The kernel dropped the call's answer: an internal error interrupted it
+/// (contained, in the Error Log; its project stops), or the app is quitting.
 pub(crate) fn stopped() -> Error {
-    Error::unavailable("app kernel stopped")
+    Error {
+        code: "kernel_error".into(),
+        message: "The app kernel didn’t answer: an internal error interrupted this call (see the \
+                  Error Log), or the app is quitting."
+            .into(),
+        backing: Some("pm-kernel".into()),
+    }
 }
 fn identity(p: &Published) -> Value {
     let name = p

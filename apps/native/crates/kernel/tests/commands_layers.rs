@@ -4,7 +4,7 @@
 //! trims, `layer-groups.ts`).
 
 use pm_kernel::commands::keyframes::KeyframeCommand;
-use pm_kernel::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
+use pm_kernel::commands::layers::{AddLayer, BlockLayer, LayerPatch, ParentChange, Restack};
 use pm_kernel::{
     Command, CommandError, DocumentStore, GroupCommand, LayerCommand, Origin, TimingCommand,
     TransactionError,
@@ -537,6 +537,48 @@ fn paste_moves_the_block_to_the_playhead_and_remaps_links() {
     assert_eq!(num(&layer(&s, "pb"), &["from"]), 5.0);
     assert_eq!(get(&layer(&s, "pb"), &["parent"]).as_str(), Some("pa"));
     assert_eq!(get(&layer(&s, "pb"), &["matteSource"]).as_str(), Some("pa"));
+}
+
+#[test]
+fn an_inserted_block_keeps_names_group_local_poses_and_locks_in_one_step() {
+    let mut s = store();
+    let before = s.revision();
+    let mut group = add("fg", "group");
+    group.name = Some("Card".into());
+    let mut child = add("fr", "shape");
+    child.name = Some("Top".into());
+    child.properties.insert("position.x", Value::Number(12.0));
+    let block = |group: AddLayer, child: AddLayer, of: &str| LayerCommand::InsertBlock {
+        label: "Paste Figma layers".into(),
+        layers: vec![
+            BlockLayer {
+                add: group,
+                group: None,
+                locked: false,
+            },
+            BlockLayer {
+                add: child,
+                group: Some(of.into()),
+                locked: true,
+            },
+        ],
+    };
+    let e = refused(
+        &mut s,
+        block(group.clone(), child.clone(), "top"),
+        Origin::Interface,
+    );
+    assert_eq!(e.to_string(), "Unknown group layer: top");
+    run(&mut s, block(group, child, "fg"));
+    assert_eq!(s.revision(), before + 1);
+    assert_eq!(&ids(&s)[..3], &["fg", "fr", "top"]);
+    let fr = layer(&s, "fr");
+    // Not renumbered like Paste, and not moved to keep a world pose.
+    assert_eq!(get(&fr, &["name"]).as_str(), Some("Top"));
+    assert_eq!(num(&fr, &["p", "position.x", "v"]), 12.0);
+    assert_eq!(get(&fr, &["group"]).as_str(), Some("fg"));
+    assert_eq!(get(&fr, &["lock"]).as_bool(), Some(true));
+    assert_eq!(get(&layer(&s, "fg"), &["name"]).as_str(), Some("Card"));
 }
 
 #[test]

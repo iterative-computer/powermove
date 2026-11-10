@@ -201,6 +201,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "media_waveform",
     "export_video",
     "export_captions",
+    "transcribe_media",
+    "generate_captions",
     "import_media",
     "replace_media",
     "import_media_to_timeline",
@@ -226,6 +228,8 @@ pub const IMPLEMENTED: &[&str] = &[
 ];
 /// Adapter availability is distinct from a working standalone backend.
 pub const HOST_BACKED: &[&str] = &[
+    "transcribe_media",
+    "generate_captions",
     "thread_list",
     "thread_read",
     "import_media",

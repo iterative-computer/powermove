@@ -174,6 +174,24 @@ pub struct Clip {
     pub trim: Option<Edge>,
     /// The first missing extension effect: the clip carries a quiet badge.
     pub missing_effect: Option<String>,
+    /// A captions clip's cues (S089), drawn in place of its name.
+    pub cues: Vec<CueMark>,
+}
+/// One caption cue on its clip, in composition seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CueMark {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+/// The op id of a cue: `cue:` then the layer and cue ids, unit-separated.
+pub fn cue_op(layer: &str, cue: &str) -> String {
+    format!("cue:{layer}\u{1f}{cue}")
+}
+/// The layer and cue an op id names.
+pub fn parse_cue_op(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("cue:")?.split_once('\u{1f}')
 }
 /// An audio file's peak envelope, read once per file off the main thread.
 #[derive(Clone, Debug, PartialEq)]
@@ -314,6 +332,10 @@ pub trait ModelPresenter {
     fn waveform(&self, _layer: &crate::Layer) -> Option<Option<Waveform>> {
         None
     }
+    /// A captions layer's cues; none for other layers.
+    fn cues(&self, _layer: &crate::Layer) -> Vec<CueMark> {
+        vec![]
+    }
     /// Native schema supplies track names/AX copy; no renderer-invented labels.
     fn track_accessibility_label(
         &self,
@@ -382,6 +404,7 @@ impl Scene {
                                     audio: p.waveform(layer),
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
+                                    cues: p.cues(layer),
                                 }),
                                 summary,
                             },
@@ -433,6 +456,7 @@ impl Scene {
                     audio: p.waveform(layer),
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
+                    cues: p.cues(layer),
                 });
             }
             let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
@@ -444,27 +468,21 @@ impl Scene {
                 }
             }
             let mut tracks = vec![];
-            for (area, count) in [
-                (Area::Video, layout.video),
-                (Area::Audio, layout.audio),
-                (Area::Captions, layout.captions),
-            ] {
-                for lane in 0..count {
-                    tracks.push(PaintRow {
-                        id: json!(["track", format!("{area:?}"), lane]).to_string(),
-                        accessibility_label: p
-                            .track_accessibility_label(area, lane)
-                            .ok_or(Error::MissingTrackPresentation)?,
-                        depth: 0,
-                        selected: false,
-                        hovered: false,
-                        focused: false,
-                        content: RowContent::Track {
-                            clips: clips.remove(&(area, lane)).unwrap_or_default(),
-                        },
-                    });
-                    tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
-                }
+            for (area, lane) in layout.display_order() {
+                tracks.push(PaintRow {
+                    id: json!(["track", format!("{area:?}"), lane]).to_string(),
+                    accessibility_label: p
+                        .track_accessibility_label(area, lane)
+                        .ok_or(Error::MissingTrackPresentation)?,
+                    depth: 0,
+                    selected: false,
+                    hovered: false,
+                    focused: false,
+                    content: RowContent::Track {
+                        clips: clips.remove(&(area, lane)).unwrap_or_default(),
+                    },
+                });
+                tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
             }
             tracks
         } else {
@@ -1153,7 +1171,44 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     // A readable audio clip shows its waveform in place of the name (v1): the
     // bars stand on the clip's floor in the body's bright tint, one column per
     // point summarising every peak under it.
-    if let (Some(audio), false) = (&c.audio, offline) {
+    if !c.cues.is_empty() {
+        // Captions (S089): each cue a quiet chip with its text, in place of
+        // the clip's name; a cue is clicked, double-clicked and read by itself.
+        for cue in &c.cues {
+            let x0 = v.x(cue.start).max(r.x + m.border as f64);
+            let x1 = v.x(cue.end).min(r.x + r.width - m.border as f64);
+            if x1 - x0 < 2. {
+                continue;
+            }
+            let chip = Rect::new(
+                x0,
+                r.y + 2. * m.border as f64,
+                x1 - x0,
+                (r.height - 4. * m.border as f64).max(0.),
+            );
+            let mut o = Op::new(cue_op(&c.id, &cue.id), "rect", chip, material.primary);
+            o.radius = (m.clip_radius as f64 - m.border as f64).max(0.);
+            o.opacity = 0.35 * strength;
+            o.detail = json!({"from":cue.start,"to":cue.end,"text":cue.text});
+            ops.push(o);
+            let mut o = Op::new(
+                format!("cue-text:{}\u{1f}{}", c.id, cue.id),
+                "text",
+                Rect::new(
+                    x0 + lead,
+                    chip.y,
+                    (x1 - x0 - 2. * lead).max(0.),
+                    chip.height,
+                ),
+                ink,
+            );
+            o.text = Some(cue.text.replace('\n', " "));
+            o.font_size = t.typography.minimum as f64;
+            o.opacity = strength;
+            o.detail = json!({"truncate":"tail"});
+            ops.push(o);
+        }
+    } else if let (Some(audio), false) = (&c.audio, offline) {
         // Bars keep clear of the seam and the rounded corners on every side.
         let inset = 2. * m.border as f64;
         let r = Rect::new(r.x + inset, r.y, (r.width - 2. * inset).max(0.), r.height);

@@ -2939,3 +2939,357 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
     );
     assert_eq!(gone["action"], "refresh-fonts");
 }
+
+/// 3d-studio.md §8 through the Properties presenter: each role's sections,
+/// a channel row writing like any property, and pop-ups and checkboxes
+/// going through the Studio's typed edits.
+#[test]
+fn properties_show_the_3d_section_for_models_lights_and_cameras() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    run(json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
+    run(json!({"operation":"add_light","id":"lamp","light":{"type":"area"}}));
+    run(json!({"operation":"add_camera","id":"cam"}));
+    let mut presenter = properties::Properties::default();
+    let publish = |presenter: &mut properties::Properties, id: &str| {
+        select_layer(&kernel, id);
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        (model, publication)
+    };
+    let titles = |p: &Value| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"].as_str().unwrap().starts_with("3d."))
+            .map(|s| s["title"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let labels = |p: &Value, section: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["title"] == section)
+            .map(|s| {
+                s["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["label"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let write = |presenter: &properties::Properties,
+                 model: &mut pm_panel_inspector::Inspector,
+                 row: &Value,
+                 value: Value| {
+        let handle = row["control"]["binding"]["handle"]
+            .as_str()
+            .or(row["control"]["axes"][0]["binding"]["handle"].as_str())
+            .unwrap();
+        let request = presenter
+            .write(
+                model,
+                Caller::native(),
+                handle,
+                data::model(&value).unwrap(),
+                0.,
+            )
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{value}: {e}");
+        }
+        model.sync(kernel.published("synthetic").unwrap());
+    };
+
+    let (mut model, p) = publish(&mut presenter, "model");
+    assert_eq!(
+        titles(&p),
+        ["Model", "Material", "Coat and Glass", "Surface", "Emission"]
+    );
+    assert_eq!(
+        labels(&p, "Model"),
+        ["Source", "Cast Shadows", "Receive Shadows"]
+    );
+    assert_eq!(
+        labels(&p, "Material"),
+        ["Screen", "Color", "Roughness", "Metalness", "Opacity"]
+    );
+    assert_eq!(row(&p, "3d.source").unwrap()["control"]["value"], "Cube");
+    let roughness = row(&p, "m.roughness").unwrap();
+    assert_eq!(roughness["control"]["axes"][0]["min"], 0.02);
+    assert_eq!(roughness["animation"], "static");
+    write(&presenter, &mut model, &roughness, json!(0.5));
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.castShadow").unwrap(),
+        json!(false),
+    );
+    let (_, p) = publish(&mut presenter, "model");
+    assert_eq!(
+        row(&p, "m.roughness").unwrap()["control"]["axes"][0]["value"],
+        0.5
+    );
+    assert_eq!(row(&p, "3d.castShadow").unwrap()["control"]["value"], false);
+
+    let (mut model, p) = publish(&mut presenter, "lamp");
+    assert_eq!(titles(&p), ["Light"]);
+    assert_eq!(
+        labels(&p, "Light"),
+        [
+            "Type",
+            "Color",
+            "Brightness",
+            "Width",
+            "Height",
+            "Cast Shadows"
+        ]
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.type").unwrap(),
+        json!("spot"),
+    );
+    let (_, p) = publish(&mut presenter, "lamp");
+    assert_eq!(
+        labels(&p, "Light"),
+        [
+            "Type",
+            "Color",
+            "Brightness",
+            "Range",
+            "Falloff",
+            "Spread",
+            "Softness",
+            "Cast Shadows"
+        ]
+    );
+
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert_eq!(titles(&p), ["Camera", "Environment", "Shot"]);
+    assert_eq!(
+        labels(&p, "Camera"),
+        [
+            "Projection",
+            "Field of View",
+            "Clip Start",
+            "Clip End",
+            "f-Stop",
+            "Focus"
+        ]
+    );
+    assert_eq!(
+        labels(&p, "Environment"),
+        [
+            "Ambient",
+            "Ambient Color",
+            "Exposure",
+            "Shadows",
+            "Background"
+        ]
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.projection").unwrap(),
+        json!("orthographic"),
+    );
+    let (_, p) = publish(&mut presenter, "cam");
+    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert_eq!(row(&p, "3d.samples").unwrap()["disabled"], true);
+    // A 2D layer has no 3D section.
+    let (_, p) = publish(&mut presenter, "a");
+    assert!(titles(&p).is_empty());
+}
+
+#[test]
+fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"cloud":{"revision":4,"signedIn":true,"identity":"@maker",
+        "email":"person@example.com","rememberInstalls":false}});
+    let publication = backend.settings_snapshot().unwrap();
+    let rows = publication["rows"].as_array().unwrap();
+    let remember = rows.iter().find(|r| r["id"] == "account.remember").unwrap();
+    // The switch acts through a lease, like every other Settings switch.
+    assert!(remember["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    let revision = publication["revision"].clone();
+    for (action, command) in [
+        (
+            json!({"type":"write","id":"account.remember","value":true}),
+            "cloudRememberOn",
+        ),
+        (
+            json!({"type":"row","id":"account.sign-in","action":"account.sign-out"}),
+            "cloudSignOut",
+        ),
+        (
+            json!({"type":"row","id":"account.delete","action":"account.delete"}),
+            "cloudDeleteAccount",
+        ),
+    ] {
+        backend.native.platform.clear();
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":action}),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.native.platform,
+            [("command".to_owned(), json!({ "name": command }))]
+        );
+    }
+    // A new account state is a new publication.
+    backend.native.facts["cloud"]["revision"] = json!(5);
+    assert_ne!(backend.settings_snapshot().unwrap()["revision"], revision);
+}
+#[test]
+fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
+    let actor = actor();
+    let entry = |id: &str, installed: bool| {
+        pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+            id: id.into(),
+            installed,
+            enabled: true,
+            version: "1.0.0".into(),
+            source: pm_model::json::parse(
+                r#"{"hostRecord":{"name":"Glow","health":{"state":"ok"}}}"#,
+            )
+            .unwrap(),
+        })
+    };
+    actor
+        .handle()
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![
+                entry("com.example.glow", true),
+                entry("builtin.panel", false),
+                pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    id: "com.example.gone".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Gone","archived":true}}"#,
+                    )
+                    .unwrap(),
+                }),
+                pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    id: "com.example.away".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Away","about":"Glows","unavailable":true}}"#,
+                    )
+                    .unwrap(),
+                }),
+            ],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let listed = |id: &str| {
+        publication["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    // Deleted ones stay in the kernel (their values) but leave the list.
+    assert!(
+        !publication["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "com.example.gone")
+    );
+    assert_eq!(listed("com.example.glow")["canArchive"], true);
+    assert_eq!(listed("builtin.panel")["canArchive"], false);
+    // Its folder can't be reached (an unmounted volume): listed, and said so.
+    assert_eq!(
+        listed("com.example.away")["about"],
+        "Unavailable: its folder can't be reached."
+    );
+    let revision = publication["revision"].clone();
+    let mut perform = |action: Value| {
+        backend.native.platform.clear();
+        let result = backend.native_command(
+            "panel.settings",
+            &json!({"revision":revision,"action":action}),
+        );
+        (result.is_ok(), backend.native.platform.clone())
+    };
+    for (kind, command) in [
+        ("extension.finder", "extensionReveal.com.example.glow"),
+        ("extension.archive", "extensionArchive.com.example.glow"),
+    ] {
+        let (ok, platform) = perform(json!({"type":kind,"id":"com.example.glow"}));
+        assert!(ok);
+        assert_eq!(
+            platform,
+            [("command".to_owned(), json!({ "name": command }))]
+        );
+        // A built-in has no folder to show and is never deleted.
+        let (_, platform) = perform(json!({"type":kind,"id":"builtin.panel"}));
+        assert!(platform.is_empty());
+    }
+}

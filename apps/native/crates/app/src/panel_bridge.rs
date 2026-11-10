@@ -310,19 +310,12 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             Ok(workspace(windows, c, editor, window, cx))
         }),
         "set_panel_layout" => {
-            let (plan, name) = target.with(cx, |_, editor, _, cx| layout_plan(editor, args, cx))?;
-            let (path, project, layout) = plan;
-            let written = layout.clone();
-            let (store, saved) = cx
-                .background_executor()
-                .spawn(async move {
-                    layout::save_agent_layout(path.as_deref(), &project, &name, &written)
-                })
-                .await
-                .map_err(|e| Error::invalid(e.to_string()))?;
             target.with(cx, |_, editor, _, cx| {
-                editor.update(cx, |e, cx| e.adopt_agent_layout(store, layout, cx));
-                Ok(json!({"workspaceId":saved,"name":saved,"historyId":null,
+                let (docks, name) = layout_plan(editor, args, cx)?;
+                let (id, name) = editor
+                    .update(cx, |e, cx| e.save_agent_layout(&name, docks, cx))
+                    .map_err(|e| Error::invalid(e.to_string()))?;
+                Ok(json!({"workspaceId":id,"name":name,"historyId":null,
                     "note":"Saved as a new workspace and shown in this window. New projects use this workspace. Previous workspaces remain available in Window ▸ Workspace.",
                     "layout":live_layout(editor, cx)}))
             })
@@ -570,8 +563,12 @@ fn registered(editor: &Entity<Editor>, id: &str, cx: &App) -> bool {
 }
 /// Panels drawn by a v4 view (the rest are native: viewer, scopes, the
 /// timeline's surface is inside its view).
+/// Built-in panels drawn by v4 views; the others are native GPUI panels.
 fn builtin_view_expected(id: &str) -> bool {
-    !matches!(id, "viewer" | "scopes") && layout::PANELS.contains(&id)
+    !matches!(
+        id,
+        "viewer" | "scopes" | "perf" | "mixer" | "takes" | "notes"
+    ) && layout::PANELS.contains(&id)
 }
 /// What identifies the panel an action was aimed at: its view and its place.
 /// What identifies the panel an action was aimed at: its view, the realm
@@ -683,14 +680,13 @@ fn workspace(
     })
 }
 
-/// set_panel_layout's checks (main's `setPanelLayout`) and the layout to
-/// write; the write itself runs off the main thread.
-#[allow(clippy::type_complexity)]
+/// set_panel_layout's checks (main's `setPanelLayout`): the docks and name
+/// of the new workspace.
 fn layout_plan(
     editor: &Entity<Editor>,
     args: &Value,
     cx: &mut App,
-) -> Result<((Option<std::path::PathBuf>, String, layout::Layout), String)> {
+) -> Result<(Vec<layout::Dock>, String)> {
     const DOCKS: [&str; 4] = ["left", "center", "bottom", "right"];
     let name = args["name"]
         .as_str()
@@ -771,7 +767,7 @@ fn layout_plan(
         );
     }
     docks.sort_by_key(|d| DOCKS.iter().position(|id| *id == d.id));
-    Ok((editor.read(cx).agent_layout_plan(docks), name.to_owned()))
+    Ok((docks, name.to_owned()))
 }
 
 fn read_panel(

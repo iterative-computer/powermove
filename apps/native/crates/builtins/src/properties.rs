@@ -284,6 +284,17 @@ impl Properties {
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
             }
+            if model.selected_layers().len() == 1 {
+                sections.extend(self.caption_sections(model, &layer)?);
+            }
+            // One 3D section after content, single selection only.
+            if model.selected_layers().len() == 1 {
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
+                    sections
+                        .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                }
+            }
             if !audio {
                 let mut rows = vec![];
                 for (id, label, paths, unit, step) in [
@@ -401,6 +412,271 @@ impl Properties {
         }
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
     }
+    /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
+    /// names the row, and `write` hands it to the Studio's typed edits.
+    fn control_lease(&mut self, id: &str) -> Value {
+        let handle = self
+            .handles
+            .entry(id.into())
+            .or_insert_with(|| format!("{}#{id}", self.key))
+            .clone();
+        json!({"handle":handle,"channels":[id]})
+    }
+    /// 3d-studio.md §8: Model, Material and its groups, Light, Camera, Shot
+    /// and Environment, in the inspector's row grammar.
+    fn scene_sections(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        record: &Value,
+        role: pm_panel_studio3d::properties::Role,
+        fields: Vec<pm_panel_studio3d::properties::Field>,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        use pm_panel_studio3d::properties::Role;
+        let data = &record["d"]["data"];
+        let locked = !model.editable(layer);
+        let mut groups: Vec<(&'static str, Vec<Value>)> = vec![];
+        fn push(groups: &mut Vec<(&'static str, Vec<Value>)>, group: &'static str, row: Value) {
+            match groups.iter_mut().find(|g| g.0 == group) {
+                Some(g) => g.1.push(row),
+                None => groups.push((group, vec![row])),
+            }
+        }
+        let row = |id: &str, label: &str, control: Value| json!({"id":id,"label":label,"locked":locked,"animation":null,"control":control});
+        let toggle = |this: &mut Self, id: &str, label: &str, value: bool| {
+            let lease = this.control_lease(id);
+            row(
+                id,
+                label,
+                json!({"kind":"toggle","binding":lease,"value":value}),
+            )
+        };
+        match role {
+            Role::Object => {
+                let object = &data["object"];
+                let source = &object["source"];
+                let name = if let Some(asset) = source["assetId"].as_str() {
+                    model
+                        .published()
+                        .snapshot
+                        .root()
+                        .and_then(|r| {
+                            r.get("assets")?
+                                .get(asset)?
+                                .get("name")?
+                                .to_value()
+                                .as_str()
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| "Model".into())
+                } else if let Some(primitive) = source["primitive"].as_str() {
+                    match primitive {
+                        "box" => "Cube",
+                        "roundedBox" => "Rounded Cube",
+                        "sphere" => "Sphere",
+                        "plane" => "Plane",
+                        "cylinder" => "Cylinder",
+                        "cone" => "Cone",
+                        "torus" => "Torus",
+                        "capsule" => "Capsule",
+                        "icosahedron" => "Icosphere",
+                        _ => "Mesh",
+                    }
+                    .into()
+                } else {
+                    "Mesh".into()
+                };
+                let lease = self.control_lease("3d.source");
+                push(
+                    &mut groups,
+                    "Model",
+                    row(
+                        "3d.source",
+                        "Source",
+                        json!({"kind":"text","binding":lease,"value":name,"disabled":true}),
+                    ),
+                );
+                if source.get("assetId").is_some() {
+                    let on = object["useSourceMaterials"] == true;
+                    push(
+                        &mut groups,
+                        "Model",
+                        toggle(self, "3d.useSourceMaterials", "Model Materials", on),
+                    );
+                }
+                if object["useSourceMaterials"] != true {
+                    let options = pm_panel_studio3d::properties::screens(model.published(), layer)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|o| json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]}))
+                        .collect::<Vec<_>>();
+                    let lease = self.control_lease("3d.screen");
+                    push(
+                        &mut groups,
+                        "Material",
+                        row(
+                            "3d.screen",
+                            "Screen",
+                            json!({"kind":"choice","binding":lease,"value":object["material"]["screen"],"options":options}),
+                        ),
+                    );
+                }
+            }
+            Role::Light => {
+                let lease = self.control_lease("3d.type");
+                let options = json!([{"v":"area","label":"Softbox"},{"v":"spot","label":"Spotlight"},{"v":"point","label":"Bulb"},{"v":"sun","label":"Sun"}]);
+                push(
+                    &mut groups,
+                    "Light",
+                    row(
+                        "3d.type",
+                        "Type",
+                        json!({"kind":"choice","binding":lease,"value":data["light"]["type"],"options":options}),
+                    ),
+                );
+            }
+            Role::Camera => {
+                let lease = self.control_lease("3d.projection");
+                let options = json!([{"v":"perspective","label":"Perspective"},{"v":"orthographic","label":"Orthographic"}]);
+                push(
+                    &mut groups,
+                    "Camera",
+                    row(
+                        "3d.projection",
+                        "Projection",
+                        json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
+                    ),
+                );
+            }
+        }
+        for field in fields {
+            let binding = Binding::Property(PropertyId::new(layer, &field.id));
+            let state = match model.binding_state(&binding, time) {
+                Ok(state) => state,
+                Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let value = super::data::wire(&state.value);
+            let lease = self.lease(model, &field.id, binding)?;
+            let control = match (field.kind, &value) {
+                ("color", Value::String(_)) => {
+                    json!({"kind":"colour","binding":lease,"value":value})
+                }
+                ("number", Value::Number(_)) => {
+                    let fine = field.max.is_some_and(|max| max <= 2.);
+                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":if field.min.is_some_and(|m| m > 0. && m < 0.01) {3} else {2}});
+                    if let Some(min) = field.min {
+                        axis["min"] = json!(min);
+                    }
+                    if let Some(max) = field.max {
+                        axis["max"] = json!(max);
+                    }
+                    json!({"kind":"number","axes":[axis]})
+                }
+                _ => continue,
+            };
+            let animation = if state.key_at_playhead {
+                "key-at-playhead"
+            } else if state.animated {
+                "animated"
+            } else {
+                "static"
+            };
+            push(
+                &mut groups,
+                field.group,
+                json!({"id":field.id,"label":field.label,"locked":locked,"animation":animation,"control":control}),
+            );
+        }
+        match role {
+            Role::Object => {
+                let object = &data["object"];
+                push(
+                    &mut groups,
+                    "Model",
+                    toggle(
+                        self,
+                        "3d.castShadow",
+                        "Cast Shadows",
+                        object["castShadow"] != false,
+                    ),
+                );
+                push(
+                    &mut groups,
+                    "Model",
+                    toggle(
+                        self,
+                        "3d.receiveShadow",
+                        "Receive Shadows",
+                        object["receiveShadow"] != false,
+                    ),
+                );
+            }
+            Role::Light => {
+                let on = data["light"]["castShadow"] != false;
+                push(
+                    &mut groups,
+                    "Light",
+                    toggle(self, "3d.castShadow", "Cast Shadows", on),
+                );
+            }
+            Role::Camera => {
+                let environment = &data["environment"];
+                let lease = self.control_lease("3d.samples");
+                let options = json!([{"v":16,"label":"Draft · 16"},{"v":64,"label":"Standard · 64"},{"v":256,"label":"High · 256"},{"v":1024,"label":"Best · 1024"}]);
+                let orthographic = data["camera"]["projection"] == "orthographic";
+                let mut quality = row(
+                    "3d.samples",
+                    "Final Quality",
+                    json!({"kind":"choice","binding":lease,"value":environment["samples"].as_f64().unwrap_or(64.),"options":options,"disabled":orthographic}),
+                );
+                quality["disabled"] = json!(orthographic);
+                push(&mut groups, "Shot", quality);
+                push(
+                    &mut groups,
+                    "Environment",
+                    toggle(
+                        self,
+                        "3d.shadows",
+                        "Shadows",
+                        environment["shadows"] != false,
+                    ),
+                );
+                let background = environment["background"].as_str();
+                push(
+                    &mut groups,
+                    "Environment",
+                    toggle(self, "3d.background", "Background", background.is_some()),
+                );
+                if let Some(colour) = background {
+                    let lease = self.control_lease("3d.background.color");
+                    push(
+                        &mut groups,
+                        "Environment",
+                        row(
+                            "3d.background.color",
+                            "Background Color",
+                            json!({"kind":"colour","binding":lease,"value":colour}),
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(title, rows)| {
+                let id = format!("3d.{}", title.to_ascii_lowercase().replace(' ', "-"));
+                // Disclosure groups start closed unless a row inside is animated.
+                let closed = matches!(title, "Coat and Glass" | "Surface" | "Emission")
+                    && rows.iter().all(|r| {
+                        r["animation"] != "animated" && r["animation"] != "key-at-playhead"
+                    });
+                let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
+                json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows})
+            })
+            .collect())
+    }
     /// Each mask's rows (MasksSection.svelte): Enabled, Shape, Mode and its
     /// animatable box and feather.
     fn masks(
@@ -491,6 +767,195 @@ impl Properties {
     /// Type Settings (v1): one row per variation axis of the text layer's
     /// font, plus axes the layer saved from a font this Mac doesn't have. A
     /// static font shows nothing; a missing one says so and offers Refresh Fonts.
+    /// S088: a captions layer's style in the inspector's row grammar, each
+    /// change one `Caption Style` step through `edit_captions` (op style).
+    fn caption_sections(&mut self, model: &Inspector, layer: &str) -> Result<Vec<Value>, String> {
+        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
+        if record["type"] != "captions" {
+            return Ok(vec![]);
+        }
+        let style =
+            serde_json::to_value(pm_captions::normalize_caption_style(&record["d"]["style"]))
+                .unwrap_or_default();
+        let locked = !model.editable(layer);
+        let mut groups: Vec<(&str, &str, Vec<Value>)> = vec![
+            ("captions", "Captions", vec![]),
+            ("captions-background", "Background", vec![]),
+            ("captions-placement", "Placement", vec![]),
+            ("captions-words", "Words", vec![]),
+        ];
+        let row = |this: &mut Self, key: &str, label: &str, control: Value| {
+            let mut control = control;
+            control["binding"] = this.control_lease(&format!("captions.{key}"));
+            if control.get("value").is_none() {
+                control["value"] = style[key].clone();
+            }
+            control["mixed"] = json!(false);
+            json!({"id":format!("captions.{key}"),"label":label,"locked":locked,"animation":null,"control":control})
+        };
+        let number = |this: &mut Self,
+                      key: &str,
+                      unit: &str,
+                      min: f64,
+                      max: Option<f64>,
+                      step: f64| {
+            let mut axis = json!({"binding":this.control_lease(&format!("captions.{key}")),"value":style[key],
+                "unit":unit,"step":step,"precision":2,"mixed":false,"min":min});
+            if let Some(max) = max {
+                axis["max"] = json!(max);
+            }
+            json!({"kind":"number","axes":[axis]})
+        };
+        let choice = |pairs: &[(&str, &str)]| json!({"kind":"choice","options":pairs.iter().map(|(v, l)| json!({"v":v,"label":l})).collect::<Vec<_>>()});
+        let mut presets: Vec<(String, String)> = pm_captions::caption_presets()
+            .iter()
+            .map(|p| (p.id.clone(), p.label.clone()))
+            .collect();
+        if style["preset"] == "custom" {
+            presets.push(("custom".into(), "Custom".into()));
+        }
+        let presets: Vec<(&str, &str)> = presets
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        groups[0]
+            .2
+            .push(row(self, "preset", "Style", choice(&presets)));
+        groups[0].2.push(row(
+            self,
+            "font",
+            "Font",
+            json!({"kind":"font","options":[]}),
+        ));
+        let mut weights: Vec<Value> = [
+            (300, "Light"),
+            (400, "Regular"),
+            (500, "Medium"),
+            (600, "Semibold"),
+            (700, "Bold"),
+            (800, "Heavy"),
+            (900, "Black"),
+        ]
+        .iter()
+        .map(|(v, l)| json!({"v":v,"label":l}))
+        .collect();
+        if !weights
+            .iter()
+            .any(|o| o["v"].as_f64() == style["weight"].as_f64())
+        {
+            weights.push(json!({"v":style["weight"],"label":style["weight"].to_string()}));
+        }
+        groups[0].2.push(row(
+            self,
+            "weight",
+            "Weight",
+            json!({"kind":"choice","options":weights}),
+        ));
+        let size = number(self, "size", "px", 4., None, 1.);
+        groups[0].2.push(row(self, "size", "Size", size));
+        groups[0]
+            .2
+            .push(row(self, "fill", "Color", json!({"kind":"colour"})));
+        let stroke = number(self, "stroke", "px", 0., None, 0.5);
+        groups[0].2.push(row(self, "stroke", "Outline", stroke));
+        if style["stroke"].as_f64().is_some_and(|s| s > 0.) {
+            groups[0].2.push(row(
+                self,
+                "strokeColor",
+                "Outline Color",
+                json!({"kind":"colour"}),
+            ));
+        }
+        groups[0].2.push(row(
+            self,
+            "textCase",
+            "Case",
+            choice(&[
+                ("original", "As Typed"),
+                ("upper", "Uppercase"),
+                ("lower", "Lowercase"),
+            ]),
+        ));
+        groups[1]
+            .2
+            .push(row(self, "box", "Background", json!({"kind":"toggle"})));
+        if style["box"] == true {
+            groups[1]
+                .2
+                .push(row(self, "boxColor", "Color", json!({"kind":"colour"})));
+            let opacity = number(self, "boxOpacity", "%", 0., Some(100.), 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxOpacity", "Opacity", opacity));
+            let padding = number(self, "boxPadding", "px", 0., None, 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxPadding", "Padding", padding));
+            let radius = number(self, "boxRadius", "px", 0., None, 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxRadius", "Corner Radius", radius));
+        }
+        groups[2].2.push(row(
+            self,
+            "placement",
+            "Position",
+            choice(&[("bottom", "Bottom"), ("middle", "Middle"), ("top", "Top")]),
+        ));
+        groups[2].2.push(row(
+            self,
+            "align",
+            "Align",
+            json!({"kind":"segmented","options":[
+            {"id":"left","label":"Align Left","symbol":"text.alignleft"},
+            {"id":"center","label":"Align Center","symbol":"text.aligncenter"},
+            {"id":"right","label":"Align Right","symbol":"text.alignright"}]}),
+        ));
+        let x = self.control_lease("captions.offsetX");
+        let y = self.control_lease("captions.offsetY");
+        groups[2].2.push(json!({"id":"captions.offset","label":"Offset","locked":locked,"animation":null,
+            "control":{"kind":"number","axes":[
+                {"binding":x,"value":style["offsetX"],"unit":"px","step":1,"precision":2,"mixed":false,"label":"Horizontal offset"},
+                {"binding":y,"value":style["offsetY"],"unit":"px","step":1,"precision":2,"mixed":false,"label":"Vertical offset"}]}}));
+        let margin = number(self, "safeMargin", "%", 0., Some(45.), 0.5);
+        groups[2]
+            .2
+            .push(row(self, "safeMargin", "Safe Margin", margin));
+        let width = number(self, "maxWidth", "%", 10., Some(100.), 1.);
+        groups[2].2.push(row(self, "maxWidth", "Max Width", width));
+        let lines = number(self, "maxLines", "", 1., Some(6.), 1.);
+        groups[2].2.push(row(self, "maxLines", "Max Lines", lines));
+        groups[3].2.push(row(
+            self,
+            "highlight",
+            "Highlight",
+            json!({"kind":"toggle"}),
+        ));
+        if style["highlight"] == true {
+            groups[3].2.push(row(
+                self,
+                "highlightColor",
+                "Color",
+                json!({"kind":"colour"}),
+            ));
+            let scale = number(self, "highlightScale", "%", 50., Some(300.), 1.);
+            groups[3].2.push(row(self, "highlightScale", "Size", scale));
+        }
+        groups[3].2.push(row(
+            self,
+            "wordAnimation",
+            "Animation",
+            choice(&[("none", "None"), ("pop", "Pop In"), ("fade", "Fade In")]),
+        ));
+        Ok(groups
+            .into_iter()
+            .filter(|(_, _, rows)| !rows.is_empty())
+            .map(|(id, title, rows)| {
+                json!({"id":id,"title":title,
+                "collapsed":self.collapsed.get(id).copied().unwrap_or(false),"rows":rows})
+            })
+            .collect())
+    }
     fn type_settings(
         &mut self,
         model: &mut Inspector,
@@ -600,6 +1065,65 @@ impl Properties {
                     time,
                 )
                 .map_err(|e| e.to_string());
+        }
+        if let Some(key) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("captions."))
+        {
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            let published = model.published().clone();
+            if model.selected_layers().len() != 1
+                || published.selection.layers() != model.selected_layers()
+            {
+                return Err("The selection changed".into());
+            }
+            let value = super::data::wire(&value);
+            let patch = pm_model::json::parse(&json!({ key: value }).to_string())
+                .map_err(|e| e.to_string())?;
+            let edit = pm_kernel::commands::captions::CaptionEdit::Style {
+                style: patch,
+                language: None,
+            };
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Caption Style".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CaptionCommand::Edit { layer_id, edit }.into(),
+                    ]),
+                },
+            ));
+        }
+        if let Some(control) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("3d."))
+        {
+            let published = model.published().clone();
+            if model.selected_layers().len() != 1
+                || published.selection.layers() != model.selected_layers()
+            {
+                return Err("The selection changed".into());
+            }
+            let (label, commands) = pm_panel_studio3d::properties::command(
+                &published,
+                time,
+                control,
+                super::data::wire(&value),
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
+                },
+            ));
         }
         self.adapter
             .set(model, caller, handle, &[value], time)
