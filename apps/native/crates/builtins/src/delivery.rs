@@ -182,12 +182,10 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         let tc = pm_time::TimecodeFormat::for_rate(rate).format(rate.frame_of(start));
         format!("{}×{} · frame at {tc}", width, height)
     } else {
-        format!(
-            "{frames} frames · {} s · {}×{}",
-            pm_time::seconds_from_ticks(end - start),
-            width,
-            height
-        )
+        // Two places at most, as the timeline's readouts: 73.53 s, 1.05 s, 10 s.
+        let seconds = format!("{:.2}", pm_time::seconds_from_ticks(end - start));
+        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
+        format!("{frames} frames · {seconds} s · {}×{}", width, height)
     };
     Ok(Plan {
         settings: Some(settings),
@@ -563,6 +561,10 @@ mod tests {
         assert_eq!(p.captions, 1);
         assert!(!settings.delivery.hide_captions);
         assert!(p.summary.starts_with("31 frames · 1.05 s"));
+        // 181 frames at 24 fps (7.5416… s) read at two places.
+        o.fps = 24.;
+        let s = fixture(",\"work\":[0,7.541666666666667]");
+        assert!(plan(&s, &o, 0.).unwrap().summary.contains(" · 7.54 s · "));
     }
     #[test]
     fn missing_or_invalid_work_area_refuses_instead_of_exporting_all() {
