@@ -101,6 +101,8 @@ pub struct Controller {
     /// The document whose stop (an internal error) this window already
     /// offered to reopen.
     pub stop_offered: Option<u64>,
+    /// The next open is Reopen after such a stop (its recovery prompt says so).
+    reopening_stopped: bool,
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
@@ -459,6 +461,7 @@ impl Controller {
             keyframes: 0,
             recovery_pending: false,
             stop_offered: None,
+            reopening_stopped: false,
             mcp,
             job_overrides: Default::default(),
             window_key: 0,
@@ -1109,6 +1112,7 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
+        let after_stop = std::mem::take(&mut self.reopening_stopped);
         // Commands still waiting on an earlier open never reach this project.
         let (open, dropped) = self.after_open.begin(&name);
         self.opening = true;
@@ -1126,7 +1130,16 @@ impl Controller {
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
                     reply, &name, false, saved,
-                );
+                )
+                .map(|mut r| {
+                    let asks = r.alert.buttons.iter().any(|b| {
+                        b.action == crate::surfaces::recovery::Action::Recover
+                    });
+                    if after_stop && asks {
+                        r.alert = crate::surfaces::recovery::after_stop(r.alert, &name);
+                    }
+                    r
+                });
                 if let Some(recovery) = recovery {
                     let answer = this.update(cx, |v, _| {
                         if matches!(
@@ -1330,6 +1343,7 @@ impl Controller {
                 v.published = None;
                 v.mirror = None;
                 v.mcp.bind_window(v.window_key, None);
+                v.reopening_stopped = true;
                 v.open_named(source, Some(name), cx);
             });
         })

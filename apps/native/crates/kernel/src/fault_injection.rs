@@ -41,10 +41,31 @@ mod armed {
         CURRENT.with(|c| *c.borrow_mut() = project.map(str::to_owned));
     }
 
+    /// `PM_KERNEL_INJECT=<Stage>:<n>` (feature builds only, for checking a
+    /// running app): the n-th call on any project that reaches the stage
+    /// panics, once.
+    fn from_env(stage: Stage) -> bool {
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static PLAN: OnceLock<Option<(String, AtomicU32)>> = OnceLock::new();
+        let Some((name, left)) = PLAN.get_or_init(|| {
+            let v = std::env::var("PM_KERNEL_INJECT").ok()?;
+            let (name, n) = v.split_once(':')?;
+            Some((name.to_owned(), AtomicU32::new(n.parse().ok()?)))
+        }) else {
+            return false;
+        };
+        name == &format!("{stage:?}")
+            && left.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)) == Ok(1)
+    }
+
     pub(crate) fn hit(stage: Stage) {
         let Some(project) = CURRENT.with(|c| c.borrow().clone()) else {
             return;
         };
+        if from_env(stage) {
+            panic!("injected fault at {stage:?}");
+        }
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(i) = armed.iter().position(|(s, p)| *s == stage && *p == project) {
             armed.remove(i);
