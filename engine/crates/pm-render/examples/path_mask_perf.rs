@@ -190,7 +190,15 @@ fn main() {
         // Sustained: 60 frames in one submission (the GPU at its playback
         // clocks, not idling between isolated frames).
         let mut encoder = device.create_command_encoder(&Default::default());
-        stamp(&mut encoder, &begin, 0, &[wgpu::BindGroupEntry { binding: 0, resource: sink.as_entire_binding() }]);
+        stamp(
+            &mut encoder,
+            &begin,
+            0,
+            &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sink.as_entire_binding(),
+            }],
+        );
         let mut last = None;
         for frame in 0..60 {
             last = Some(pipelines.coverage(device, &mut encoder, &mask(frame, 2.0 * sigma)));
@@ -201,8 +209,14 @@ fn main() {
             &end,
             1,
             &[
-                wgpu::BindGroupEntry { binding: 0, resource: sink.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: sink.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
             ],
         );
         queue.submit([encoder.finish()]);

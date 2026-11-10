@@ -436,9 +436,10 @@ fn ungroup_each(
                     let aim = s.world_aim3d(l, t)?;
                     let perspective = s.perspective_amount(l, t)?;
                     let group_opacity = clamp_opacity(s.channel(gl, "opacity", t)?.to_number());
-                    let opacity =
-                        js_sem::mul(&s.channel(l, "opacity", t)?, &JsValue::Number(group_opacity))
-                            / 100.0;
+                    let opacity = js_sem::mul(
+                        &s.channel(l, "opacity", t)?,
+                        &JsValue::Number(group_opacity),
+                    ) / 100.0;
                     Ok(Sampled {
                         world,
                         aim,
@@ -484,7 +485,10 @@ fn ungroup_each(
             let k = key_of(layer(edit, m)?);
             children.push(id_of(layer(edit, m)?));
             if invisible {
-                edit.set(join(&edit.layer_path(m), &[key("on")]), Some(Value::Bool(false)))?;
+                edit.set(
+                    join(&edit.layer_path(m), &[key("on")]),
+                    Some(Value::Bool(false)),
+                )?;
             }
             if matches!(poses.get(&k), Some(WorldPose::Space(_))) {
                 ensure_3d_channels(edit, m)?;
@@ -520,7 +524,10 @@ fn ungroup_each(
             .any(|l| js_sem::strict_eq(&node::get(l, b"parent").to_js(), &group_id));
         if parented {
             let path = edit.layer_path(g);
-            edit.set(join(&path, &[key("type")]), Some(Value::String(JsString::from("null"))))?;
+            edit.set(
+                join(&path, &[key("type")]),
+                Some(Value::String(JsString::from("null"))),
+            )?;
             edit.set(join(&path, &[key("solo")]), Some(Value::Bool(false)))?;
             continue;
         }

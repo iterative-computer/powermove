@@ -451,7 +451,12 @@ impl InputScratch {
             words(&batch.rows),
         ];
         let (ranges, end) = Self::extent(device, batch);
-        debug_assert!(inputs.iter().zip(&ranges).all(|(b, r)| b.len().max(16) as u64 == r.1));
+        debug_assert!(
+            inputs
+                .iter()
+                .zip(&ranges)
+                .all(|(b, r)| b.len().max(16) as u64 == r.1)
+        );
         let limit = device.limits().max_buffer_size;
         if end > self.capacity {
             self.capacity = bounded_capacity(end, 256, limit)?;

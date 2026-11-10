@@ -358,7 +358,11 @@ pub fn primitive_name(kind: &usvg::filter::Kind) -> &'static str {
 /// The first part of `g` the float painter cannot draw, named.
 fn unpaintable_group(g: &usvg::Group) -> Option<String> {
     for filter in g.filters() {
-        if let Some(p) = filter.primitives().iter().find(|p| !float_primitive(p.kind())) {
+        if let Some(p) = filter
+            .primitives()
+            .iter()
+            .find(|p| !float_primitive(p.kind()))
+        {
             return Some(primitive_name(p.kind()).to_owned());
         }
     }

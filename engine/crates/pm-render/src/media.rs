@@ -1563,9 +1563,9 @@ impl MediaCache {
             }
         } else {
             let want = match self.playback {
-                Some(deadline) => Want::Playback(
-                    deadline.saturating_duration_since(std::time::Instant::now()),
-                ),
+                Some(deadline) => {
+                    Want::Playback(deadline.saturating_duration_since(std::time::Instant::now()))
+                }
                 None if self.scrub => Want::Scrub,
                 None => Want::Exact,
             };

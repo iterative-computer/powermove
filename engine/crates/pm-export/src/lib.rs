@@ -31,9 +31,9 @@ pub(crate) mod par;
 pub mod pipeline;
 pub mod png;
 #[cfg(all(feature = "engine", target_os = "macos"))]
-mod readback;
-#[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod raster;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+mod readback;
 pub mod render;
 pub mod schedule;
 pub mod settings;

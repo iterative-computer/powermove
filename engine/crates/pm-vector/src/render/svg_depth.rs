@@ -23,7 +23,11 @@ pub const INLINE_DEPTH: usize = 128;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tag {
     /// `<name ...>`, or `<name .../>` when `empty`.
-    Open { start: usize, end: usize, empty: bool },
+    Open {
+        start: usize,
+        end: usize,
+        empty: bool,
+    },
     /// `</name>`.
     Close { start: usize, end: usize },
 }
@@ -100,7 +104,11 @@ pub(crate) fn for_each_tag(data: &[u8], mut f: impl FnMut(Tag)) {
                     _ => i += 1,
                 }
             }
-            f(Tag::Open { start, end: i, empty });
+            f(Tag::Open {
+                start,
+                end: i,
+                empty,
+            });
         }
     }
 }

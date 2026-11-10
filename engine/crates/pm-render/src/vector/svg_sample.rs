@@ -331,8 +331,8 @@ impl SvgSample {
             f64::from(raster.rect.right()),
             f64::from(raster.rect.bottom()),
         );
-        let projected = (transform * Affine::scale(1.0 / raster.scale))
-            .transform_rect_bbox(source_bounds);
+        let projected =
+            (transform * Affine::scale(1.0 / raster.scale)).transform_rect_bbox(source_bounds);
         let visible = PixelRect::round_out(projected).intersect(rect);
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -529,11 +529,17 @@ mod tests {
     fn closeness(actual: &[f64], reference: &[f64], size: u32) -> Closeness {
         let (mut max, mut sum, mut a, mut r, mut ax, mut rx, mut ay, mut ry) =
             (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let mut errors: Vec<f64> =
-            actual.iter().zip(reference).map(|(p, q)| (p - q).abs()).collect();
+        let mut errors: Vec<f64> = actual
+            .iter()
+            .zip(reference)
+            .map(|(p, q)| (p - q).abs())
+            .collect();
         errors.sort_by(f64::total_cmp);
         for (i, (&p, &q)) in actual.iter().zip(reference).enumerate() {
-            let (x, y) = (f64::from(i as u32 % size) + 0.5, f64::from(i as u32 / size) + 0.5);
+            let (x, y) = (
+                f64::from(i as u32 % size) + 0.5,
+                f64::from(i as u32 / size) + 0.5,
+            );
             max = max.max((p - q).abs());
             sum += (p - q).abs();
             (a, r) = (a + p, r + q);
@@ -564,7 +570,9 @@ mod tests {
             (
                 "circle",
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><circle cx="5" cy="5" r="4.5" fill="white"/></svg>"##,
-                Box::new(move |u: Point| f64::from(u8::from(in_crop(u) && (u.x - 5.0).hypot(u.y - 5.0) <= 4.5))),
+                Box::new(move |u: Point| {
+                    f64::from(u8::from(in_crop(u) && (u.x - 5.0).hypot(u.y - 5.0) <= 4.5))
+                }),
             ),
             (
                 "masked stroke",
@@ -581,15 +589,33 @@ mod tests {
             let doc = doc(svg);
             let wanted = reference(SIZE, inverse, inside);
             for precision in [Precision::Float32, Precision::Float16, Precision::Unorm8] {
-                let (output, plan, source) =
-                    playback(&gpu, &doc, transform, corners(transform, crop), SIZE, precision);
+                let (output, plan, source) = playback(
+                    &gpu,
+                    &doc,
+                    transform,
+                    corners(transform, crop),
+                    SIZE,
+                    precision,
+                );
                 let alpha: Vec<f64> = output.chunks_exact(4).map(|p| f64::from(p[3])).collect();
                 let engine = closeness(&alpha, &wanted, SIZE);
-                let today = closeness(&bilinear_rgba8(&source, &plan, transform, SIZE), &wanted, SIZE);
+                let today = closeness(
+                    &bilinear_rgba8(&source, &plan, transform, SIZE),
+                    &wanted,
+                    SIZE,
+                );
                 eprintln!(
                     "{name} {precision:?}: engine max {:.2} p99.9 {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px; today max {:.2} p99.9 {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px",
-                    engine.max_cv, engine.p999_cv, engine.mean_cv, engine.area, engine.centroid,
-                    today.max_cv, today.p999_cv, today.mean_cv, today.area, today.centroid,
+                    engine.max_cv,
+                    engine.p999_cv,
+                    engine.mean_cv,
+                    engine.area,
+                    engine.centroid,
+                    today.max_cv,
+                    today.p999_cv,
+                    today.mean_cv,
+                    today.area,
+                    today.centroid,
                 );
                 assert!(engine.max_cv <= today.max_cv, "{name} {precision:?}");
                 assert!(engine.p999_cv <= today.p999_cv, "{name} {precision:?}");
