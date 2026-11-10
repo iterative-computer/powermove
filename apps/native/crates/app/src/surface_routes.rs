@@ -195,7 +195,8 @@ impl Controller {
                 return None;
             }
         };
-        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, cx));
+        let editor = Some(self.host.borrow().window.clone());
+        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, editor, cx));
         self.library = Some(library.clone());
         Some(library)
     }

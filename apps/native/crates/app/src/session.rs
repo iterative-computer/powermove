@@ -548,12 +548,22 @@ impl Controller {
         }
     }
     /// A window restored at launch reopens its project when that project has
-    /// unsaved work from a crash (so the person is asked about it at once) or
-    /// when the system keeps documents open across quits.
+    /// unsaved work from a crash (so the person is asked about it at once),
+    /// when the system keeps documents open across quits, or when Settings ›
+    /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
+    /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
+        let keep = keep
+            || self
+                .kernel
+                .state()
+                .settings
+                .get("restoreWindows")
+                .and_then(pm_model::Value::as_bool)
+                != Some(false);
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -1012,17 +1022,22 @@ impl Controller {
         self.seek_at(seconds, Self::event_time());
     }
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
+        let mut target = None;
         if let Some(v) = &self.viewer {
             let frame = self
                 .rate
                 .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
-            if let Ok(time) = self.rate.frame_start(frame)
-                && let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input)
-            {
-                self.message = e.to_string();
+            if let Ok(time) = self.rate.frame_start(frame) {
+                target = Some(time as f64 / TICKS_PER_SECOND as f64);
+                if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                    self.message = e.to_string();
+                }
             }
         }
-        self.persist_ui();
+        // The viewer's clock lands later (always so for a viewer bound a
+        // moment ago, as on open): record the time asked for, so MCP's
+        // playhead and the saved transport never read the old one.
+        let _ = self.write_ui_at(target.unwrap_or_else(|| self.time()));
     }
     pub fn persist_ui(&self) {
         let _ = self.write_ui();
@@ -1030,6 +1045,13 @@ impl Controller {
     /// Resolves once the kernel has taken the write.
     pub(crate) fn write_ui(
         &self,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        self.write_ui_at(self.time())
+    }
+    fn write_ui_at(
+        &self,
+        time: f64,
     ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
     {
         let (Some(s), Some(p)) = (&self.session, &self.published) else {
@@ -1043,7 +1065,7 @@ impl Controller {
             }
         }
         if let pm_model::Value::Object(m) = &mut ui.transport {
-            m.insert("time", pm_model::Value::from(self.time()));
+            m.insert("time", pm_model::Value::from(time));
             m.insert(
                 "playing",
                 pm_model::Value::from(
@@ -1588,6 +1610,10 @@ impl Controller {
     pub fn save(&mut self, as_path: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.recovery_pending || self.save_pending {
             self.message = "Finish the recovery decision or current save first".into();
+            return;
+        }
+        let path = as_path.clone();
+        if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
             return;
         }
         let Some(session) = self.session.clone() else {

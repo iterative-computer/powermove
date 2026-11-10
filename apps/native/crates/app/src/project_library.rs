@@ -43,6 +43,9 @@ pub struct ProjectLibrary {
     motion: pm_shell::motion::Motion<u64>,
     /// The library's own AppKit window, which its sheets attach to.
     ns_window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+    /// The editor window that owns this library: its sheets attach here while
+    /// the library window is closed, whether or not the app is active.
+    editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
 }
 impl ProjectLibrary {
     /// The worker and its wake channel, started before the view exists.
@@ -65,6 +68,7 @@ impl ProjectLibrary {
         rx: async_channel::Receiver<()>,
         tokens: Tokens,
         sink: Sink,
+        editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -84,6 +88,7 @@ impl ProjectLibrary {
             window: None,
             motion: Default::default(),
             ns_window: None,
+            editor,
         }
     }
     /// Takes finished work and turns the controller's effects into platform calls.
@@ -94,11 +99,15 @@ impl ProjectLibrary {
         }
         cx.notify();
     }
-    /// Sheets attach to the library window (whether or not the app is
-    /// active), or to the key window when the library isn't open.
+    /// Sheets attach to the library window while it's open, else to the
+    /// editor window that asked (whether or not the app is active; the key
+    /// window may be Settings or none at all).
     fn parent(&self, cx: &App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         let _ = cx;
         if let Some(window) = self.ns_window.clone().filter(|w| w.isVisible()) {
+            return Some(window);
+        }
+        if let Some(window) = self.editor.clone() {
             return Some(window);
         }
         let mtm = objc2::MainThreadMarker::new()?;

@@ -1166,6 +1166,15 @@ pub fn plan_export_for(job: &ExportJob, renderer: &Renderer) -> Result<ExportPla
 pub type CapabilityCheck<'a> =
     dyn Fn(&Document, &str, &MediaPaths) -> Vec<pm_render::Unsupported> + 'a;
 
+/// [`plan_export`] routed with a caller's capability check: an export sheet
+/// probing a format before the job's renderer (definitions, fonts) exists.
+pub fn plan_export_with(
+    job: &ExportJob,
+    check: &CapabilityCheck<'_>,
+) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, check)
+}
+
 fn plan_export_checked(
     job: &ExportJob,
     check: &CapabilityCheck<'_>,
