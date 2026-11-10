@@ -1,5 +1,6 @@
 //! Native model coordination. Snapshots contain presentation facts and leased
 //! identifiers, never a writable JS project or a second persistence authority.
+use crate::LockShared;
 use crate::{
     data::{Backend, model, wire},
     properties::Properties,
@@ -522,7 +523,7 @@ impl Backend {
     }
     pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
         let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
-        let mut state = agent.lock().unwrap();
+        let mut state = agent.shared();
         let active = state.panel.active_id().to_owned();
         let provider = state
             .panel
@@ -1182,7 +1183,7 @@ impl Backend {
                 let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
                 let link = self.native.agent_link.clone();
                 let effect = {
-                    let mut state = agent.lock().unwrap();
+                    let mut state = agent.shared();
                     let thread = state.panel.active_id().to_owned();
                     let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
                     let (provider, live) = (session.settings.provider, session.run.is_some());

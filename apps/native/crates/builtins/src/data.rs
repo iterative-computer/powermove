@@ -1,4 +1,5 @@
 //! Worker-side application adapter; typed plans and actual actor receipts only.
+use crate::LockShared;
 use pm_kernel::*;
 use pm_panel_inspector::{
     EffectClipboard, Inspector,
@@ -529,7 +530,7 @@ impl KernelData for Data {
         channels: Option<&[String]>,
         _: Option<f64>,
     ) -> Result<QuerySnapshot, String> {
-        let mut b = self.0.lock().unwrap();
+        let mut b = self.0.shared();
         if b.retired || identity != &b.identity {
             return Err("retired/foreign data service".into());
         }
@@ -560,7 +561,7 @@ impl KernelData for Data {
         Ok(QuerySnapshot { revision, value })
     }
     fn enqueue(&mut self, request: HostRequest, reply: SyncSender<HostAck>) -> Result<(), String> {
-        let mut b = self.0.lock().unwrap();
+        let mut b = self.0.shared();
         if b.retired {
             return Err("built-in retired".into());
         }
@@ -765,7 +766,7 @@ impl KernelData for Data {
         b.reply(request, reply, result)
     }
     fn retire(&mut self, identity: &Identity) -> Result<(), String> {
-        let mut b = self.0.lock().unwrap();
+        let mut b = self.0.shared();
         if &b.identity != identity {
             return Err("foreign retirement".into());
         }

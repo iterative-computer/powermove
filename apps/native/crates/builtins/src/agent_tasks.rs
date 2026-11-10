@@ -4,6 +4,7 @@
 //! calling run with the results once its turn ends (`pm_agents::orchestration`).
 //! Task archives are main's `Agent Tasks/<project>/<conversation>.json`.
 //! Everything here runs on workers: MCP calls and the `pm-agent-runs` loop.
+use crate::LockShared;
 use crate::agent_host::{AgentLink, AgentState, SharedAgent, now_ms};
 use pm_agents::{
     Access, Event, Provider, RunResult,
@@ -1185,7 +1186,7 @@ pub(crate) fn call(
         .environment()
         .ok_or("Agent provider or native action service is unavailable")?;
     let profile = environment.profile.clone();
-    let mut guard = shared.lock().unwrap();
+    let mut guard = shared.shared();
     let state = &mut *guard;
     state.tasks.environment = Some(environment);
     let AgentState {
@@ -1289,7 +1290,7 @@ pub(crate) fn call(
             if args["mode"] == "wait" {
                 return wait_task(shared, link, &profile, &root, &run, &task_id, timeout(args));
             }
-            let guard = shared.lock().unwrap();
+            let guard = shared.shared();
             let task = guard
                 .tasks
                 .roots
@@ -1416,7 +1417,7 @@ fn wait_task(
     let deadline = Instant::now() + limit;
     loop {
         {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.shared();
             let scope = &mut guard.tasks.roots.get_mut(root).ok_or(GONE)?.scope;
             let snapshot = scope.owned(run, task).map_err(|e| e.to_string())?.clone();
             let terminal = matches!(
@@ -1448,7 +1449,7 @@ fn wait_watch(
     let deadline = Instant::now() + limit;
     loop {
         {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.shared();
             let tasks = &mut guard.tasks;
             let current = tasks
                 .monitor

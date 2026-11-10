@@ -45,6 +45,52 @@ fn actor() -> KernelActor {
     actor
 }
 #[test]
+fn a_panic_holding_a_panel_lock_never_stops_the_v8_owner_thread() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    panels.take_publications();
+    // A host thread panics while it holds the panel's backend.
+    let backend = panels
+        .broker
+        .entry("layer-effects")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let held = backend.clone();
+    let panicked = thread::spawn(move || {
+        let _guard = held.lock().unwrap();
+        panic!("a host thread fails while holding panel state");
+    })
+    .join();
+    assert!(panicked.is_err() && backend.is_poisoned());
+    // The owner thread still serves the panel: a selection republishes it.
+    actor
+        .handle()
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
+    let next = panels.take_publications().pop().unwrap();
+    assert!(next.surface.nodes().values().any(|n| n.text == "Headline"));
+    assert!(!backend.is_poisoned());
+    assert!(panels.take_errors().is_empty());
+}
+#[test]
 fn authored_effect_controls_mount_and_follow_kernel_selection() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();

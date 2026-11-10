@@ -1,6 +1,7 @@
 //! The Agent panel's process path. Admission precedes Panel mutation, so a
 //! missing runtime never consumes a draft or starts a fictitious run. Runs start
 //! on the panel worker and a dedicated worker delivers their events durably.
+use crate::LockShared;
 use crate::models::KernelStore;
 use pm_agents::{
     Provider,
@@ -67,39 +68,39 @@ impl AgentLink {
                 }
             }),
         );
-        *self.environment.lock().unwrap() = Some(environment);
-        *self.accounts.lock().unwrap() = Some(accounts.clone());
+        *self.environment.shared() = Some(environment);
+        *self.accounts.shared() = Some(accounts.clone());
         accounts.refresh(Provider::Chatgpt);
         accounts.refresh(Provider::Claude);
     }
     pub fn set_notices(&self, sink: Arc<NoticeSink>) {
-        *self.notices.lock().unwrap() = Some(sink);
+        *self.notices.shared() = Some(sink);
     }
     fn tell(&self, notices: Vec<pm_panel_agentpanel::runtime::Notice>) {
         if notices.is_empty() {
             return;
         }
-        if let Some(sink) = self.notices.lock().unwrap().clone() {
+        if let Some(sink) = self.notices.shared().clone() {
             for notice in notices {
                 sink(notice);
             }
         }
     }
     pub fn add_realm(&self, realm: Realm) {
-        self.realms.lock().unwrap().push(realm);
+        self.realms.shared().push(realm);
     }
     pub fn close(&self) {
-        self.realms.lock().unwrap().clear();
+        self.realms.shared().clear();
         self.closing.store(true, Ordering::Release);
         if let Some(accounts) = self.accounts() {
             accounts.close();
         }
     }
     pub fn environment(&self) -> Option<Environment> {
-        self.environment.lock().unwrap().clone()
+        self.environment.shared().clone()
     }
     pub fn accounts(&self) -> Option<Arc<Accounts>> {
-        self.accounts.lock().unwrap().clone()
+        self.accounts.shared().clone()
     }
     /// Changes when a sign-in does, so Settings republishes.
     pub fn accounts_revision(&self) -> u64 {
@@ -122,8 +123,7 @@ impl AgentLink {
             && (action["base"].as_str() == Some(draft)
                 || self
                     .typed
-                    .lock()
-                    .unwrap()
+                    .shared()
                     .as_ref()
                     .is_some_and(|(t, text)| t == thread && text == draft));
         match envelope["sequence"].as_u64() {
@@ -133,7 +133,7 @@ impl AgentLink {
     }
     /// Typing set `text` as `thread`'s draft.
     pub fn typed(&self, thread: &str, text: &str) {
-        *self.typed.lock().unwrap() = Some((thread.into(), text.into()));
+        *self.typed.shared() = Some((thread.into(), text.into()));
     }
     /// A run needs its runtime and a signed-in account.
     pub fn available(&self, provider: Provider) -> bool {
@@ -157,8 +157,7 @@ impl AgentLink {
         };
         let installed = self
             .environment
-            .lock()
-            .unwrap()
+            .shared()
             .as_ref()
             .is_some_and(|environment| environment.available(provider));
         let accounts = self.accounts().filter(|_| installed);
@@ -178,13 +177,7 @@ impl AgentLink {
     }
     /// The saved API or local model connection (Settings › Accounts).
     pub fn compatible(&self) -> Option<pm_agents::compatible::Saved> {
-        let host = self
-            .environment
-            .lock()
-            .unwrap()
-            .as_ref()?
-            .compatible
-            .clone()?;
+        let host = self.environment.shared().as_ref()?.compatible.clone()?;
         host.saved()
     }
     /// The connected model's choices, as the account models list them.
@@ -203,7 +196,7 @@ impl AgentLink {
     }
     /// Providers this install can run, and the choices of the given one.
     pub fn catalog(&self, provider: Provider) -> Catalog {
-        let environment = self.environment.lock().unwrap();
+        let environment = self.environment.shared();
         let mut providers = vec![];
         for (candidate, label) in [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")] {
             let runtime = match candidate {
@@ -251,7 +244,7 @@ impl AgentLink {
         self.publish();
     }
     fn publish(&self) {
-        for realm in self.realms.lock().unwrap().iter() {
+        for realm in self.realms.shared().iter() {
             let _ = realm.eval("__pmBuiltin.publish()");
         }
     }
@@ -263,10 +256,10 @@ pub struct AgentCarry(pub(crate) Option<(Arc<AgentLink>, SharedAgent)>);
 impl AgentCarry {
     /// The window giving these up stops publishing to its realms.
     pub(crate) fn take(link: &Arc<AgentLink>, state: &SharedAgent) -> Option<Self> {
-        if state.lock().unwrap().runs.active() == 0 {
+        if state.shared().runs.active() == 0 {
             return None;
         }
-        link.realms.lock().unwrap().clear();
+        link.realms.shared().clear();
         Some(Self(Some((link.clone(), state.clone()))))
     }
     /// Hand the runs to a new application window; nothing is cancelled.
@@ -403,7 +396,7 @@ pub fn run_effect(
     effect: &Effect,
 ) -> Result<(), String> {
     let mut store = KernelStore::new(kernel.clone(), application);
-    let mut guard = shared.lock().unwrap();
+    let mut guard = shared.shared();
     let state = &mut *guard;
     let result = match &effect.kind {
         EffectKind::Send {
@@ -412,7 +405,7 @@ pub fn run_effect(
             steer: false,
             ..
         } => {
-            let environment = link.environment.lock().unwrap().clone();
+            let environment = link.environment.shared().clone();
             launch_request(state, environment, effect, text, settings).and_then(
                 |(environment, request)| {
                     let kept = request.clone();
@@ -569,7 +562,7 @@ pub(crate) fn ensure_worker(
     kernel: &KernelHandle,
     application: bool,
 ) {
-    let mut state = shared.lock().unwrap();
+    let mut state = shared.shared();
     if state.worker || state.runs.is_empty() && !state.panel.unsaved() && state.tasks.idle() {
         return;
     }
@@ -587,7 +580,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
     let mut closed: Option<Instant> = None;
     loop {
         let (changed, failed, done) = {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.shared();
             let state = &mut *guard;
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
                 closed = Some(Instant::now());
