@@ -278,6 +278,17 @@ impl Editor {
         }
         if target != self.record {
             self.pending.clear();
+            if self
+                .workspaces
+                .project
+                .as_ref()
+                .is_some_and(|p| self.workspaces.deleted(p))
+            {
+                // Another window deleted this project's workspace: it moves
+                // to the fallback, and the project keeps that one.
+                self.activate_record(target);
+                return;
+            }
             self.show_record(target);
             self.persist_session();
         }
@@ -579,14 +590,7 @@ impl Editor {
                     Rc::make_mut(&mut self.workspaces).apply(&write);
                     self.outbox.push(write);
                     if self.layout.workspace == rest {
-                        // Not `active()`: it prefers the project's copy, which
-                        // is the record just deleted, and would file it again.
-                        let fallback = self
-                            .workspaces
-                            .get(workspace::FALLBACK)
-                            .cloned()
-                            .or_else(|| workspace::preset(workspace::FALLBACK))
-                            .unwrap_or_default();
+                        let fallback = self.workspaces.fallback();
                         self.activate_record(fallback);
                     }
                     self.status = format!("Deleted workspace “{}”", workspace::record_name(&r));
@@ -2371,7 +2375,94 @@ mod keyboard_tests {
 mod tests {
     // Not a glob: gpui's own `test` attribute would shadow the standard one.
     use super::{Editor, Rc, Tokens, workspace};
-    use gpui::TestAppContext;
+    use gpui::{AnyElement, App, TestAppContext, Window};
+    use std::cell::RefCell;
+
+    /// The kernel's store as a window reads it, and what the window writes.
+    #[derive(Default)]
+    struct Kernel {
+        store: RefCell<Rc<workspace::Store>>,
+        writes: RefCell<Vec<workspace::Write>>,
+    }
+    struct Stub(Rc<Kernel>);
+    impl crate::integration::Integration for Stub {
+        fn observe(&self, _: &mut gpui::Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn workspaces(&self, _: &App) -> Option<Rc<workspace::Store>> {
+            Some(self.0.store.borrow().clone())
+        }
+        fn write_workspace(&self, write: workspace::Write, _: &mut App) {
+            self.0.writes.borrow_mut().push(write);
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            Some("p".into())
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    #[gpui::test]
+    fn a_workspace_deleted_by_another_window_moves_this_one_to_the_fallback(
+        cx: &mut TestAppContext,
+    ) {
+        let mut mine = workspace::preset("edit").unwrap();
+        mine["id"] = "mine".into();
+        mine["name"] = "Mine".into();
+        mine["builtin"] = false.into();
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&mine)),
+            current: Some("mine".into()),
+            default: None,
+            project: Some(mine.clone()),
+            project_id: Some("p".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "mine");
+                // Another window deletes it; this project still holds it.
+                let before = (**kernel.store.borrow()).clone();
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    records: workspace::seeded(&[]),
+                    trashed: vec!["mine".into()],
+                    ..before
+                });
+                kernel.writes.borrow_mut().clear();
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, workspace::FALLBACK);
+                // The next frame sends it.
+                v.sync_workspaces(cx);
+                let writes = kernel.writes.borrow();
+                assert!(
+                    matches!(&writes[..], [workspace::Write::Active { after, .. }]
+                        if workspace::record_id(after) == Some(workspace::FALLBACK)),
+                    "the project should keep the fallback: {writes:?}"
+                );
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn deleting_the_active_workspace_moves_to_the_fallback_and_never_refiles_it(
@@ -2391,6 +2482,7 @@ mod tests {
                     default: None,
                     project: Some(mine.clone()),
                     project_id: Some("p".into()),
+                    trashed: vec![],
                 });
                 v.show_record(mine);
                 v.outbox.clear();

@@ -927,6 +927,7 @@ mod tests {
             default: None,
             project: Some(record.clone()),
             project_id: Some(PROJECT.into()),
+            trashed: vec![],
         };
         // As the panel sends it for a window with a project.
         let workspace::Write::Active { before, after } =
