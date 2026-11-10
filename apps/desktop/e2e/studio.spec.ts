@@ -70,16 +70,27 @@ test('Live reuses the previous frame while the camera moves', async ({ session }
   const history = await page.evaluate(async () => {
     const PM = (window as any).PM, cam = PM.L('cam');
     const stats: any[] = [];
+    await PM.Studio.idle();
+    const nextFrame = async () => {
+      const previous = PM.Studio.status().frames;
+      // Scene evaluation and rendering follow the display clock. Reading the
+      // GPU history in a tight loop can observe the same frame repeatedly.
+      for (let attempt = 0; attempt < 120; attempt++) {
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        PM.GL.render(PM.time, { mblur: false });
+        await PM.Studio.idle();
+        if (PM.Studio.status().frames > previous) return PM.Studio.liveHistory();
+      }
+      throw new Error('Studio did not complete the requested camera frame');
+    };
     for (let i = 0; i < 12; i++) {
       // A drag: the camera moves a hair each frame, so every frame is Live.
       cam.p['position.x'].v = i * 0.002; PM.touch();
-      PM.GL.render(PM.time, { mblur: false });
-      stats.push(await PM.Studio.liveHistory());
+      stats.push(await nextFrame());
     }
     // A jump to the far side: the surface now in view was never seen, so its history restarts.
     cam.p['position.x'].v = 0; cam.p['position.z'].v = -5; PM.touch();
-    PM.GL.render(PM.time, { mblur: false });
-    return { first: stats[0], last: stats[11], jump: await PM.Studio.liveHistory() };
+    return { first: stats[0], last: stats[11], jump: await nextFrame() };
   });
   // While dragging, nearly every surface pixel reuses 8+ earlier frames.
   expect(history.first.reused).toBe(0);
