@@ -74,7 +74,7 @@ fn open<'a>(
     let (port, rx) = ProjectLibrary::port(fixture.actor.handle(), fixture.profile.clone()).unwrap();
     let tokens = Tokens::new(Scheme::Light, Accessibility::default());
     let (view, cx) =
-        cx.add_window_view(move |_, cx| ProjectLibrary::new(port, rx, tokens, sink, cx));
+        cx.add_window_view(move |_, cx| ProjectLibrary::new(port, rx, tokens, sink, None, cx));
     cx.update(|window, cx| {
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
