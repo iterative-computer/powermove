@@ -173,8 +173,9 @@ fn quit_now_alert(note: &str) -> crate::alert::Alert<bool> {
 }
 /// A second Quit while the first waits on work (archiving, saving, the
 /// library): says what it waits for and offers to quit now. Quitting now
-/// leaves everything as a crash would: the journal keeps unsaved work and
-/// the next open offers to recover it.
+/// flushes the journals and leaves everything as a crash would: the journal
+/// keeps unsaved work, consistent with whichever file a running save left,
+/// and the next open offers to recover it.
 fn ask_quit_now(cx: &mut App) {
     let q = cx.global::<QuitCoordinator>();
     let waiting = q.controllers.iter().find_map(|weak| {
@@ -195,15 +196,34 @@ fn ask_quit_now(cx: &mut App) {
     cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
     cx.spawn(async move |cx| {
         let now = answer.recv().await.ok().flatten() == Some(true);
-        cx.update(|cx| {
+        let kernel = cx.update(|cx| {
             let q = cx.global_mut::<QuitCoordinator>();
             q.asking_now = None;
+            (now && q.quitting).then(|| q.host.kernel.clone())
+        });
+        let Some(kernel) = kernel else {
+            return;
+        };
+        // Every edit the kernel acknowledged is already written to its
+        // journal; make it durable without waiting for the busy kernel.
+        // Saves journal their save point before replacing a file, so the
+        // journal replays onto whatever the disk holds.
+        let synced = cx
+            .background_executor()
+            .spawn(async move { kernel.sync_journals() })
+            .await;
+        cx.update(|cx| {
+            let q = cx.global_mut::<QuitCoordinator>();
             // The quit may have been cancelled (a failed save) meanwhile.
-            if now && q.quitting {
-                q._delegate.resolve_quit_events(false);
-                eprintln!("Quit Now: {note}");
-                std::process::exit(0);
+            if !q.quitting {
+                return;
             }
+            q._delegate.resolve_quit_events(false);
+            if let Err(e) = synced {
+                eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
+            }
+            eprintln!("Quit Now: {note}");
+            std::process::exit(0);
         });
     })
     .detach();

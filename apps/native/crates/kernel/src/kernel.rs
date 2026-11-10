@@ -628,6 +628,31 @@ impl Kernel {
     }
 
     /// Start a new journal base only after its library/file save barrier.
+    /// Journals the save point of a save about to publish `document` at
+    /// `revision` ([`Journal::mark_save`]), so recovery replays onto the
+    /// file whether or not the save lands. A journal that cannot record it
+    /// says so; the save still goes ahead, since the file is then the best
+    /// copy of the work.
+    pub(crate) fn mark_save_point(&mut self, id: &str, document: &Document, revision: u64) {
+        let Some(slot) = self.slots.get_mut(id) else {
+            return;
+        };
+        let Some(journal) = &mut slot.journal else {
+            return;
+        };
+        let hash = document.canonical_hash().unwrap_or_default();
+        if let Err(e) = journal.mark_save(&hash, revision) {
+            slot.project.push_notice(Notice::NotDurable {
+                message: e.to_string(),
+            });
+        }
+    }
+
+    /// A handle that makes every journal durable from any thread.
+    pub fn journal_sync(&self) -> Option<journal::JournalSync> {
+        self.durability.as_ref().map(Durability::syncer)
+    }
+
     pub(crate) fn rebase_journal(&mut self, id: &str) -> Result<(), KernelFailure> {
         let dir = self.project_dir(id);
         let library_hash = if let Some(crate::session::Session {

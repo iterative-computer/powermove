@@ -49,7 +49,14 @@
 //! holds now) differs from the session's base hash, the result is
 //! [`Recovery::Copy`], to be opened as a copy, never merged. Sessions are
 //! never deleted by recovery; a new session that adopts recovered work
-//! supersedes them once its own first checkpoint is durable.
+//! supersedes them once its own first checkpoint is durable, and until then
+//! recovery continues from the session it superseded.
+//!
+//! **Save points.** A save journals `{"t":"save"}` with the hash of the state
+//! it is about to publish, durably, before it replaces the file. The file is
+//! then either the old base or that save, and recovery replays onto either
+//! (from the start, or from just after the save point) without waiting for
+//! any checkpoint; a base the session passed through is adopted, not copied.
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
@@ -86,6 +93,11 @@ pub struct JournalConfig {
     pub checkpoint_revisions: u64,
     /// ... or this many segment bytes (`MAX_JOURNAL_BYTES`).
     pub max_segment_bytes: u64,
+    /// Failure injection (tests): while the flag is set, the checkpoint
+    /// writer waits before writing each checkpoint, as a slow disk or a
+    /// large document does.
+    #[doc(hidden)]
+    pub hold_checkpoints: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
 impl Default for JournalConfig {
@@ -94,6 +106,7 @@ impl Default for JournalConfig {
             flush_interval: Duration::from_millis(200),
             checkpoint_revisions: 50,
             max_segment_bytes: 4 * 1024 * 1024,
+            hold_checkpoints: None,
         }
     }
 }
@@ -153,6 +166,9 @@ enum Job {
         base: String,
         segment: u64,
         state: Box<CheckpointState>,
+        /// Hashes of states the session passed through that may be on disk
+        /// (its base and its saves): any of them is an ancestor of `state`.
+        bases: Vec<String>,
         /// Sessions this one replaces once its checkpoint is durable.
         supersedes: Vec<PathBuf>,
         /// Told the checkpoint's size, which says whether the document is large.
@@ -231,6 +247,7 @@ impl Durability {
         let (jobs, rx) = mpsc::channel::<Job>();
         let writer = {
             let shared = shared.clone();
+            let hold = config.hold_checkpoints.clone();
             thread::Builder::new()
                 .name("pm-kernel-checkpoint".into())
                 .spawn(move || {
@@ -242,11 +259,19 @@ impl Durability {
                                 base,
                                 segment,
                                 state,
+                                bases,
                                 supersedes,
                                 measured,
                             } => {
+                                if let Some(hold) = &hold {
+                                    let (held, wake) = &**hold;
+                                    let mut held = held.lock().expect("hold");
+                                    while *held {
+                                        held = wake.wait(held).expect("hold");
+                                    }
+                                }
                                 let bytes = match write_checkpoint(
-                                    &dir, &project, &base, segment, &state,
+                                    &dir, &project, &base, &bases, segment, &state,
                                 ) {
                                     Ok(bytes) => bytes,
                                     Err(e) => {
@@ -334,6 +359,11 @@ impl Durability {
         }
     }
 
+    /// A handle that flushes every journal segment from any thread.
+    pub fn syncer(&self) -> JournalSync {
+        JournalSync(self.shared.clone())
+    }
+
     /// Background errors since the last call (shown as a notice, never
     /// silently dropped).
     pub fn take_errors(&self) -> Vec<String> {
@@ -343,6 +373,25 @@ impl Durability {
             .expect("errors")
             .drain(..)
             .collect()
+    }
+}
+
+/// Flushes journal segments without the kernel actor (Quit Now while the
+/// actor is busy): every line the actor acknowledged is already written, and
+/// this makes it durable. Checkpoints are not waited for; recovery never
+/// needs one that has not landed (see [`Journal::mark_save`]).
+#[derive(Clone)]
+pub struct JournalSync(Arc<Shared>);
+
+impl JournalSync {
+    /// `F_FULLFSYNC`s every registered segment. Blocking; never on the main
+    /// thread.
+    pub fn sync(&self) -> io::Result<()> {
+        let targets = self.0.targets.lock().expect("targets").clone();
+        for target in targets {
+            target.sync()?;
+        }
+        Ok(())
     }
 }
 
@@ -373,7 +422,13 @@ pub struct Journal {
     revisions: u64,
     /// Checkpoint 0, held back while the session's state is its base.
     deferred: Option<Box<CheckpointState>>,
+    /// The base and every state a save published since: what a file or slot
+    /// may hold that this session's work descends from.
+    bases: Vec<String>,
 }
+
+/// How many save points a session remembers as possible bases.
+const MAX_BASES: usize = 32;
 
 fn segment_name(n: u64) -> String {
     format!("journal-{n:08}.log")
@@ -446,7 +501,30 @@ impl Journal {
         let dir = project_dir.join(session_name());
         fs::create_dir_all(&dir)?;
         sync_dir(project_dir)?;
-        let (file, target) = open_segment(durability, &dir, project, base, 0, initial.revision)?;
+        let bases = vec![base.to_owned()];
+        // Adopted recovered work starts from checkpoint 0, not the base.
+        // Until that lands, the session it supersedes here still holds the
+        // state, and recovery continues from it.
+        let start = (!saved && !supersedes.is_empty()).then(|| {
+            supersedes
+                .iter()
+                .filter(|old| old.parent() == Some(project_dir))
+                .filter_map(|old| old.file_name()?.to_str())
+                .max()
+                .unwrap_or("")
+        });
+        let (file, target) = open_segment(
+            durability,
+            &dir,
+            Head {
+                project,
+                base,
+                bases: &bases,
+                start,
+                segment: 0,
+                revision: initial.revision,
+            },
+        )?;
         let checkpoint_bytes = Arc::new(AtomicU64::new(0));
         let mut deferred = None;
         if saved {
@@ -461,11 +539,13 @@ impl Journal {
                 base: base.to_owned(),
                 segment: 0,
                 state: Box::new(initial),
+                bases: bases.clone(),
                 supersedes,
                 measured: checkpoint_bytes.clone(),
             });
         }
         Ok(Journal {
+            bases,
             deferred,
             checkpoint_bytes,
             dir,
@@ -512,6 +592,7 @@ impl Journal {
                 base: self.base.clone(),
                 segment: 0,
                 state: initial,
+                bases: self.bases.clone(),
                 supersedes: Vec::new(),
                 measured: self.checkpoint_bytes.clone(),
             });
@@ -547,10 +628,14 @@ impl Journal {
         let (file, target) = open_segment(
             durability,
             &self.dir,
-            &self.project,
-            &self.base,
-            next,
-            state.revision,
+            Head {
+                project: &self.project,
+                base: &self.base,
+                bases: &self.bases,
+                start: None,
+                segment: next,
+                revision: state.revision,
+            },
         )?;
         // The old segment stays registered until its last fsync.
         self.file = file;
@@ -564,9 +649,39 @@ impl Journal {
             base: self.base.clone(),
             segment: next,
             state: Box::new(state),
+            bases: self.bases.clone(),
             supersedes: Vec::new(),
             measured: self.checkpoint_bytes.clone(),
         });
+        Ok(())
+    }
+
+    /// Records that a save is about to publish the state as of this line
+    /// (canonical hash `hash`, at `revision`) and makes it durable before
+    /// returning. Call it after freezing the save's snapshot and before the
+    /// file or slot is replaced. Whatever the disk then holds, the old base
+    /// or this save, recovery replays onto it: from the start, or from just
+    /// after this line, so edits journalled while the save ran (or that a
+    /// Quit Now left without a checkpoint) are never stranded on a base
+    /// that is gone.
+    pub(crate) fn mark_save(&mut self, hash: &str, revision: u64) -> io::Result<()> {
+        let mut point = Map::new();
+        point.insert("h", Value::from(hash));
+        point.insert("r", Value::Number(revision as f64));
+        let mut m = Map::new();
+        m.insert("t", Value::from("save"));
+        m.insert("v", Value::Object(point));
+        let mut buf = String::new();
+        line(&mut buf, &Value::Object(m));
+        (&self.file).write_all(buf.as_bytes())?;
+        self.bytes += buf.len() as u64;
+        self.target.dirty.store(true, Ordering::Release);
+        self.target.sync()?;
+        self.bases.retain(|b| b != hash);
+        self.bases.push(hash.to_owned());
+        if self.bases.len() > MAX_BASES {
+            self.bases.remove(0);
+        }
         Ok(())
     }
 
@@ -611,13 +726,28 @@ fn archive_path(path: &mut PathBuf) -> io::Result<()> {
     sync_dir(archive.parent().expect("project directory"))
 }
 
+/// A segment's header line.
+struct Head<'a> {
+    project: &'a str,
+    base: &'a str,
+    bases: &'a [String],
+    /// The session holding the start state until checkpoint 0 lands.
+    start: Option<&'a str>,
+    segment: u64,
+    revision: u64,
+}
+
 fn open_segment(
     durability: &Durability,
     dir: &Path,
-    project: &str,
-    base: &str,
-    segment: u64,
-    revision: u64,
+    Head {
+        project,
+        base,
+        bases,
+        start,
+        segment,
+        revision,
+    }: Head,
 ) -> io::Result<(File, Arc<SyncTarget>)> {
     let path = dir.join(segment_name(segment));
     let mut options = OpenOptions::new();
@@ -634,6 +764,12 @@ fn open_segment(
     head.insert("version", Value::Number(1.0));
     head.insert("project", Value::from(project));
     head.insert("base", Value::from(base));
+    head.insert("bases", bases_value(bases));
+    if let Some(continues) = start {
+        // `continues`: the session holding the start state ("" for none).
+        head.insert("start", Value::from("checkpoint"));
+        head.insert("continues", Value::from(continues));
+    }
     head.insert("segment", Value::Number(segment as f64));
     head.insert("revision", Value::Number(revision as f64));
     let mut buf = String::new();
@@ -643,6 +779,28 @@ fn open_segment(
     sync_dir(dir)?;
     let target = durability.register(&file)?;
     Ok((file, target))
+}
+
+fn bases_value(bases: &[String]) -> Value {
+    Value::Array(bases.iter().map(|b| Value::from(b.as_str())).collect())
+}
+
+/// A head's or checkpoint's `bases`, or just its `base` (older journals).
+fn bases_of(m: &Map, base: &str) -> Vec<String> {
+    let mut bases: Vec<String> = m
+        .get("bases")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !bases.iter().any(|b| b == base) {
+        bases.insert(0, base.to_owned());
+    }
+    bases
 }
 
 fn checksum(text: &str) -> String {
@@ -759,6 +917,7 @@ fn write_checkpoint(
     dir: &Path,
     project: &str,
     base: &str,
+    bases: &[String],
     segment: u64,
     state: &CheckpointState,
 ) -> io::Result<u64> {
@@ -791,6 +950,7 @@ fn write_checkpoint(
     meta.insert("version", Value::Number(1.0));
     meta.insert("project", Value::from(project));
     meta.insert("base", Value::from(base));
+    meta.insert("bases", bases_value(bases));
     meta.insert("segment", Value::Number(segment as f64));
     meta.insert("revision", Value::Number(state.revision as f64));
     meta.insert("documentHash", Value::from(digest.as_str()));
@@ -829,6 +989,7 @@ fn prune_before(dir: &Path, segment: u64) {
 struct Loaded {
     revision: u64,
     base: String,
+    bases: Vec<String>,
     document: Option<pm_model::Node>,
     history: LoadedHistory,
     workspace: Value,
@@ -864,9 +1025,11 @@ fn read_checkpoint(path: &Path, base: Option<&Document>) -> Option<Loaded> {
             Some(pm_model::Node::parse_bytes(&doc, revision).ok()?)
         }
     };
+    let base = m.get("base")?.as_str()?.to_owned();
     Some(Loaded {
         revision,
-        base: m.get("base")?.as_str()?.to_owned(),
+        bases: bases_of(m, &base),
+        base,
         document,
         history: LoadedHistory::Saved(m.get("history")?.clone()),
         workspace: m.get("workspace").cloned().unwrap_or(Value::Null),
@@ -879,8 +1042,12 @@ fn read_checkpoint(path: &Path, base: Option<&Document>) -> Option<Loaded> {
 #[derive(Debug)]
 pub struct Recovered {
     pub project: String,
-    /// The session's base hash.
+    /// The session's base hash, or the save point the caller's current base
+    /// matched.
     pub base: String,
+    /// Every base the recovered state descends from: the session's base and
+    /// each save it published. A current base among them is safe to adopt.
+    pub bases: Vec<String>,
     pub revision: u64,
     pub document: Document,
     pub history: History,
@@ -932,6 +1099,7 @@ pub fn recover(
 }
 
 /// What a session's base holds, for replay when no checkpoint landed.
+#[derive(Clone, Copy)]
 pub struct Base<'a> {
     /// The canonical document (its hash is checked against the session's).
     pub document: &'a Document,
@@ -950,13 +1118,22 @@ pub fn recover_from(
     let Some(session) = sessions(project_dir).pop() else {
         return Recovery::Nothing;
     };
-    if numbered(&session, "checkpoint-", ".json").is_empty() && !has_changes(&session) {
+    if numbered(&session, "checkpoint-", ".json").is_empty()
+        && !has_changes(&session)
+        && continued(&session).is_none()
+    {
         // Opened (or saved) and never changed: the base holds all of it.
         return Recovery::Nothing;
     }
     match recover_session(&session, base) {
         Err(reason) => Recovery::Unrecoverable { session, reason },
-        Ok(recovered) => match current_base {
+        Ok(mut recovered) => match current_base {
+            // A base the session passed through (its start or one of its
+            // saves) is an ancestor of the recovered state: adopt it.
+            Some(current) if recovered.bases.iter().any(|b| b == current) => {
+                recovered.base = current.to_owned();
+                Recovery::Recovered(recovered)
+            }
             Some(current) if current != recovered.base => Recovery::Copy {
                 recovered,
                 current_base: current.to_owned(),
@@ -964,6 +1141,21 @@ pub fn recover_from(
             _ => Recovery::Recovered(recovered),
         },
     }
+}
+
+/// The session a session continues while its checkpoint 0 has not landed.
+fn continued(session: &Path) -> Option<PathBuf> {
+    if !numbered(session, "checkpoint-", ".json").is_empty() {
+        return None;
+    }
+    let first = *numbered(session, "journal-", ".log").first()?;
+    let head = segment_head(&session.join(segment_name(first)))?;
+    if head.get("start")?.as_str()? != "checkpoint" {
+        return None;
+    }
+    let name = head.get("continues")?.as_str()?;
+    let earlier = session.parent()?.join(name);
+    (!name.is_empty() && !name.contains('/') && earlier.is_dir()).then_some(earlier)
 }
 
 fn segment_head(path: &Path) -> Option<Map> {
@@ -987,15 +1179,54 @@ fn has_changes(session: &Path) -> bool {
                 text.split(|&b| b == b'\n')
                     .filter(|l| !l.is_empty())
                     .skip(1)
-                    .any(|l| !is_workspace_line(l))
+                    .any(|l| !is_bookkeeping_line(l))
             })
     })
 }
-/// `<checksum> {"t":"ws",…}`: a workspace record.
-fn is_workspace_line(line: &[u8]) -> bool {
-    line.splitn(2, |&b| b == b' ')
-        .nth(1)
-        .is_some_and(|json| json.starts_with(br#"{"t":"ws","#))
+/// `<checksum> {"t":"ws",…}` or `{"t":"save",…}`: a workspace record or a
+/// save point, neither of them an edit.
+fn is_bookkeeping_line(line: &[u8]) -> bool {
+    line.splitn(2, |&b| b == b' ').nth(1).is_some_and(|json| {
+        json.starts_with(br#"{"t":"ws","#) || json.starts_with(br#"{"t":"save","#)
+    })
+}
+
+/// A segment's checksummed lines after its header, up to the first torn or
+/// corrupt one (`Err(())` marks where the valid prefix ends).
+fn segment_lines(path: &Path) -> Result<Vec<Result<Value, ()>>, String> {
+    let mut text = Vec::new();
+    File::open(path)
+        .and_then(|mut f| f.read_to_end(&mut text))
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&text);
+    let mut lines = text.split_inclusive('\n');
+    let _head = lines.next();
+    let mut out = Vec::new();
+    for raw in lines {
+        let value = raw
+            .strip_suffix('\n')
+            .and_then(|body| body.split_once(' '))
+            .filter(|(sum, json)| checksum(json) == *sum)
+            .and_then(|(_, json)| parse(json).ok());
+        match value {
+            Some(value) => out.push(Ok(value)),
+            None => {
+                out.push(Err(()));
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A `save` line's hash and revision ([`Journal::mark_save`]).
+fn save_point(value: &Value) -> Option<(&str, u64)> {
+    let m = value.as_object()?;
+    if m.get("t")?.as_str()? != "save" {
+        return None;
+    }
+    let point = m.get("v")?.as_object()?;
+    Some((point.get("h")?.as_str()?, point.get("r")?.as_f64()? as u64))
 }
 
 fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, String> {
@@ -1013,6 +1244,15 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
         .and_then(Value::as_str)
         .ok_or("the journal has no base")?
         .to_owned();
+    let mut lines = Vec::new();
+    for &n in &segments {
+        let segment = segment_lines(&session.join(segment_name(n)))?;
+        let torn = segment.last().is_some_and(Result::is_err);
+        lines.push((n, segment));
+        if torn {
+            break;
+        }
+    }
     // The newest checkpoint that verifies.
     let mut start = None;
     for n in numbered(session, "checkpoint-", ".json").into_iter().rev() {
@@ -1023,27 +1263,78 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
             &session.join(checkpoint_name(n)),
             base.as_ref().map(|b| b.document),
         ) {
-            start = Some((n, loaded));
+            start = Some(((n, 0), loaded));
             break;
         }
     }
-    let (from, loaded) = match start {
+    let ((from, skip), loaded) = match start {
         Some(found) => found,
-        None => {
-            // Only the session's first segment can start from the base.
-            if first != 0 {
-                return Err("no checkpoint covers the oldest journal segment".into());
+        None if let Some(earlier) = continued(session) => {
+            // Checkpoint 0 never landed: the session this one superseded
+            // still holds its start state.
+            let earlier = recover_session(&earlier, base)?;
+            let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(0.0) as u64;
+            if earlier.truncated || earlier.revision != revision {
+                return Err("the session's first checkpoint never landed".into());
             }
-            let base = base.ok_or("no checkpoint was written and no base was given")?;
-            if base.document.canonical_hash().as_deref() != Some(session_base.as_str()) {
-                return Err("the given document is not this journal's base".into());
-            }
-            let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(1.0) as u64;
             (
-                0,
+                (first, 0),
                 Loaded {
                     revision,
-                    base: session_base.clone(),
+                    base: earlier.base,
+                    bases: {
+                        let mut bases = earlier.bases;
+                        if !bases.contains(&session_base) {
+                            bases.push(session_base.clone());
+                        }
+                        bases
+                    },
+                    document: earlier.document.root().cloned(),
+                    history: LoadedHistory::Ready(earlier.history),
+                    workspace: earlier.workspace,
+                },
+            )
+        }
+        None => {
+            let base = base.ok_or("no checkpoint was written and no base was given")?;
+            let hash = base.document.canonical_hash().unwrap_or_default();
+            let mut bases = bases_of(&head, &session_base);
+            // The base may be a save this session published while edits
+            // went on (or that a Quit Now left without a checkpoint): replay
+            // what followed its save point.
+            let mut point = None;
+            if hash != session_base {
+                for (n, segment) in &lines {
+                    for (i, value) in segment.iter().enumerate() {
+                        if let Some((h, revision)) = value.as_ref().ok().and_then(save_point) {
+                            bases.push(h.to_owned());
+                            if h == hash {
+                                point = Some(((*n, i + 1), revision));
+                            }
+                        }
+                    }
+                }
+            }
+            let (at, revision) = match point {
+                Some(found) => found,
+                // Only the session's first segment can start from the base.
+                None if first != 0 => {
+                    return Err("no checkpoint covers the oldest journal segment".into());
+                }
+                None if hash != session_base => {
+                    return Err("the given document is not this journal's base".into());
+                }
+                None => (
+                    (0, 0),
+                    head.get("revision").and_then(Value::as_f64).unwrap_or(1.0) as u64,
+                ),
+            };
+            (
+                at,
+                Loaded {
+                    revision,
+                    base: hash,
+                    bases,
                     document: base.document.root().cloned(),
                     history: LoadedHistory::Ready(base.history.cloned().unwrap_or_default()),
                     workspace: base.workspace.cloned().unwrap_or(Value::Null),
@@ -1072,33 +1363,23 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
         workspace: loaded.workspace,
         replayed: 0,
     };
+    let mut bases = loaded.bases;
     let mut truncated = false;
-    'segments: for n in segments.into_iter().filter(|&n| n >= from) {
-        let mut text = Vec::new();
-        File::open(session.join(segment_name(n)))
-            .and_then(|mut f| f.read_to_end(&mut text))
-            .map_err(|e| e.to_string())?;
-        let text = String::from_utf8_lossy(&text);
-        let mut lines = text.split_inclusive('\n');
-        let _head = lines.next();
-        for raw in lines {
-            let Some(body) = raw.strip_suffix('\n') else {
-                truncated = true; // torn final line
-                break 'segments;
-            };
-            let Some((sum, json)) = body.split_once(' ') else {
+    for (n, segment) in lines.iter().filter(|(n, _)| *n >= from) {
+        let skip = if *n == from { skip } else { 0 };
+        for value in segment.iter().skip(skip) {
+            let Ok(value) = value else {
+                // The tail of an interrupted write.
                 truncated = true;
-                break 'segments;
+                break;
             };
-            if checksum(json) != sum {
-                truncated = true;
-                break 'segments;
+            if let Some((hash, _)) = save_point(value) {
+                if !bases.iter().any(|b| b == hash) {
+                    bases.push(hash.to_owned());
+                }
+                continue;
             }
-            let Ok(value) = parse(json) else {
-                truncated = true;
-                break 'segments;
-            };
-            if let Err(e) = r.apply(&value) {
+            if let Err(e) = r.apply(value) {
                 return Err(format!("journal replay failed: {e}"));
             }
         }
@@ -1106,6 +1387,7 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
     Ok(Recovered {
         project,
         base: loaded.base,
+        bases,
         revision: r.revision,
         document: r.document,
         history: r.history,
@@ -1298,6 +1580,7 @@ mod durability_tests {
                 history: History::new().snapshot(),
                 workspace: Value::Null,
             }),
+            bases: vec![],
             supersedes: vec![],
             measured: Default::default(),
         });

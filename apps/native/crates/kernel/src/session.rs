@@ -732,6 +732,9 @@ impl Kernel {
             .store_mut()
             .prepare_save(target, options)
             .map_err(failure)?;
+        // Durable before the worker can replace the file the journal is
+        // based on; edits while it runs are journalled after this point.
+        self.mark_save_point(&session.project, &plan.document, plan.revision);
         let ticket = crate::new_id("save");
         self.sessions
             .get_mut(&session.project)
@@ -1679,9 +1682,12 @@ impl Kernel {
                 },
                 None => SaveTarget::InPlace,
             };
-            let result = p
-                .store_mut()
-                .prepare_save(target, options)
+            let plan = p.store_mut().prepare_save(target, options);
+            if let Ok(plan) = &plan {
+                self.mark_save_point(id, &plan.document, plan.revision);
+            }
+            let p = self.project_mut(id).unwrap();
+            let result = plan
                 .and_then(|plan| plan.run())
                 .and_then(|receipt| p.store_mut().finish_save(receipt));
             if let Err(e) = result {

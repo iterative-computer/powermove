@@ -34,6 +34,7 @@ fn config(root: &Path, checkpoint_revisions: u64) -> KernelConfig {
             flush_interval: Duration::from_millis(50),
             checkpoint_revisions,
             max_segment_bytes: 4 * 1024 * 1024,
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -370,5 +371,221 @@ fn kill_test_sigkill_loses_no_acknowledged_write() {
     assert_eq!(
         layer_name(&k.project("P").unwrap().store().snapshot().document),
         format!("w{}", recovered_n - 1)
+    );
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The Quit Now journey: a file save publishes while the session's first
+/// checkpoint is stuck behind a slow disk, the person keeps editing, the
+/// save's completion waits on that checkpoint, and Quit Now syncs the
+/// journals from outside the busy actor and exits. What the disk holds at
+/// that moment (copied, as an exit freezes it) reopens with every edit
+/// recovered onto the saved file: none is stranded on the replaced base.
+#[test]
+fn quit_now_after_a_save_during_a_slow_checkpoint_recovers_every_edit() {
+    use pm_kernel::session::{
+        RecoveryDecision, RecoveryResult, SessionSource, ShellCall, ShellReply,
+    };
+    use std::sync::{Arc, Condvar, Mutex};
+    let dir = TempDir::new("save-point");
+    let file = dir.0.join("project.pmv");
+    let mut untitled = pm_kernel::DocumentStore::new_untitled(parse(PROJECT).unwrap());
+    common::save_as(&mut untitled, &file).unwrap();
+    drop(untitled);
+    let hold = Arc::new((Mutex::new(true), Condvar::new()));
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(dir.0.join("journals")),
+        backup_root: Some(dir.0.join("backups")),
+        journal: JournalConfig {
+            hold_checkpoints: Some(hold.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let k = actor.handle();
+    let open = |k: &pm_kernel::KernelHandle, path: &Path| {
+        k.shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(path.into()),
+            electron_profile: None,
+        })
+    };
+    let session = match open(&k, &file).wait().unwrap().unwrap() {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    };
+    let edit = |name: &str| {
+        k.call("P", Request::new(Caller::native(), rename(name)))
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    edit("before save");
+    let plan = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap();
+    edit("while saving");
+    let completion = plan.run();
+    edit("after publishing");
+    // Completing the save waits on the stuck checkpoint: the actor is busy.
+    let finishing = k.finish_save(completion);
+    k.sync_journals().unwrap();
+    let exited = dir.0.join("after-quit-now");
+    copy_tree(&dir.0.join("journals"), &exited.join("journals"));
+    std::fs::copy(&file, exited.join("project.pmv")).unwrap();
+    let checkpoints = std::fs::read_dir(exited.join("journals/P"))
+        .unwrap()
+        .flat_map(|s| std::fs::read_dir(s.unwrap().path()).unwrap())
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("checkpoint-")
+        })
+        .count();
+    assert_eq!(checkpoints, 0, "the checkpoint never landed");
+    *hold.0.lock().unwrap() = false;
+    hold.1.notify_all();
+    finishing.wait().unwrap().unwrap();
+    drop(actor);
+
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(exited.join("journals")),
+        ..Default::default()
+    });
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(exited.join("project.pmv")),
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+        panic!("{reply:?}");
+    };
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { truncated: false }),
+        "{recovery:?}"
+    );
+    let reply = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap();
+    assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
+    let store = k.project("P").unwrap().store();
+    assert_eq!(layer_name(&store.snapshot().document), "after publishing");
+    let labels = store.history().labels();
+    assert_eq!(
+        labels,
+        [
+            "Rename before save",
+            "Rename while saving",
+            "Rename after publishing"
+        ]
+    );
+}
+
+/// Recovering work starts a session from checkpoint 0 of the recovered
+/// state. When Quit Now comes before that checkpoint lands (a large project,
+/// a slow disk), the next open continues from the session it superseded,
+/// which is kept until then: the recovered edits and the ones after are all
+/// there.
+#[test]
+fn quit_now_before_a_recovered_sessions_first_checkpoint_keeps_all_the_work() {
+    use pm_kernel::session::{
+        RecoveryDecision, RecoveryResult, SessionSource, ShellCall, ShellReply,
+    };
+    use std::sync::{Arc, Condvar, Mutex};
+    let dir = TempDir::new("continued");
+    let file = dir.0.join("project.pmv");
+    let mut untitled = pm_kernel::DocumentStore::new_untitled(parse(PROJECT).unwrap());
+    common::save_as(&mut untitled, &file).unwrap();
+    drop(untitled);
+    let hold = Arc::new((Mutex::new(false), Condvar::new()));
+    let kernel = |journals: &Path, hold: Option<Arc<(Mutex<bool>, Condvar)>>| {
+        Kernel::new(KernelConfig {
+            journal_root: Some(journals.to_path_buf()),
+            journal: JournalConfig {
+                hold_checkpoints: hold,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    };
+    let prepare = |k: &mut Kernel, path: &Path| match k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(path.into()),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::RecoveryRequired { ticket, recovery } => (ticket, recovery),
+        other => panic!("{other:?}"),
+    };
+    let recover = |k: &mut Kernel, ticket: String| {
+        let reply = k
+            .shell(ShellCall::DecideRecovery {
+                ticket,
+                decision: RecoveryDecision::Recover,
+            })
+            .unwrap();
+        assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
+    };
+    let journals = dir.0.join("journals");
+    let mut k = kernel(&journals, None);
+    k.shell(ShellCall::Open {
+        id: "P".into(),
+        source: SessionSource::File(file.clone()),
+        electron_profile: None,
+    })
+    .unwrap();
+    handle(&mut k, rename("one"));
+    handle(&mut k, rename("two"));
+    k.durability_barrier().unwrap();
+    drop(k); // a crash: the session stays
+
+    let mut k = kernel(&journals, Some(hold.clone()));
+    let (ticket, _) = prepare(&mut k, &file);
+    *hold.0.lock().unwrap() = true;
+    recover(&mut k, ticket);
+    handle(&mut k, rename("three"));
+    k.journal_sync().unwrap().sync().unwrap();
+    let exited = dir.0.join("after-quit-now");
+    copy_tree(&journals, &exited.join("journals"));
+    std::fs::copy(&file, exited.join("project.pmv")).unwrap();
+    *hold.0.lock().unwrap() = false;
+    hold.1.notify_all();
+    drop(k);
+
+    let mut k = kernel(&exited.join("journals"), None);
+    let (ticket, recovery) = prepare(&mut k, &exited.join("project.pmv"));
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { truncated: false }),
+        "{recovery:?}"
+    );
+    recover(&mut k, ticket);
+    let store = k.project("P").unwrap().store();
+    assert_eq!(layer_name(&store.snapshot().document), "three");
+    assert_eq!(
+        store.history().labels(),
+        ["Rename one", "Rename two", "Rename three"]
     );
 }

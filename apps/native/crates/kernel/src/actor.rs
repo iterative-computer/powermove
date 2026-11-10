@@ -326,6 +326,7 @@ struct Shared {
     state: Mutex<Arc<crate::state::StateSnapshot>>,
     subscribers: Mutex<Vec<mpsc::Sender<KernelEvent>>>,
     realms: Mutex<HashMap<Writer, mpsc::Sender<RealmEnvelope>>>,
+    journal_sync: Mutex<Option<crate::journal::JournalSync>>,
 }
 
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
@@ -428,7 +429,11 @@ impl KernelActor {
             let shared = shared.clone();
             thread::Builder::new()
                 .name("pm-kernel".into())
-                .spawn(move || run(Kernel::new(config), rx, shared))
+                .spawn(move || {
+                    let kernel = Kernel::new(config);
+                    *shared.journal_sync.lock().expect("journal sync") = kernel.journal_sync();
+                    run(kernel, rx, shared)
+                })
                 .expect("spawn kernel thread")
         };
         KernelActor {
@@ -462,6 +467,17 @@ impl Drop for KernelActor {
 }
 
 impl KernelHandle {
+    /// Makes every journal durable without waiting for the actor, which may
+    /// be busy (Quit Now). Blocking: run it off the main thread.
+    pub fn sync_journals(&self) -> std::io::Result<()> {
+        let sync = self
+            .shared
+            .journal_sync
+            .lock()
+            .expect("journal sync")
+            .clone();
+        sync.map_or(Ok(()), |sync| sync.sync())
+    }
     /// Bind an immutable actor identity; cloned handles never change another caller's origin.
     /// Queue native UI/MCP pro actions. Never waits on the caller thread.
     pub fn pro_editing(
