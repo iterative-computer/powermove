@@ -26,12 +26,12 @@ export const LIGHT_TYPES: ReadonlyArray<{ id: LightType; label: string }> = [
 ];
 
 export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
-  { id: 'color', label: 'Color map' },
-  { id: 'normal', label: 'Normal map' },
-  { id: 'roughness', label: 'Roughness map' },
-  { id: 'metalness', label: 'Metalness map' },
-  { id: 'emissive', label: 'Emissive map' },
-  { id: 'ao', label: 'Occlusion map' }
+  { id: 'color', label: 'Color Map' },
+  { id: 'normal', label: 'Normal Map' },
+  { id: 'roughness', label: 'Roughness Map' },
+  { id: 'metalness', label: 'Metalness Map' },
+  { id: 'emissive', label: 'Emissive Map' },
+  { id: 'ao', label: 'Occlusion Map' }
 ];
 
 /** Channel keys are `x`, `rx`, `sx` for transforms and camel-cased `targetX` for targets. */
@@ -50,17 +50,17 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
   { key: 'roughness', label: 'Roughness', kind: 'num', step: 0.01, min: 0.02, max: 1 },
   { key: 'metalness', label: 'Metalness', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'emissive', label: 'Emission', kind: 'color' },
-  { key: 'emissiveIntensity', label: 'Emission strength', kind: 'num', step: 0.05, min: 0 },
+  { key: 'emissiveIntensity', label: 'Emission Strength', kind: 'num', step: 0.05, min: 0 },
   { key: 'opacity', label: 'Opacity', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'clearcoat', label: 'Clear coat', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'clearcoatRoughness', label: 'Coat roughness', kind: 'num', step: 0.005, min: 0.002, max: 1 },
+  { key: 'clearcoat', label: 'Clear Coat', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'clearcoatRoughness', label: 'Coat Roughness', kind: 'num', step: 0.005, min: 0.002, max: 1 },
   { key: 'transmission', label: 'Transmission', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'ior', label: 'Index of refraction', kind: 'num', step: 0.01, min: 1, max: 2.6 },
+  { key: 'ior', label: 'Index of Refraction', kind: 'num', step: 0.01, min: 1, max: 2.6 },
   { key: 'specular', label: 'Specular', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'sheen', label: 'Sheen', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'iridescence', label: 'Thin film', kind: 'num', step: 10, min: 0, max: 1200, unit: 'nm' },
+  { key: 'iridescence', label: 'Thin Film', kind: 'num', step: 10, min: 0, max: 1200, unit: 'nm' },
   { key: 'dispersion', label: 'Dispersion', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'droplets', label: 'Water droplets', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'droplets', label: 'Water Droplets', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'anisotropy', label: 'Brushed', kind: 'num', step: 0.01, min: -1, max: 1 },
   { key: 'subsurface', label: 'Subsurface', kind: 'num', step: 0.01, min: 0 }
 ];
@@ -82,14 +82,14 @@ export function lightFields(type: LightType): FieldSpec[] {
   }
   if (type !== 'sun' && type !== 'area') {
     fields.push(
-      { key: 'distance', label: 'Range', kind: 'num', step: 0.1, min: 0 },
+      { key: 'distance', label: 'Falloff Distance', kind: 'num', step: 0.1, min: 0 },
       { key: 'decay', label: 'Falloff', kind: 'num', step: 0.05, min: 0 }
     );
   }
   if (type === 'spot') {
     fields.push(
-      { key: 'angle', label: 'Cone angle', kind: 'num', step: 1, min: 1, max: 89, unit: '°' },
-      { key: 'penumbra', label: 'Softness', kind: 'num', step: 0.01, min: 0, max: 1 }
+      { key: 'angle', label: 'Cone Angle', kind: 'num', step: 1, min: 1, max: 89, unit: '°' },
+      { key: 'penumbra', label: 'Cone Feather', kind: 'num', step: 0.01, min: 0, max: 1 }
     );
   }
   return fields;
@@ -100,17 +100,17 @@ export function cameraFields(projection: 'perspective' | 'orthographic'): FieldS
     ...xyz('', 'Position', 0.01),
     ...xyz('target', 'Target', 0.01),
     projection === 'perspective'
-      ? { key: 'fov', label: 'Field of view', kind: 'num', step: 0.5, min: 1, max: 150, unit: '°' }
+      ? { key: 'fov', label: 'Angle of View', kind: 'num', step: 0.5, min: 1, max: 150, unit: '°' }
       : { key: 'zoom', label: 'Zoom', kind: 'num', step: 0.01, min: 0.01 },
-    { key: 'near', label: 'Clip start', kind: 'num', step: 0.01, min: 0.001 },
-    { key: 'far', label: 'Clip end', kind: 'num', step: 1, min: 0.01 },
-    { key: 'fStop', label: 'f-stop', kind: 'num', step: 0.1, min: 0, max: 64 },
-    { key: 'focusDistance', label: 'Focus', kind: 'num', step: 0.01, min: 0 }
+    { key: 'near', label: 'Near Clip', kind: 'num', step: 0.01, min: 0.001 },
+    { key: 'far', label: 'Far Clip', kind: 'num', step: 1, min: 0.01 },
+    { key: 'fStop', label: 'F-Stop', kind: 'num', step: 0.1, min: 0, max: 64 },
+    { key: 'focusDistance', label: 'Focus Distance', kind: 'num', step: 0.01, min: 0 }
   ];
 }
 
 export const ENVIRONMENT_FIELDS: FieldSpec[] = [
   { key: 'ambient', label: 'Ambient', kind: 'num', step: 0.01, min: 0 },
-  { key: 'ambientColor', label: 'Ambient color', kind: 'color' },
+  { key: 'ambientColor', label: 'Ambient Color', kind: 'color' },
   { key: 'exposure', label: 'Exposure', kind: 'num', step: 0.01, min: 0 }
 ];

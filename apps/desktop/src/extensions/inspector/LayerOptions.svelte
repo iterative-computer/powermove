@@ -13,9 +13,11 @@
   const animatedEdit = (field: string, label: string): EditBinding => ({ mode: 'command', label, origin: 'inspector', command: (value) => ({ type: 'set_property', target: layer.id, path: `l.${field}`, value: value as any, time: transport.time, mode: 'auto', preserveHandEdits: false }) });
   const edit = (field: string, label: string): EditBinding =>
     layerFieldBinding(layer.id, field as any, { label, origin: 'inspector' });
+  /* Link Layers needs a place: a World or an Ambient/Environment light has none. */
+  const canLink = (item: any) => (api.model.TYPE_META as Record<string, { transform?: boolean }>)[item?.type]?.transform !== false && !api.model.layerKind?.(item)?.surrounds;
   const selectedLayers = () => api.selection.layers().map((id) => api.model.layer(id)).filter((candidate) => candidate !== null);
   const parentingLayers = () => (api.selection.layers().includes(layer.id) ? selectedLayers() : [layer])
-    .filter((item: any) => (api.model.TYPE_META as Record<string, { transform?: boolean }>)[item.type]?.transform !== false);
+    .filter(canLink);
   const parentEdit: EditBinding = { mode:'command', label:'Parent layers', origin:'inspector', command: (parent) => parentingLayers().map((item: any) => ({ type:'set_layer', target:item.id, patch:{parent: parent == null ? null : String(parent)} })) };
   const parentOptions = $derived.by<SelectOption[]>(() => {
     doc.tick.structure; doc.proj; sel.layers;
@@ -23,7 +25,7 @@
     const children = parentingLayers();
     return [
       { v: null, label: 'None' },
-      ...api.project.get().layers.filter((candidate: any) => (api.model.TYPE_META as Record<string, { transform?: boolean }>)[candidate.type]?.transform !== false && children.every((item: any) => item.id !== candidate.id && !api.anim.wouldCycle(item, candidate.id)))
+      ...api.project.get().layers.filter((candidate: any) => canLink(candidate) && children.every((item: any) => item.id !== candidate.id && !api.anim.wouldCycle(item, candidate.id)))
         .map((candidate: any) => ({ v: candidate.id, label: String(candidate.name) }))
     ];
   });
@@ -44,7 +46,7 @@
   {#if layer.type === 'precomp'}
     <Row {api} label="Rasterize"><ToggleField {api} {mixed} get={() => (doc.tick.values, !!layer.continuousRaster)} edit={edit('continuousRaster', 'Continuously rasterize')} label="Continuously rasterize" /></Row>
   {/if}
-  <Row {api} label="Link Layers"><button class="pickwhip" aria-label="Pick parent layer" title="Drag to a layer to parent · Esc cancels" onpointerdown={(event) => api.ui.beginParentPick(event, api.selection.layers().includes(layer.id) ? api.selection.layers() : [layer.id])}>◎</button><SelectField {api} {mixed} get={() => layer.parent} edit={parentEdit} options={parentOptions} label="Parent" /></Row>
+  {#if canLink(layer)}<Row {api} label="Link Layers"><button class="pickwhip" aria-label="Pick parent layer" title="Drag to a layer to parent · Esc cancels" onpointerdown={(event) => api.ui.beginParentPick(event, api.selection.layers().includes(layer.id) ? api.selection.layers() : [layer.id])}>◎</button><SelectField {api} {mixed} get={() => layer.parent} edit={parentEdit} options={parentOptions} label="Parent" /></Row>{/if}
   <Row {api} label="Color"><ColorField {api} {mixed} get={() => layer.color} edit={edit('color', 'Label color')} label="Label color" /></Row>
 {/if}
 

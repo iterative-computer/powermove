@@ -34,21 +34,21 @@ export const WORLD_MODES = [
 export const WORLD_LIGHT_FIELDS: FieldSpec[] = [
   { key: 'intensity', label: 'Intensity', kind: 'num', step: 0.05, min: 0, max: 10 },
   { key: 'rotation', label: 'Rotation', kind: 'num', step: 1, unit: '°' },
-  { key: 'visible', label: 'Visible to camera', kind: 'toggle' }
+  { key: 'visible', label: 'Visible to Camera', kind: 'toggle' }
 ];
 export const WORLD_SUN_FIELDS: FieldSpec[] = [
-  { key: 'elevation', label: 'Sun height', kind: 'num', step: 0.5, min: -90, max: 90, unit: '°' },
-  { key: 'azimuth', label: 'Sun direction', kind: 'num', step: 1, unit: '°' },
-  { key: 'sunIntensity', label: 'Sun strength', kind: 'num', step: 0.05, min: 0, max: 10 },
+  { key: 'elevation', label: 'Sun Height', kind: 'num', step: 0.5, min: -90, max: 90, unit: '°' },
+  { key: 'azimuth', label: 'Sun Direction', kind: 'num', step: 1, unit: '°' },
+  { key: 'sunIntensity', label: 'Sun Strength', kind: 'num', step: 0.05, min: 0, max: 10 },
   { key: 'haze', label: 'Haze', kind: 'num', step: 0.05, min: 1, max: 10 },
   { key: 'overcast', label: 'Clouds', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'groundColor', label: 'Ground color', kind: 'color' }
+  { key: 'groundColor', label: 'Ground Color', kind: 'color' }
 ];
 export const WORLD_FOG_FIELDS: FieldSpec[] = [
   { key: 'fogDensity', label: 'Fog', kind: 'num', step: 0.001, min: 0, max: 0.2 },
-  { key: 'fogColor', label: 'Fog color', kind: 'color' },
-  { key: 'fogHeightFalloff', label: 'Fog falloff', kind: 'num', step: 0.01, min: 0, max: 2 },
-  { key: 'fogBaseHeight', label: 'Fog base', kind: 'num', step: 0.05 }
+  { key: 'fogColor', label: 'Fog Color', kind: 'color' },
+  { key: 'fogHeightFalloff', label: 'Fog Falloff', kind: 'num', step: 0.01, min: 0, max: 2 },
+  { key: 'fogBaseHeight', label: 'Fog Base', kind: 'num', step: 0.05 }
 ];
 export const FOG_FIELDS: FieldSpec[] = [
   { key: 'shape', label: 'Shape', kind: 'select', options: [{ v: 'box', label: 'Box' }, { v: 'sphere', label: 'Sphere' }] },
@@ -57,13 +57,13 @@ export const FOG_FIELDS: FieldSpec[] = [
   { key: 'depth', label: 'Depth', kind: 'num', step: 0.05, min: 0.0001 },
   { key: 'density', label: 'Density', kind: 'num', step: 0.001, min: 0, max: 1 },
   { key: 'color', label: 'Color', kind: 'color' },
-  { key: 'anisotropy', label: 'Forward glow', kind: 'num', step: 0.01, min: -0.95, max: 0.95 }
+  { key: 'anisotropy', label: 'Forward Glow', kind: 'num', step: 0.01, min: -0.95, max: 0.95 }
 ];
 export const TERRAIN_FIELDS: FieldSpec[] = [
   { key: 'width', label: 'Width', kind: 'num', step: 0.5, min: 0.001 },
   { key: 'depth', label: 'Depth', kind: 'num', step: 0.5, min: 0.001 },
   { key: 'amplitude', label: 'Height', kind: 'num', step: 0.05, min: 0, max: 20 },
-  { key: 'frequency', label: 'Feature size', kind: 'num', step: 0.005, min: 0.01, max: 1 },
+  { key: 'frequency', label: 'Feature Size', kind: 'num', step: 0.005, min: 0.01, max: 1 },
   { key: 'octaves', label: 'Detail', kind: 'num', step: 1, min: 1, max: 12 },
   { key: 'ridged', label: 'Ridges', kind: 'toggle' },
   { key: 'seed', label: 'Variation', kind: 'num', step: 1, min: 0 },
@@ -71,8 +71,8 @@ export const TERRAIN_FIELDS: FieldSpec[] = [
 ];
 export const REGION_FIELDS: FieldSpec[] = [
   { key: 'color', label: 'Color', kind: 'color' },
-  { key: 'minSlope', label: 'Steeper than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
-  { key: 'maxSlope', label: 'Flatter than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
+  { key: 'minSlope', label: 'Steeper Than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
+  { key: 'maxSlope', label: 'Flatter Than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
   { key: 'minHeight', label: 'Above', kind: 'num', step: 0.05 },
   { key: 'maxHeight', label: 'Below', kind: 'num', step: 0.05 },
   { key: 'roughness', label: 'Roughness', kind: 'num', step: 0.01, min: 0.02, max: 1 }
@@ -83,10 +83,10 @@ export const SCATTER_FIELDS: FieldSpec[] = [
   { key: 'seed', label: 'Variation', kind: 'num', step: 1, min: 0 },
   { key: 'scaleMin', label: 'Smallest', kind: 'num', step: 0.05, min: 0.0001 },
   { key: 'scaleMax', label: 'Largest', kind: 'num', step: 0.05, min: 0.0001 },
-  { key: 'rotationMin', label: 'Turn from', kind: 'num', step: 1, unit: '°' },
+  { key: 'rotationMin', label: 'Turn From', kind: 'num', step: 1, unit: '°' },
   { key: 'rotationMax', label: 'Turn to', kind: 'num', step: 1, unit: '°' },
-  { key: 'maxSlope', label: 'Flatter than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
-  { key: 'minSlope', label: 'Steeper than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
+  { key: 'maxSlope', label: 'Flatter Than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
+  { key: 'minSlope', label: 'Steeper Than', kind: 'num', step: 1, min: 0, max: 90, unit: '°' },
   { key: 'minHeight', label: 'Above', kind: 'num', step: 0.05 },
   { key: 'maxHeight', label: 'Below', kind: 'num', step: 0.05 }
 ];
@@ -98,10 +98,10 @@ export const MATERIAL_OPTION_FIELDS: FieldSpec[] = [
   { key: 'appearsInReflections', label: 'Appears in Reflections', kind: 'toggle' }
 ];
 export const IRIS_FIELDS: FieldSpec[] = [
-  { key: 'irisShape', label: 'Iris shape', kind: 'select', options: [{ v: 0, label: 'Round' }, ...[3, 4, 5, 6, 7, 8, 9, 10].map(n => ({ v: n, label: `${n} blades` }))] },
-  { key: 'irisRotation', label: 'Iris rotation', kind: 'num', step: 1, unit: '°' },
-  { key: 'irisRoundness', label: 'Iris roundness', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'irisAspect', label: 'Iris aspect ratio', kind: 'num', step: 0.01, min: 0.1, max: 10 }
+  { key: 'irisShape', label: 'Iris Shape', kind: 'select', options: [{ v: 0, label: 'Round' }, ...[3, 4, 5, 6, 7, 8, 9, 10].map(n => ({ v: n, label: `${n} blades` }))] },
+  { key: 'irisRotation', label: 'Iris Rotation', kind: 'num', step: 1, unit: '°' },
+  { key: 'irisRoundness', label: 'Iris Roundness', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'irisAspect', label: 'Iris Aspect Ratio', kind: 'num', step: 0.01, min: 0.1, max: 10 }
 ];
 
 /** The composition's World layer, if any. */

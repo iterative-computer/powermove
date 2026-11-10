@@ -71,11 +71,17 @@
     font-weight: var(--fw-semibold);
   }
   .insp :global(.row.split) { height: 30px; margin: 2px calc(-1 * var(--pad)); padding: 0 16px; gap: 8px; }
+  /* Wide enough for After Effects' two-word property names (Coat Roughness,
+     Iris Roundness) on one line; longer names end in an ellipsis and show
+     whole in the tooltip rather than wrapping or clipping mid-word. */
   .insp :global(.row.split .k) {
-    width: 78px;
+    width: 92px;
     color: var(--tx-2);
     font-size: 12px;
     line-height: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .insp :global(.row.split :is(.num, .sel, .color-field, .pm-select, .onoff)) {
     height: 26px;

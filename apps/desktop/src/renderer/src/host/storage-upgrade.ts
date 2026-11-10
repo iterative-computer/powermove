@@ -18,7 +18,7 @@ export function installStorageUpgradeNotice(PM: PMRegistry, host: StorageBridge 
     if (stopped) return;
     if (!startedNotice) {
       startedNotice = true;
-      PM.toast('This update is optimizing storage in the background.', 6000, { key: 'storage-upgrade-start', kind: 'status', error: false });
+      PM.toast('This update is optimizing storage in the background.', 6000, { key: 'storage-upgrade-start', kind: 'status', error: false, corner: 'top-right' });
     }
     PM.toast('Optimizing storage', 2200, { key: KEY, task: true, progress, detail: stages[stage], error: false });
   };
@@ -47,6 +47,8 @@ export function installStorageUpgradeNotice(PM: PMRegistry, host: StorageBridge 
         const acknowledge = () => { void host.upgrade!({ action: 'notified', token }).catch(() => {}); };
         PM.toast(result.freedBytes ? `Storage optimized · Freed about ${formatBytes(result.freedBytes)}` : 'Storage optimized', 10_000, {
           key: 'storage-upgrade-complete', kind: 'status', error: false, sticky: true, dismissible: true,
+          // Housekeeping, not a response to anything the user did: keep it off the viewer.
+          corner: 'top-right',
           action: { label: 'View Storage', run: () => { PM.SettingsUI?.open('storage'); acknowledge(); } },
           onDismiss: acknowledge,
         });
@@ -56,7 +58,7 @@ export function installStorageUpgradeNotice(PM: PMRegistry, host: StorageBridge 
       PM.dismissToast?.(KEY);
       if (!pausedNotice) {
         pausedNotice = true;
-        PM.toast('Storage cleanup paused. It will resume automatically.', 6000, { key: 'storage-upgrade-paused', kind: 'status', error: false });
+        PM.toast('Storage cleanup paused. It will resume automatically.', 6000, { key: 'storage-upgrade-paused', kind: 'status', error: false, corner: 'top-right' });
       }
       retry();
     }

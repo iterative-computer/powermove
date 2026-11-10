@@ -7,7 +7,7 @@
   import WorldSection from './WorldSection.svelte';
   import MaterialOptionsRows from './MaterialOptionsRows.svelte';
   import { FOG_FIELDS, TERRAIN_FIELDS, REGION_FIELDS, SCATTER_FIELDS, IRIS_FIELDS, SKY_PRESET_VALUES, environmentKind, worldLayer, addWorld, scatterSources, environmentSourceChoices, pickEnvironmentImage, sourceKey, sourceFromKey } from './environment-ui';
-  import { MATERIAL_FIELDS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
+  import { MATERIAL_FIELDS, LIGHT_TYPES, PRIMITIVES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
   import type { SceneUiState } from './scene-state.svelte';
   let { api,ui,layerId }:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
   const {Row,Section,ToggleField,SelectField,ColorField,NumField}=untrack(()=>api.ui.controls);
@@ -69,7 +69,7 @@
     <Section {api} title="Terrain" />
     <!-- Four shapes in an even grid; the one the terrain matches reads as chosen. -->
     <div class="shots looks" role="group" aria-label="Terrain shape">{#each TERRAIN_LOOKS as look (look.id)}<button type="button" class="chip" aria-pressed={terrainLook(object.terrain,ui.version)===look.id} onclick={()=>edit('update_terrain',{p:look.p},look.label)}>{look.label}</button>{/each}</div>
-    <Row {api} label="Shape from"><SelectField {api} get={()=>object.terrain.heightSource?sourceKey(object.terrain.heightSource):'noise'} options={heightChoices} edit={{mode:'set',label:'Terrain height',set:(v:unknown)=>void chooseHeight(v)}} label="Terrain shape source" /></Row>
+    <Row {api} label="Shape From"><SelectField {api} get={()=>object.terrain.heightSource?sourceKey(object.terrain.heightSource):'noise'} options={heightChoices} edit={{mode:'set',label:'Terrain height',set:(v:unknown)=>void chooseHeight(v)}} label="Terrain shape source" /></Row>
     {#each TERRAIN_FIELDS.filter(f=>!object.terrain.heightSource || !['frequency','octaves','ridged','seed'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`terrain.${field.key}`} channel={object.terrain.p[field.key]} />{/each}
     {#each object.terrain.regions as region, i (i)}
       <Section {api} title={i===0?'Ground cover':`Ground cover ${i+1}`} />
@@ -80,13 +80,13 @@
     <Section {api} title="Scatter" />
     <Row {api} label="Copies of"><SelectField {api} get={()=>object.scatter.model} options={[...(sources?.models.some(m=>m.id===object.scatter.model)?[]:[{v:object.scatter.model,label:'Missing model'}]),...(sources?.models ?? []).map(m=>({v:m.id,label:m.name}))]} edit={{mode:'set',label:'Scatter model',set:(v:unknown)=>edit('update_scatter',{model:v},'Scatter model')}} label="Scatter copies of" /></Row>
     <Row {api} label="Over"><SelectField {api} get={()=>object.scatter.surface} options={[...(sources?.surfaces.some(m=>m.id===object.scatter.surface)?[]:[{v:object.scatter.surface,label:'Missing surface'}]),...(sources?.surfaces ?? []).map(m=>({v:m.id,label:m.name}))]} edit={{mode:'set',label:'Scatter surface',set:(v:unknown)=>edit('update_scatter',{surface:v},'Scatter surface')}} label="Scatter over" /></Row>
-    <div class="shots" role="group" aria-label="Scatter actions"><button type="button" class="chip" onclick={()=>edit('update_scatter',{p:{seed:Math.round(Number(ev(object.scatter.p.seed,'scatter.seed') ?? 0))+1}},'New variation')}>New variation</button></div>
+    <div class="shots" role="group" aria-label="Scatter actions"><button type="button" class="chip" onclick={()=>edit('update_scatter',{p:{seed:Math.round(Number(ev(object.scatter.p.seed,'scatter.seed') ?? 0))+1}},'New Variation')}>New Variation</button></div>
     {#each SCATTER_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`scatter.${field.key}`} channel={object.scatter.p[field.key]} />{/each}
   {:else if object}
     <Section {api} title="Model" />
-    <div class="shots" role="group" aria-label="Model actions"><button type="button" class="chip" onclick={()=>studioEdit({operation:'drop_to_floor'},'Drop to floor')}>Drop to floor</button><button type="button" class="chip" onclick={()=>studioEdit({operation:"shot",shot:"turntable",duration:4},"Turntable")}>Turntable</button></div>
-    <Row {api} label="Source"><span class="k">{object.source.assetId?assetName(object.source.assetId) ?? 'Model':object.source.primitive ?? (object.source.lathe?'Lathe':object.source.extrude?'Extrusion':'Mesh')}</span></Row>
-    {#if object.source.assetId}<Row {api} label="From file"><span class="from-file" title="Use the materials stored in the model file. Turn off to give the whole model one simple material."><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Use the model file’s materials" /></span></Row>{/if}
+    <div class="shots" role="group" aria-label="Model actions"><button type="button" class="chip" onclick={()=>studioEdit({operation:'drop_to_floor'},'Drop to Floor')}>Drop to Floor</button><button type="button" class="chip" onclick={()=>studioEdit({operation:"shot",shot:"turntable",duration:4},"Turntable")}>Turntable</button></div>
+    <Row {api} label="Source"><span class="k">{object.source.assetId?assetName(object.source.assetId) ?? 'Model':(object.source.primitive?PRIMITIVES.find(p=>p.id===object.source.primitive)?.label ?? object.source.primitive:null) ?? (object.source.lathe?'Lathe':object.source.extrude?'Extrusion':'Mesh')}</span></Row>
+    {#if object.source.assetId}<Row {api} label="From File"><span class="from-file" title="Use the materials stored in the model file. Turn off to give the whole model one simple material."><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Use the model file’s materials" /></span></Row>{/if}
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
       <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${swatches[finish.id]?'transparent':finish.p.color};${swatches[finish.id]?`background-image:url(${swatches[finish.id]});background-size:cover`:""}`} onclick={()=>studioEdit({operation:"apply_material",preset:finish.id},finish.label)}></button>{/each}</div>
@@ -100,7 +100,7 @@
     <Row {api} label="Type"><SelectField {api} get={()=>light.type} options={LIGHT_TYPES.map(t=>({v:t.id,label:t.label}))} edit={structural('update_light','type','Light type')} label="Light type" /></Row>
     {#each lightFields(light.type).filter(f=>!['x','y','z'].includes(f.key) && value(light,f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`light.${field.key}`} channel={value(light,field.key)} />{/each}
     {#if light.type==='environment' && light.world}<WorldSection {api} {ui} {layer} world={light.world} title="Environment" edit={environmentLightEdit} />{/if}
-    {#if light.type!=='ambient' && light.type!=='environment'}<Row {api} label="Cast shadows"><ToggleField {api} get={()=>light.castShadow} edit={structural('update_light','castShadow','Cast shadows')} label="Cast shadows" /></Row>{/if}
+    {#if light.type!=='ambient' && light.type!=='environment'}<Row {api} label="Casts Shadows"><ToggleField {api} get={()=>light.castShadow} edit={structural('update_light','castShadow','Casts Shadows')} label="Casts Shadows" /></Row>{/if}
   {:else if camera}
     <Section {api} title="Camera" />
     <Row {api} label="Projection"><SelectField {api} get={()=>camera.projection} options={[{v:'perspective',label:'Perspective'},{v:'orthographic',label:'Orthographic'}]} edit={structural('set_camera','projection','Camera projection')} label="Projection" /></Row>
@@ -117,13 +117,13 @@
       <WorldSection {api} {ui} layer={world} world={world.d.data.object.world} edit={(patch,label)=>{const r=api.scene3d.edit({operation:'set_world',patch},{label,origin:'inspector'});if(!r.ok)api.ui.toast(r.message,{error:true});api.transport.invalidate();}} />
     {:else}
       <Section {api} title="World" />
-      <div class="shots" role="group" aria-label="World"><button type="button" class="chip" onclick={()=>{addWorld(api);api.selection.select([layerId]);}}>Add sky</button></div>
+      <div class="shots" role="group" aria-label="World"><button type="button" class="chip" onclick={()=>{addWorld(api);api.selection.select([layerId]);}}>Add Sky</button></div>
     {/if}
     <Section {api} title="Shot" />
     <div class="shots" role="group" aria-label="Studio"><button type="button" class="chip" onclick={()=>studioEdit({operation:'auto_studio'},'Set up studio')}>Set up studio</button></div>
     <div class="shots" role="group" aria-label="Shots">{#each studio.shots.filter(shot=>shot.id!=='turntable') as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
     <Row {api} label="Final quality"><SelectField {api} get={()=>String(environment.samples ?? 64)} options={[{v:'16',label:'Draft · 16'},{v:'64',label:'Standard · 64'},{v:'256',label:'High · 256'},{v:'1024',label:'Best · 1024'}]} edit={{mode:'set',label:'Final quality',set:(v:unknown)=>edit('set_environment',{samples:Number(v)},'Final quality')}} label="Final quality" /></Row>
-    <Row {api} label="Studio set"><ToggleField {api} get={()=>!!environment.shadowCatcher} edit={{mode:'set',label:'Studio set',set:(v:unknown)=>studioEdit({operation:'set_studio',on:!!v},'Studio set')}} label="Studio set" /></Row>
+    <Row {api} label="Studio Set"><ToggleField {api} get={()=>!!environment.shadowCatcher} edit={{mode:'set',label:'Studio set',set:(v:unknown)=>studioEdit({operation:'set_studio',on:!!v},'Studio set')}} label="Studio set" /></Row>
     <Section {api} title="Scene" />
     {#each ENVIRONMENT_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}
     <Row {api} label="Shadows"><ToggleField {api} get={()=>environment.shadows} edit={structural('set_environment','shadows','Shadows')} label="Shadows" /></Row>

@@ -49,7 +49,20 @@ export async function importModelIntoScene(api:PowermoveAPI,supplied?:unknown,_l
       api.transport.invalidate();
       return {...result,data:{...result.data,result:(added.data as any)?.result}};
     }catch(error){api.edit.cancel();throw error;}
-  }catch(error){const message=error instanceof Error?error.message:String(error);api.ui.toast(message,{error:true});return {ok:false,message};}
+  }catch(error){const message=importFailureMessage(error,supplied);api.ui.toast(message,{error:true});return {ok:false,message};}
+}
+/** Parser internals ("Unexpected token … is not valid JSON", DataView offsets)
+ * mean nothing to the person importing. Say which file failed and why in their
+ * words; keep messages that were already written for people. */
+export function importFailureMessage(error:unknown,supplied?:unknown):string{
+  const raw=error instanceof Error?error.message:String(error);
+  const files=supplied instanceof File?[supplied]:Array.isArray(supplied)?supplied.filter((f):f is File=>f instanceof File):[];
+  const model=files.find(f=>MODEL_FILE.test(f.name)),name=model?.name;
+  if(!name)return raw;
+  const technical=error instanceof SyntaxError || error instanceof RangeError || error instanceof TypeError
+    || /JSON|Unexpected (token|end)|magic|DataView|offset|out of bounds|buffer|undefined|null|NaN|parse/i.test(raw);
+  if(technical)return `Couldn’t import ${name}. The file isn’t a readable ${name.split('.').pop()!.toUpperCase()} model — it may be damaged or incomplete.`;
+  return raw.includes(name)?raw:`Couldn’t import ${name}. ${raw.replace(/\.?$/,'.')}`;
 }
 export function duplicateItems(api:PowermoveAPI,_layerId?:unknown,ids?:string[]):boolean{return batch(api,ids || api.selection.layers(),'duplicate','Duplicate 3D layers');}
 export function removeItems(api:PowermoveAPI,_layerId?:unknown,ids?:string[]):boolean{return batch(api,ids || api.selection.layers(),'remove','Delete 3D layers');}

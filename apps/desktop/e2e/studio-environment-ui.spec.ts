@@ -69,7 +69,7 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   // The camera inspector shows the same World, so the sky is one click from the shot.
   await page.evaluate((id: string) => (window as any).PM.selectLayers([id]), ids.camera);
   await expect(page.getByRole('radiogroup', { name: 'Sky' })).toBeVisible();
-  await pick(page, 'Iris shape', '6 blades');
+  await pick(page, 'Iris Shape', '6 blades');
   await expect.poll(async () => (await objects(page)).find((l: any) => l.id === ids.camera).camera.p.irisShape.v).toBe(6);
   await page.locator('[data-scene-channel="camera.irisShape"]').scrollIntoViewIfNeeded();
   await shot(page, '05-camera-iris-and-world');
@@ -92,7 +92,7 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   expect(await shown(ids.cube)).toBe(false);
   await expect(page.getByLabel('Copies of', { exact: true }).first()).toBeAttached();
   const seed = scatter.object.scatter.p.seed.v;
-  await page.getByRole('button', { name: 'New variation' }).click();
+  await page.getByRole('button', { name: 'New Variation' }).click();
   await expect.poll(async () => (await objects(page)).find((l: any) => l.object?.scatter).object.scatter.p.seed.v).toBe(seed + 1);
   await shot(page, '07-scatter');
 

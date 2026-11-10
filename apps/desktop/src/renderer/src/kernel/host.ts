@@ -244,8 +244,10 @@ export function createExtensionAPI(
      out of the editor's error family, whatever the extension passed. */
   const extensionUI = {
     ...(deps.ui as UIAPI),
+    // Built-ins are part of the editor to the person using it: their notices
+    // speak as the app, never under an internal extension name.
     toast: (text: string, opts?: Parameters<UIAPI['toast']>[1]): void =>
-      deps.ui.toast(text, { ...opts, source: { id, name: manifest.name } } as Parameters<UIAPI['toast']>[1])
+      deps.ui.toast(text, record.scope === 'builtin' ? opts : { ...opts, source: { id, name: manifest.name } } as Parameters<UIAPI['toast']>[1])
   } as UIAPI;
 
   const collect = (disposable: Disposable): Disposable => {

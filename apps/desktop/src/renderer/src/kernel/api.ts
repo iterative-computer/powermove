@@ -762,7 +762,8 @@ export interface ModelAPI {
   normalizeFill(value: unknown, fallback?: string): Fill;
   layerDefinition(id: string): ExtensionLayerDefinition | undefined;
   /** What a layer is, as the interface names it: "World", "Terrain", "Environment Light", "Text"… with its icon. */
-  layerKind?(layer: Layer | null | undefined): { label: string; icon: string } | null;
+  /** `surrounds` marks a World, Ambient or Environment light: no place in the scene, so no Transform or parent. */
+  layerKind?(layer: Layer | null | undefined): { label: string; icon: string; surrounds?: boolean } | null;
   curComp(): Comp;
   layer(id: string): Layer | null;
   byName(name: string): Layer | null;

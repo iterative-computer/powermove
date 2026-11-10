@@ -28,6 +28,12 @@ export const VIEW_PANE_STYLES = `
   .viewer-pane-label:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
   .viewer-pane-label svg{width:8px;height:8px;color:var(--tx-3)}
   #stage > .viewer-pane-label{color:var(--tx)}
+  .viewer-pane-status{position:absolute;right:6px;bottom:6px;z-index:9;display:flex;align-items:center;gap:5px;height:20px;padding:0 7px;border-radius:var(--r-pill);
+    background:color-mix(in srgb,var(--bg-float) 88%,transparent);color:var(--tx-3);font:11px/20px var(--f-ui);white-space:nowrap;pointer-events:auto;cursor:default}
+  .viewer-pane-status[data-state="busy"]::before{content:'';width:8px;height:8px;border-radius:50%;border:1.5px solid var(--ink-3);border-top-color:var(--accent);animation:pm-pane-spin .8s linear infinite}
+  .viewer-pane-status[data-state="error"]{color:var(--danger,#E5484D)}
+  @keyframes pm-pane-spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.viewer-pane-status[data-state="busy"]::before{animation:none}}
 `;
 
 /** Pane rectangles inside the viewer's area, reading order. */
@@ -67,7 +73,10 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
   activeLabel.type = 'button';
   activeLabel.className = 'viewer-pane-label';
 
-  type PaneEl = { el: HTMLElement; canvas: HTMLCanvasElement; label: HTMLButtonElement; version: string; size: string };
+  /* `status`: side panes say what they show, as the main viewer's Refine pill
+     does — still drawing, catching up with an edit, a Live picture, or a view
+     Studio can't draw. They stay at Live quality; the selected view refines. */
+  type PaneEl = { el: HTMLElement; canvas: HTMLCanvasElement; label: HTMLButtonElement; status: HTMLElement; version: string; size: string; drawn: boolean; staleSince: number; failed: boolean };
   const panes = new Map<number, PaneEl>();
   let state: Views = scene.views.get();
   let rects: Rect[] = [];
@@ -110,12 +119,15 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
     const label = document.createElement('button');
     label.type = 'button';
     label.className = 'viewer-pane-label';
-    el.append(canvas, label);
+    const status = document.createElement('div');
+    status.className = 'viewer-pane-status';
+    status.setAttribute('role', 'status');
+    el.append(canvas, label, status);
     label.addEventListener('pointerdown', event => event.stopPropagation());
     label.addEventListener('click', event => { event.stopPropagation(); chooseView(index, label); });
     el.addEventListener('pointerdown', event => activate(index, event));
     container.append(el);
-    pane = { el, canvas, label, version: '', size: '' };
+    pane = { el, canvas, label, status, version: '', size: '', drawn: false, staleSince: performance.now(), failed: false };
     panes.set(index, pane);
     return pane;
   };
@@ -182,12 +194,26 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
       // Retina-sized Live pictures: Studio's Live tier traces fewer pixels and upscales.
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const w = Math.max(2, Math.round(fit.w * dpr)), h = Math.max(2, Math.round(fit.h * dpr)), size = `${w}x${h}`;
-      if (pane.size !== size) { pane.size = size; pane.canvas.width = w; pane.canvas.height = h; pane.version = ''; }
+      if (pane.size !== size) { pane.size = size; pane.canvas.width = w; pane.canvas.height = h; pane.version = ''; pane.drawn = false; pane.staleSince = performance.now(); }
     });
   };
 
   /* Poll every pane on the display link. Studio bounds each pane to one
      in-flight Live image; only changed pictures copy into the visible canvas. */
+  const showStatus = (pane: PaneEl) => {
+    // A brief wait after an edit is normal; only say "Updating" when it shows.
+    // An edit that doesn't change this view's picture never delivers a new
+    // frame: stop waiting for one after two seconds.
+    const elapsed = pane.staleSince > 0 ? performance.now() - pane.staleSince : 0;
+    if (pane.drawn && elapsed > 2000) pane.staleSince = 0;
+    const waiting = pane.staleSince > 0 && elapsed > 250;
+    const [state, text, title] = pane.failed ? ['error', 'Can’t draw', 'Studio couldn’t draw this view. The selected view and your export are unaffected']
+      : !pane.drawn ? ['busy', 'Rendering…', 'Studio is drawing this view']
+      : waiting ? ['busy', 'Updating…', 'Studio is redrawing this view after your change']
+      : ['live', 'Live', 'Side views draw at Live quality. Click a view to work in it; the selected view refines to your render quality'];
+    if (pane.status.dataset.state === state && pane.status.textContent === text) return;
+    pane.status.dataset.state = state; pane.status.textContent = text; pane.status.title = title;
+  };
   let raf = 0;
   const stats = { renders: 0, ms: 0 };
   runtime.viewPaneStats = stats;
@@ -200,10 +226,13 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
       try {
         picture = scene.views.render(index, pane.canvas.width, pane.canvas.height);
         outline = scene.views.selection(index, pane.canvas.width, pane.canvas.height);
-      } catch { picture = null; }
+        pane.failed = false;
+      } catch { picture = null; pane.failed = true; }
       // Redraw when the picture or the selection outline changed.
       const version = picture ? `${picture.version}|${outline.map(l => l.map(v => Math.round(v)).join(',')).join(';')}` : '';
+      showStatus(pane);
       if (!picture || version === pane.version) continue;
+      if (picture.version !== pane.version.split('|')[0]) { pane.drawn = true; pane.staleSince = 0; }
       const c = pane.canvas.getContext('2d');
       if (!c) continue;
       const bg = String((api.project.get() as any).bg ?? '#000000');
@@ -236,7 +265,12 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
         next.panes.every((pane, index) => pane.view === state.panes[index]?.view)) return;
     apply(); runtime.layout?.();
   });
-  const structure = api.events.on('project:changed', ({ kind }: any) => { if (kind !== 'values') apply(); });
+  const structure = api.events.on('project:changed', ({ kind }: any) => {
+    // Any edit makes every side picture out of date until its next frame lands.
+    const now = performance.now();
+    for (const pane of panes.values()) if (pane.drawn && !pane.staleSince) pane.staleSince = now;
+    if (kind !== 'values') apply();
+  });
   apply();
 
   return () => {
