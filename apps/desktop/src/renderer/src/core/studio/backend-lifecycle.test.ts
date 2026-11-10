@@ -13,7 +13,7 @@ import { registerStudioBackend, type StudioBackend } from '../scene3d/studio-bac
 import { SceneRuntime } from '../scene3d/runtime';
 import { disposeSceneRuntimes } from '../scene3d/service';
 import { createScene, createObject } from '../scene3d/schema';
-import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, studioPending } from './index';
+import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, studioPending,studioProgress,studioUnsettled } from './index';
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
 afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
@@ -152,9 +152,12 @@ it('plans all combined shutter times before resolving and denoises one shared fr
   const PM:any={proj:{layers:[{id:'a'},{id:'b'}]},time:0,_studioFinal:true,_studioPreparing:true,_studioShutterSamples:2,invalidate:vi.fn(),store:{get:()=> 'quality'}};
   const runtime=new SceneRuntime(),scene=createScene();scene.objects=[createObject('a'),createObject('b')];runtime.sync(scene);
   const draw=(time:number)=>studioLayer(PM,runtime,64,64,'a',new Set(['a','b']),true,runtime.camera,undefined,time);
+  const atmosphere=(density:number)=>({atmosphere:{density,color:{x:1,y:1,z:1},anisotropy:0,base_height:0,height_falloff:0,distance:100}});
+  Object.assign(runtime,{studioWorld:atmosphere(.1)});
   beginStudioCapture(PM);draw(0);await studioIdle(PM);
-  draw(0);draw(.01);flushStudioShutters(PM);await studioIdle(PM);
+  draw(0);Object.assign(runtime,{studioWorld:atmosphere(.2)});draw(.01);flushStudioShutters(PM);await studioIdle(PM);
   expect(batch).toHaveBeenCalledOnce();expect(batch.mock.calls[0]![0].map((s:any)=>s.time)).toEqual([0,.01]);
+  expect(batch.mock.calls[0]![0].map((s:any)=>s.scene.world.atmosphere.density)).toEqual([.1,.2]);
   expect(render).not.toHaveBeenCalled();expect(PM.Studio.status().declined).toBe('');PM._studioPreparing=false;
   expect(draw(0)?.canvas).toBeTruthy();expect(draw(.01)?.canvas).toBeTruthy();
   // Reusing one composition twice at distinct source times must not mix the
@@ -164,4 +167,19 @@ it('plans all combined shutter times before resolving and denoises one shared fr
   for(const time of [0,.01,.02,.03])draw(time);flushStudioShutters(PM);await studioIdle(PM);
   expect(batch).not.toHaveBeenCalled();expect(render).toHaveBeenCalledTimes(4);
   disposeSceneRuntimes(PM);runtime.dispose();
+});
+
+it('finishes bounded viewer Refine below the ceiling and restarts after a quality edit',async()=>{
+  let now=0;const clock=vi.spyOn(performance,'now').mockImplementation(()=>now),ticks:FrameRequestCallback[]=[],requests:any[]=[];
+  vi.stubGlobal('requestAnimationFrame',(cb:FrameRequestCallback)=>{ticks.push(cb);return ticks.length;});
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>{requests.push(r);return {source:document.createElement('canvas'),width:64,height:64,samples:r.tier==='refine'?8:1,version:`${r.tier}:${requests.length}`};},dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,draw}=fixture();PM._studioFinal=false;
+  try{
+    draw();await studioIdle(PM);draw();await studioIdle(PM);
+    now=1000;draw();await studioIdle(PM);draw();for(const tick of ticks.splice(0))tick(now);
+    expect(requests.filter(r=>r.tier==='refine')).toHaveLength(1);expect(requests.at(-1).samples).toBe(256);
+    expect(studioUnsettled(PM)).toBe(false);expect(studioProgress(PM)).toMatchObject({samples:8,goal:8,refining:false});
+    PM.proj={studioQuality:'draft'};draw();await studioIdle(PM);now=2000;draw();await studioIdle(PM);draw();
+    expect(requests.at(-1)).toMatchObject({tier:'refine',samples:16});expect(studioUnsettled(PM)).toBe(false);
+  }finally{disposeSceneRuntimes(PM);clock.mockRestore();}
 });

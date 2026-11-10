@@ -317,7 +317,7 @@ shared shutter accumulation so quiet pixels cannot miss later motion times.
 Unblurred Final/Refine still use the noise threshold. Caustic-free scenes skip
 photons; Production builds a stable photon estimate before tracing and keeps
 it through camera-only changes, invalidating it on scene or texture edits.
-Temporal image reuse is disabled for exports.
+Temporal denoiser history is disabled for exports.
 
 Perspective and orthographic cameras both use Studio, including camera zoom
 and near/far clipping. The macOS app uses a native Metal renderer through

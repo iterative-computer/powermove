@@ -889,7 +889,7 @@ readback or encoding. Saved quality uses one-sample GPU submissions and
 explicit floors override the legacy caustic minimum. Production's stable
 photon prepass allows adaptive pixels to finish without a hidden 512-sample
 floor; Final (Max) keeps progressive photon sampling. Scene changes invalidate
-the map. Export temporal image reuse is disabled.
+the map. Export temporal denoiser history is disabled.
 
 The overall production decision remains **not ready to ship**. The new presets
 make quality selectable; they do not waive the native-resolution appearance,

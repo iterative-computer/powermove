@@ -21,7 +21,7 @@ type Job = {
   backend: StudioBackend; ready: boolean; disposed:boolean; chain: Promise<void> | null;
   frames: Map<string, StudioFrame>; pending: Map<string, Promise<void>>;
   screens: { layer: number; comp: string }[]; screenKey: string;
-  changedAt: number; usedAt: number; refining: boolean; samples: number; refineGoal:number;qualityGoal:number; generation: number;
+  changedAt: number; usedAt: number; refining: boolean; samples: number; refineGoal:number;qualityGoal:number;qualityKey?:string;qualityComplete?:boolean; generation: number;
   factoryRevision: number; completedGeneration: number; failure: string | null;
   /** '' for the viewer's own view; another viewer pane's slot otherwise. Pane views stay Live and never refine. */
   slot: string;
@@ -79,11 +79,11 @@ export function setStudioPreview(PM: any, q: StudioPreview): void {
 }
 export function onStudioPreview(PM: any, listener: (q: StudioPreview) => void): () => void { const s = state(PM); s.previewListeners.add(listener); return () => s.previewListeners.delete(listener); }
 export function studioPreviewKey(PM: any): string { const s = states.get(PM); return `${s?.enabled}:${s?.preview}:${s?.revision}:${studioBackendRevision()}:${studioGpuGeneration()}`; }
-export function studioUnsettled(PM: any): boolean { const s = states.get(PM); return !!s && [...s.jobs.values()].some(j => !j.slot && (j.pending.size || j.completedVersion&&j.completedVersion!==j.presentedVersion || s.preview === 'quality' && j.samples < j.qualityGoal)); }
+export function studioUnsettled(PM: any): boolean { const s = states.get(PM); return !!s && [...s.jobs.values()].some(j => !j.slot && (j.pending.size || j.completedVersion&&j.completedVersion!==j.presentedVersion || s.preview === 'quality' && !j.qualityComplete && j.samples < j.qualityGoal)); }
 function preparingOf(s: State): StudioPending | null { if (!s.preparing.size) return null; return [...s.preparing.values()].reduce((a, p) => ({ pending: a.pending + p.pending, total: a.total + p.total }), { pending: 0, total: 0 }); }
 export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean; preparing?: StudioPending } | null {
   const s = state(PM), preparing = preparingOf(s); if (preparing) return { samples: 0, goal: qualityForComposition(PM).maxSamples, refining: false, preparing };
-  if (s.preview === 'fast') return null; for (const j of s.jobs.values()) if (!j.slot) return { samples: j.samples, goal: j.qualityGoal, refining: j.refining }; return null;
+  if (s.preview === 'fast') return null; for (const j of s.jobs.values()) if (!j.slot) return { samples: j.samples, goal: j.qualityComplete ? Math.max(1,j.samples) : j.qualityGoal, refining: j.refining }; return null;
 }
 
 export function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camera'] | null {
@@ -190,8 +190,8 @@ function schedule(PM: any): void {
     s.tick = null; let more = false;
     for (const j of s.jobs.values()) {
       if (j.slot || PM.playing || j.failure || performance.now() - j.usedAt > 2000) continue;
-      if (j.samples >= j.qualityGoal) { j.refining = false; continue; }
-      if (performance.now() - j.changedAt >= REFINE_DELAY_MS) {j.refining = true;if(!j.pending.size && j.samples>=j.refineGoal)j.refineGoal=Math.min(j.qualityGoal,Math.max(32,j.refineGoal+32));}
+      if (j.qualityComplete || j.samples >= j.qualityGoal) { j.refining = false; continue; }
+      if (performance.now() - j.changedAt >= REFINE_DELAY_MS) j.refining = true;
       more = true;
     }
     if (more) { PM.invalidate?.('render'); schedule(PM); }
@@ -209,7 +209,7 @@ function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: stri
   if (job.pending.has(key) || !job.ready) return null;
   if(capture && PM._studioPreparing && sample && !request.layer && request.background && (PM._studioShutterSamples || 1)>1 && job.backend.renderShutter && job.backend.shutterAccumulation!==false){
     const batches:NonNullable<Capture['batches']>=capture.batches ??= new Map();const batch=batches.get(job) ?? [];
-    if(!batch.some(item=>item.captureKey===captureKey))batch.push({sample,captureKey,key,count:PM._studioShutterSamples});
+    if(!batch.some(item=>item.captureKey===captureKey))batch.push({sample:{...sample,scene:{...sample.scene}},captureKey,key,count:PM._studioShutterSamples});
     batches.set(job,batch);return null;
   }
   // Input may advance several times before one native frame completes. Keep
@@ -231,6 +231,7 @@ function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: stri
     // Captures already own immutable snapshots of their shutter samples.
     const prefix = `${request.layer ?? ''}:`;
     for (const [oldKey, old] of job.frames) if (oldKey.startsWith(prefix) && oldKey !== key) { old.release?.(); job.frames.delete(oldKey); }
+    if(request.tier==='refine' && request.samples>=job.qualityGoal){job.qualityComplete=true;job.refining=false;}
     job.frames.set(key, frame); job.completedVersion=frame.version;job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); if(!job.slot){state(PM).frames++;if(!job.synchronous){state(PM).backend=job.backend.id;state(PM).frameSamples=frame.samples;}}
   };
   try {
@@ -345,7 +346,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
       s.jobs.set(setKey, created);
     }
     job.failure=null;job.sceneKey = sceneKey; job.scene = extracted; job.maps = maps; job.screens = screens; job.screenKey = screenKey;
-    job.viewKey = ''; job.samples = 0; job.refineGoal=0; job.refining = false; job.changedAt = performance.now(); job.generation++;
+    job.viewKey = ''; job.samples = 0; job.qualityComplete=false; job.refineGoal=0; job.refining = false; job.changedAt = performance.now(); job.generation++;
     const view = viewOf(runtime, cam, extracted.bounds), current = job;
     queueInput(job,'scene', () => current.backend.setPreparedScene ? current.backend.setPreparedScene(extracted, maps, () => describePreparedScene(extracted, view, maps)) : current.backend.setScene(describePreparedScene(extracted, view, maps)), PM);
     }
@@ -357,19 +358,21 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   if (job.viewKey !== viewKey) {
     if([...job.pending.keys()].some(key=>key.includes(':refine:')))job.backend.cancelRefine?.();
     job.failure=null;
-    job.viewKey = viewKey; job.samples = 0; job.refineGoal=0; job.refining = false; job.changedAt = performance.now(); job.generation++;
+    job.viewKey = viewKey; job.samples = 0; job.qualityComplete=false; job.refineGoal=0; job.refining = false; job.changedAt = performance.now(); job.generation++;
     const current = job;job.currentView=view;
     queueInput(job,'view', () => current.backend.setView ? current.backend.setView(view) : current.backend.setCamera(describeCamera(view).camera, describeCamera(view).options), PM);
     queueInput(job,'time', () => current.backend.setTime(time), PM);
   }
   if (job.failure) throw new Error(job.failure);
+  const savedQuality=qualityForComposition(PM), qualityKey=JSON.stringify(savedQuality);
+  if(job.qualityKey!==qualityKey){if([...job.pending.keys()].some(key=>key.includes(':refine:')))job.backend.cancelRefine?.();job.qualityKey=qualityKey;job.qualityComplete=false;job.samples=0;job.refineGoal=0;job.changedAt=performance.now();job.generation++;}
+  job.qualityGoal=savedQuality.maxSamples;
   const tier = PM._studioRefineCapture ? 'refine' : final || still ? 'final' : !slot && job.frames.size>0 && s.preview === 'quality' && performance.now() - job.changedAt >= REFINE_DELAY_MS && !PM.playing ? 'refine' : 'live';
-  // Reach the clean-preview budget in one OIDN pass. Tiny four-sample steps
-  // repeatedly ran the full denoiser before the first 32-sample image existed.
-  if(tier==='refine' && job.refineGoal===0)job.refineGoal=32;
+  // One bounded quality request owns one denoiser finish. A noise/deadline
+  // stop completes Refine even when it used fewer samples than the ceiling.
+  if(tier==='refine' && job.refineGoal===0)job.refineGoal=savedQuality.maxSamples;
   // Immediate legacy readbacks retain their small synchronous preview. Agent
   // stills and exports prepare quality captures and consume those above.
-  const savedQuality=qualityForComposition(PM);job.qualityGoal=savedQuality.maxSamples;
   const quality = shutterQuality(savedQuality, final ? PM._studioShutterSamples : 1);
   const samples = PM._studioRefineCapture || (final ? quality.maxSamples : still ? (synchronous ? 4 : quality.maxSamples) : tier === 'refine' ? Math.min(job.refineGoal, quality.maxSamples) : 1);
   // Native Live owns tracing resolution and MetalFX upscaling. Its requested

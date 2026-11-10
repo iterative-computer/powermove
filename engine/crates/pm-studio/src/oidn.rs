@@ -245,6 +245,10 @@ impl Denoiser {
             oidnSetFilterFloat(f.beauty, name("inputScale").as_ptr(), f32::NAN);
         }
         for color in colors {
+            // Closed rooms and visible skies often have exactly unit catcher
+            // shading. Preserve a constant RGB layer instead of filtering it.
+            let constant=[color[0],color[1],color[2]];
+            if constant.iter().all(|v|v.is_finite()) && color.chunks_exact(stride).take(pixels).all(|p|p[..3]==constant) {continue;}
             bind(f.beauty, "color", color.as_mut_ptr(), stride);
             execute(f.beauty)?;
             for i in 0..pixels {
@@ -265,6 +269,19 @@ impl Drop for Denoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_constant_layer_is_exact_while_its_noisy_companion_is_filtered() {
+        let (w,h)=(32,24);let expected=0.5;
+        let mut color:Vec<f32>=(0..w*h).flat_map(|i|{let v=if i%2==0 {0.3} else {0.7};[v,v,v,0.25]}).collect();
+        let mut shade=vec![1.;w*h*4];let original_shade=shade.clone();
+        let albedo=vec![0.5;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
+        let error=|pixels:&[f32]|pixels.chunks_exact(4).map(|p|(p[0]-expected).powi(2)).sum::<f32>();
+        let before=error(&color);
+        Denoiser::new().unwrap().run_layers_interruptible(&mut [&mut color,&mut shade],&albedo,&normal,4,w,h,None).unwrap();
+        assert_eq!(shade,original_shade);assert!(error(&color)<before*0.3);
+        assert!(color.chunks_exact(4).all(|p|p[3]==0.25));
+    }
 
     #[test]
     fn changing_quality_on_cached_filters_matches_a_fresh_filter() {

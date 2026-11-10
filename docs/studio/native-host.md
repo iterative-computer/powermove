@@ -746,3 +746,9 @@ nice -n 10 python3 engine/tools/render-quality.py \
   --references /absolute/path/to/audited-raw-references \
   --sequence 8 --timing-runs 3 --check
 ```
+
+Viewer Refine submits the selected ceiling once, stops on the same noise/time
+policy and reports completion even when fewer samples were needed. A quality
+edit resets that completion state and cancels an older Refine. Constant RGB
+layers (notably unit catcher shading in closed rooms/skies) bypass the redundant
+OIDN color pass; noisy companion layers and both auxiliary prefilters still run.
