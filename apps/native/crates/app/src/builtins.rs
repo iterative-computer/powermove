@@ -250,7 +250,14 @@ impl Controller {
             self.opening_name = None;
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
-            for (name, args) in std::mem::take(&mut self.after_open) {
+            // Bound to the open that brought `project`: they run only if this
+            // window still shows it.
+            let shown = self.session.as_ref().is_some_and(|s| s.project == project);
+            let (run, dropped) = self.after_open.settle(self.settling_open, shown);
+            if let Some(note) = dropped {
+                self.message = note;
+            }
+            for (name, args) in run {
                 self.host.borrow().send_command(&name, args);
             }
         }

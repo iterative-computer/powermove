@@ -1,3 +1,4 @@
+mod after_open;
 mod alert;
 mod builtins;
 #[cfg(test)]

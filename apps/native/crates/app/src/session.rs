@@ -62,9 +62,11 @@ pub struct Controller {
     pub settling: Option<String>,
     /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
     pub(crate) open_timer: crate::diag::OpenTimer,
-    /// Project commands asked for while the project was arriving; they run
-    /// once it has settled (`settled`), or go with a failed open.
-    pub(crate) after_open: Vec<(String, Vec<serde_json::Value>)>,
+    /// Project commands asked for while the project was arriving, bound to
+    /// that open: they run once it has settled here (`settled`).
+    pub(crate) after_open: crate::after_open::AfterOpen,
+    /// The open whose project is settling.
+    pub(crate) settling_open: u64,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -429,7 +431,8 @@ impl Controller {
             opening_name: None,
             settling: None,
             open_timer: Default::default(),
-            after_open: Vec::new(),
+            after_open: Default::default(),
+            settling_open: 0,
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -1106,9 +1109,14 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
+        // Commands still waiting on an earlier open never reach this project.
+        let (open, dropped) = self.after_open.begin(&name);
         self.opening = true;
         self.busy = Some(crate::platform::Busy::begin("Opening a project"));
-        self.message = format!("Opening “{name}”…");
+        self.message = dropped.map_or_else(
+            || format!("Opening “{name}”…"),
+            |note| format!("{note} Opening “{name}”…"),
+        );
         self.opening_name = Some(name.clone());
         self.open_timer.begin();
         cx.notify();
@@ -1161,13 +1169,14 @@ impl Controller {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
                     _ => None,
                 };
+                v.settling_open = open;
                 // Held until the panels have drawn the project (`settled`).
                 if v.settling.is_none() {
                     v.opening_name = None;
                     v.busy = None;
                     // No project arrived; its open failure says why.
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
-                        v.after_open.clear();
+                        v.after_open.fail();
                     }
                 }
                 match result {
@@ -1632,7 +1641,7 @@ impl Controller {
         if (self.opening || self.settling.is_some())
             && crate::layer_commands::waits_for_project(&cmd.name)
         {
-            self.after_open.push((cmd.name.clone(), cmd.args.clone()));
+            self.after_open.defer(cmd.name.clone(), cmd.args.clone());
             return true;
         }
         if self.extension_command(cmd, cx) {
