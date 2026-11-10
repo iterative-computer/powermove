@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /** Shared editable-model helpers available to built-in and forked extensions. */
 export { isProperty, canAnimateContent, resolveContent, contentLabel, evaluatedValue } from '../legacy/core/content-properties';
 export { makeVectorPath, makeVertex, structuredProperties, pathValues, groupMatrix, tracePath, pathTargets } from '../legacy/core/vector-paths';

@@ -230,9 +230,9 @@ test("review 4: density uses native-relative lengths for both schemes and access
   for (const source of natives) {
     const input = structuredClone(source);
     for (const [density, expected] of [
-      ["normal", [28, 6, 32, 28, 12, 13]],
-      ["compact", [24, 4, 26, 24, 9, 12]],
-      ["comfy", [32, 8, 36, 30, 14, 14]],
+      ["normal", [28, 6, 38, 28, 12, 13]],
+      ["compact", [24, 4, 32, 24, 9, 12]],
+      ["comfy", [32, 8, 42, 30, 14, 14]],
     ]) {
       const values = variables(
         createCompatEdition(input, { workspace: { density } }),
@@ -249,8 +249,8 @@ test("review 4: density uses native-relative lengths for both schemes and access
     input.metrics.inset += 10;
     input.typography.title += 10;
     for (const [density, expected] of [
-      ["compact", [34, 14, 36, 34, 19, 22]],
-      ["comfy", [42, 18, 46, 40, 24, 24]],
+      ["compact", [34, 14, 42, 34, 19, 22]],
+      ["comfy", [42, 18, 52, 40, 24, 24]],
     ]) {
       const values = variables(
         createCompatEdition(input, { workspace: { density } }),
@@ -326,7 +326,7 @@ test("density, source specificity, inline/workspace, important and radius alias 
   assert.equal(values["--bg-panel"], "#1a1a1a"); // dark specificity beats later :root
   assert.equal(values["--row-h"], "24px");
   assert.equal(scalar(values["--r-lg"]).value, 24);
-  assert.equal(scalar(values["--r-sm"]).value, 12);
+  assert.equal(scalar(values["--r-sm"]).value, 18);
   assert.equal(result.surfaces.panel.base.style.background, "#123456");
   assert.equal(result.surfaces.panel.base.style.padding, "7px");
   assert.equal(edition.rootAttributes["data-corpus"], "enabled");
@@ -600,7 +600,7 @@ test("accessibility modes compose and preserve explicit authored colours", () =>
   assert.equal(values["--line-strong"], values["--line"]);
   assert.equal(values["--dur-1"], "75ms"); // existing extension media/motion rules remain in charge
   assert.equal(values["--hairline"], "0.5px");
-  assert.equal(values["--focus-ring"], "0 0 0 2px #123456,0 0 0 5px #ffa073");
+  assert.equal(values["--focus-ring"], "0 0 0 2px #123456,0 0 0 5px #e0e0e0");
 });
 
 test("bad native inputs and unresolved fixed scheme fail visibly", () => {

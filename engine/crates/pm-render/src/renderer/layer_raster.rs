@@ -302,7 +302,12 @@ impl Renderer {
         let geometry = pm_vector::shape::shape_geometry(&content)
             .map_err(|e| RenderError::Request(e.to_string()))?;
         let mut scene = pm_vector::render::scene::CoverageScene::default();
-        scene.push_shape(&geometry, g.shape_to_pixels(), &colors.color, &colors.stroke_color);
+        scene.push_shape(
+            &geometry,
+            g.shape_to_pixels(),
+            &colors.color,
+            &colors.stroke_color,
+        );
         let canvas = (g.width as u32, g.height as u32);
         let pixels = self.paint_scene(scene, canvas, precision)?;
         let s = g.selection;

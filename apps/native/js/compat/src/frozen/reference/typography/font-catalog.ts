@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 export interface FontAxis { tag: string; label: string; min: number; max: number; default: number }
 /** One installed face, named as the font names it (for example "Italic" or "Bold Condensed"). */
 export interface FontStyle { name: string; weight: number; italic: boolean }

@@ -11,7 +11,7 @@
         "reduce_motion": false
       },
       "file": "light.css",
-      "sha256": "97d708b34a71a22cf7b3eebe6c1ee757339e9c74ea9c08d909a3b603eeac3173"
+      "sha256": "eb7d90c1e3905a912eee5b578bbc7bc397a4f7baee48b7594dbf5b088ede8b51"
     },
     {
       "id": "compat-v1/light-solid",
@@ -22,7 +22,7 @@
         "reduce_motion": false
       },
       "file": "light-solid.css",
-      "sha256": "e27f30308f319560e50479120d4bda969813882d498a56eb59370b58a87af8a8"
+      "sha256": "fcfbfcb450d2ea3223f53aed34b037cf7b69d966b36a08372f0e89faa0e386a1"
     },
     {
       "id": "compat-v1/light-contrast",
@@ -33,7 +33,7 @@
         "reduce_motion": false
       },
       "file": "light-contrast.css",
-      "sha256": "e104ac712fa692c79a4aae41bce1a46774ee691334859fe7b272e800f7241a73"
+      "sha256": "45b6713cc1c238f149f0916fa4e92f97b26c8e3a54516720b7c847af6a97c134"
     },
     {
       "id": "compat-v1/light-contrast-solid",
@@ -44,7 +44,7 @@
         "reduce_motion": false
       },
       "file": "light-contrast-solid.css",
-      "sha256": "242c3f45c089997db9f4dd6d42a4d4214c4e6f598b88b923bd46d4c7066ef0df"
+      "sha256": "b04a203135491d862c01a34a5a5aa50036a5f9db533aac311b483756b9c6874f"
     },
     {
       "id": "compat-v1/dark",
@@ -55,7 +55,7 @@
         "reduce_motion": false
       },
       "file": "dark.css",
-      "sha256": "ef7754c458ab7ecf972041a0c88a498b74f44a34276ebfbdfcf275a4e9066766"
+      "sha256": "cf56a6304b473816ce4a82898a02c229044ea9534dfe97a99993b18cbc16acb6"
     },
     {
       "id": "compat-v1/dark-solid",
@@ -66,7 +66,7 @@
         "reduce_motion": false
       },
       "file": "dark-solid.css",
-      "sha256": "e2e4585e92aeedce8b759b5995e59063f3c9dd7d1ae9893e33394c8d83922e0e"
+      "sha256": "f2e2ea32cfcfde50829e24620b0ec7bed9f69d481a70269515a23b6989e7e478"
     },
     {
       "id": "compat-v1/dark-contrast",
@@ -77,7 +77,7 @@
         "reduce_motion": false
       },
       "file": "dark-contrast.css",
-      "sha256": "0341ed1d2a86017034fb3fc962db6819592ecf21e27464ca889808047fb5dcc6"
+      "sha256": "e30b6a902763223f146a404f009e38199e652e622575ed1cf86d09b90759d438"
     },
     {
       "id": "compat-v1/dark-contrast-solid",
@@ -88,7 +88,7 @@
         "reduce_motion": false
       },
       "file": "dark-contrast-solid.css",
-      "sha256": "4575071057a0ef96a2f95629ea15374f69ae6e7565a63be097de79ed796e934d"
+      "sha256": "b18f6f85f540046a6cecf1b95e7611fa1c1ad0e3701f3b0ab4a0403d207b0010"
     }
   ]
 }

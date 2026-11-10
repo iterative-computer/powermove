@@ -207,9 +207,8 @@ fn upload_bytes(
             return (wgpu::TextureFormat::Rgba32Float, bytes, 16);
         }
         static VALUES: OnceLock<[[u8; 2]; 256]> = OnceLock::new();
-        let values = VALUES.get_or_init(|| {
-            std::array::from_fn(|v| f16_bits(v as f32 / 255.0).to_le_bytes())
-        });
+        let values = VALUES
+            .get_or_init(|| std::array::from_fn(|v| f16_bits(v as f32 / 255.0).to_le_bytes()));
         let mut bytes = Vec::with_capacity(channels * 2);
         for &value in raster.data.iter().take(channels) {
             bytes.extend_from_slice(&values[value as usize]);

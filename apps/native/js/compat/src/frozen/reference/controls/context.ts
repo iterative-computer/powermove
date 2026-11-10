@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { getContext, setContext } from 'svelte';
 
 const ROW_LABEL = Symbol('powermove-control-row-label');

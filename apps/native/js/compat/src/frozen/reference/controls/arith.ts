@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /**
  * Evaluate the deliberately tiny arithmetic language accepted by numeric
  * controls. The parser consumes the complete input and never executes source.

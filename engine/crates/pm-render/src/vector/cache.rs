@@ -60,18 +60,25 @@ impl ScenePage {
     /// of `bytes` coverage values.
     fn growth(&self, device: &wgpu::Device, width: u32, height: u32, bytes: u64) -> u64 {
         let limits = device.limits();
-        let value_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
+        let value_limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
         let mut grown = 0;
         let mut value_capacity = self.value_capacity;
         if bytes > value_capacity {
-            value_capacity = crate::coverage::bounded_capacity(bytes, 16, value_limit).unwrap_or(bytes);
+            value_capacity =
+                crate::coverage::bounded_capacity(bytes, 16, value_limit).unwrap_or(bytes);
             grown += value_capacity;
         }
         if width > self.width || height > self.height {
             let wide = (self.width.max(width), self.height.max(height));
             let wide_bytes = u64::from(wide.0) * u64::from(wide.1) * 4;
             let room = MAX_SCENE_SCRATCH_BYTES.saturating_sub(value_capacity);
-            grown += if wide_bytes <= room { wide_bytes } else { u64::from(width) * u64::from(height) * 4 };
+            grown += if wide_bytes <= room {
+                wide_bytes
+            } else {
+                u64::from(width) * u64::from(height) * 4
+            };
         }
         grown
     }
@@ -79,14 +86,27 @@ impl ScenePage {
     /// Grows the page for `width` × `height` and `bytes` coverage values;
     /// returns the bytes of what it replaced (still held by commands that
     /// recorded it).
-    fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32, bytes: u64) -> Result<u64, String> {
+    fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        bytes: u64,
+    ) -> Result<u64, String> {
         let limits = device.limits();
-        let value_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
+        let value_limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
         if bytes > value_limit {
-            return Err(format!("coverage values need {bytes} bytes, binding limit {value_limit}"));
+            return Err(format!(
+                "coverage values need {bytes} bytes, binding limit {value_limit}"
+            ));
         }
         if width > limits.max_texture_dimension_2d || height > limits.max_texture_dimension_2d {
-            return Err(format!("coverage page {width}x{height} exceeds texture limit {}", limits.max_texture_dimension_2d));
+            return Err(format!(
+                "coverage page {width}x{height} exceeds texture limit {}",
+                limits.max_texture_dimension_2d
+            ));
         }
         let mut released = 0;
         if bytes > self.value_capacity {
@@ -101,11 +121,13 @@ impl ScenePage {
             let room = MAX_SCENE_SCRATCH_BYTES.saturating_sub(self.value_capacity);
             // Reuse the larger rectangle while it fits the scratch cap.
             // Crossing two narrow dimensions must not allocate a huge square.
-            (self.width, self.height) = if grown_bytes <= room { grown } else { (width, height) };
-            let texture = device.create_texture(&crate::coverage::page_descriptor(
-                self.width,
-                self.height,
-            ));
+            (self.width, self.height) = if grown_bytes <= room {
+                grown
+            } else {
+                (width, height)
+            };
+            let texture =
+                device.create_texture(&crate::coverage::page_descriptor(self.width, self.height));
             self.view = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             self.texture = Some(texture);
         }
@@ -134,8 +156,15 @@ struct UploadSlots {
 
 impl UploadSlots {
     fn bytes(&self) -> u64 {
-        self.inputs.iter().map(InputScratch::capacity_bytes).sum::<u64>()
-            + self.paints.iter().map(|(_, capacity)| capacity).sum::<u64>()
+        self.inputs
+            .iter()
+            .map(InputScratch::capacity_bytes)
+            .sum::<u64>()
+            + self
+                .paints
+                .iter()
+                .map(|(_, capacity)| capacity)
+                .sum::<u64>()
     }
 
     /// The next encoder starts: slots are reused from the first, and those
@@ -182,10 +211,16 @@ impl UploadSlots {
     fn next_paint(&mut self, device: &wgpu::Device, bytes: u64) -> Result<usize, String> {
         let limit = device.limits().max_buffer_size;
         if bytes > limit {
-            return Err(format!("paint data needs {bytes} bytes, buffer limit {limit}"));
+            return Err(format!(
+                "paint data needs {bytes} bytes, buffer limit {limit}"
+            ));
         }
         let at = self.paints_used;
-        if self.paints.get(at).is_none_or(|(_, capacity)| *capacity < bytes) {
+        if self
+            .paints
+            .get(at)
+            .is_none_or(|(_, capacity)| *capacity < bytes)
+        {
             let capacity = crate::coverage::bounded_capacity(bytes, 256, limit)?;
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pm vector pooled paint data"),
@@ -261,7 +296,10 @@ impl SceneOutlines {
         let placement = Affine::new([a / scale, b / scale, c / scale, d / scale, tx, ty]);
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.used = self.tick;
-            return SceneOutline { path: Arc::clone(&entry.path), transform: placement };
+            return SceneOutline {
+                path: Arc::clone(&entry.path),
+                transform: placement,
+            };
         }
         let canonical = Arc::new(match self.prepared.remove(&key) {
             Some(outline) => outline,
@@ -271,11 +309,8 @@ impl SceneOutlines {
             + canonical.elements().len().max(4).next_power_of_two() * size_of::<PathEl>()
             + size_of::<Arc<BezPath>>()) as u64;
         if bytes <= Self::MAX_BYTES {
-            while self.bytes + bytes > Self::MAX_BYTES
-                || self.entries.len() >= Self::MAX_ENTRIES
-            {
-                let Some(oldest) = self.entries.values().map(|entry| entry.used).min()
-                else {
+            while self.bytes + bytes > Self::MAX_BYTES || self.entries.len() >= Self::MAX_ENTRIES {
+                let Some(oldest) = self.entries.values().map(|entry| entry.used).min() else {
                     break;
                 };
                 let mut removed_bytes = None;
@@ -290,13 +325,19 @@ impl SceneOutlines {
                 self.bytes -= removed_bytes.expect("oldest outline entry exists");
             }
             self.bytes += bytes;
-            self.entries.insert(key, OutlineEntry {
-                path: Arc::clone(&canonical),
-                used: self.tick,
-                bytes,
-            });
+            self.entries.insert(
+                key,
+                OutlineEntry {
+                    path: Arc::clone(&canonical),
+                    used: self.tick,
+                    bytes,
+                },
+            );
         }
-        SceneOutline { path: canonical, transform: placement }
+        SceneOutline {
+            path: canonical,
+            transform: placement,
+        }
     }
 }
 
@@ -362,10 +403,25 @@ fn outline_key(item: &CoverageItem, scale: f64) -> Vec<u64> {
     };
     for el in item.path.elements() {
         match *el {
-            PathEl::MoveTo(p) => { key.push(0); point(&mut key, p); }
-            PathEl::LineTo(p) => { key.push(1); point(&mut key, p); }
-            PathEl::QuadTo(p, q) => { key.push(2); point(&mut key, p); point(&mut key, q); }
-            PathEl::CurveTo(p, q, r) => { key.push(3); point(&mut key, p); point(&mut key, q); point(&mut key, r); }
+            PathEl::MoveTo(p) => {
+                key.push(0);
+                point(&mut key, p);
+            }
+            PathEl::LineTo(p) => {
+                key.push(1);
+                point(&mut key, p);
+            }
+            PathEl::QuadTo(p, q) => {
+                key.push(2);
+                point(&mut key, p);
+                point(&mut key, q);
+            }
+            PathEl::CurveTo(p, q, r) => {
+                key.push(3);
+                point(&mut key, p);
+                point(&mut key, q);
+                point(&mut key, r);
+            }
             PathEl::ClosePath => key.push(4),
         }
     }
@@ -376,10 +432,18 @@ fn outline_key(item: &CoverageItem, scale: f64) -> Vec<u64> {
         ItemStyle::Stroke(stroke) => {
             key.push(7);
             key.push(stroke.width.to_bits());
-            key.push(match stroke.join { Join::Bevel => 0, Join::Miter => 1, Join::Round => 2 });
+            key.push(match stroke.join {
+                Join::Bevel => 0,
+                Join::Miter => 1,
+                Join::Round => 2,
+            });
             key.push(stroke.miter_limit.to_bits());
             for cap in [stroke.start_cap, stroke.end_cap] {
-                key.push(match cap { Cap::Butt => 0, Cap::Square => 1, Cap::Round => 2 });
+                key.push(match cap {
+                    Cap::Butt => 0,
+                    Cap::Square => 1,
+                    Cap::Round => 2,
+                });
             }
             key.push(stroke.dash_pattern.len() as u64);
             key.extend(stroke.dash_pattern.iter().map(|v| v.to_bits()));
@@ -681,7 +745,11 @@ impl VectorCache {
         if self.scene_scratch_bytes() > budget {
             self.clear_scene_scratch();
         }
-        self.evict(budget.saturating_sub(self.scene_scratch_bytes()), self.max_entries, true);
+        self.evict(
+            budget.saturating_sub(self.scene_scratch_bytes()),
+            self.max_entries,
+            true,
+        );
     }
 
     fn scene_scratch_bytes(&self) -> u64 {
@@ -828,7 +896,10 @@ impl VectorCache {
                         format!("SVG {feature} is drawn by resvg"),
                         pm_perf::Counter::SvgFallbackFeature,
                     )
-                } else if !device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+                } else if !device
+                    .features()
+                    .contains(wgpu::Features::FLOAT32_BLENDABLE)
+                {
                     (
                         "GPU lacks FLOAT32_BLENDABLE".to_owned(),
                         pm_perf::Counter::SvgFallbackDevice,
@@ -851,7 +922,14 @@ impl VectorCache {
                             .expect("FLOAT32_BLENDABLE was checked")
                     });
                     if let Some((texture, bytes)) = painter.render(
-                        device, queue, &mut encoder, &doc, transform, *rect, &clip, precision,
+                        device,
+                        queue,
+                        &mut encoder,
+                        &doc,
+                        transform,
+                        *rect,
+                        &clip,
+                        precision,
                     )? {
                         queue.submit([encoder.finish()]);
                         self.svg_fallback_reason = None;
@@ -949,7 +1027,9 @@ impl VectorCache {
         let sampler = self
             .svg_sample
             .get_or_insert_with(|| super::svg_sample::SvgSample::new(device));
-        Ok(sampler.render(device, queue, &source, &plan, transform, rect, clip, precision))
+        Ok(sampler.render(
+            device, queue, &source, &plan, transform, rect, clip, precision,
+        ))
     }
 
     /// Caches a new texture under `key`, making room first.
@@ -1001,15 +1081,25 @@ impl VectorCache {
         precision: Precision,
     ) -> Result<(wgpu::Texture, u64), String> {
         let limits = device.limits();
-        let value_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
-        let max_side = limits.max_texture_dimension_2d
+        let value_limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
+        let max_side = limits
+            .max_texture_dimension_2d
             .min(8192)
             .min((value_limit / 4).isqrt().min(u64::from(u32::MAX)) as u32);
         if max_side < 16 {
-            return Err(format!("coverage page limit {max_side} is below minimum tile size"));
+            return Err(format!(
+                "coverage page limit {max_side} is below minimum tile size"
+            ));
         }
-        if rect.width > limits.max_texture_dimension_2d || rect.height > limits.max_texture_dimension_2d {
-            return Err(format!("vector output {}x{} exceeds texture limit {}", rect.width, rect.height, limits.max_texture_dimension_2d));
+        if rect.width > limits.max_texture_dimension_2d
+            || rect.height > limits.max_texture_dimension_2d
+        {
+            return Err(format!(
+                "vector output {}x{} exceeds texture limit {}",
+                rect.width, rect.height, limits.max_texture_dimension_2d
+            ));
         }
         let layout = AtlasLayout::pack(scene, rect, max_side);
         // One shape cannot supply the independent misses parallel preparation
@@ -1018,8 +1108,9 @@ impl VectorCache {
             self.scene_outlines
                 .prepare(layout.cells.iter().map(|cell| &scene.items[cell.item]));
         }
-        let mut outlines: Vec<Option<SceneOutline>> =
-            std::iter::repeat_with(|| None).take(scene.items.len()).collect();
+        let mut outlines: Vec<Option<SceneOutline>> = std::iter::repeat_with(|| None)
+            .take(scene.items.len())
+            .collect();
         for cell in &layout.cells {
             if outlines[cell.item].is_none() {
                 outlines[cell.item] = Some(
@@ -1054,21 +1145,21 @@ impl VectorCache {
             self.scene_batch.reset_transformed(&page_items(i));
             self.scene_batch.fits_gpu_limits(&limits)?;
             adds += self.frame_slots.input_growth(device, i, &self.scene_batch);
-            adds += self
-                .scene_pages
-                .get(i)
-                .map_or_else(|| ScenePage::default().growth(device, w, h, self.scene_batch.bytes()), |p| {
-                    p.growth(device, w, h, self.scene_batch.bytes())
-                });
+            adds += self.scene_pages.get(i).map_or_else(
+                || ScenePage::default().growth(device, w, h, self.scene_batch.bytes()),
+                |p| p.growth(device, w, h, self.scene_batch.bytes()),
+            );
         }
         let frame = frame.filter(|_| self.frame_held() + adds <= self.frame_held_limit);
         let mut own = None;
         let in_frame = frame.is_some();
         let encoder = match frame {
             Some(encoder) => encoder,
-            None => own.insert(device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("pm vector"),
-            })),
+            None => own.insert(
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("pm vector"),
+                }),
+            ),
         };
         let (slots, pages) = if in_frame {
             (&mut self.frame_slots, &mut self.scene_pages)
@@ -1182,10 +1273,7 @@ impl VectorCache {
                     j += 1;
                 }
                 let bind = binds[page].get_or_insert_with(|| {
-                    let view = pages[page]
-                        .view
-                        .as_ref()
-                        .expect("coverage page view");
+                    let view = pages[page].view.as_ref().expect("coverage page view");
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("pm vector paint"),
                         layout: &paint.layout,
@@ -1397,8 +1485,19 @@ mod scene_pool_tests {
         let gpu = pm_gpu::Gpu::new("scene page preflight").expect("GPU");
         let limits = gpu.device.limits();
         let mut page = ScenePage::default();
-        assert!(page.ensure(&gpu.device, 1, 1, limits.max_storage_buffer_binding_size + 1).is_err());
-        assert!(page.ensure(&gpu.device, limits.max_texture_dimension_2d + 1, 1, 16).is_err());
+        assert!(
+            page.ensure(
+                &gpu.device,
+                1,
+                1,
+                limits.max_storage_buffer_binding_size + 1
+            )
+            .is_err()
+        );
+        assert!(
+            page.ensure(&gpu.device, limits.max_texture_dimension_2d + 1, 1, 16)
+                .is_err()
+        );
         assert_eq!(page.bytes(), 0);
     }
 
@@ -1413,7 +1512,10 @@ mod scene_pool_tests {
         assert!(Arc::ptr_eq(&first.path, &moved.path));
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.tick, 2);
-        assert_eq!(moved.transform * &*moved.path, item.device_outline_with(&mut scratch));
+        assert_eq!(
+            moved.transform * &*moved.path,
+            item.device_outline_with(&mut scratch)
+        );
     }
 
     /// Outlines made on several threads are the outlines `outline` makes
@@ -1422,7 +1524,9 @@ mod scene_pool_tests {
     fn prepared_outlines_are_what_outline_makes() {
         let items: Vec<CoverageItem> = (0..10)
             .map(|i| {
-                let mut item = scene(1.5 + i as f64 * 0.7, 2.0 + i as f64 * 0.3, 20.0 + i as f64).items.remove(0);
+                let mut item = scene(1.5 + i as f64 * 0.7, 2.0 + i as f64 * 0.3, 20.0 + i as f64)
+                    .items
+                    .remove(0);
                 item.transform = Affine::rotate(i as f64 * 0.41) * item.transform;
                 // Overlapping contours (resolved to one nonzero boundary).
                 item.path.move_to((8.0, 8.0));
@@ -1434,10 +1538,13 @@ mod scene_pool_tests {
             .collect();
         let mut scratch = OutlineScratch::default();
         let mut alone = SceneOutlines::default();
-        let want: Vec<BezPath> = items.iter().map(|item| {
-            let o = alone.outline(item, &mut scratch);
-            o.transform * &*o.path
-        }).collect();
+        let want: Vec<BezPath> = items
+            .iter()
+            .map(|item| {
+                let o = alone.outline(item, &mut scratch);
+                o.transform * &*o.path
+            })
+            .collect();
         let mut prepared = SceneOutlines::default();
         prepared.prepare(items.iter().rev());
         assert!(!prepared.prepared.is_empty());
@@ -1446,7 +1553,10 @@ mod scene_pool_tests {
             assert_eq!(&(o.transform * &*o.path), want);
         }
         assert!(prepared.prepared.is_empty());
-        assert_eq!((prepared.entries.len(), prepared.bytes, prepared.tick), (alone.entries.len(), alone.bytes, alone.tick));
+        assert_eq!(
+            (prepared.entries.len(), prepared.bytes, prepared.tick),
+            (alone.entries.len(), alone.bytes, alone.tick)
+        );
     }
 
     #[test]
@@ -1491,7 +1601,14 @@ mod scene_pool_tests {
             let s = scene(1.5 + f64::from(i) * 0.37, 2.25, f64::from(side) - 6.0);
             let held = cache.frame_held();
             let (out, _) = cache
-                .render_scene(&gpu.device, &gpu.queue, Some(&mut encoder), &s, rect, Precision::Float16)
+                .render_scene(
+                    &gpu.device,
+                    &gpu.queue,
+                    Some(&mut encoder),
+                    &s,
+                    rect,
+                    Precision::Float16,
+                )
                 .expect("scene records");
             assert!(
                 cache.frame_held() <= cache.frame_held_limit,
@@ -1507,7 +1624,10 @@ mod scene_pool_tests {
             drawn.push((s, rect, out));
         }
         gpu.queue.submit([encoder.finish()]);
-        assert!(in_frame > 0 && alone > 0, "{in_frame} in the frame, {alone} alone");
+        assert!(
+            in_frame > 0 && alone > 0,
+            "{in_frame} in the frame, {alone} alone"
+        );
         let read = |texture: &wgpu::Texture| {
             pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture).unwrap()
         };
@@ -1535,10 +1655,24 @@ mod scene_pool_tests {
         cache.begin_frame();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let (out_a, _) = cache
-            .render_scene(&gpu.device, &gpu.queue, Some(&mut encoder), &a, rect, Precision::Float16)
+            .render_scene(
+                &gpu.device,
+                &gpu.queue,
+                Some(&mut encoder),
+                &a,
+                rect,
+                Precision::Float16,
+            )
             .expect("A records");
         let (out_b, _) = cache
-            .render_scene(&gpu.device, &gpu.queue, Some(&mut encoder), &b, rect, Precision::Float16)
+            .render_scene(
+                &gpu.device,
+                &gpu.queue,
+                Some(&mut encoder),
+                &b,
+                rect,
+                Precision::Float16,
+            )
             .expect("B records");
         gpu.queue.submit([encoder.finish()]);
         let fresh = |s: &CoverageScene| {

@@ -898,7 +898,11 @@ fn user_programs_draw_natively_on_first_use() {
     let _gpu = gpu();
     for kind in ["effect", "transition", "shader", "extension"] {
         let mut set = builtin_definitions();
-        let base = if kind == "effect" { "invert" } else { "crossfade" };
+        let base = if kind == "effect" {
+            "invert"
+        } else {
+            "crossfade"
+        };
         let mut def = set
             .definitions
             .iter()

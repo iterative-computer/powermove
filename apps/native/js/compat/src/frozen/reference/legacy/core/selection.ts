@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { temporalKeys } from './temporal-bridge';
 import { layerPropertyChannels } from './project-index';
 /* Ported from js/core/selection.js — behavior-preserving. */

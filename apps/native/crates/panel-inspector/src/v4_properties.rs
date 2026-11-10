@@ -35,7 +35,7 @@ pub enum V4Action {
 }
 #[derive(Debug)]
 pub enum V4Plan {
-    Request(Request),
+    Request(Box<Request>),
     Service(Vec<ServiceIntent>),
 }
 impl V4Adapter {
@@ -183,7 +183,7 @@ impl V4Adapter {
                     (!linked).into(),
                     time,
                 )
-                .map(V4Plan::Request);
+                .map(|request| V4Plan::Request(Box::new(request)));
         }
         let property_action = match action {
             V4Action::Diamond => PropertyAction::Diamond,
@@ -217,6 +217,6 @@ impl V4Adapter {
         };
         model
             .property_action(caller, &ids, property_action, time)
-            .map(V4Plan::Request)
+            .map(|request| V4Plan::Request(Box::new(request)))
     }
 }

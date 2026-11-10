@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /** Content channels use the same persisted {v, kf, expr} model as transforms. */
 export function isProperty(value: any): boolean {
   return !!value && typeof value === 'object' && Array.isArray(value.kf) && 'v' in value;

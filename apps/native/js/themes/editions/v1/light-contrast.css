@@ -9,7 +9,7 @@
   --bg-rail:#eeeef1;
   --bg-panel:#fdfdfe;
   --bg-panel-2:#f5f5f7;
-  --bg-sunken:#e6e6ea;
+  --bg-sunken:#e4e4e4;
   --bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));
   --bg-row-hi:#ebebef;
   --bg-field:#f3f3f6;
@@ -42,9 +42,9 @@
   --green:var(--success);
   --red:var(--danger);
   --yellow:var(--warning);
-  --r-base:4px;
+  --r-base:2.6666666666666665px;
   --r-xs:4px;
-  --r-sm:calc(var(--r-base) * 1.5);
+  --r-sm:calc(var(--r-base) * 2.25);
   --r-md:calc(var(--r-base) * 2);
   --r-lg:calc(var(--r-base) * 3);
   --r-xl:calc(var(--r-base) * 4);
@@ -53,7 +53,7 @@
   --fw-medium:500;
   --fw-semibold:600;
   --row-h:28px;
-  --hdr-h:32px;
+  --hdr-h:38px;
   --ctl-h:28px;
   --gut:10px;
   --panel-edge-inset:10px;
@@ -75,7 +75,7 @@
   --ctl-raised:var(--ink-1);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 5px #9a2f00;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 5px #3c3c42;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
     0 1px 1px rgb(var(--ink-rgb) / .04),
@@ -92,7 +92,7 @@
 }
 :root[data-density="compact"]{
   --row-h:24px;
-  --hdr-h:26px;
+  --hdr-h:32px;
   --ctl-h:24px;
   --fs-md:12px;
   --gut:7px;
@@ -101,7 +101,7 @@
 }
 :root[data-density="comfy"]{
   --row-h:32px;
-  --hdr-h:36px;
+  --hdr-h:42px;
   --ctl-h:30px;
   --fs-md:14px;
   --gut:12px;

@@ -100,10 +100,18 @@ fn anisotropic_gaussian_has_independent_f64_axis_weights() {
 /// frame, in both colour spaces, and conserve area and centroid.
 #[test]
 fn device_grid_gaussians_match_f64_weights() {
-    for (sigma, srgb) in [((3.0, 6.0), false), ((5.0, 3.5), true), ((12.0, 9.0), false)] {
+    for (sigma, srgb) in [
+        ((3.0, 6.0), false),
+        ((5.0, 3.5), true),
+        ((12.0, 9.0), false),
+    ] {
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="96" height="96"{}><feGaussianBlur stdDeviation="{} {}"/></filter></defs><rect x="40" y="36" width="13" height="21" fill="#fff" filter="url(#f)"/></svg>"##,
-            if srgb { r#" color-interpolation-filters="sRGB""# } else { "" },
+            if srgb {
+                r#" color-interpolation-filters="sRGB""#
+            } else {
+                ""
+            },
             sigma.0,
             sigma.1
         );

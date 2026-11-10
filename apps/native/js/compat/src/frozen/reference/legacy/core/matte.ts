@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 export const MATTE_MODES=['alpha','alpha-inverted','luma','luma-inverted'];
 export function validMatteSource(layers:any[],layer:any,id:string|null):boolean {
   const seen=new Set([layer.id]);let cursor=id;

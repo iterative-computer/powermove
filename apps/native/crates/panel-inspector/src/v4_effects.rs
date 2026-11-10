@@ -636,6 +636,8 @@ impl EffectsPanel {
                     .iter()
                     .filter(|p| effect.get("p").and_then(|v| v.get(&p.key)).is_some())
                     .map(|p| {
+                        // AE-style effect Reset: the default keyed at the playhead,
+                        // existing animation kept. The parameter row's Reset clears it.
                         let mut c = pm_kernel::commands::properties::SetProperty::new(
                             &layer,
                             format!("{id}.{}", p.key),
@@ -706,15 +708,37 @@ impl EffectsPanel {
                 let action = match text(intent, "action") {
                     "diamond" => PropertyAction::Diamond,
                     "stopwatch" => PropertyAction::Stopwatch,
+                    // v1 B367: keys and expression removed, then the static default.
+                    "reset" => {
+                        // The same saved-version, layer-sized default as the effect Reset.
+                        let (fx, key) = property
+                            .path
+                            .split_once('.')
+                            .ok_or(InspectorError::InvalidInput)?;
+                        let effect = model.effect(&layer, fx)?;
+                        let definition =
+                            model.saved_effect_definition(&effect).ok_or_else(|| {
+                                InspectorError::MissingDefinition(text(&effect, "type").into())
+                            })?;
+                        let definition =
+                            model.contextual_effect_definition(&layer, definition, time)?;
+                        let default = definition
+                            .params
+                            .into_iter()
+                            .find(|p| p.key == key)
+                            .map(|p| p.default);
+                        PropertyAction::Reset(default)
+                    }
                     _ => return Err(InspectorError::InvalidInput),
                 };
                 plan.request = Some(model.property_action(caller, &[property], action, time)?);
-                // Keep the kernel's exact action-specific undo name for diamond
-                // add/remove, rather than labelling a removal as an addition.
-                if text(intent, "action") == "diamond" {
-                    return Ok(plan.pin_document());
-                }
-                label = "Remove Animation".into();
+                label = match text(intent, "action") {
+                    // Keep the kernel's exact action-specific undo name for diamond
+                    // add/remove, rather than labelling a removal as an addition.
+                    "diamond" => return Ok(plan.pin_document()),
+                    "reset" => "Reset".into(),
+                    _ => "Remove Animation".into(),
+                };
             }
             _ => return Err(InspectorError::InvalidInput),
         }

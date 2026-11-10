@@ -118,7 +118,9 @@ enum Ceiling {
 /// engine processes find it loaded; this test finds the checkout's.
 fn locate_todays_ffmpeg() -> bool {
     if std::env::var_os("POWERMOVE_CHROMIUM_FFMPEG").is_none() {
-        let modules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../node_modules/.bun");
+        // Electron ships from the v1 checkout (PM_V1_REF), not this branch.
+        let v1 = std::env::var_os("PM_V1_REF").unwrap_or_else(|| "/tmp/pm-ref-v1.2.0".into());
+        let modules = Path::new(&v1).join("node_modules/.bun");
         let found = std::fs::read_dir(modules).ok().and_then(|d| {
             d.flatten().find_map(|e| {
                 let lib = e.path().join("node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib");

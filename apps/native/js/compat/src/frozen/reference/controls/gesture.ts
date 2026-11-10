@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /*
  * EditGesture — the three-mode write dispatcher from legacy ui/controls.js:8-18
  * as one object, so a control cannot mismatch begin/commit.

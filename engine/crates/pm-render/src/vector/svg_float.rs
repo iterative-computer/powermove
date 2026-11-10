@@ -1349,7 +1349,10 @@ impl SvgPainter {
         // The result over `need` at device resolution, transparent where
         // nothing was drawn.
         let output = float_target(device, need.width, need.height);
-        if let Some(texture) = current.as_ref().and_then(|(image, _)| image.texture.as_ref()) {
+        if let Some(texture) = current
+            .as_ref()
+            .and_then(|(image, _)| image.texture.as_ref())
+        {
             let image = &current.as_ref().expect("a drawn image").0;
             if rate == 1 {
                 copy_rect(&mut encoder, texture, [0, 0], &output, image.rect, need);

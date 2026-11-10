@@ -105,7 +105,12 @@ fn parse_hex(hex: &str) -> Option<CanvasColor> {
     let single = |i: usize| d[i] * 17;
     match d.len() {
         3 => Some(CanvasColor::rgba8(single(0), single(1), single(2), 255)),
-        4 => Some(CanvasColor::rgba8(single(0), single(1), single(2), single(3))),
+        4 => Some(CanvasColor::rgba8(
+            single(0),
+            single(1),
+            single(2),
+            single(3),
+        )),
         6 => Some(CanvasColor::rgba8(pair(0), pair(2), pair(4), 255)),
         8 => Some(CanvasColor::rgba8(pair(0), pair(2), pair(4), pair(6))),
         _ => None,
@@ -207,7 +212,8 @@ fn split_args(body: &str) -> Option<(Vec<Token>, Option<Token>, bool)> {
             Some((c, a)) => (c, Some(a.trim())),
             None => (body, None),
         };
-        let tokens: Option<Vec<Token>> = channels.split_ascii_whitespace().map(parse_token).collect();
+        let tokens: Option<Vec<Token>> =
+            channels.split_ascii_whitespace().map(parse_token).collect();
         let tokens = tokens?;
         if tokens.len() != 3 {
             return None;
@@ -245,7 +251,10 @@ fn parse_rgb(body: &str) -> Option<CanvasColor> {
     // The legacy syntax requires all three channels to be numbers or all
     // three percentages.
     if legacy {
-        let percents = tokens.iter().filter(|t| matches!(t, Token::Percent(_))).count();
+        let percents = tokens
+            .iter()
+            .filter(|t| matches!(t, Token::Percent(_)))
+            .count();
         if percents != 0 && percents != 3 {
             return None;
         }

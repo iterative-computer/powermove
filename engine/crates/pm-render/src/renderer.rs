@@ -1585,11 +1585,12 @@ impl Renderer {
         self.pipelines.prewarm(format);
         // Text pipelines too: a text layer first met while playing compiled
         // its paint pipeline on that frame (about 80 ms).
-        self.text_gpu.prewarm(if format == working_format(Precision::Float32) {
-            Precision::Float32
-        } else {
-            Precision::Float16
-        });
+        self.text_gpu
+            .prewarm(if format == working_format(Precision::Float32) {
+                Precision::Float32
+            } else {
+                Precision::Float16
+            });
     }
 
     /// Asks the font registry for the faces `document`'s text layers lay out

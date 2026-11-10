@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /**
  * Move a control overlay out of its panel's clipped scrolling surface.
  *

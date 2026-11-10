@@ -352,7 +352,6 @@ export class CompatRealm {
       byName: (name: string) =>
         this.PM.proj.layers?.find((layer: Data) => layer.name === name) ?? null,
       P: (v: any, extra: Data = {}) => ({ v, kf: [], expr: null, ...extra }),
-
     };
     let uid = 0;
     this.PM.uid = (prefix = "l") =>
@@ -771,7 +770,13 @@ export class CompatRealm {
         "Unavailable",
         "Native recorder-canvas host is not attached",
       );
-    return new NativeImage(this.options.recorder, surface, width, height, vector);
+    return new NativeImage(
+      this.options.recorder,
+      surface,
+      width,
+      height,
+      vector,
+    );
   }
   /** The kernel revision this realm's project mirrors. */
   get revision(): number {
@@ -791,7 +796,11 @@ export class CompatRealm {
     // waits, it asks this realm for them, and they are answered inline.
     while (value?.kind === "raster-asks") {
       for (const asked of value.batches ?? [])
-        this.options.capabilities?.answerRasters?.(asked.batch, asked.needs, asked.ask ?? {});
+        this.options.capabilities?.answerRasters?.(
+          asked.batch,
+          asked.needs,
+          asked.ask ?? {},
+        );
       value = query("render.continue", []);
     }
     if (value?.kind !== "recorder-surface") return value;
@@ -848,7 +857,8 @@ export class CompatRealm {
   /** The composition holding layer `id` (null: the open one). */
   private compositionOf(id: string): string | null {
     const project = this.PM.proj;
-    if ((project?.layers ?? []).some((layer: Data) => layer?.id === id)) return null;
+    if ((project?.layers ?? []).some((layer: Data) => layer?.id === id))
+      return null;
     const comps = project?.comps;
     for (const [key, comp] of Object.entries(comps ?? {}) as [string, Data][])
       if ((comp?.layers ?? []).some((layer: Data) => layer?.id === id))
@@ -873,8 +883,7 @@ export class CompatRealm {
     const context = this.rasterContext;
     // The project's own record: a view of it, the exact layer this answer
     // is for.
-    const own =
-      isProjectView(layer) || layer === context?.layer;
+    const own = isProjectView(layer) || layer === context?.layer;
     const id = String(layer.id ?? "");
     const composition = context?.composition ?? this.compositionOf(id);
     const spec: Data = {
@@ -907,7 +916,14 @@ export class CompatRealm {
         uv: value.uv ?? [0, 0, 1, 1],
       });
     };
-    const state: BaseState = { id, own, scale, time, crop: crop ?? null, touched: false };
+    const state: BaseState = {
+      id,
+      own,
+      scale,
+      time,
+      crop: crop ?? null,
+      touched: false,
+    };
     const written: Data = {};
     // Today's cache key: the same layer, frame, scale and crop paint the same.
     const surface: Data = {
@@ -920,7 +936,16 @@ export class CompatRealm {
         spec.content ?? null,
       ]),
     };
-    for (const key of ["cv", "w", "h", "anchorX", "anchorY", "selection", "fontOffset", "uv"])
+    for (const key of [
+      "cv",
+      "w",
+      "h",
+      "anchorX",
+      "anchorY",
+      "selection",
+      "fontOffset",
+      "uv",
+    ])
       Object.defineProperty(surface, key, {
         enumerable: true,
         configurable: true,

@@ -69,7 +69,7 @@ impl Fixture {
             .action(&mut self.model, Caller::native(), handle, action, time)
             .unwrap()
         {
-            V4Plan::Request(request) => self.run(request),
+            V4Plan::Request(request) => self.run(*request),
             _ => panic!("Expected actor request"),
         }
     }

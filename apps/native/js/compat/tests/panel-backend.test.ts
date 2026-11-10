@@ -87,7 +87,7 @@ test("a panel paints only where the shell placed it, even when placed before it 
   for (const id of ["early", "late"])
     realm.kernel.panels.register("owner", { id, build() {} });
   const root = (id: string) =>
-    h.page.window.document.querySelector(`[data-pm-contribution="${id}"]`);
+    h.page.window.document.querySelector(`[data-pm-contribution="${id}"]`)!;
   panels.place("early", [10, 20, 300, 400]);
   panels.open("early");
   panels.open("late");
@@ -148,7 +148,7 @@ test("an extension restyling its panel body keeps the shell's placement", async 
   await h.settle();
   const root = h.page.window.document.querySelector(
     '[data-pm-contribution="styled"]',
-  );
+  )!;
   expect(root.getAttribute("style")).toBe("display:none");
   panels.place("styled", [5, 6, 7, 8]);
   await h.settle();

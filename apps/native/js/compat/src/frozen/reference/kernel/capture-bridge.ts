@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* The only renderer module allowed to read the preload's global bridge. */
 import type { PowermoveBridge } from '../../../shared/ipc';
 

@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { isProperty } from './content-properties';
 import { textAnimatorLabel } from './text-animation';
 export type PathVertex = { id:string; p:Record<string,any> };

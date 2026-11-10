@@ -222,7 +222,10 @@ fn idle_targets_are_released_and_the_next_frame_is_identical() {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
     let before = render_bytes(&mut r, &doc, 0.73, &request, &resolver);
     let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
-    assert!(r.target_pool_idle() > 0, "a frame leaves idle targets in the pool");
+    assert!(
+        r.target_pool_idle() > 0,
+        "a frame leaves idle targets in the pool"
+    );
     let pooled = r.target_pool_bytes();
     let freed = r.release_idle_targets();
     assert!(freed > 0 && freed <= pooled);

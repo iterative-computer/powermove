@@ -594,7 +594,17 @@ function ParameterView({
       ? "animated"
       : "not animated";
   return (
-    <div role="group" label={row.effectLabel} onClick={stop} onKeyDown={stop}>
+    <div
+      role="group"
+      label={row.effectLabel}
+      onClick={stop}
+      onKeyDown={stop}
+      onPointerDown={(e) => {
+        if (e.button !== 2) return;
+        stop(e);
+        void c.parameterMenu(row.id).catch((error) => c.platform.report(error));
+      }}
+    >
       <UI.InspectorRow
         label={p.label}
         metadata={{

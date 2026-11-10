@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 /* Colour math for the picker, after Paper's: sRGB channels as floats that may
    leave 0–1 when a colour came from Display P3, with HSV, HSL, OKLCH, OKLab and
    P3 views of the same value, plus alpha. Documents store sRGB hex (#RRGGBB,

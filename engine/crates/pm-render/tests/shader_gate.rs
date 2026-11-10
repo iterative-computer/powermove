@@ -974,7 +974,13 @@ fn g_e1_bounds_stable_pixels_and_counts_unstable_ones() {
     assert_eq!((m.over, m.max_cv), (1, 102));
     assert!(!m.pass());
     // Where WebGL moves against itself the pixel is counted, not judged.
-    let m = compare(&engine, &webgl(two.clone(), Some(vec![false, true])), 2, false, 1);
+    let m = compare(
+        &engine,
+        &webgl(two.clone(), Some(vec![false, true])),
+        2,
+        false,
+        1,
+    );
     assert!(m.pass());
     assert_eq!(m.unstable, 1);
     // Within the bound of WebGL with unrounded intermediates passes too.
@@ -1006,9 +1012,21 @@ fn g_e1_bounds_stable_pixels_and_counts_unstable_ones() {
     );
     let mut chaotic = webgl(two, None);
     chaotic.spread = (3, 120);
-    record(&mut tally, "y", "y", "v", compare(&engine, &chaotic, 2, false, 1), false);
+    record(
+        &mut tally,
+        "y",
+        "y",
+        "v",
+        compare(&engine, &chaotic, 2, false, 1),
+        false,
+    );
     assert_eq!(
-        (tally.matched, tally.known.len(), tally.failures.len(), tally.ill_conditioned.len()),
+        (
+            tally.matched,
+            tally.known.len(),
+            tally.failures.len(),
+            tally.ill_conditioned.len()
+        ),
         (1, 1, 1, 1)
     );
 }

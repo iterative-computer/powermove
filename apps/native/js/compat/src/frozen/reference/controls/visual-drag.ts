@@ -1,3 +1,4 @@
+// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
 import { EditGesture, type EditBinding } from './gesture';
 import type { PowermoveAPI } from '../kernel/api';
 
