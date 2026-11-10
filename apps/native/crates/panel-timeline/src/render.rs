@@ -363,7 +363,13 @@ impl Scene {
             .iter()
             .map(String::as_str)
             .collect();
-        let selected_keys: HashSet<_> = model.selection.keys().iter().map(String::as_str).collect();
+        // Selected keys by (layer, key): key ids may repeat across layers.
+        let selected_keys: HashSet<(&str, &str)> = model
+            .index
+            .selected_keys(&model.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.as_str(), k.id.as_str()))
+            .collect();
         let keys = |layer: &crate::Layer, channels: Vec<&crate::Channel>| {
             channels
                 .into_iter()
@@ -371,17 +377,14 @@ impl Scene {
                 .map(|k| Key {
                     id: k.id.clone(),
                     seconds: layer.from + k.time,
-                    selected: selected_keys.contains(k.id.as_str()),
+                    selected: selected_keys.contains(&(layer.id.as_str(), k.id.as_str())),
                     focused: false,
                     interpolation: p.interpolation(k),
                 })
                 .collect::<Vec<_>>()
         };
         // Layers with a selected key: only their marks are copied to show it.
-        let marked: HashSet<&str> = selected_keys
-            .iter()
-            .filter_map(|id| model.index.key(id).map(|(l, _, _)| l.id.as_str()))
-            .collect();
+        let marked: HashSet<&str> = selected_keys.iter().map(|(layer, _)| *layer).collect();
         let mut summaries = HashMap::new();
         let rows = model
             .rows()
@@ -406,7 +409,8 @@ impl Scene {
                                     shared
                                         .iter()
                                         .map(|k| Key {
-                                            selected: selected_keys.contains(k.id.as_str()),
+                                            selected: selected_keys
+                                                .contains(&(id.as_str(), k.id.as_str())),
                                             ..k.clone()
                                         })
                                         .collect()
@@ -1604,12 +1608,17 @@ impl Frame {
         key_identity(self.hit_op("key:", x, y, slop)?)
     }
     /// Every key whose diamond meets the rectangle, for marquee selection.
-    pub fn keys_in(&self, area: Rect) -> Vec<String> {
+    /// The keys a marquee covers, as `(layer, key)`.
+    pub fn keys_in(&self, area: Rect) -> Vec<(String, String)> {
         self.ops
             .iter()
             .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
             .filter_map(key_identity)
-            .map(|(_, key)| key)
+            .filter_map(|(row, key)| match crate::v4::parse_row(&row).ok()? {
+                crate::RowId::Layer(layer) | crate::RowId::Property { layer_id: layer, .. } => {
+                    Some((layer, key))
+                }
+            })
             .collect()
     }
     /// One accessible element per painted clip, in paint order: its name and

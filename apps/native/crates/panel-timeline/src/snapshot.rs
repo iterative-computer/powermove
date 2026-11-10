@@ -116,20 +116,38 @@ const KEY_BLOCK: usize = 64;
 #[derive(Debug, Default)]
 struct KeyBlock {
     layers: Vec<Arc<Layer>>,
+    /// Each key id's last layer in the block.
     keys: HashMap<String, usize>,
+    /// Every layer of an id more than one layer of the block holds (the
+    /// kernel lets key ids repeat across layers).
+    repeated: HashMap<String, Vec<usize>>,
 }
 impl KeyBlock {
     fn new(layers: &[Arc<Layer>]) -> Self {
         let mut keys = HashMap::new();
+        let mut repeated: HashMap<String, Vec<usize>> = HashMap::new();
         for (offset, layer) in layers.iter().enumerate() {
             for id in layer.key_at.keys() {
-                keys.insert(id.clone(), offset);
+                if let Some(previous) = keys.insert(id.clone(), offset) {
+                    repeated
+                        .entry(id.clone())
+                        .or_insert_with(|| vec![previous])
+                        .push(offset);
+                }
             }
         }
         Self {
             layers: layers.to_vec(),
             keys,
+            repeated,
         }
+    }
+    fn holders(&self, id: &str) -> impl Iterator<Item = &Arc<Layer>> {
+        let offsets = match self.repeated.get(id) {
+            Some(all) => all.as_slice(),
+            None => self.keys.get(id).map_or(&[][..], std::slice::from_ref),
+        };
+        offsets.iter().map(|offset| &self.layers[*offset])
     }
     fn holds(&self, layers: &[Arc<Layer>]) -> bool {
         self.layers.len() == layers.len()
@@ -452,6 +470,41 @@ impl TimelineIndex {
         let layer = self.layer(layer)?;
         layer.channel_at.get(channel).map(|c| &layer.channels[*c])
     }
+    /// The key `id` on layer `layer` (key ids may repeat across layers).
+    pub fn key_on(&self, layer: &str, id: &str) -> Option<(&Layer, &Channel, &Key)> {
+        let layer = self.layer(layer)?;
+        let (c, k) = layer.key_at.get(id)?;
+        Some((layer, &layer.channels[*c], &layer.channels[*c].keys[*k]))
+    }
+    /// Every layer's key `id`, in layer order.
+    pub fn key_holders(&self, id: &str) -> Vec<(&Layer, &Channel, &Key)> {
+        self.key_blocks
+            .iter()
+            .flat_map(|block| block.holders(id))
+            .filter_map(|layer| self.key_on(&layer.id, id))
+            .collect()
+    }
+    /// The selected keys, each on the layer it was picked on; a key selected
+    /// by id alone is selected on every layer holding it.
+    pub fn selected_keys(
+        &self,
+        selection: &pm_kernel::Selection,
+    ) -> Vec<(&Layer, &Channel, &Key)> {
+        selection
+            .keys()
+            .iter()
+            .flat_map(|id| match selection.key_owners(id) {
+                Some(owners) => owners
+                    .into_iter()
+                    .filter_map(|layer| self.key_on(layer, id))
+                    .collect(),
+                None => self.key_holders(id),
+            })
+            .collect()
+    }
+    /// A key by id alone: its last layer. Keys picked on a row resolve with
+    /// [`key_on`](Self::key_on); the selection with
+    /// [`selected_keys`](Self::selected_keys).
     pub fn key(&self, id: &str) -> Option<(&Layer, &Channel, &Key)> {
         let layer = self
             .key_blocks

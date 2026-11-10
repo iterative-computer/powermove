@@ -391,21 +391,21 @@ impl TimelineModel {
         {
             return Err(ModelError::UnknownId("key".into()));
         }
-        let expanded = self.expand_scale_keys(hit);
-        let hit = expanded.as_slice();
-        let before = self.selection.keys();
-        let all = hit.iter().any(|id| before.contains(id));
-        let mut next = if additive || all {
-            before.to_vec()
-        } else {
-            Vec::new()
-        };
+        // Keys by (layer, key): key ids may repeat across layers.
+        let hit: Vec<(String, String)> = self
+            .expand_scale_keys_on(layer, hit)
+            .into_iter()
+            .map(|id| (layer.to_owned(), id))
+            .collect();
+        let before = self.selected_key_pairs();
+        let all = hit.iter().any(|pair| before.contains(pair));
+        let mut next = if additive || all { before } else { Vec::new() };
         if additive && !dragging && all {
-            next.retain(|id| !hit.contains(id));
+            next.retain(|pair| !hit.contains(pair));
         } else {
-            for id in hit {
-                if !next.contains(id) {
-                    next.push(id.clone());
+            for pair in hit {
+                if !next.contains(&pair) {
+                    next.push(pair);
                 }
             }
         }
@@ -422,8 +422,17 @@ impl TimelineModel {
             );
         }
         calls.push(SelectionCall::Channel(Some(channel.into())).into());
-        calls.push(SelectionCall::Keys(next).into());
+        calls.push(SelectionCall::LayerKeys(next).into());
         Ok(calls)
+    }
+
+    /// The selected keys as `(layer, key)`.
+    pub fn selected_key_pairs(&self) -> Vec<(String, String)> {
+        self.index
+            .selected_keys(&self.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.clone(), k.id.clone()))
+            .collect()
     }
 
     /// Semantic marquee: caller supplies intersected IDs after hit testing. Never seeks.

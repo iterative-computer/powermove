@@ -221,3 +221,68 @@ fn collapsed_rows_share_their_key_marks_until_a_key_of_theirs_is_selected() {
     .join()
     .unwrap();
 }
+
+/// Key ids may repeat across layers: a key picked on the earlier layer is
+/// selected there (summary and index), never on the later layer holding the
+/// same id.
+#[test]
+fn a_key_id_two_layers_share_is_selected_on_the_layer_it_was_picked_on() {
+    use pm_panel_timeline::render::{RowContent, Scene};
+    std::thread::spawn(|| {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let layer = |id: &str| {
+            format!(
+                r#"{{"id":"{id}","name":"{id}","type":"shape","from":0,"dur":4,"on":true,"p":{{"opacity":{{"v":10,"kf":[{{"i":"k","t":1,"v":10}}],"expr":null}}}}}}"#
+            )
+        };
+        let project = pm_model::json::parse(&format!(
+            r#"{{"id":"P","compId":"C","name":"Shared ids","w":200,"h":100,"fps":30,"dur":10,"comps":{{}},"assets":{{}},"layers":[{},{}]}}"#,
+            layer("first"),
+            layer("second")
+        ))
+        .unwrap();
+        kernel
+            .open("p", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let mut client =
+            pm_panel_timeline::TimelineClient::new(kernel.clone(), "p", Caller::native()).unwrap();
+        for call in client
+            .model
+            .select_keys("first", "opacity", &["k".into()], false, false)
+            .unwrap()
+        {
+            kernel
+                .call_blocking("p", Request::new(Caller::native(), call))
+                .unwrap();
+        }
+        client.sync().unwrap();
+        let scene = Scene::from_model(&client.model, &Presenter, &tokens, 0.).unwrap();
+        let selected = |layer: &str| {
+            let row = scene.row(&pm_panel_timeline::v4::row_id(
+                &pm_panel_timeline::RowId::Layer(layer.into()),
+            ));
+            match &row.expect("layer row").content {
+                RowContent::Layer { summary, .. } => summary.iter().any(|k| k.selected),
+                _ => panic!("layer row"),
+            }
+        };
+        assert!(selected("first"), "the picked layer shows its key selected");
+        assert!(!selected("second"), "the other layer's key is not selected");
+        let picked: Vec<_> = client
+            .model
+            .index
+            .selected_keys(&client.model.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.clone(), k.id.clone()))
+            .collect();
+        assert_eq!(picked, [("first".to_owned(), "k".to_owned())]);
+        assert_eq!(client.model.index.key_holders("k").len(), 2);
+        actor.shutdown();
+    })
+    .join()
+    .unwrap();
+}

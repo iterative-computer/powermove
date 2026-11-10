@@ -1275,7 +1275,7 @@ impl TimelineSurface {
         } else {
             vec![]
         };
-        let plan = session.update(&self.model, keys, layers);
+        let plan = session.update(keys, layers);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
@@ -1299,7 +1299,7 @@ impl TimelineSurface {
                     >= self.tokens.metrics.drag_threshold;
                 if moved {
                     self.queue
-                        .push_back(Job::Apply(session.finish(&self.model)));
+                        .push_back(Job::Apply(session.finish()));
                 } else {
                     self.queue.push_back(Job::Apply(Plan {
                         calls: vec![SelectionCall::Clear.into()],

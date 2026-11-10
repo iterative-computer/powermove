@@ -106,6 +106,10 @@ fn key_time(c: &TimelineClient, id: &str) -> f64 {
 fn strings(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|s| (*s).into()).collect()
 }
+/// Keys on one layer, as a marquee picks them.
+fn on(layer: &str, ids: &[&str]) -> Vec<(String, String)> {
+    ids.iter().map(|id| (layer.into(), (*id).into())).collect()
+}
 fn mods() -> Modifiers {
     Modifiers::default()
 }
@@ -2257,7 +2261,7 @@ fn shift_marquee_toggles_keys_against_captured_selection_each_sample() {
     select_keys(&mut c, &["a0"]);
     let mut marquee = MarqueeSession::begin(&c.model, true, false);
     for _ in 0..2 {
-        let p = marquee.update(&c.model, strings(&["a0", "a2"]), Vec::new());
+        let p = marquee.update(on("a", &["a0", "a2"]), Vec::new());
         run(&mut c, p);
         assert_eq!(c.model.selection.keys(), strings(&["a2"]));
     }
@@ -2267,10 +2271,10 @@ fn graph_marquee_retains_original_during_preview_then_replaces_on_release() {
     let (_a, mut c) = client();
     select_keys(&mut c, &["a0"]);
     let mut marquee = MarqueeSession::begin(&c.model, false, true);
-    let p = marquee.update(&c.model, strings(&["a2"]), Vec::new());
+    let p = marquee.update(on("a", &["a2"]), Vec::new());
     run(&mut c, p);
     assert_eq!(c.model.selection.keys(), strings(&["a0", "a2"]));
-    let p = marquee.finish(&c.model);
+    let p = marquee.finish();
     run(&mut c, p);
     assert_eq!(c.model.selection.keys(), strings(&["a2"]));
 }
@@ -2280,12 +2284,12 @@ fn graph_marquee_empty_release_and_escape_restore_original_ids() {
     select(&mut c, &["a"]);
     select_keys(&mut c, &["a0"]);
     let mut marquee = MarqueeSession::begin(&c.model, false, true);
-    let p = marquee.update(&c.model, Vec::new(), Vec::new());
+    let p = marquee.update(Vec::new(), Vec::new());
     run(&mut c, p);
-    let p = marquee.finish(&c.model);
+    let p = marquee.finish();
     run(&mut c, p);
     assert_eq!(c.model.selection.keys(), strings(&["a0"]));
-    let p = marquee.update(&c.model, strings(&["a2"]), Vec::new());
+    let p = marquee.update(on("a", &["a2"]), Vec::new());
     run(&mut c, p);
     run(&mut c, marquee.cancel());
     assert_eq!(c.model.selection.keys(), strings(&["a0"]));

@@ -567,6 +567,12 @@ impl DocumentStore {
         self.emit(StoreEvent::SelectionChanged);
     }
 
+    /// Selects keyframes as picked on their layers, `(layer, key)`.
+    pub fn select_layer_keys(&mut self, pairs: Vec<(String, String)>) {
+        self.selection.set_layer_keys(pairs);
+        self.emit(StoreEvent::SelectionChanged);
+    }
+
     /// The focused channel (`PM.sel.chan`).
     pub fn set_selected_channel(&mut self, channel: Option<String>) {
         if self.selection.channel() != channel.as_deref() {

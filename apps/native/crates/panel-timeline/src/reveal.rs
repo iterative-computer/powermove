@@ -118,7 +118,7 @@ impl TimelineModel {
                                             && p.starts_with("scale."))
                                         || c.keys
                                             .iter()
-                                            .any(|k| self.selection.keys().contains(&k.id))
+                                            .any(|k| self.selection.key_selected(&l.id, &k.id))
                                 }
                                 ('r', false) => {
                                     p == "rotation"
