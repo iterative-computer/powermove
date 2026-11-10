@@ -1250,6 +1250,11 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn skimming(&self, cx: &App) -> bool {
         crate::skimming::on(&self.0, cx)
     }
+    fn skimmer_shown(&self, cx: &App) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|c| c.read(cx).skimming.at.is_some())
+    }
     fn seek(&self, seconds: f64, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             v.seek(seconds);

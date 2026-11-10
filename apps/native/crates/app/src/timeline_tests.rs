@@ -1129,3 +1129,28 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
 }
+/// Cmd-Tab (the window stops being active) without moving the pointer
+/// clears the skimmer: the viewer returns to the playhead and Space plays
+/// from the playhead, not from a stale skimmer (review).
+#[gpui::test]
+fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.vcx.update(|window, _| window.activate());
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    let over = |s: &mut Stage| {
+        let surface = s.surface.clone();
+        s.vcx
+            .update(|window, cx| surface.read(cx).pointer_over(window))
+    };
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+    assert!(over(&mut s), "Space would play from the skimmer");
+    s.vcx.deactivate_window();
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
+    assert!(!over(&mut s), "Space plays from the playhead");
+}

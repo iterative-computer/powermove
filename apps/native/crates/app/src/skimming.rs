@@ -109,7 +109,8 @@ impl Controller {
             let _ = v.skim_audio(self.skimming.on && self.skimming.audio);
         }
         if let Some(timeline) = self.builtins.timeline.clone() {
-            timeline.update(cx, |t, cx| t.skimming_changed(cx));
+            // The surface calls back into this controller: after this update.
+            cx.defer(move |cx| timeline.update(cx, |t, cx| t.skimming_changed(cx)));
         }
         crate::viewer2::update_skim_checks(self.skimming.on, self.skimming.audio);
         cx.notify();

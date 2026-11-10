@@ -1718,8 +1718,22 @@ impl Controller {
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
             | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
             | "nextVisibleEvent" => {
-                // Final Cut: Space plays from the skimmer.
+                // Final Cut: Space plays from the skimmer, only while the
+                // pointer is over the timeline now; otherwise from the playhead.
+                let over = self
+                    .builtins
+                    .timeline
+                    .as_ref()
+                    .is_some_and(|t| t.read(cx).pointer_over(window));
+                if cmd.name == "play" && !over && self.skimming.at.is_some() {
+                    self.skim(None, Self::event_time());
+                    if let Some(t) = self.builtins.timeline.clone() {
+                        // The surface calls back into this controller.
+                        cx.defer(move |cx| t.update(cx, |t, cx| t.skimming_changed(cx)));
+                    }
+                }
                 if cmd.name == "play"
+                    && over
                     && let Some(at) = self.skimming.at
                     && self.viewer.as_ref().is_some_and(|v| {
                         v.status()

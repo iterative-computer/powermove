@@ -52,6 +52,10 @@ pub trait Delegate: 'static {
     fn skimming(&self, _cx: &App) -> bool {
         false
     }
+    /// Whether the viewer still shows the skimmer's frame.
+    fn skimmer_shown(&self, _cx: &App) -> bool {
+        true
+    }
     /// A context menu whose native rows come first, then what extensions add
     /// for each of `locations` (v1–3's `MenuLocation` and what it was opened on).
     fn extension_menu(
@@ -215,6 +219,9 @@ pub struct TimelineSurface {
     /// The skimmer's time while the pointer hovers the time area (Final
     /// Cut's skimming): a ghost playhead; the playhead itself stays.
     skimmer: Option<f64>,
+    /// Clears the skimmer when the window stops being active (Cmd-Tab, key
+    /// loss, hide): the pointer may never move out of the timeline.
+    activation: Option<Subscription>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -268,6 +275,7 @@ impl TimelineSurface {
             painting: false,
             told: None,
             skimmer: None,
+            activation: None,
             late: None,
         };
         this.restore_view();
@@ -1478,15 +1486,26 @@ impl TimelineSurface {
             None => self.set_skimmer(None, cx),
         }
     }
-    /// View ▸ Skimming changed: hide the skimmer when it went off.
+    /// View ▸ Skimming changed, or the controller dropped the skimmer
+    /// (Space with the pointer elsewhere): hide it unless the pointer still
+    /// skims here.
     pub fn skimming_changed(&mut self, cx: &mut Context<Self>) {
-        if !self.delegate.skimming(cx) {
+        if !self.delegate.skimming(cx) || !self.delegate.skimmer_shown(cx) {
             self.set_skimmer(None, cx);
         }
     }
     #[cfg(test)]
     pub fn skimmer(&self) -> Option<f64> {
         self.skimmer
+    }
+    /// Whether the pointer is over the time area right now (Space plays
+    /// from the skimmer only then): the window is active and the pointer's
+    /// last position in it is inside this element.
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        self.skimmer.is_some()
+            && window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
     }
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
@@ -1924,7 +1943,14 @@ fn build(
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.activation.is_none() {
+            self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
+                if !window.is_window_active() {
+                    s.set_skimmer(None, cx);
+                }
+            }));
+        }
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_area().and_then(|area| self.graph_ops(area));
@@ -2089,6 +2115,12 @@ impl Render for TimelineSurface {
                                         s.set_skimmer(None, cx);
                                     }
                                 });
+                            }
+                        });
+                        let exited = this.clone();
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = exited.update(cx, |s, cx| s.set_skimmer(None, cx));
                             }
                         });
                         let released = this.clone();
