@@ -534,12 +534,17 @@ impl Store {
         out
     }
     /// The record a window shows: its project's own workspace, else `preferred`
-    /// (the window's last), else the default and last activated ones.
+    /// (the window's last choice), else, for a project without its own, the
+    /// default for new projects, else the last activated one (v1's `workspace`).
     pub fn active(&self, preferred: Option<&str>) -> Value {
         if let Some(p) = self.project.as_ref().filter(|p| usable(p)) {
             return p.clone();
         }
-        [preferred, self.default.as_deref(), self.current.as_deref()]
+        let default = self
+            .default
+            .as_deref()
+            .filter(|_| self.project_id.is_some());
+        [preferred, default, self.current.as_deref()]
             .into_iter()
             .flatten()
             .find_map(|id| self.get(id))

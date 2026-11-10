@@ -1617,3 +1617,40 @@ fn duplicating_the_entry_of_a_deleted_file_copies_its_newest_work() {
         Some(23.0)
     );
 }
+#[test]
+fn an_unchanged_file_reopens_with_the_workspace_it_was_closed_with() {
+    let dir = common::TempDir::new("file-workspace");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    let ws = parse(r#"{"id":"w1","name":"Mine","layout":{"docks":[{"id":"center","panels":[{"id":"viewer","flex":true}]}]}}"#).unwrap();
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "P", SessionSource::File(path.clone()));
+    let expected = k.project("P").unwrap().workspace().clone();
+    k.handle(
+        "P",
+        Request::new(
+            Caller::native(),
+            WorkspaceCall::Replace {
+                expected,
+                next: ws.clone(),
+            },
+        ),
+    );
+    // The kernel files it as the active workspace record too.
+    assert_eq!(k.state().settings["workspace"].as_str(), Some("w1"));
+    k.shell(ShellCall::Close(h)).unwrap();
+    // A panel change is not a document change: the file is not rewritten.
+    assert_eq!(fs::read_to_string(&path).unwrap(), PROJECT);
+    drop(k);
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "P", SessionSource::File(path.clone()));
+    assert_eq!(k.project("P").unwrap().workspace(), &ws);
+    k.shell(ShellCall::Close(h)).unwrap();
+    drop(k);
+    // A file changed elsewhere since brings its own workspace.
+    fs::write(&path, PROJECT.replace("Fixture", "Elsewhere")).unwrap();
+    let mut k = kernel(&profile);
+    open(&mut k, "P", SessionSource::File(path));
+    assert_ne!(k.project("P").unwrap().workspace(), &ws);
+}

@@ -1170,8 +1170,21 @@ impl Kernel {
                         }
                     }
                 }
-                let opened =
+                let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+                // The workspace the person left this file with (its entry keeps
+                // it, as v1 kept it in the project's state) wins while the file
+                // is still the one they left; a file changed elsewhere brings its own.
+                let left = meta
+                    .get("file")
+                    .and_then(|f| f.get("savedHash"))
+                    .and_then(Value::as_str);
+                if let Some(ws) = meta.get("workspace").filter(|w| w.as_object().is_some())
+                    && left.is_some()
+                    && left == opened.file.version.as_ref().map(|v| v.hash.as_str())
+                {
+                    opened.file.envelope.workspace = Some(ws.clone());
+                }
                 // The opened tree is canonical already: hash it in place
                 // (memoized on the document, which recovery reuses).
                 let hash = opened
@@ -1898,7 +1911,7 @@ impl Kernel {
             .get(id)
             .map(|ui| ui.to_session())
             .unwrap_or_else(|| session.meta.clone());
-        let meta = file_metadata(meta, p.store());
+        let meta = with_workspace(file_metadata(meta, p.store()), p.workspace());
         let summary = entry_summary(p.store().root());
         let writer = self
             .library
@@ -1924,7 +1937,7 @@ impl Kernel {
             .get(id)
             .map(|ui| ui.to_session())
             .unwrap_or_else(|| session.meta.clone());
-        let meta = file_metadata(meta, p.store());
+        let meta = with_workspace(file_metadata(meta, p.store()), p.workspace());
         writer
             .set(&format!("projectMeta.{id}"), meta.clone())
             .and_then(|()| writer.flush())
@@ -1959,6 +1972,15 @@ fn entry_summary(root: Option<&pm_model::doc::Node>) -> Value {
     Value::Object(m)
 }
 
+/// A file entry's metadata with the project's workspace, so reopening the
+/// file restores the panels the person left (v1's project state did).
+fn with_workspace(meta: Value, workspace: &Value) -> Value {
+    let mut m = meta.as_object().cloned().unwrap_or_default();
+    if workspace.as_object().is_some() {
+        m.insert("workspace", workspace.clone());
+    }
+    Value::Object(m)
+}
 fn file_metadata(meta: Value, store: &crate::DocumentStore) -> Value {
     let mut m = meta.as_object().cloned().unwrap_or_default();
     let mut file = m

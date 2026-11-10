@@ -63,6 +63,9 @@ pub struct Editor {
     pending: Vec<serde_json::Value>,
     /// What the store last said this window should show.
     seen: Option<serde_json::Value>,
+    /// The workspace this window last showed by choice (restored or
+    /// activated); a new window follows the store's last activated one.
+    preferred: Option<String>,
     /// Writes for the kernel, sent on the next frame.
     outbox: Vec<workspace::Write>,
     project: String,
@@ -113,6 +116,7 @@ impl Editor {
             record,
             pending: vec![],
             seen: None,
+            preferred: None,
             outbox: vec![],
             project,
             split_focus: None,
@@ -126,7 +130,8 @@ impl Editor {
     pub fn restore(&mut self, state: &WindowState) {
         self.window_id = state.id;
         self.project = state.project.clone();
-        self.show_record(self.workspaces.active(Some(&state.workspace)));
+        self.preferred = Some(state.workspace.clone());
+        self.show_record(self.workspaces.active(self.preferred.as_deref()));
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
@@ -228,6 +233,7 @@ impl Editor {
     }
     /// Shows workspace `record` in this window and makes it the active one.
     fn activate_record(&mut self, record: serde_json::Value) {
+        self.preferred = workspace::record_id(&record).map(str::to_owned);
         self.show_record(record.clone());
         self.commit(record);
         self.persist_session();
@@ -249,7 +255,7 @@ impl Editor {
         if !Rc::ptr_eq(&store, &self.workspaces) {
             self.workspaces = store;
         }
-        let target = self.workspaces.active(Some(&self.layout.workspace));
+        let target = self.workspaces.active(self.preferred.as_deref());
         if self.seen.as_ref() == Some(&target) {
             return;
         }
