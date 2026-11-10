@@ -56,6 +56,21 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             review_library_row(rest, cx);
             continue;
         }
+        // `review/viewer/<View menu title>`: the viewer's render actions.
+        #[cfg(debug_assertions)]
+        if let Some(title) = raw.strip_prefix("powermove://review/viewer/") {
+            let title = url::form_urlencoded::parse(format!("x={title}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let editors = cx.default_global::<Entries>().editors.clone();
+            if let Some(action) = crate::viewer2::review_action(&title)
+                && let Some(editor) = editors.into_iter().find_map(|(e, _)| e.upgrade())
+            {
+                editor.update(cx, |v, cx| v.viewer_action(action, cx));
+            }
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(rest) = raw.strip_prefix("powermove://review/files/") {
             review_files(rest, cx);

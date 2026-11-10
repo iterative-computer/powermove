@@ -772,6 +772,18 @@ pub fn screens() -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Development builds: a View-menu render action by its menu title, for
+/// on-screen reviews that must not press a menu item.
+#[cfg(debug_assertions)]
+pub fn review_action(title: &str) -> Option<Action> {
+    match title {
+        "Render Selection" => Some(Action::RenderSelection),
+        "Keep Rendered" => Some(Action::KeepRendered),
+        "Delete Rendered Frames" => Some(Action::DeleteRendered),
+        _ => None,
+    }
+}
+
 impl Controller {
     pub fn viewer_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
