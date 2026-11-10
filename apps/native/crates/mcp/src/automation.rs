@@ -388,15 +388,7 @@ impl Automation {
     }
 
     pub fn read_document(&self, id: &str) -> Result<Value> {
-        let view = self.view(id)?;
-        let mut project = json_value(&pm_model::canonical::realize_project(
-            view.snapshot
-                .document
-                .to_value()
-                .ok_or_else(|| Error::invalid("Missing document"))?,
-        ));
-        project["revision"] = json!(view.revision);
-        Ok(project)
+        document_json(&self.view(id)?.snapshot)
     }
     /// The kernel half of `get_workspace_state`; the window adds viewport,
     /// open projects, extension health, errors and unsaved state.
@@ -1157,3 +1149,16 @@ impl ActorAutomation {
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
+
+/// A published document as the realized project JSON tools read, with its
+/// revision.
+pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
+    let mut project = json_value(&pm_model::canonical::realize_project(
+        snapshot
+            .document
+            .to_value()
+            .ok_or_else(|| Error::invalid("Missing document"))?,
+    ));
+    project["revision"] = json!(snapshot.revision);
+    Ok(project)
+}

@@ -9,8 +9,8 @@ then:
 
 Launches the app in the background on a copy (soak.py's launcher), waits for
 the project to settle, then times --edits rounds of a move, a keyframe, a
-rename and a visibility toggle on a layer of the open composition through the
-app's MCP tools (the round trip includes the kernel thread and publication).
+rename, a visibility toggle, a layer added and deleted in the open composition
+through the app's MCP tools (the round trip includes the kernel thread and publication).
 Prints one JSON summary; exits 1 when an edit's median round trip is over a
 60 Hz frame or the app stalls its main thread for more than --stall-ms.
 """
@@ -67,6 +67,9 @@ def main():
                                    'mode': 'keyframe', 'time': 0.5 + n * 0.1},
             'rename': lambda n: {'type': 'set_layer', 'target': a.layer, 'patch': {'name': f'Renamed {n}'}},
             'toggle': lambda n: {'type': 'set_layer', 'target': a.layer, 'patch': {'visible': n % 2 == 1}},
+            'add': lambda n: {'type': 'add_layer', 'id': f'scale{n}', 'layerType': 'solid', 'name': f'Scale {n}',
+                              'select': False},
+            'delete': lambda n: {'type': 'delete_layers', 'targets': [f'scale{n}']},
         }
         rounds = {}
         for kind, make in commands.items():
