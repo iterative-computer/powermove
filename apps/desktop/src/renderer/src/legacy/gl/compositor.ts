@@ -17,6 +17,7 @@ import { onVideoParked } from '../core/video-residency';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { GPUTiming } from './gpu-timing';
 import { createOpaqueReadback } from './opaque-readback';
+import { createPresentedReadback } from './presented-readback';
 import { createAlphaReadback, createFloatReadback, createHalfReadback, type DeferredAlphaReader } from './half-readback';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, inversePlane, affinePlane, projectPoint } from '../core/space-3d';
@@ -2852,6 +2853,10 @@ GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,
   }
 };
 GL.renderToPixels = renderToPixels;
+GL.createPresentedReadback = (W: number, H: number) => {
+  const gl = GL.gl, generation = readbackGeneration;
+  return createPresentedReadback(gl, GL.canvas, W, H, () => GL.gl === gl && !GL.contextLost && generation === readbackGeneration);
+};
 GL.createOpaqueReadback = (W: number, H: number) => {
   const gl = GL.gl;
   return createOpaqueReadback(gl, W, H, (time, options, read) => {

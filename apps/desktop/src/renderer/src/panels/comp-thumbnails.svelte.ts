@@ -9,6 +9,7 @@ import { viewerService } from '../legacy/core/services';
 import { prepareThumbnailVideoFrames, type ThumbnailVideoFrames } from './thumbnail-video-frames';
 import {layer3DRole} from '../core/scene3d/layers';
 import {isExtrudedLayer,isShared3DPlane} from '../core/scene3d/extrusion-data';
+import type { OpaqueReadbackSession, OpaqueReadbackTicket } from '../legacy/gl/opaque-readback';
 
 const WIDTH = 320;
 const SETTLE_MS = 400;
@@ -75,38 +76,59 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
           await PM.GL.prepareStudioFrame(comp,posterTime(comp),{width,height,mblur:false,signal:(capture??=new AbortController()).signal,thumbnailVideo:prepared??{frames:EMPTY_VIDEO_FRAMES,version:'thumbnail:empty'}});
           if(disposed||PM.proj!==project||key!==renderedKey||blocked())return null;
         }
-        return encode(comp, prepared);
+        return await encode(comp, prepared);
       } finally { prepared?.dispose(); }
     });
   }
 
-  function encode(comp: any, prepared?: ThumbnailVideoFrames): string | null {
+  function encode(comp: any, prepared?: ThumbnailVideoFrames): string | null | Promise<string | null> {
     const project = PM.proj;
+    const renderedKey = key;
+    const cancelled = () => disposed || PM.proj !== project || key !== renderedKey || blocked();
     const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
     const quality = PM.quality;
     const oldFrames = PM.preparedVideoFrames, oldVersion = PM.preparedVideoVersion;
     const hadFrames = Object.hasOwn(PM, 'preparedVideoFrames'), hadVersion = Object.hasOwn(PM, 'preparedVideoVersion');
     let pixels: Uint8Array<ArrayBuffer> | null;
+    let readback: OpaqueReadbackSession | null = null, ticket: OpaqueReadbackTicket | null = null;
+    const release = () => { ticket?.dispose(); ticket = null; readback?.dispose(); readback = null; };
     try {
       PM.quality = 1;
       PM.preparedVideoFrames = prepared?.frames ?? EMPTY_VIDEO_FRAMES;
       PM.preparedVideoVersion = prepared?.version ?? 'thumbnail:empty';
-      pixels = PM.GL.renderToPixels(posterTime(comp), width, height, {
+      const options = {
         comp, mblur: false, mbSamples: 1, opaque: true, topDownOpaque: true,
         isolatedVideoFrames: true,
-      });
+      };
+      if (typeof PM.GL.createOpaqueReadback === 'function') {
+        readback = PM.GL.createOpaqueReadback(width, height);
+        // An unavailable asynchronous capture leaves the existing thumbnail.
+        // Falling back to a blocking read here would stall an otherwise idle UI.
+        if (!readback) return null;
+        ticket = readback.begin(posterTime(comp), options);
+        const target = new Uint8Array(width * height * 4);
+        return ticket.readInto(target, cancelled).then(ready => ready && !cancelled()
+          ? encodePixels(target, width, height) : null).finally(release);
+      }
+      pixels = PM.GL.renderToPixels(posterTime(comp), width, height, options);
+    } catch (error) {
+      release(); throw error;
     } finally {
       PM.quality = quality;
       if (hadFrames) PM.preparedVideoFrames = oldFrames; else delete PM.preparedVideoFrames;
       if (hadVersion) PM.preparedVideoVersion = oldVersion; else delete PM.preparedVideoVersion;
     }
+    return encodePixels(pixels, width, height);
+  }
+
+  function encodePixels(pixels: Uint8Array<ArrayBuffer> | null, width: number, height: number): string | null {
     if (!pixels || pixels.length !== width * height * 4 || PM.GL.gl?.isContextLost?.()) return null;
     // Encoding finishes synchronously, so one bounded, detached canvas can
     // serve every composition without retaining a backing store per card.
     canvas ??= document.createElement('canvas');
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
-    canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height), 0, 0);
+    canvas.getContext('2d', { willReadFrequently: true })!.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height), 0, 0);
     return canvas.toDataURL('image/jpeg', .8);
   }
 

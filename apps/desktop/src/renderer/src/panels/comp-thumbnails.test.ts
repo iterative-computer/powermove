@@ -40,6 +40,26 @@ function fixture(count = 3) {
 }
 
 describe('composition thumbnails', () => {
+  it('reads thumbnail pixels asynchronously without blocking or retaining a cancelled capture', async () => {
+    const { PM, cache, viewer } = fixture(1);
+    let finish!: (ready: boolean) => void;
+    let cancelled!: () => boolean;
+    const ticket = { dispose: vi.fn(), readInto: vi.fn((_target: Uint8Array, check: () => boolean) => {
+      cancelled = check; return new Promise<boolean>(resolve => { finish = resolve; });
+    }) };
+    const session = { begin: vi.fn(() => ticket), dispose: vi.fn() };
+    PM.GL.createOpaqueReadback = vi.fn(() => session);
+    cache.refresh('first'); await vi.advanceTimersByTimeAsync(400);
+    expect(PM.GL.renderToPixels).not.toHaveBeenCalled();
+    expect(session.begin).toHaveBeenCalledWith(4, expect.objectContaining({ comp: PM.proj, isolatedVideoFrames: true }));
+    expect(PM.quality).toBe(.5);
+    viewer.isNavigating.mockReturnValue(true);
+    expect(cancelled()).toBe(true);
+    finish(false); await vi.advanceTimersByTimeAsync(0);
+    expect(cache.urls['comp-0']).toBeUndefined();
+    expect(ticket.dispose).toHaveBeenCalledOnce(); expect(session.dispose).toHaveBeenCalledOnce();
+    expect(putImageData).not.toHaveBeenCalled();
+  });
   it('prepares 3D thumbnails asynchronously and skips readback when navigation starts',async()=>{
     const {PM,cache,comps,viewer}=fixture(1);comps[0].layers=[{type:'extension',d:{definition:'powermove.3d.object'}}];PM.proj.layers=comps[0].layers;
     let complete!:()=>void;PM.GL.prepareStudioFrame=vi.fn(()=>new Promise<void>(resolve=>{complete=resolve;}));

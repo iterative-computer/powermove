@@ -667,6 +667,7 @@ PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
    to settle. A five-second rate limit alone still allowed mid-gesture stalls. */
 let lastThumbAt = 0;
 let thumbRetry = 0;
+let thumbnailInFlight = false;
 const thumbnailBlocked = () => PM.interactionActive?.() || viewerService(PM)?.isNavigating?.() || PM.playing
   || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
 function retryThumbnail(project: any) {
@@ -686,6 +687,7 @@ function canFinishThumbnail(project: any) {
   return false;
 }
 function projectThumb() {
+  if (thumbnailInFlight) return undefined;
   const now = Date.now();
   if (now - lastThumbAt < 5000) return undefined;
   if (thumbnailBlocked()) {
@@ -697,6 +699,25 @@ function projectThumb() {
   // Never render a second composition or synchronously readPixels for recovery.
   // Capture the already-presented canvas asynchronously; metadata can arrive later.
   const canvas = PM.GL?.canvas, project = PM.proj;
+  if (canvas && typeof PM.GL.createPresentedReadback === 'function') {
+    const scale = Math.min(1, 320 / canvas.width, 320 / canvas.height);
+    const width = Math.max(1, Math.round(canvas.width * scale)), height = Math.max(1, Math.round(canvas.height * scale));
+    const readback: import('./gl/opaque-readback').OpaqueReadbackSession | null = PM.GL.createPresentedReadback(width, height);
+    if (!readback) return undefined;
+    let ticket: import('./gl/opaque-readback').OpaqueReadbackTicket | undefined;
+    try {
+      ticket = readback.begin(0);
+      const pixels = new Uint8Array(width * height * 4);
+      thumbnailInFlight = true;
+      void ticket.readInto(pixels, () => PM.proj !== project || discardedProjects.has(project.id) || thumbnailBlocked()).then(ready => {
+        if (!canFinishThumbnail(project) || !ready) return;
+        const thumbnail = document.createElement('canvas'); thumbnail.width = width; thumbnail.height = height;
+        thumbnail.getContext('2d', { willReadFrequently: true })!.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer), width, height), 0, 0);
+        PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb: thumbnail.toDataURL('image/jpeg', .7) });
+      }).catch(() => undefined).finally(() => { thumbnailInFlight = false; ticket?.dispose(); readback.dispose(); });
+    } catch { ticket?.dispose(); readback.dispose(); thumbnailInFlight = false; }
+    return undefined;
+  }
   if (canvas?.toBlob && typeof createImageBitmap === 'function') {
     canvas.toBlob((blob: Blob | null) => {
       if (!blob || !canFinishThumbnail(project)) return;

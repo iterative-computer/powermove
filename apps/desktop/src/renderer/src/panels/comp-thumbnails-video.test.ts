@@ -51,6 +51,19 @@ it('restores frame/version ownership and releases copies when rendering throws',
   expect(cache!.urls.root).toBeUndefined();
 });
 
+it('holds private video frames until asynchronous GPU capture finishes while restoring viewer ownership immediately', async () => {
+  const f = fixture(); let complete!: (ready: boolean) => void;
+  const ticket = { readInto: vi.fn(() => new Promise<boolean>(resolve => { complete = resolve; })), dispose: vi.fn() };
+  const session = { begin: vi.fn(() => { expect(f.PM.preparedVideoFrames).toBe(f.prepared.frames); return ticket; }), dispose: vi.fn() };
+  f.PM.GL.createOpaqueReadback = () => session;
+  cache!.refresh('one'); vi.advanceTimersByTime(400); f.finish(f.prepared); await f.flush();
+  expect(f.PM.preparedVideoFrames).toBe(f.oldFrames); expect(f.PM.quality).toBe(.5);
+  expect(f.prepared.dispose).not.toHaveBeenCalled(); expect(cache!.urls.root).toBeUndefined();
+  complete(true); await f.flush();
+  expect(cache!.urls.root).toBe('data:image/jpeg;poster'); expect(f.prepared.dispose).toHaveBeenCalledOnce();
+  expect(ticket.dispose).toHaveBeenCalledOnce(); expect(session.dispose).toHaveBeenCalledOnce();
+});
+
 it.each(['refresh', 'project', 'dispose', 'playback', 'export'])('discards pending pixels after %s without modifying the viewer or export', async event => {
   const f = fixture();
   cache!.refresh('one'); vi.advanceTimersByTime(400); const signal = f.signal;

@@ -1028,6 +1028,32 @@ describe('legacy app install', () => {
     expect(put).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['complete', 'playing', 'project'])('captures saved-project thumbnails asynchronously and releases them after %s', async stage => {
+    const { PM, timers } = appRegistry();
+    let complete!: (ready: boolean) => void;
+    const ticket = { dispose: vi.fn(), readInto: vi.fn(() => new Promise<boolean>(resolve => { complete = resolve; })) };
+    const session = { begin: vi.fn(() => ticket), dispose: vi.fn() };
+    PM.GL.createPresentedReadback = vi.fn(() => session);
+    PM.GL.canvas = { width: 640, height: 360, toBlob: vi.fn() };
+    const encode = vi.fn(() => 'data:image/jpeg;base64,async-preview');
+    window.document.createElement = (() => ({ getContext: () => ({ putImageData() {} }), toDataURL: encode })) as any;
+    vi.stubGlobal('ImageData', class { constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {} });
+    PM.Projects.upsertMeta = vi.fn();
+    PM.autosave(); await timers.get(PM.app.saveTimer)();
+    expect(PM.GL.canvas.toBlob).not.toHaveBeenCalled();
+    expect(PM.GL.createPresentedReadback).toHaveBeenCalledWith(320, 180);
+    expect(encode).not.toHaveBeenCalled();
+    if (stage === 'playing') PM.playing = true;
+    if (stage === 'project') PM.proj = { ...PM.proj, id: 'different-project' };
+    complete(true);
+    await vi.waitFor(() => expect(session.dispose).toHaveBeenCalledOnce());
+    if (stage === 'complete') {
+      expect(encode).toHaveBeenCalledOnce();
+      expect(PM.Projects.upsertMeta).toHaveBeenCalledWith(expect.objectContaining({ thumb: 'data:image/jpeg;base64,async-preview' }));
+    } else { expect(encode).not.toHaveBeenCalled(); expect(PM.Projects.upsertMeta).not.toHaveBeenCalled(); }
+    expect(ticket.dispose).toHaveBeenCalledOnce();
+  });
+
   it.each(['readback', 'resize'])('defers a thumbnail when playback starts during %s', async stage => {
     const { PM, timers } = appRegistry();
     const captures: Function[] = [];

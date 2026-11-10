@@ -38,6 +38,21 @@ test('the editor renders native Studio frames and keeps new depth sets native',a
  await expect.poll(()=>page.evaluate(()=>(window as any).PM.Studio?.status().ready),{timeout:30_000}).toBe(true);
  await expect.poll(()=>session.app.evaluate(()=>(globalThis as any).__studioSharedTransfers),{timeout:30_000}).toBeGreaterThan(0);
  const first=await capture();expect(first.backend).toBe('native-studio');expect(first.red).toBeGreaterThan(200);
+ const poster=await page.evaluate(async()=>{
+  const PM=(window as any).PM;
+  PM.GL.render(PM.time,{mblur:false});
+  const readback=PM.GL.createPresentedReadback(160,90);if(!readback)throw new Error('Presented-image readback is unavailable');
+  const render=PM.GL.renderProject;
+  let ticket;
+  try{
+   PM.GL.renderProject=()=>{throw new Error('A project thumbnail must not render another composition');};
+   try{ticket=readback.begin(0);}finally{PM.GL.renderProject=render;}
+   const pixels=new Uint8Array(160*90*4);if(!await ticket.readInto(pixels,()=>false))throw new Error('Presented-image readback was cancelled');
+   let red=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>pixels[i+1]+30&&pixels[i]>pixels[i+2]+30)red++;
+   return {red};
+  }finally{ticket?.dispose();readback.dispose();}
+ });
+ expect(poster.red).toBeGreaterThan(10);
  for(let i=0;i<3;i++){
   await page.evaluate(i=>{const PM=(window as any).PM;PM.Kernel.api('native-editor').scene3d.edit({operation:'add_object',object:{id:`added-${i}`,source:{primitive:'box',parameters:{width:.3,height:.3,depth:.3}},p:{x:i*.4-.4,y:1}}});},i);
   const result=await capture();expect(result.backend).toBe('native-studio');expect(result.red).toBeGreaterThan(200);
