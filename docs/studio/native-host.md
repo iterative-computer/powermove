@@ -822,9 +822,13 @@ include real motion and compression and are not isolated noise measurements.
 
 Rust: **120 passed**, including the Cycles corpus, unchanged tolerances, actual
 GPU adaptive-floor/deadline tests and exact constant-layer preservation.
-The full desktop unit suite and focused native four-view/quality/UX checks are
-rerun on the combined branch; their final counts are recorded with delivery.
-Svelte has zero errors with the existing IconCropper accessibility warning.
+Combined branch: **7583 desktop unit tests passed** (7 skipped); **7 focused
+native four-view/quality/UX tests passed** (1 optional capture skipped). The full
+3D suite completed with **86 passed, 4 optional skips and one bounds-null Redo
+image-identity failure**; that case passed unchanged on its focused rerun. This
+flaky full-suite result is retained rather than reported as an all-green run.
+Svelte has zero errors with the existing IconCropper accessibility warning;
+main-process TypeScript checking passes.
 
 Four Views now retries temporary native capacity rather than permanently
 moving a pane to WebGPU when a retiring preview occupies a slot. The four-host
