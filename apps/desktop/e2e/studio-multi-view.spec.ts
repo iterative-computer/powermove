@@ -111,3 +111,26 @@ test('1, 2 and 4 views: choose each pane’s view, select and move in another pa
   await expect(page.locator('#viewer-pane-frame')).toHaveCount(0);
   expect(await page.locator('#stage').evaluate((el: HTMLElement) => el.style.marginLeft + el.style.marginRight)).toBe('');
 });
+
+test('heavy terrain, scatter and fog deliver every native side pane',async({session})=>{
+  test.setTimeout(120_000);await session.openEditor();const page=session.page;
+  await page.evaluate(()=>{const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel?.();});
+  await session.app.evaluate(({ipcMain})=>{const original=(ipcMain as any)._invokeHandlers.get('studio-native:request');ipcMain.removeHandler('studio-native:request');ipcMain.handle('studio-native:request',(event,...args)=>{(globalThis as any).__paneEvent=event;return original(event,...args);});});
+  await chooseNativeMenu(session,['Terrain'],()=>page.evaluate(()=>(window as any).PM.cmd('3d.add-menu')));
+  await chooseNativeMenu(session,['Fog Volume'],()=>page.evaluate(()=>(window as any).PM.cmd('3d.add-menu')));
+  // Retiring previews may occupy slots while the four-view layout opens.
+  await session.app.evaluate(async({ipcMain})=>{
+    for(let i=0;!(globalThis as any).__paneEvent && i<500;i++)await new Promise(r=>setTimeout(r,20));
+    const event=(globalThis as any).__paneEvent;if(!event)throw new Error('No native editor session');
+    const request=(ipcMain as any)._invokeHandlers.get('studio-native:request'),release=(ipcMain as any)._invokeHandlers.get('studio-native:release'),held:string[]=[];
+    for(let i=0;i<3;i++){const key=`pane-capacity-hold-${i}`;try{await request(event,key,{op:'hello'});held.push(key);}catch{break;}}
+    if(held.length>2)await release(event,held.pop());
+    setTimeout(()=>{for(const key of held)void release(event,key);},2000);
+  });
+  await page.evaluate(()=>{const PM=(window as any).PM,api=PM.Kernel.api('heavy-pane-test').scene3d;const r=api.edit({operation:'set_world',patch:{p:{fogDensity:.025,fogDistance:500,fogHeightFalloff:.005}}});if(!r.ok)throw new Error(r.message);api.views.setLayout(4);PM.selectLayers([]);PM.invalidate();});
+  const state=()=>page.evaluate(()=>({panes:[...document.querySelectorAll('.viewer-pane')].map((el:any)=>({index:el.dataset.pane,status:el.querySelector('.viewer-pane-status')?.textContent})),studio:(window as any).PM.Studio.diagnostics()}));
+  await expect.poll(async()=>{const s=await state();return s.panes.filter(p=>p.status==='Live').length;},{timeout:60_000}).toBe(3);
+  await expect.poll(async()=>{const s=await state();return s.studio.filter((j:any)=>j.slot && j.backend==='native-studio' && j.version).length;},{timeout:60_000}).toBe(3);
+  for(const index of [0,1,2])await expect.poll(()=>page.locator(`.viewer-pane[data-pane="${index}"] canvas`).evaluate((canvas:HTMLCanvasElement)=>{const p=canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data;let lit=0;for(let i=0;i<p.length;i+=4*29)if(p[i]+p[i+1]+p[i+2]>30)lit++;return lit;})).toBeGreaterThan(20);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

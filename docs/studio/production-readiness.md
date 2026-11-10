@@ -896,3 +896,91 @@ make quality selectable; they do not waive the native-resolution appearance,
 moving-sequence, quiet-machine timing or full-editor acceptance gates. Detailed
 preset measurements and limitations are recorded in
 [native host measurements](native-host.md#saved-quality-and-frame-budgets-lane-q).
+
+## Render-quality measurements — Lane Q, 10 November 2026
+
+Apple M5, 16 GB; native hardware ray queries were active throughout. Times are
+medians of three warm native 1920×1080 frames, including tracing, guides,
+filtering and readback, excluding the encoder. A target warm-up is excluded;
+the first quality request is recorded separately by the harness. Quality and
+eight-frame advancing-seed flicker use frozen **320×180** scenes against audited
+raw high-sample references (2048 samples, 16384 for room fog). These small
+reference scores do not certify the appearance of a moving 1080p film.
+
+Product shots retain the complete preset run; fog/landscape quality presets were
+rerun after the exact-constant-layer optimization. Draft does not use OIDN.
+
+| Scene | Preset | 1080p seconds/frame | SSIM | Mean ΔE00 | Flicker RMS |
+|---|---|---:|---:|---:|---:|
+| Glass | Draft | 0.451 | 0.8647 | 5.120 | 0.01995 |
+| Glass | Preview | 3.476 | 0.9236 | 3.054 | 0.00925 |
+| Glass | Production | 5.024 | 0.9909 | 0.610 | 0.00632 |
+| Glass | Final | 24.163 | 0.9946 | 0.456 | 0.00470 |
+| Product hero | Draft | 0.202 | 0.9820 | 0.398 | 0.01700 |
+| Product hero | Preview | 2.678 | 0.9917 | 0.237 | 0.00700 |
+| Product hero | Production | 4.465 | 0.9925 | 0.220 | 0.00321 |
+| Product hero | Final | 22.819 | 0.9950 | 0.258 | 0.00205 |
+| Chrome | Draft | 0.562 | 0.8779 | 2.628 | 0.01553 |
+| Chrome | Preview | 3.162 | 0.9360 | 1.257 | 0.00976 |
+| Chrome | Production | 4.551 | 0.9057 | 0.846 | 0.00696 |
+| Chrome | Final | 24.412 | 0.9668 | 0.540 | 0.00714 |
+| Room fog | Draft | 0.660 | 0.8299 | 2.697 | 0.02834 |
+| Room fog | Preview | 3.547 | 0.9420 | 1.482 | 0.01328 |
+| Room fog | Production | 5.172 | 0.9555 | 1.174 | 0.01120 |
+| Room fog | Final | 22.924 | 0.9676 | 0.909 | 0.00625 |
+| Default landscape | Draft | 0.673 | 0.7939 | 2.989 | 0.05058 |
+| Default landscape | Preview | 3.023 | 0.8630 | 1.992 | 0.01299 |
+| Default landscape | Production | 4.351 | 0.9167 | 1.527 | 0.00903 |
+| Default landscape | Final | 23.290 | 0.9504 | 1.200 | 0.00618 |
+
+All Production/Final rows pass the unchanged DN harness gates, SSIM ≥ .90 and
+mean ΔE00 ≤ 4. Draft stays below 1 s and Production below 6 s in these median
+native measurements. This is not a quiet-machine, full-editor shipping signoff:
+other desktop work was present during this overnight session. The fixed-map
+Production chrome image still shows caustic grain at native size; a passing
+small-image score does not waive that issue.
+
+### Actual moving glass export
+
+The normal compositor and H.264 encoder produced eight 1920×1080, 30 fps frames
+from source time 17.5 s. Production used two shutter times and one OIDN finish:
+**5.784 s median native time**, 5.551–6.578 s range, and **52.808 s wall time**
+including project setup and encoding. Actual camera counts were 30–40 per
+frame: the tracing deadline can preempt the noise floor. Draft used one shutter
+time: **.533 s median native time**, .526–.657 s range, **10.760 s wall time**.
+Both files were independently checked for dimensions, duration and eight frames.
+DN2's earlier 120-frame export measured 54.522 s/output frame including encoding;
+the shorter current wall-time sample includes proportionally more startup.
+
+Against matching frames 45–52 of DN2's cleaned movie, Production averages
+**SSIM .99481, mean ΔE00 .661** at full 1080p. This is a compressed, denoised movie
+comparison, separate from the independent raw-reference test. Cup-interior
+SSIM is .9949; the cup-caustic region is .9541. The prism-face region averages
+ΔE00 **4.839**, so its colour/detail acceptance remains open despite the strong
+whole-frame score. Adjacent-frame high-pass RMS (Gaussian σ 1.5, decoded sRGB)
+is .00191 versus DN2 .00248 in the cup interior, .00354 versus .00341 on the
+prism, and .00426 versus .00418 in the caustic. These moving-image differences
+include real motion and compression and are not isolated noise measurements.
+
+### Verification and remaining gates
+
+Rust: **120 passed**, including the Cycles corpus, unchanged tolerances, actual
+GPU adaptive-floor/deadline tests and exact constant-layer preservation.
+The full desktop unit suite and focused native four-view/quality/UX checks are
+rerun on the combined branch; their final counts are recorded with delivery.
+Svelte has zero errors with the existing IconCropper accessibility warning.
+
+Four Views now retries temporary native capacity rather than permanently
+moving a pane to WebGPU when a retiring preview occupies a slot. The four-host
+memory cap stays intact. A regression covers Terrain, 18600+ scatter instances,
+local/World Fog and temporarily occupied preview slots, requiring every side
+pane to deliver a native picture. Refine completes on its bounded quality result
+and a quality edit starts a new request. The UX `choices`, `fields` and `describe`
+API additions are preserved.
+
+**Still not ready to ship:** native-size chrome caustic grain, prism colour
+fidelity, longer moving references for the other four scenes and quiet-machine
+full-editor acceptance remain open. Styled depth sets and nested Studio
+compositions can require several bounded traces; the per-trace time setting is
+not an absolute wall-clock timeout. No temporal denoiser history is used for
+exports. No renders, videos or local logs are committed.

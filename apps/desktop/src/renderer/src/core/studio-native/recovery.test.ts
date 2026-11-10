@@ -51,3 +51,10 @@ describe('native Studio fallback', () => {
     expect([...writer.finish()]).toEqual([1, 2, 3]);
   });
 });
+
+it('retries temporary native capacity instead of permanently losing a side pane',async()=>{
+ const native=backend('native'),factory=vi.fn(()=>backend('webgpu'));
+ native.initialize=vi.fn().mockRejectedValueOnce(new Error('Too many active Studio sessions')).mockRejectedValueOnce(new Error('Too many active Studio sessions')).mockResolvedValue(undefined);
+ const recovering=new RecoveringStudioBackend(native,factory,{invalidate:vi.fn()});
+ await recovering.initialize();expect(recovering.id).toBe('native');expect(native.initialize).toHaveBeenCalledTimes(3);expect(factory).not.toHaveBeenCalled();recovering.dispose();
+});

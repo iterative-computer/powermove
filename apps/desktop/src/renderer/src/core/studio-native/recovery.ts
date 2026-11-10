@@ -16,7 +16,19 @@ export class RecoveringStudioBackend implements StudioBackend {
   private nativeFailure:string|null=null;
   get id(): string { return this.fallback?.id ?? this.native.id; }
   constructor(private native: StudioBackend, private fallbackFactory: StudioBackendFactory, private context: StudioBackendContext) {}
-  async initialize(): Promise<void> { try { await this.native.initialize(); } catch (error) { this.nativeFailure=String(error);console.warn('Native Studio initialization failed; using WebGPU',error);await this.recover(); } }
+  async initialize(): Promise<void> {
+    const until=performance.now()+30_000;
+    while(!this.closed){
+      try{await this.native.initialize();return;}
+      catch(error){
+        // A retiring preview can briefly occupy one of the four native slots.
+        // Capacity is temporary, so do not permanently demote a side pane.
+        if(String(error).includes('Too many active Studio sessions') && performance.now()<until){await new Promise(resolve=>setTimeout(resolve,250));continue;}
+        this.nativeFailure=String(error);console.warn('Native Studio initialization failed; using WebGPU',error);await this.recover();return;
+      }
+    }
+    throw new Error('Studio backend is closed');
+  }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription) {
     this.input = { scene, maps, description }; this.camera = null;
     const active = this.fallback ?? this.native;

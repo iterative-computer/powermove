@@ -69,6 +69,7 @@ export class NativeStudioBackend implements StudioBackend {
 
   async initialize(): Promise<void> {
     if(this.closed)throw new Error('Studio backend is closed');
+    this.textureUnsubscribe?.();this.textureUnsubscribe=null;
     this.textureUnsubscribe=this.bridge.onTexture?.((info,texture)=>{
       if(info.session!==this.session)return;
       const start=performance.now(), frame=texture.getVideoFrame() as VideoFrame;
