@@ -1,14 +1,39 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import * as THREE from 'three';
 import { makePM } from '../../legacy/__tests__/make-pm';
-import { viewsState,setViewLayout,setActivePane,setPaneView } from './views';
+import { viewsState,setViewLayout,setActivePane,setPaneView,paneCamera,renderPane } from './views';
 import { getViewportMode } from './viewport';
 import { disposeSceneRuntimes } from './service';
+import * as service from './service';
+import * as studio from '../studio';
 const editors:any[]=[];
 function editor(){
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
   PM.proj=PM.mkProject({name:'Views'});PM.time=0;editors.push(PM);return PM;
 }
-afterEach(()=>{for(const PM of editors.splice(0))disposeSceneRuntimes(PM);});
+afterEach(()=>{for(const PM of editors.splice(0))disposeSceneRuntimes(PM);vi.restoreAllMocks();});
+it('keeps a side view stationary while objects move, instead of refitting the scene every tick',()=>{
+  const mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial());mesh.updateMatrixWorld(true);
+  const world:any={camera:new THREE.PerspectiveCamera(45,16/9,.01,10000),objects:new Map([['model',mesh]])};
+  const PM={L:()=>({threeD:true})},pane:any={view:'front',pose:null};
+  const before=paneCamera(PM,pane,400,225,world);
+  mesh.position.x=100;mesh.updateMatrixWorld(true);
+  const after=paneCamera(PM,pane,400,225,world);
+  expect(after.matrixWorld.elements).toEqual(before.matrixWorld.elements);
+  expect(paneCamera(PM,{view:'front',pose:null},400,225,world).position.x).toBeCloseTo(100);
+  mesh.geometry.dispose();(mesh.material as THREE.Material).dispose();
+});
+it('evaluates every playback pane at the same project-frame time and preserves exact paused time',()=>{
+  const PM=editor();PM.L=()=>({threeD:true});setViewLayout(PM,4);PM.proj.fps=60;PM.time=1.019;PM.playing=true;
+  const mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial());mesh.updateMatrixWorld(true);
+  const world:any={camera:new THREE.PerspectiveCamera(45,16/9,.01,10000),objects:new Map([['model',mesh]])};
+  const evaluate=vi.spyOn(service,'compositionRuntime').mockReturnValue(world),draw=vi.spyOn(studio,'studioLayer').mockReturnValue(null);
+  for(let pane=0;pane<3;pane++)renderPane(PM,pane,400,225);
+  expect(evaluate.mock.calls.map(call=>call[1])).toEqual([61/60,61/60,61/60]);
+  expect(draw.mock.calls.map(call=>call[9])).toEqual([61/60,61/60,61/60]);
+  PM.playing=false;renderPane(PM,0,400,225);expect(draw.mock.calls.at(-1)![9]).toBe(1.019);
+  mesh.geometry.dispose();(mesh.material as THREE.Material).dispose();
+});
 const snapshot=(PM:any)=>JSON.stringify(viewsState(PM));
 it('undoes/redoes layout, pane selection and view choices and reopens the same views',()=>{
   const PM=editor();

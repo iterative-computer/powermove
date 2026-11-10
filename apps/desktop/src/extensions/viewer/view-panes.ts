@@ -186,43 +186,42 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
     });
   };
 
-  /* One side pane per animation frame, at most ~20 times a second, and only
-     when its picture changed: the selected pane keeps the frame budget. */
-  let next = 0, lastDraw = 0, raf = 0;
+  /* Poll every pane on the display link. Studio bounds each pane to one
+     in-flight Live image; only changed pictures copy into the visible canvas. */
+  let raf = 0;
   const stats = { renders: 0, ms: 0 };
   runtime.viewPaneStats = stats;
-  const loop = (now: number) => {
+  const loop = () => {
     raf = requestAnimationFrame(loop);
-    if (!panes.size || now - lastDraw < 48) return;
-    const indices = [...panes.keys()].sort((a, b) => a - b);
-    const index = indices[next++ % indices.length]!;
-    const pane = panes.get(index)!;
+    if (!panes.size) return;
     const start = performance.now();
-    let picture: { canvas: CanvasImageSource; version: string } | null = null, outline: number[][] = [];
-    try {
-      picture = scene.views.render(index, pane.canvas.width, pane.canvas.height);
-      outline = scene.views.selection(index, pane.canvas.width, pane.canvas.height);
-    } catch { picture = null; }
-    lastDraw = now;
-    // Redraw when the picture or the selection outline changed.
-    const version = picture ? `${picture.version}|${outline.map(l => l.map(v => Math.round(v)).join(',')).join(';')}` : '';
-    if (!picture || version === pane.version) return;
-    const c = pane.canvas.getContext('2d');
-    if (!c) return;
-    const bg = String((api.project.get() as any).bg ?? '#000000');
-    c.fillStyle = /^#[0-9a-f]{3,8}$/i.test(bg) ? bg : '#000';
-    c.fillRect(0, 0, pane.canvas.width, pane.canvas.height);
-    c.drawImage(picture.canvas, 0, 0, pane.canvas.width, pane.canvas.height);
-    if (outline.length) {
-      c.save();
-      c.strokeStyle = getComputedStyle(container).getPropertyValue('--accent').trim() || '#FF6B1A';
-      c.lineWidth = Math.max(1, Math.round(pane.canvas.width / Math.max(1, pane.canvas.clientWidth)));
-      c.beginPath();
-      for (const [x1, y1, x2, y2] of outline) { c.moveTo(x1!, y1!); c.lineTo(x2!, y2!); }
-      c.stroke(); c.restore();
+    for (const [index, pane] of panes) {
+      let picture: { canvas: CanvasImageSource; version: string } | null = null, outline: number[][] = [];
+      try {
+        picture = scene.views.render(index, pane.canvas.width, pane.canvas.height);
+        outline = scene.views.selection(index, pane.canvas.width, pane.canvas.height);
+      } catch { picture = null; }
+      // Redraw when the picture or the selection outline changed.
+      const version = picture ? `${picture.version}|${outline.map(l => l.map(v => Math.round(v)).join(',')).join(';')}` : '';
+      if (!picture || version === pane.version) continue;
+      const c = pane.canvas.getContext('2d');
+      if (!c) continue;
+      const bg = String((api.project.get() as any).bg ?? '#000000');
+      c.fillStyle = /^#[0-9a-f]{3,8}$/i.test(bg) ? bg : '#000';
+      c.fillRect(0, 0, pane.canvas.width, pane.canvas.height);
+      c.drawImage(picture.canvas, 0, 0, pane.canvas.width, pane.canvas.height);
+      if (outline.length) {
+        c.save();
+        c.strokeStyle = getComputedStyle(container).getPropertyValue('--accent').trim() || '#FF6B1A';
+        c.lineWidth = Math.max(1, Math.round(pane.canvas.width / Math.max(1, pane.canvas.clientWidth)));
+        c.beginPath();
+        for (const [x1, y1, x2, y2] of outline) { c.moveTo(x1!, y1!); c.lineTo(x2!, y2!); }
+        c.stroke(); c.restore();
+      }
+      pane.version = version;
+      stats.renders++;
     }
-    pane.version = version;
-    stats.renders++; stats.ms = performance.now() - start;
+    stats.ms = performance.now() - start;
   };
   raf = requestAnimationFrame(loop);
 

@@ -34,6 +34,7 @@ export const paneViewLabel = (view: PaneView): string => PANE_VIEWS.find(v => v.
 type Entry = { layout: ViewLayout; active: number; panes: ViewPane[]; stored: unknown };
 const entries = new WeakMap<object, { project: object; comps: Map<string, Entry> }>();
 const listeners = new WeakMap<object, Set<() => void>>();
+const framedPanes = new WeakMap<ViewPane, ViewPose>();
 function entry(PM: any): Entry {
   let owner = entries.get(PM);
   if (!owner || owner.project !== PM.proj) { owner = { project: PM.proj, comps: new Map() }; entries.set(PM, owner); }
@@ -78,8 +79,8 @@ export function viewsState(PM: any): ViewsState {
 }
 
 /** Frame every model along an axis, as a Top or Front view first opens. */
-export function sidePose(PM: any, side: ViewSide): ViewPose {
-  const world = compositionRuntime(PM), box = new THREE.Box3();
+export function sidePose(PM: any, side: ViewSide, world=compositionRuntime(PM)): ViewPose {
+  const box = new THREE.Box3();
   for (const [id, object] of world.objects as Map<string, THREE.Object3D>) {
     const layer = PM.L?.(id);
     if (!layer || layer.d?.data?.object?.world) continue;
@@ -97,10 +98,20 @@ export function sidePose(PM: any, side: ViewSide): ViewPose {
   return { position: target.clone().addScaledVector(sideDirection(side), distance), target, zoom: 1 };
 }
 
+function panePose(PM:any,pane:ViewPane,world?:ReturnType<typeof compositionRuntime>):ViewPose {
+  if(pane.pose)return pane.pose;
+  let pose=framedPanes.get(pane);
+  if(!pose){
+    pose=pane.view==='custom'?viewportPose(PM):sidePose(PM,pane.view as ViewSide,world);
+    framedPanes.set(pane,pose);
+  }
+  return pose;
+}
+
 function load(PM: any, pane: ViewPane): void {
   if (pane.view === 'camera') { setViewportMode(PM, 'camera'); return; }
-  if (pane.view === 'custom') { if (pane.pose) applyViewportPose(PM, pane.pose); else setViewportMode(PM, 'editor'); return; }
-  applySidePose(PM, pane.view, pane.pose ?? sidePose(PM, pane.view));
+  if (pane.view === 'custom') { const pose=pane.pose??framedPanes.get(pane);if (pose) applyViewportPose(PM, pose); else setViewportMode(PM, 'editor'); return; }
+  applySidePose(PM, pane.view, panePose(PM,pane));
 }
 
 /** 1 View, 2 Views (side by side) or 4 Views. The view you were looking
@@ -141,11 +152,10 @@ export function setPaneView(PM: any, index: number, view: PaneView): void {
 }
 
 /** The camera a pane looks through, at its size. */
-export function paneCamera(PM: any, pane: ViewPane, width: number, height: number): THREE.Camera {
-  const world = compositionRuntime(PM);
+export function paneCamera(PM: any, pane: ViewPane, width: number, height: number, world=compositionRuntime(PM)): THREE.Camera {
   const camera = world.camera.clone() as THREE.PerspectiveCamera | THREE.OrthographicCamera;
   if (pane.view !== 'camera') {
-    const pose = pane.pose ?? (pane.view === 'custom' ? viewportPose(PM) : sidePose(PM, pane.view));
+    const pose = panePose(PM,pane,world);
     camera.position.copy(pose.position); camera.zoom = pose.zoom;
     if (pane.view === 'top') camera.up.set(0, 0, -1); else if (pane.view === 'bottom') camera.up.set(0, 0, 1); else camera.up.set(0, 1, 0);
     camera.lookAt(pose.target);
@@ -155,13 +165,19 @@ export function paneCamera(PM: any, pane: ViewPane, width: number, height: numbe
   return camera;
 }
 
+const paneTime=(PM:any):number=>{
+  const time=PM.time||0,fps=Math.max(1,Number(PM.previewFps||PM.proj?.fps)||30);
+  return PM.playing?Math.floor(time*fps+1e-7)/fps:time;
+};
+const paneAt=(PM:any,index:number):ViewPane|undefined=>{const e=entry(PM);return index===e.active?current(PM):e.panes[index];};
+
 /** A pane's picture from its own Studio session, at Live quality. Null until the first frame arrives. */
 export function renderPane(PM: any, index: number, width: number, height: number): { canvas: CanvasImageSource; version: string } | null {
-  const pane = viewsState(PM).panes[index]; if (!pane) return null;
-  const time = PM.time || 0, world = compositionRuntime(PM, time);
+  const pane = paneAt(PM,index); if (!pane) return null;
+  const time = paneTime(PM), world = compositionRuntime(PM, time);
   const ids = new Set<string>([...(world.objects as Map<string, unknown>).keys()]);
   if (!ids.size) return null;
-  const camera = paneCamera(PM, pane, width, height);
+  const camera = paneCamera(PM, pane, width, height,world);
   return studioLayer(PM, world, width, height, '', ids, true, camera, undefined, time, { slot: `pane-${index}` });
 }
 
@@ -169,9 +185,9 @@ export function renderPane(PM: any, index: number, width: number, height: number
     selection reads in every view, as in After Effects. Empty when nothing
     3D is selected or it is behind the pane's camera. */
 export function paneSelection(PM: any, index: number, width: number, height: number): number[][] {
-  const pane = viewsState(PM).panes[index]; if (!pane) return [];
+  const pane = paneAt(PM,index); if (!pane) return [];
   const ids: string[] = PM.sel?.layers || []; if (!ids.length) return [];
-  const world = compositionRuntime(PM), camera = paneCamera(PM, pane, width, height);
+  const world = compositionRuntime(PM,paneTime(PM)), camera = paneCamera(PM, pane, width, height,world);
   const lines: number[][] = [];
   for (const id of ids) {
     const object = (world.objects as Map<string, THREE.Object3D>).get(id), layer = PM.L?.(id);
