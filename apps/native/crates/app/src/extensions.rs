@@ -1579,6 +1579,7 @@ impl Controller {
             tokens.accessibility.increase_contrast,
             tokens.accessibility.reduce_transparency,
         );
+        let page_span = crate::diag::span("extensions.page");
         let created = match &session {
             Some(session) => MacDomHost::new_store_remote_dom(
                 mtm,
@@ -1618,6 +1619,7 @@ impl Controller {
         let shell = self.host.borrow();
         host.install_below(&shell.native_container(), &shell.gpui);
         drop(shell);
+        drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions
             .views
