@@ -196,6 +196,19 @@ pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> 
     choose_paths(window, false, true, &[], "Attach")
 }
 
+#[cfg(debug_assertions)]
+thread_local! {
+    static REVIEW_ANSWER: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Development builds: the next open panel answers `paths` without showing.
+/// The system panel takes no background input, so on-screen reviews of
+/// Import, Locate File… and the rest choose their files here.
+#[cfg(debug_assertions)]
+pub fn answer_next_open_panel(paths: Vec<PathBuf>) {
+    REVIEW_ANSWER.with(|a| *a.borrow_mut() = Some(paths));
+}
+
 /// An open panel sheet whose default button reads `prompt`.
 pub fn choose_paths(
     window: &NSWindow,
@@ -207,6 +220,11 @@ pub fn choose_paths(
     use objc2::{msg_send, runtime::AnyObject};
     use objc2_foundation::NSArray;
     let (tx, rx) = async_channel::bounded(1);
+    #[cfg(debug_assertions)]
+    if let Some(paths) = REVIEW_ANSWER.with(|a| a.borrow_mut().take()) {
+        let _ = tx.try_send(paths);
+        return rx;
+    }
     let mtm = MainThreadMarker::new().unwrap();
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseFiles(!folders);

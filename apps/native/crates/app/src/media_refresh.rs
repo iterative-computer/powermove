@@ -209,6 +209,21 @@ impl Controller {
         let Some(job) = plan.job else {
             return;
         };
+        // Until the job lands, a clip whose file isn't known yet (just
+        // imported or relinked) draws nothing rather than Media Offline: the
+        // card is wrong for it, and drawing it held the viewer seconds after
+        // an import.
+        let resolving: BTreeSet<String> = published
+            .media
+            .iter()
+            .map(|item| item.id.to_string())
+            .filter(|id| !self.media_base.originals.contains_key(id))
+            .collect();
+        if resolving != self.media_base.resolving {
+            self.media_base.resolving = resolving;
+            self.decorate_media(cx);
+            self.publish_media_catalog();
+        }
         let cache = crate::media::cache_root(&self.profile);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -226,7 +241,14 @@ impl Controller {
                 {
                     match result {
                         Ok(resolution) => v.adopt_media(resolution, cx),
-                        Err(error) => v.message = format!("Media could not be resolved: {error}"),
+                        Err(error) => {
+                            v.message = format!("Media could not be resolved: {error}");
+                            // Nothing is being looked up any more: what has
+                            // no file is offline.
+                            v.media_base.resolving.clear();
+                            v.decorate_media(cx);
+                            v.publish_media_catalog();
+                        }
                     }
                     v.update_builtins(cx);
                     cx.notify();

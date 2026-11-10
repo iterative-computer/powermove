@@ -40,7 +40,7 @@ pub struct Host {
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
-    requests: VecDeque<PlatformRequest>,
+    pub(crate) requests: VecDeque<PlatformRequest>,
     pub windows: BTreeMap<String, AnyWindowHandle>,
     /// The size each panel window was opened at (the Agent popover's, for the
     /// MCP panel tools).

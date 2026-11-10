@@ -3360,6 +3360,47 @@ fn stale_settings_presses_never_reach_a_different_account_or_provider() {
         "account.sign-in"
     ));
 }
+/// Settings › Media's proxy choices show their pop-ups (a choice without a
+/// lease drew no control at all) and a change reaches the app's media service.
+#[test]
+fn media_proxy_choices_have_controls_and_write_through_the_app() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"mediaSettings":{"rows":[
+        {"id":"media.create","label":"Create Proxies","detail":"","value":"ask",
+         "options":[{"v":"ask","label":"When Asked"},{"v":"import","label":"On Import"}]}],
+        "location":"/synthetic","used":null,"folders":[]}});
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "media.create")
+        .unwrap()
+        .clone();
+    assert_eq!(row["control"], "choice");
+    assert!(row["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":publication["revision"],
+                "action":{"type":"write","id":"media.create","value":"import"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        backend.native.platform,
+        [(
+            "media.settings".to_owned(),
+            json!({"write":"media.create","value":"import"})
+        )]
+    );
+}
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
     let actor = actor();

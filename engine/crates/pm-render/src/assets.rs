@@ -12,6 +12,11 @@ pub trait AssetResolver: Send + Sync {
     /// The original media file of `asset` (its document record is passed
     /// when the document has one), or `None` when the media is offline.
     fn path(&self, asset: &str, record: Option<&Node>) -> Option<PathBuf>;
+    /// The host is still looking `asset`'s file up (just imported or
+    /// relinked): a frame draws nothing for it, never the Media Offline card.
+    fn resolving(&self, _asset: &str) -> bool {
+        false
+    }
 }
 
 /// Reads the record's `sourcePath` (linked media).

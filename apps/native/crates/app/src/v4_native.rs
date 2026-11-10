@@ -38,6 +38,16 @@ pub fn menu(
     };
     let view: Retained<NSView> =
         unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    // An agent's panel action never leaves a menu on screen: its item is
+    // chosen by label, or the menu closes and the agent gets its items.
+    if let Some(ns_window) = view.window()
+        && let Some(choice) =
+            pm_shell::agent_menu::claim(&pm_shell::agent_menu_windows(&ns_window), options)
+    {
+        // After the caller's update returns, as a chosen row arrives.
+        cx.defer(move |cx| choose(choice, cx));
+        return;
+    }
     let mtm = MainThreadMarker::new().unwrap();
     let target: Retained<MenuTarget> = unsafe {
         msg_send![

@@ -98,6 +98,8 @@ impl From<RenderError> for JobError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaPaths {
     pub paths: BTreeMap<String, PathBuf>,
+    /// Assets the host is still resolving (the viewer's; exports never).
+    pub resolving: std::collections::BTreeSet<String>,
 }
 
 impl MediaPaths {
@@ -109,6 +111,9 @@ impl MediaPaths {
 impl pm_render::AssetResolver for MediaPaths {
     fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
         self.paths.get(asset).cloned()
+    }
+    fn resolving(&self, asset: &str) -> bool {
+        self.resolving.contains(asset)
     }
 }
 

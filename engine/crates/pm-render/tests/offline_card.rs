@@ -81,3 +81,28 @@ fn other_renders_keep_failing_offline_media() {
     let rgba = renderer.read_rgba(&frame).unwrap();
     assert!(alpha_at(&rgba, 96, 54) < 0.01);
 }
+
+/// Media the host is still looking up (just imported or relinked) is not
+/// offline: an isolating frame draws nothing for it and reports no failure.
+#[test]
+fn media_still_resolving_draws_no_card_and_no_failure() {
+    struct Resolving;
+    impl pm_render::AssetResolver for Resolving {
+        fn path(&self, _: &str, _: Option<&pm_model::Node>) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn resolving(&self, asset: &str) -> bool {
+            asset == "missing"
+        }
+    }
+    let doc = offline_doc();
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_isolate_layers(true);
+    let frame = renderer
+        .render(&doc, "Ptest-root", ticks(0.0), &request, &Resolving)
+        .expect("render");
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let rgba = renderer.read_rgba(&frame).unwrap();
+    assert!(alpha_at(&rgba, 96, 54) < 0.01, "no card in the layer's box");
+}

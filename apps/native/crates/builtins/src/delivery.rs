@@ -379,6 +379,7 @@ pub fn capabilities(
                 settings: planned.settings.ok_or("Missing render settings")?,
                 media: std::sync::Arc::new(pm_export::render::MediaPaths {
                     paths: originals.clone(),
+                    ..Default::default()
                 }),
                 destination: destination
                     .path()

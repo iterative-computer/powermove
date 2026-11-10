@@ -1545,6 +1545,72 @@ fn a_session_killed_unchanged_or_after_saving_reopens_without_asking() {
         ShellReply::RecoveryRequired { .. }
     ));
 }
+/// A layout change (a dock's active tab switched because its saved panel
+/// isn't installed here, a panel moved) is no unsaved work: a session killed
+/// after only that reopens without asking and wrote no checkpoint. An edit
+/// after it still asks, and recovery keeps the layout.
+#[test]
+fn a_session_killed_after_only_layout_changes_reopens_without_asking() {
+    let dir = common::TempDir::new("layout-then-killed");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    let prepare = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(path.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let layout = |k: &mut Kernel, active: &str| {
+        k.handle(
+            "P",
+            Request::new(
+                Caller::native(),
+                WorkspaceCall::Mutate {
+                    next: parse(&format!(
+                        r#"{{"id":"design","name":"Design","layout":{{"docks":[{{"id":"right","panels":[{{"id":"{active}","active":true}}]}}]}}}}"#
+                    ))
+                    .unwrap(),
+                    threw: None,
+                },
+            ),
+        )
+        .unwrap();
+    };
+    let checkpoints = || {
+        fs::read_dir(profile.join("journals/P"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|s| fs::read_dir(s.path()).into_iter().flatten().flatten())
+            .filter(|f| f.file_name().to_string_lossy().starts_with("checkpoint-"))
+            .count()
+    };
+    {
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        layout(&mut k, "flappy-bird.panel");
+        layout(&mut k, "voiceover-recorder.panel");
+        k.sync_all();
+        assert_eq!(checkpoints(), 0, "a layout change rewrote the document");
+    }
+    {
+        let mut k = kernel(&profile);
+        let ShellReply::Opened { .. } = prepare(&mut k) else {
+            panic!("a session with only layout changes asked to recover")
+        };
+        layout(&mut k, "inspector");
+        edit(&mut k, "P", 23.0);
+        k.sync_all();
+    }
+    let mut k = kernel(&profile);
+    let ShellReply::RecoveryRequired { ticket, .. } = prepare(&mut k) else {
+        panic!("an unsaved edit after a layout change didn't ask")
+    };
+    let _ = ticket;
+}
 #[test]
 fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
     let dir = common::TempDir::new("deleted-file-open");
