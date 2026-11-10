@@ -107,7 +107,7 @@ fn fill(v: &Controller) -> Value {
     } else {
         json!({"type": "solid", "stops": [{"color": bg, "position": 0}]})
     };
-    if !f["stops"].as_array().is_some_and(|s| !s.is_empty()) {
+    if f["stops"].as_array().is_none_or(|s| s.is_empty()) {
         f["stops"] = json!([{"color": bg, "position": 0}]);
     }
     if f["type"].as_str().is_none() {
@@ -474,6 +474,8 @@ impl Controller {
             if answer.recv().await != Ok(Some(true)) {
                 return;
             }
+            // The field editor may still hold the typing: commit it first.
+            read.validateEditing();
             let text = read.stringValue().to_string();
             let next = if numeric {
                 match text.trim().parse::<f64>() {

@@ -1627,16 +1627,18 @@ fn an_unchanged_file_reopens_with_the_workspace_it_was_closed_with() {
     let mut k = kernel(&profile);
     let h = open(&mut k, "P", SessionSource::File(path.clone()));
     let expected = k.project("P").unwrap().workspace().clone();
-    k.handle(
-        "P",
-        Request::new(
-            Caller::native(),
-            WorkspaceCall::Replace {
-                expected,
-                next: ws.clone(),
-            },
-        ),
-    );
+    let _ack = k
+        .handle(
+            "P",
+            Request::new(
+                Caller::native(),
+                WorkspaceCall::Replace {
+                    expected,
+                    next: ws.clone(),
+                },
+            ),
+        )
+        .unwrap();
     // The kernel files it as the active workspace record too.
     assert_eq!(k.state().settings["workspace"].as_str(), Some("w1"));
     k.shell(ShellCall::Close(h)).unwrap();

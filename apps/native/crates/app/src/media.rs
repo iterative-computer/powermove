@@ -611,7 +611,7 @@ mod attachment_tests {
         .unwrap();
         let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
         let cache = dir.path().join("cache");
-        let cloud = crate::cloud_media::Fixture::new(&[remote.clone()], &[], 0);
+        let cloud = crate::cloud_media::Fixture::new(std::slice::from_ref(&remote), &[], 0);
         let resolve = |files: &dyn crate::cloud_media::CloudFiles| {
             crate::media::for_session_within(
                 &snapshot,

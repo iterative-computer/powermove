@@ -235,15 +235,16 @@ impl Controller {
                 // Checking the box opts into later openings even when this
                 // batch waits (v1).
                 if always {
-                    let _ = v
-                        .kernel
-                        .state_transaction(pm_kernel::state::StateTransaction {
-                            expected_revision: None,
-                            ops: vec![pm_kernel::state::StateOp::Setting {
-                                key: "autoDownloadCloudMedia".into(),
-                                value: Some(pm_model::Value::Bool(true)),
-                            }],
-                        });
+                    drop(
+                        v.kernel
+                            .state_transaction(pm_kernel::state::StateTransaction {
+                                expected_revision: None,
+                                ops: vec![pm_kernel::state::StateOp::Setting {
+                                    key: "autoDownloadCloudMedia".into(),
+                                    value: Some(pm_model::Value::Bool(true)),
+                                }],
+                            }),
+                    );
                 }
                 if download {
                     v.download_cloud_media(found, cx);
@@ -362,7 +363,7 @@ mod tests {
     #[test]
     fn the_fixture_cloud_downloads_with_progress_and_fails_what_it_names() {
         let (a, b) = (PathBuf::from("/x/a.mov"), PathBuf::from("/x/b.mov"));
-        let cloud = Fixture::new(&[a.clone(), b.clone()], &[b.clone()], 20);
+        let cloud = Fixture::new(&[a.clone(), b.clone()], std::slice::from_ref(&b), 20);
         assert_eq!(cloud.provider(&a).as_deref(), Some("iCloud"));
         let seen = std::sync::Mutex::new(vec![]);
         cloud

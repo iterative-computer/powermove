@@ -1895,7 +1895,9 @@ impl Render for Editor {
                 } else {
                     ("Panel Unavailable", unknown.as_str(), None)
                 };
-                let mut empty = empty_state(&t, heading, line).h(px((p.rect.h - m.header).max(0.)));
+                let mut empty = empty_state(&t, heading, line)
+                    .h(px((p.rect.h - m.header).max(0.)))
+                    .overflow_hidden();
                 // Actions run only with an app attached (the bare shell has no importer).
                 if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
                     empty = empty.child(

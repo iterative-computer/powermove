@@ -13,7 +13,9 @@ use std::{cell::RefCell, rc::Rc};
 /// The last store built and what it was built from: the kernel state
 /// revision and the project's published workspace.
 #[derive(Default)]
-pub struct Cache(RefCell<Option<(u64, Option<pm_model::Value>, Rc<Store>)>>);
+pub struct Cache(RefCell<Option<Built>>);
+/// The state revision and project workspace a store was built from.
+type Built = (u64, Option<pm_model::Value>, Rc<Store>);
 
 fn json(v: &pm_model::Value) -> serde_json::Value {
     serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap_or_default()
@@ -68,9 +70,10 @@ impl Controller {
                 };
                 if let Some(session) = &self.session {
                     let call = WorkspaceCall::Replace { expected, next };
-                    let _ = self
-                        .kernel
-                        .call(&session.project, Request::new(Caller::native(), call));
+                    drop(
+                        self.kernel
+                            .call(&session.project, Request::new(Caller::native(), call)),
+                    );
                     return;
                 }
                 let id = after["id"].as_str().map(pm_model::Value::from);
@@ -97,10 +100,10 @@ impl Controller {
                 value: Some(id.as_str().into()),
             }],
         };
-        let _ = self.kernel.state_transaction(StateTransaction {
+        drop(self.kernel.state_transaction(StateTransaction {
             expected_revision: None,
             ops,
-        });
+        }));
     }
 }
 
