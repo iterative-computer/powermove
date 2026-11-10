@@ -1,6 +1,6 @@
 import {describe,expect,it,vi} from 'vitest';
 import activate from './index';
-import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems} from './scene-actions';
+import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,importFailureMessage} from './scene-actions';
 import {createObject,createLight,createScene} from '../../renderer/src/core/scene3d/schema';
 import {MATERIAL_FIELDS,lightFields,cameraFields} from './scene-model';
 function harness(){
@@ -49,6 +49,12 @@ describe('3D layer UI and commands',()=>{
     expect(api.edit.begin).toHaveBeenCalledWith('Import bottle.glb',{origin:'command'});
     expect(api.edit.commit).toHaveBeenCalledWith('Import bottle.glb');
     expect(api.edit.cancel).not.toHaveBeenCalled();
+  });
+  it('explains a model that cannot be read in plain words, naming the file',()=>{
+    const glb=new File(['x'],'Broken.glb');
+    expect(importFailureMessage(new SyntaxError('Unexpected token \u0001 is not valid JSON'),[glb])).toBe('Couldn’t import Broken.glb. The file isn’t a readable GLB model — it may be damaged or incomplete.');
+    expect(importFailureMessage(new Error('Model has 3M triangles; the limit is 1M'),[glb])).toBe('Couldn’t import Broken.glb. Model has 3M triangles; the limit is 1M.');
+    expect(importFailureMessage(new Error('Choose an OBJ, GLB, glTF, FBX, STEP, IGES or Gaussian splat (PLY, .splat) model'),[new File(['x'],'notes.txt')])).toMatch(/^Choose an OBJ/);
   });
   it('cancels a failed multi-layer operation without changing selection',()=>{
     const {api,layers}=harness();layers.push({id:'a',d:{definition:'powermove.3d.object'}},{id:'b',d:{definition:'powermove.3d.light'}});

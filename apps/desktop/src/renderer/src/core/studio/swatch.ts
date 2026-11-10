@@ -68,7 +68,9 @@ export async function studioSwatch(id: string, p: Record<string, number | string
         tanY: Math.tan(THREE.MathUtils.degToRad(14)), aspect: 1, lensRadius: 0, focus: 4.4,
       },
       exposure: 1, backdrop: [0, 0, 0], backdropOpaque: false, shadowCatcher: false, shadows: true, floorY: 0,
-      environment: { zenith: [0.35, 0.35, 0.37], horizon: [0.22, 0.22, 0.24], ground: [0.08, 0.08, 0.09] },
+      // A light-grey studio sweep: metals and dark finishes mostly show what
+      // they reflect, so a dim surround made most of the shelf read as black.
+      environment: { zenith: [0.8, 0.8, 0.82], horizon: [0.62, 0.62, 0.64], ground: [0.3, 0.3, 0.31] },
     });
     target.trace(32, 6, true, 64);
     target.resolve(2);

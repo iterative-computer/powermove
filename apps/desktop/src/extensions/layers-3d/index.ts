@@ -64,7 +64,7 @@ export default function activate(api:PowermoveAPI):void {
     {id:'3d.convert-layer',label:'Convert to 3D Layers',run:convert},
     {id:'3d.duplicate-selection',label:'Duplicate 3D Layers',run:()=>duplicateItems(api)},
     {id:'3d.delete-selection',label:'Delete 3D Layers',run:()=>removeItems(api)},
-    {id:'3d.add-menu',label:'Add 3D Layer',run:()=>api.ui.menu({x:window.innerWidth/2,y:80},addMenuItems(api) as any)}
+    {id:'3d.add-menu',label:'Add 3D Layer',run:(anchor?:unknown)=>api.ui.menu(anchor instanceof HTMLElement?anchor:{x:window.innerWidth/2,y:80},addMenuItems(api) as any)}
   ];
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),

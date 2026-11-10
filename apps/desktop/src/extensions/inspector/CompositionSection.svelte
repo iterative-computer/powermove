@@ -1,5 +1,6 @@
 <script lang="ts">
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
+  import RenderQualitySection from './RenderQualitySection.svelte';
 
   const { api, doc, mixed } = inspectorContext();
   const { ColorField, FillField, NumField, Row, Section, SelectField, ToggleField } = api.ui.controls;
@@ -62,6 +63,9 @@
     };
   }
 
+  /* Render Quality appears once the composition has something Studio renders. */
+  const has3D = $derived((doc.tick.structure, doc.proj, !!api.scene3d?.renderQuality &&
+    (api.project.get().layers ?? []).some((layer: any) => layer.threeD === true || String(layer.d?.definition ?? '').startsWith('powermove.3d.'))));
   const params = $derived((doc.tick.structure, doc.tick.values, doc.proj,
     (Object.values(api.project.get().params ?? {}) as any[])
       .map(normalizeParam)
@@ -74,6 +78,8 @@
 <Row {api} label="Duration"><NumField {api} {mixed} get={() => api.project.get().dur} edit={compEdit('duration', 'Duration')} label="Duration" step={0.5} precision={2} unit="s" /></Row>
 <Row {api} label="Frame rate"><NumField {api} {mixed} get={() => api.project.get().fps} edit={compEdit('fps', 'Frame rate')} label="Frame rate" step={1} /></Row>
 <Row {api} label="Background"><FillField {api} get={() => api.project.get().backgroundFill} edit={compEdit('backgroundFill', 'Background fill')} label="Background fill" fallback={api.project.get().bg} /></Row>
+
+{#if has3D}<RenderQualitySection />{/if}
 
 {#if params.length}
   <Section {api} title="Scene parameters" />

@@ -69,7 +69,7 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   // The camera inspector shows the same World, so the sky is one click from the shot.
   await page.evaluate((id: string) => (window as any).PM.selectLayers([id]), ids.camera);
   await expect(page.getByRole('radiogroup', { name: 'Sky' })).toBeVisible();
-  await pick(page, 'Iris shape', '6 blades');
+  await pick(page, 'Iris Shape', '6 blades');
   await expect.poll(async () => (await objects(page)).find((l: any) => l.id === ids.camera).camera.p.irisShape.v).toBe(6);
   await page.locator('[data-scene-channel="camera.irisShape"]').scrollIntoViewIfNeeded();
   await shot(page, '05-camera-iris-and-world');
@@ -92,7 +92,7 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   expect(await shown(ids.cube)).toBe(false);
   await expect(page.getByLabel('Copies of', { exact: true }).first()).toBeAttached();
   const seed = scatter.object.scatter.p.seed.v;
-  await page.getByRole('button', { name: 'New variation' }).click();
+  await page.getByRole('button', { name: 'New Variation' }).click();
   await expect.poll(async () => (await objects(page)).find((l: any) => l.object?.scatter).object.scatter.p.seed.v).toBe(seed + 1);
   await shot(page, '07-scatter');
 
@@ -207,7 +207,7 @@ test('The Free View looks from the Front, Top or Right like After Effects 3D vie
   expect(await view()).toBe('camera');
 });
 
-test('A group of models has Exploded view and Turntable in its panel', async ({ session }) => {
+test('A group of models has Exploded View and Turntable in its panel', async ({ session }) => {
   test.setTimeout(90_000);
   await session.openEditor();
   const page = session.page;
@@ -220,7 +220,7 @@ test('A group of models has Exploded view and Turntable in its panel', async ({ 
     PM.Edit.apply({ type: 'group_layers', targets: ['base', 'top'], name: 'Product' });
     PM.selectLayers([PM.proj.layers.find((l: any) => l.type === 'group').id]);
   });
-  await page.getByRole('button', { name: 'Exploded view' }).click();
+  await page.getByRole('button', { name: 'Exploded View' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.L('top').p['position.y'].kf.length)).toBe(2);
   await shot(page, '15-group-exploded-view');
 });

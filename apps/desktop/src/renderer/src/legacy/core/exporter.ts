@@ -1,4 +1,5 @@
 import { resolveStudioQuality } from '../../../../shared/studio-quality';
+import { describeStudioQuality, STUDIO_QUALITY_CHOICES, STUDIO_QUALITY_FIELDS } from '../../../../shared/studio-quality-ui';
 import { renderStudioPasses,validatePasses } from '../../core/studio/passes';
 import { captureAgentFrame } from './agent-frame-capture';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
@@ -186,7 +187,46 @@ X.dialog = () => {
     toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, 'Transparent background'));
   /* 3D render passes (After Effects' 3D Channel / Render Passes): 16-bit PNG
      sequences, one folder entry per pass, beside per-frame metadata. */
-  const has3D = (p.layers || []).some((layer: any) => /^powermove\.3d\.(object|light|camera)$/.test(layer.d?.definition || ''));
+  // Studio renders any 3D layer: models, lights, cameras and 3D/extruded artwork, here or in a nested composition.
+  const has3D = [p, ...Object.values<any>(p.comps || {})].some((comp: any) => (comp?.layers || []).some((layer: any) => layer.threeD === true || /^powermove\.3d\./.test(layer.d?.definition || '')));
+  /* Render Quality for this export only: the composition's saved quality, or
+     one preset/Custom override that is never saved to the project. */
+  const COMP_QUALITY = '__composition__';
+  const savedQuality = () => resolveStudioQuality(p.studioQuality ?? 'production');
+  let qualityChoice: string = COMP_QUALITY;
+  let customQuality: any = { ...savedQuality(), preset: 'custom' };
+  const exportQuality = () => qualityChoice === COMP_QUALITY ? savedQuality() : qualityChoice === 'custom' ? resolveStudioQuality(customQuality) : resolveStudioQuality(qualityChoice);
+  const qualityField = select('3D Render Quality', () => qualityChoice, (v: any) => {
+    if (v === 'custom' && qualityChoice !== 'custom') customQuality = { ...exportQuality(), preset: 'custom' };
+    qualityChoice = v; sync();
+  }, [
+    { v: COMP_QUALITY, label: `Composition · ${describeStudioQuality(savedQuality()).label}` },
+    ...STUDIO_QUALITY_CHOICES.map(choice => ({ v: choice.id, label: choice.id === 'custom' ? 'Custom…' : choice.label })),
+  ]);
+  const qualityRow = mk(rendering, 'studioQuality', '3D Render Quality', '', qualityField);
+  const customRows = STUDIO_QUALITY_FIELDS.map(field => {
+    let control: any;
+    if (field.kind === 'toggle') control = toggle(() => !!customQuality[field.key], (v: any) => { customQuality = { ...customQuality, [field.key]: !!v }; sync(); }, field.label);
+    else {
+      control = settingsNumberInput(field.label, field.min ?? 0, field.max ?? 4096, field.step ?? 1);
+      control.sync = () => { if (window.document.activeElement !== control) control.value = String(customQuality[field.key]); };
+      control.addEventListener('keydown', (e: KeyboardEvent) => { e.stopPropagation(); if (e.key === 'Enter') control.blur(); });
+      control.addEventListener('change', () => {
+        const typed = Number(control.value);
+        if (Number.isFinite(typed)) {
+          const value = Math.min(field.max ?? typed, Math.max(field.min ?? typed, field.precision ? typed : Math.round(typed)));
+          const next: any = { ...customQuality, [field.key]: value };
+          if (field.key === 'minSamples' && value > next.maxSamples) next.maxSamples = value;
+          if (field.key === 'maxSamples' && value < next.minSamples) next.minSamples = value;
+          customQuality = next;
+        }
+        sync();
+      });
+      control.sync();
+    }
+    return mk(rendering, `studioQuality.${field.key}`, field.label, field.help, control);
+  });
+  rendering.body.prepend(qualityRow.element, ...customRows.map(row => row.element));
   const PASS_LABELS: [string, string][] = [['beauty', 'Beauty'], ['depth', 'Depth'], ['normal', 'Normal'], ['albedo', 'Albedo'], ['object_id', 'Object ID'], ['material_id', 'Material ID'], ['shadow', 'Shadow']];
   const passBoxes = PASS_LABELS.map(([id, label]) => {
     const input: any = h('input', { type: 'checkbox', value: id, 'aria-label': `${label} pass` });
@@ -198,7 +238,7 @@ X.dialog = () => {
     input.sync();
     return h('label.export-pass', input, h('span', label));
   });
-  mk(rendering, 'passes', 'Render passes', '3D layers only: 16-bit PNG images per pass, instead of the finished picture.',
+  const passesRow = mk(rendering, 'passes', 'Render Passes', '3D layers only: 16-bit PNG images per pass, instead of the finished picture.',
     h('div.export-passes', { role: 'group', 'aria-label': 'Render passes' }, ...passBoxes));
   /* Captions: burned in by default, optionally also delivered as a sidecar. */
   const captionLayers = (p.layers || []).filter((layer: any) => layer.type === 'captions');
@@ -248,7 +288,20 @@ X.dialog = () => {
     for (const key of Object.keys(rows)) {
       if (key === 'format' || key === 'size' || key === 'preset' || key === 'presetSave') continue;
       if (key === 'captionsBurn' || key === 'captionsSidecar') { rows[key]!.element.hidden = kind !== 'video' && !(key === 'captionsBurn' && kind === 'images'); continue; }
-      if (key === 'passes') { rows[key]!.element.hidden = !has3D || opts.format !== 'png'; continue; }
+      /* Passes are image sequences: say how to get them rather than hiding the row. */
+      if (key === 'passes') {
+        rows[key]!.element.hidden = !has3D || kind === 'project';
+        const pngs = opts.format === 'png';
+        passesRow.setEnabled(pngs);
+        passesRow.detail.textContent = pngs ? '3D layers only: 16-bit PNG images per pass, instead of the finished picture.' : 'Choose Images, then PNG sequence, to export render passes.';
+        for (const box of passesRow.element.querySelectorAll('input')) (box as HTMLInputElement).disabled = !pngs;
+        continue;
+      }
+      if (key === 'studioQuality' || key.startsWith('studioQuality.')) {
+        const shown = has3D && kind !== 'project';
+        rows[key]!.element.hidden = !shown || (key !== 'studioQuality' && qualityChoice !== 'custom');
+        continue;
+      }
       rows[key]!.element.hidden = !support[key];
     }
     rows.format!.element.hidden = settingsFree;
@@ -258,6 +311,11 @@ X.dialog = () => {
       section.element.hidden = settingsFree || ![...section.body.children].some((child) => !(child as HTMLElement).hidden);
     }
     const est: any = plan();
+    if (has3D) {
+      const about = describeStudioQuality(exportQuality(), opts.format === 'still' ? 1 : est.frames);
+      const detail = `${qualityChoice === COMP_QUALITY ? 'Saved with this composition. ' : 'This export only. '}${about.summary} ${about.total ?? about.perFrame}.`;
+      qualityRow.detail.textContent = detail;
+    }
     if (customOpen) {
       if (window.document.activeElement !== wIn) wIn.value = String(est.width);
       if (window.document.activeElement !== hIn) hIn.value = String(est.height);
@@ -279,7 +337,11 @@ X.dialog = () => {
   m = PM.modal({
     title: 'Export', body, width: 620,
     onClose: () => unmountCorners?.(),
-    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
+    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => {
+      X.remember(opts);
+      const job = has3D && qualityChoice !== COMP_QUALITY ? { ...opts, studioQuality: exportQuality() } : opts;
+      window.setTimeout(() => void run(job), 0);
+    } }],
   });
   m.el.classList.add('export-modal');
   unmountCorners = mountSquircles(m.el, `${SQUIRCLE_SELECTOR}, .export-destinations, .export-destination, .btn`);

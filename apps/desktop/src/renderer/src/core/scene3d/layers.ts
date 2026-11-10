@@ -16,17 +16,23 @@ const LIGHT_KINDS:Record<string,{label:string;icon:string}>={
 };
 /** What a 3D layer is, in the words and glyph the inspector, Timeline and
  *  menus show: a World is not a "3D Model", an Environment Light not a "Light". */
-export function layer3DKind(layer:any):{label:string;icon:string}|null {
+/** `surrounds`: a World, Ambient or Environment light lights the whole scene
+ * from everywhere. It has no place, so no Transform, gizmo or parent. */
+export function layer3DKind(layer:any):{label:string;icon:string;surrounds?:boolean}|null {
   const role=layer3DRole(layer),data=layer?.d?.data;
   if(role==='camera')return {label:'Camera',icon:'cam'};
-  if(role==='light')return LIGHT_KINDS[data?.light?.type] ?? {label:'Light',icon:'lightbulb'};
+  if(role==='light'){const kind=LIGHT_KINDS[data?.light?.type] ?? {label:'Light',icon:'lightbulb'};return ['ambient','environment'].includes(data?.light?.type)?{...kind,surrounds:true}:kind;}
   if(role!=='object')return null;
   const object=data?.object;
-  if(object?.world)return {label:'World',icon:'globe'};
+  if(object?.world)return {label:'World',icon:'globe',surrounds:true};
   if(object?.terrain)return {label:'Terrain',icon:'mountains'};
   if(object?.scatter)return {label:'Scatter',icon:'tree'};
   if(object?.fog)return {label:'Fog Volume',icon:'fog'};
   return {label:'3D Model',icon:'cube'};
+}
+/** Whether a layer can take part in Link Layers (parenting) at all. */
+export function layerCanLink(PM:any,layer:any):boolean {
+  return !!layer && PM.TYPE_META?.[layer.type]?.transform!==false && !layer3DKind(layer)?.surrounds;
 }
 /** Model groups use the same world coordinates as their contents. Mixed artwork
  * groups retain the composition's existing 2D interaction. */

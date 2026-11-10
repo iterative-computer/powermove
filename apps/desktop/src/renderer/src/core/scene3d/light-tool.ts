@@ -28,7 +28,8 @@ export type LightInfo = {
   power: number; size: number | null; distance: number; spread: number | null;
 };
 
-const NAMES: Record<LightKind, string> = { area: 'Softbox', spot: 'Spotlight', point: 'Bulb', sun: 'Sun' };
+// The same names as Add 3D Layer and the Timeline (After Effects' Spot/Point Light).
+const NAMES: Record<LightKind, string> = { area: 'Softbox Light', spot: 'Spot Light', point: 'Point Light', sun: 'Sun Light' };
 const POWER: Record<LightKind, number> = { area: 6, spot: 40, point: 25, sun: 3 };
 
 type Snapshot = { x: number; y: number; z: number; targetX: number; targetY: number; targetZ: number; intensity: number; width: number; height: number; angle: number };

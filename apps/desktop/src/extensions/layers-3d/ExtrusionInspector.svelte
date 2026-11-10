@@ -21,6 +21,10 @@
   const layer = $derived((ui.version, api.model.layer(layerId)) as Layer | null);
   const extruded = $derived((ui.version, isExtruded(layer)));
   const flat = $derived((ui.version, !(layer as any)?.threeD));
+  /* Outlines load asynchronously; poll briefly so a missing font is named as soon as it is known. */
+  let fontTick = $state(0);
+  const fontProblem = $derived((ui.version, fontTick, (layer as any)?.type === 'text' && extruded ? api.scene3d.extrusionFontStatus(layerId).message : null));
+  $effect(() => { if (!extruded || (layer as any)?.type !== 'text') return; const timer = window.setInterval(() => { fontTick++; if (api.scene3d.extrusionFontStatus(layerId).state !== 'loading') window.clearInterval(timer); }, 300); return () => window.clearInterval(timer); });
   const extrudeEdit: ControlEditBinding = { mode: 'set', label: 'Extrude', set: (on: unknown) => { setExtruded(api, layerId, !!on); } };
 
   const styleChannel = $derived((ui.version, geometryChannel(layer, 'bevelStyle')));
@@ -69,6 +73,7 @@
       </Row>
       {#if flat && !extruded}<span class="needs-3d" aria-hidden="true">{@html api.ui.icon('cube')}</span>{/if}
     </div>
+    {#if extruded && fontProblem}<p class="font-problem" role="alert" data-extrusion-font-problem>{fontProblem}</p>{/if}
     {#if extruded}
       {@const depth = GEOMETRY_FIELDS[0]!}
       <div title={depth.tip}><SceneField {api} {ui} {layer} field={depth} path={geometryPath(depth.key)} channel={geometryChannel(layer, depth.key)} /></div>
@@ -110,6 +115,7 @@
 <style>
   .extrusion { display: flex; flex-direction: column; }
   .extrude-row { position: relative; }
+  .font-problem { margin: 2px 0 6px; padding: 8px 10px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--danger, #E5484D) 10%, transparent); color: var(--tx); font-size: 11px; line-height: 15px; }
   /* A 2D layer wears a small cube beside the switch: turning it on makes the layer 3D. */
   .needs-3d { position: absolute; top: 50%; left: 86px; display: grid; place-items: center; width: 13px; height: 13px; margin-top: -6.5px; color: var(--tx-3); pointer-events: none; }
   .needs-3d :global(svg) { width: 12px; height: 12px; }

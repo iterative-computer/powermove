@@ -15,7 +15,7 @@
 <Section {api} title="Shots" />
 <Row {api} label="Spread"><SelectField {api} get={() => amount} options={[{ v: '0.25', label: 'A little' }, { v: '0.5', label: 'Medium' }, { v: '1', label: 'Far apart' }]} edit={{ mode: 'local', label: 'Exploded view spread', set: (v: unknown) => { amount = String(v); } }} label="Exploded view spread" /></Row>
 <div class="shots" role="group" aria-label="Group shots">
-  <button type="button" class="chip" onclick={() => run({ operation: 'explode', amount: Number(amount) }, 'Exploded view')}>Exploded view</button>
+  <button type="button" class="chip" onclick={() => run({ operation: 'explode', amount: Number(amount) }, 'Exploded View')}>Exploded View</button>
   <button type="button" class="chip" onclick={() => run({ operation: 'shot', shot: 'turntable', duration: 4 }, 'Turntable')}>Turntable</button>
 </div>
 <style>

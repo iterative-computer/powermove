@@ -20,8 +20,8 @@ const AIMS = [
   { id: 'direct', label: 'Direct', tip: 'Direct — The light faces where you click' },
   { id: 'orbit', label: 'Orbit', tip: 'Orbit — Drag to circle the light around its target' },
 ] as const;
-const KINDS = [{ id: 'area', label: 'Softbox' }, { id: 'spot', label: 'Spotlight' }, { id: 'point', label: 'Bulb' }, { id: 'sun', label: 'Sun' }] as const;
-const KIND: Record<string, string> = { area: 'Softbox', spot: 'Spotlight', point: 'Bulb', sun: 'Sun' };
+const KINDS = [{ id: 'area', label: 'Softbox' }, { id: 'spot', label: 'Spot' }, { id: 'point', label: 'Point' }, { id: 'sun', label: 'Sun' }] as const;
+const KIND: Record<string, string> = { area: 'Softbox', spot: 'Spot', point: 'Point', sun: 'Sun' };
 // Sliders run 0…1000; brightness, size and distance on a log scale (equal steps feel equal).
 const ROWS: Row[] = [
   { what: 'power', label: 'Brightness', tip: 'How much light it gives', min: 0.05, max: 2000, log: true, unit: '', show: () => true, value: i => i.power },
@@ -113,8 +113,8 @@ export function mountLightPanel(api: PowermoveAPI, host: HTMLElement): () => voi
     if (kind.value !== tool.kind) kind.value = tool.kind;
     const showLight = !!info && !tool.adding;
     head.hidden = !showLight; hint.hidden = showLight;
-    hint.textContent = tool.adding ? `Click a model to add a ${KIND[tool.kind]!.toLowerCase()} there.` : 'Select a light to aim it, or Add one.';
-    if (info) { headName.textContent = info.name; headKind.textContent = KIND[info.type] ?? ''; }
+    hint.textContent = tool.adding ? `Click a model to add a ${KIND[tool.kind]!.toLowerCase()} light there.` : 'Select a light to aim it, or Add one.';
+    if (info) { headName.textContent = info.name; headKind.textContent = KIND[info.type] ? `${KIND[info.type]} Light` : ''; }
     for (const { r, row, input, val } of rows) {
       const shown = showLight && r.show(info!);
       row.hidden = !shown;

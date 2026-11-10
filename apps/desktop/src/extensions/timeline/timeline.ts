@@ -705,6 +705,10 @@ function layerSupportsTransform(type: unknown): boolean {
   const metadata = api.model.TYPE_META as Record<string, { transform?: boolean }>;
   return metadata[String(type)]?.transform !== false;
 }
+/** Link Layers needs a place: a World or an Ambient/Environment light has none. */
+function layerCanLink(L: any): boolean {
+  return layerSupportsTransform(L?.type) && !(L?.type === 'extension' && api.model.layerKind?.(L)?.surrounds);
+}
 function runCleanups(bucket: Array<() => void>) {
   for (const cleanup of bucket.splice(0).reverse()) {
     try { cleanup(); } catch { }
@@ -1314,7 +1318,7 @@ const trackView = createTrackView({
   captions: captionTrack,
   fui: () => fui(), fmono: () => fmono(), niceStep,
   icoEye, icoLock, icoSpeaker, drawParentWhip,
-  supportsParent: (L) => layerSupportsTransform(L.type) && shouldDrawClipLabel(L.type),
+  supportsParent: (L) => layerCanLink(L) && shouldDrawClipLabel(L.type),
   visible: (L) => !!evaluatedValue(L, L.on, api.transport.time(), 'l.on'),
   beginDrag, invalidate, edgeSnapping,
   layerEdgeSnapper: (ids) => layerEdgeSnapper(ids),
@@ -2101,7 +2105,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       icoLayerType(c, L.type, col.swatch + 8 + indent, iy, pal.primary, L);
       c.font = (sel ? '600 ' : '500 ') + '12px ' + fui();
       c.fillStyle = theme.tx;
-      const hasParentControl = layerSupportsTransform(L.type);
+      const hasParentControl = layerCanLink(L);
       const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
       const audioX = embeddedAudioToggleX(L);
       const switches = rowSwitches(L);
@@ -3253,7 +3257,7 @@ function onMove(e: any) {
     } else if (flip) {
       cur = 'pointer';
       title = `${flip.label}: ${flip.on ? 'On' : 'Off'}`;
-    } else if (row?.kind === 'layer' && layerSupportsTransform(row.L.type) && x >= gutterColumns().link + 6) {
+    } else if (row?.kind === 'layer' && layerCanLink(row.L) && x >= gutterColumns().link + 6) {
       const whip = x < gutterColumns().link + 30;
       cur = whip ? 'crosshair' : 'pointer';
       const parent = row.L.parent ? api.model.layer(row.L.parent)?.name || 'Missing layer' : 'None';
@@ -3779,15 +3783,19 @@ function syncEmptyState() {
     actions.className = 'tl-empty-actions';
     const items: Array<[string, string, string, string]> = [
       ['type', 'Text', '⌘T', 'newText'], ['shape', 'Shape', '⇧⌘Y', 'newShape'], ['solid', 'Solid', '⌘Y', 'newSolid'],
-      ['anchor', 'Null', '⌥⇧⌘Y', 'newNull'], ['download', 'Import…', '⌘I', 'import'],
+      ['anchor', 'Null', '⌥⇧⌘Y', 'newNull'],
+      // 3D starts here too: shapes, imported models, World, lights and cameras.
+      ...(api.commands.has('3d.add-menu') ? [['cube', '3D Layer', '', '3d.add-menu'] as [string, string, string, string]] : []),
+      ['download', 'Import…', '⌘I', 'import'],
     ];
     for (const [icon, label, key, command] of items) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tl-empty-button';
       button.innerHTML = api.ui.icon(icon);
-      button.append(Object.assign(document.createElement('span'), { textContent: label }), Object.assign(document.createElement('kbd'), { textContent: key }));
-      button.addEventListener('click', () => { api.commands.run(command); });
+      button.append(Object.assign(document.createElement('span'), { textContent: label }));
+      if (key) button.append(Object.assign(document.createElement('kbd'), { textContent: key }));
+      button.addEventListener('click', () => { command === '3d.add-menu' ? api.commands.run(command, button) : api.commands.run(command); });
       actions.append(button);
     }
     const hint = document.createElement('div');
@@ -3869,7 +3877,7 @@ function gutterDown(e: any, x: any, y: any) {
     return;
   }
   const col = gutterColumns(), indent = Math.min(48, (r.depth || 0) * 12);
-  if (layerSupportsTransform(L.type) && x >= col.link + 6) {
+  if (layerCanLink(L) && x >= col.link + 6) {
     const ids = api.selection.layers().includes(L.id) ? api.selection.layers() : [L.id];
     if (x < col.link + 30) api.ui.beginParentPick(e, ids);
     else api.ui.showParentMenu(ids, e);

@@ -1,12 +1,13 @@
 import type { PMRegistry } from '../registry';
 import { timelineService, viewerService } from '../core/services';
+import { layerCanLink } from '../../core/scene3d/layers';
 
 /** One cancellable pickwhip, shared by the inspector and timeline. */
 export function installParentPickwhip(PM: PMRegistry): void {
   let cancel: (() => void) | null = null;
   PM.beginParentPick = (event: PointerEvent, ids: string[]) => {
     cancel?.(); event.preventDefault(); event.stopPropagation();
-    const layers = ids.map(id => PM.L(id)).filter((layer: any) => layer && !layer.lock && PM.TYPE_META[layer.type]?.transform !== false);
+    const layers = ids.map(id => PM.L(id)).filter((layer: any) => layer && !layer.lock && layerCanLink(PM, layer));
     if (!layers.length) return;
     const ns = 'http://www.w3.org/2000/svg';
     const overlay = document.createElementNS(ns, 'svg');
@@ -19,7 +20,7 @@ export function installParentPickwhip(PM: PMRegistry): void {
     const move = (pointer: PointerEvent) => {
       const candidate = timelineService(PM)?.layerAtPoint(pointer.clientX, pointer.clientY)
         || viewerService(PM)?.layerAtPoint?.(pointer.clientX, pointer.clientY);
-      target = candidate && PM.TYPE_META[candidate.type]?.transform !== false && layers.every((layer: any) => layer.id !== candidate.id && !PM.wouldCycle(layer, candidate.id)) ? candidate : null;
+      target = candidate && layerCanLink(PM, candidate) && layers.every((layer: any) => layer.id !== candidate.id && !PM.wouldCycle(layer, candidate.id)) ? candidate : null;
       line.setAttribute('d', `M ${event.clientX} ${event.clientY} C ${event.clientX + 60} ${event.clientY}, ${pointer.clientX - 60} ${pointer.clientY}, ${pointer.clientX} ${pointer.clientY}`);
       label.setAttribute('x', String(Math.min(window.innerWidth - 200, pointer.clientX + 12))); label.setAttribute('y', String(pointer.clientY - 12));
       label.textContent = target ? `Parent to ${target.name}` : 'Pick a parent · Esc to cancel';

@@ -45,11 +45,21 @@
     if(next!=='select'&&api.scene3d.getView()!=='editor')api.scene3d.setView('editor');
     return true;
   };
+  /* A World or an Ambient/Environment light lights the scene from everywhere:
+     there is nothing to move, rotate or scale, so say so instead of offering
+     tools that do nothing. */
+  const surroundsOnly=()=>{const ids=api.selection.layers();return ids.length>0&&ids.every(id=>!!api.model.layerKind?.(api.model.layer(id))?.surrounds);};
+  let placeless=$state(untrack(surroundsOnly));
+  const selectionSubscription=untrack(()=>api.events.on('selection',()=>placeless=surroundsOnly()));
+  onDestroy(()=>selectionSubscription.dispose());
   onDestroy(()=>subscription.dispose());
   onDestroy(()=>navigationSubscription.dispose());
   onDestroy(()=>viewSubscription.dispose());
 </script>
-{#if part==='transform'}
+{#if part==='transform' && placeless}
+<span class="placeless" title="World, Ambient Light and Environment Light surround the whole scene. They have no position, rotation or scale">Lights the whole scene · no position</span>
+<Segmented label="3D transform" options={[{id:'light',label:'Light',title:'Click a surface to place a light'}]} value={light.on?'light':''} onChange={()=>api.scene3d.lights.setTool({on:!light.on})} />
+{:else if part==='transform'}
 <Segmented label="3D transform" options={[{id:'translate',label:'Move'},{id:'rotate',label:'Rotate'},{id:'scale',label:'Scale'},{id:'light',label:'Light',title:'Click a surface to place a light'}]} value={light.on?'light':mode} onChange={next=>{if(next==='light'){api.scene3d.lights.setTool({on:!light.on});return;}api.scene3d.lights.setTool({on:false});api.scene3d.setNavigationMode('select');api.scene3d.setMode(next as typeof mode);}} />
 <Segmented label="3D axes" options={[{id:'world',label:'Global'},{id:'local',label:'Local'}]} value={space} onChange={next=>api.scene3d.setSpace(next as typeof space)} />
 {:else}
@@ -63,3 +73,6 @@
     onChange={navigate} />
 </div>
 {/if}
+<style>
+  .placeless{font:var(--fs-sm) var(--f-ui);color:var(--tx-3);white-space:nowrap;padding:0 4px}
+</style>
