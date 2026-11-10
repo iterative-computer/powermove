@@ -112,9 +112,13 @@ def launch(app, profile, project, log):
     raise RuntimeError('the app did not start')
 
 
-def command(app, name):
-    """A menu command without the menu: the development build's review link."""
-    subprocess.run(['open', '-g', '-a', str(app), f'powermove://review/command/{name}'], check=True)
+def command(lane, name):
+    """A menu command without the menu: the development build's review link,
+    sent to the running app as an AppleEvent. Bursts of `open -g` links got
+    the busy app activated now and then; a direct `open location` never did."""
+    subprocess.run(['osascript', '-e', f'tell application id "com.powermove.native.dev.{lane}" '
+                    f'to open location "powermove://review/command/{name}"'],
+                   check=True, capture_output=True, timeout=30)
 
 
 def front_is(lane):
@@ -274,15 +278,15 @@ def main():
                 note('delete_layer')
             # Undo / redo storm.
             for name in ['undo'] * 15 + ['redo'] * 15:
-                command(app, name)
+                command(a.lane, name)
                 note(name)
             # Playback, frame steps, back to start.
-            command(app, 'play')
+            command(a.lane, 'play')
             time.sleep(4)
-            command(app, 'play')
+            command(a.lane, 'play')
             for _ in range(10):
-                command(app, 'nextFrame')
-            command(app, 'gotoStart')
+                command(a.lane, 'nextFrame')
+            command(a.lane, 'gotoStart')
             note('playback')
             # Render cache.
             ok, _ = mcp.tool('render_frames', {'times': [rng.uniform(0, 5) for _ in range(4)], 'width': 480}, timeout=120)
