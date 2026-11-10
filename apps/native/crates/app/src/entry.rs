@@ -91,9 +91,10 @@ fn review_library_row(rest: &str, cx: &mut App) {
     }
 }
 
-/// `<drop|sequence|figma>/<paths>`, percent-encoded and newline-separated, on the
-/// first editor: what a Finder drop on the window, or the open panel of
-/// File ▸ Import Image Sequence…, hands over. The system open panel takes no
+/// `<drop|sequence|figma|answer>/<paths>`, percent-encoded and newline-separated,
+/// on the first editor: what a Finder drop on the window, or the open panel of
+/// File ▸ Import Image Sequence…, hands over; `answer` is what the next open
+/// panel (Import, Locate File…) returns. The system open panel takes no
 /// background input, so reviews choose files here.
 #[cfg(debug_assertions)]
 fn review_files(rest: &str, cx: &mut App) {
@@ -104,6 +105,10 @@ fn review_files(rest: &str, cx: &mut App) {
         .next()
         .map(|(_, v)| v.lines().map(PathBuf::from).collect())
         .unwrap_or_default();
+    if route == "answer" {
+        crate::platform::answer_next_open_panel(paths);
+        return;
+    }
     let route = route.to_owned();
     let editors = cx.default_global::<Entries>().editors.clone();
     if let Some(editor) = editors.into_iter().find_map(|(e, _)| e.upgrade()) {
