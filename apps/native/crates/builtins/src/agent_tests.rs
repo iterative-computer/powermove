@@ -643,8 +643,8 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     }
     assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
     assert!(panel.text().contains("Connect Your Agent"));
-    let settings = |panel: &Agent, action: Value| {
-        let backend = panel
+    let backend = |panel: &Agent| {
+        panel
             .panels
             .broker
             .entry("settings")
@@ -652,13 +652,21 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
             .lock()
             .unwrap()
             .backend
-            .clone();
+            .clone()
+    };
+    // What the Settings window holds: the publication its subscription last
+    // delivered.
+    let publication = |panel: &Agent| backend(panel).lock().unwrap().settings_snapshot().unwrap();
+    // A row button pressed as the Settings window does: with the revision of
+    // the publication it showed, which an account check finishing on a
+    // worker may have replaced since.
+    let press = |panel: &Agent, seen: &Value, id: &str, action: &str| {
+        let backend = backend(panel);
         let mut backend = backend.lock().unwrap();
-        let revision = backend.settings_snapshot().unwrap()["revision"].clone();
         match backend
             .native_command(
                 "panel.settings",
-                &json!({"revision":revision,"action":action}),
+                &json!({"revision":seen["revision"],"action":{"type":"row","id":id,"action":action}}),
             )
             .unwrap()
         {
@@ -675,18 +683,15 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
             .unwrap()
             .clone()
     };
-    let before = settings(&panel, json!({"type":"extensions.retry"}));
+    let before = publication(&panel);
     assert_eq!(row(&before, "account.chatgpt")["actionLabel"], "Sign In…");
-    settings(
-        &panel,
-        json!({"type":"row","id":"account.chatgpt","action":"account.connect"}),
-    );
+    press(&panel, &before, "account.chatgpt", "account.connect");
     panel.connected(Provider::Chatgpt);
     assert_eq!(
         opened.lock().unwrap().as_slice(),
         ["https://chatgpt.com/auth"]
     );
-    let after = settings(&panel, json!({"type":"extensions.retry"}));
+    let after = publication(&panel);
     let chatgpt = row(&after, "account.chatgpt");
     assert_eq!(chatgpt["actionLabel"], "Sign Out");
     assert_eq!(chatgpt["detail"], "user@example.invalid · plus");
@@ -695,10 +700,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     panel.send("Hi");
     panel.wait(idle);
     assert!(panel.text().contains("Saw: Hi"));
-    settings(
-        &panel,
-        json!({"type":"row","id":"account.chatgpt","action":"account.disconnect"}),
-    );
+    press(&panel, &after, "account.chatgpt", "account.disconnect");
     while read(&accounts).0 == "connected" {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));

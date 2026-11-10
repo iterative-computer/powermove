@@ -422,12 +422,29 @@ impl Backend {
             })
             .collect())
     }
+    /// A row button pressed on an older publication still lands when the
+    /// latest one offers that row the same action, enabled: an unrelated fact
+    /// (an account check finishing) must not refuse a click. Writes keep the
+    /// strict revision check.
+    fn row_still_offers(&mut self, action: &Value) -> Result<bool, String> {
+        if action["type"] != "row" {
+            return Ok(false);
+        }
+        Ok(self.settings_snapshot()?["rows"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == action["id"]))
+            .is_some_and(|row| {
+                row["action"] == action["action"] && row["disabled"] != true && row["busy"] != true
+            }))
+    }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
         self.sync()?;
-        if args["revision"].as_u64() != Some(self.native.settings_sequence) {
+        let action = &args["action"];
+        if args["revision"].as_u64() != Some(self.native.settings_sequence)
+            && !self.row_still_offers(action)?
+        {
             return Err("Settings changed; retry from the latest publication".into());
         }
-        let action = &args["action"];
         match action["type"].as_str() {
             Some("write")
                 if action["id"]

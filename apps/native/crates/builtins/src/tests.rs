@@ -3190,6 +3190,32 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
     // A new account state is a new publication.
     backend.native.facts["cloud"]["revision"] = json!(5);
     assert_ne!(backend.settings_snapshot().unwrap()["revision"], revision);
+    // A button pressed on the older publication still lands while the newest
+    // offers that row the same action; a write or a changed action does not.
+    let stale = |action: Value| json!({"revision":revision,"action":action});
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &stale(json!({"type":"row","id":"account.sign-in","action":"account.sign-out"})),
+        )
+        .unwrap();
+    assert_eq!(
+        backend.native.platform,
+        [("command".to_owned(), json!({ "name": "cloudSignOut" }))]
+    );
+    for action in [
+        json!({"type":"write","id":"account.remember","value":false}),
+        json!({"type":"row","id":"account.sign-in","action":"account.sign-in"}),
+    ] {
+        backend.native.platform.clear();
+        assert!(
+            backend
+                .native_command("panel.settings", &stale(action))
+                .is_err()
+        );
+        assert!(backend.native.platform.is_empty());
+    }
 }
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
