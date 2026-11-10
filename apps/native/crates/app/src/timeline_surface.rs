@@ -2627,15 +2627,29 @@ fn point_of(value: &serde_json::Value) -> Option<(f64, f64)> {
 fn diamond(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
     let c = area.center();
     let (w, h) = (area.size.width / 2., area.size.height / 2.);
-    let mut path = PathBuilder::fill();
-    path.move_to(point(c.x, c.y - h));
-    path.line_to(point(c.x + w, c.y));
-    path.line_to(point(c.x, c.y + h));
-    path.line_to(point(c.x - w, c.y));
-    path.close();
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
+    convex(
+        &[
+            point(c.x, c.y - h),
+            point(c.x + w, c.y),
+            point(c.x, c.y + h),
+            point(c.x - w, c.y),
+        ],
+        color,
+        window,
+    );
+}
+/// A convex polygon filled as a fan of triangles: the same coverage a
+/// tessellator gives it, without one per keyframe glyph (a dense timeline
+/// paints tens of thousands of them a frame).
+fn convex(corners: &[Point<Pixels>], color: Rgba, window: &mut Window) {
+    let mut path = gpui::Path::new(corners[0]);
+    for pair in corners[1..].windows(2) {
+        path.push_triangle(
+            (corners[0], pair[0], pair[1]),
+            (point(0., 1.), point(0., 1.), point(0., 1.)),
+        );
     }
+    window.paint_path(path, color);
 }
 fn diamond_outline(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
     let c = area.center();
@@ -2655,14 +2669,11 @@ fn half_diamond(area: Bounds<Pixels>, toward_right: bool, color: Rgba, window: &
     let c = area.center();
     let (w, h) = (area.size.width / 2., area.size.height / 2.);
     let tip = if toward_right { c.x + w } else { c.x - w };
-    let mut path = PathBuilder::fill();
-    path.move_to(point(c.x, c.y - h));
-    path.line_to(point(tip, c.y));
-    path.line_to(point(c.x, c.y + h));
-    path.close();
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
-    }
+    convex(
+        &[point(c.x, c.y - h), point(tip, c.y), point(c.x, c.y + h)],
+        color,
+        window,
+    );
 }
 
 #[cfg(test)]
