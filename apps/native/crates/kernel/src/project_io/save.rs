@@ -895,7 +895,7 @@ impl SavePlan {
             return Err(e);
         }
         if let Some(policy) = &self.options.backups {
-            let _ = durable::retain(policy);
+            let _ = durable::retain(policy, backup.as_deref());
         }
 
         let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
