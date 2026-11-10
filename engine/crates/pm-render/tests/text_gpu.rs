@@ -216,7 +216,7 @@ fn main() {
     }
     linear_overlap_and_colr_source(&mut gpu, &mut failures);
     linear_project_text_source(&mut gpu, &mut failures);
-    let mut fresh = || {
+    let fresh = || {
         let mut r = Renderer::headless().expect("a Metal device");
         r.set_text_fonts(Some(fonts()));
         r

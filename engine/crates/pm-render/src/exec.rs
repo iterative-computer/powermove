@@ -1327,8 +1327,7 @@ mod uniform_pool_tests {
         gpu.queue.submit([encoder.finish()]);
         back.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        let bytes = back.slice(..).get_mapped_range().unwrap().to_vec();
-        bytes
+        back.slice(..).get_mapped_range().unwrap().to_vec()
     }
 
     #[test]
