@@ -548,12 +548,22 @@ impl Controller {
         }
     }
     /// A window restored at launch reopens its project when that project has
-    /// unsaved work from a crash (so the person is asked about it at once) or
-    /// when the system keeps documents open across quits.
+    /// unsaved work from a crash (so the person is asked about it at once),
+    /// when the system keeps documents open across quits, or when Settings ›
+    /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
+    /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
+        let keep = keep
+            || self
+                .kernel
+                .state()
+                .settings
+                .get("restoreWindows")
+                .and_then(pm_model::Value::as_bool)
+                != Some(false);
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
