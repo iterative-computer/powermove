@@ -1159,6 +1159,7 @@ impl Kernel {
                                 match FileLock::acquire(&locks::project_lock_path(path)) {
                                     Ok(l) => {
                                         lock = Some(l);
+                                        crate::project_io::remove_abandoned_temps(path);
                                         target = Destination::File(path.clone());
                                     }
                                     Err(_) => decision = OpenDecision::AsCopy(CopyReason::Locked),
@@ -1201,7 +1202,11 @@ impl Kernel {
                 decision = locks::open_decision(&path, electron_profile.as_deref());
                 if decision == OpenDecision::Writable {
                     match FileLock::acquire(&locks::project_lock_path(&path)) {
-                        Ok(l) => lock = Some(l),
+                        Ok(l) => {
+                            lock = Some(l);
+                            // Staging files a save cut short by Quit Now left.
+                            crate::project_io::remove_abandoned_temps(&path);
+                        }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
                                 if e.kind() == std::io::ErrorKind::WouldBlock {

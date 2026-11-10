@@ -792,6 +792,57 @@ mod save_points {
         );
     }
 
+    /// The empty staging file a save cut short by Quit Now left next to the
+    /// project goes when the project is next opened or saved; anything that
+    /// is not exactly such a file of this project stays (a non-empty one, a
+    /// near miss of the name, another project's, a link).
+    #[test]
+    fn an_abandoned_empty_staging_file_goes_on_open_and_save() {
+        let dir = TempDir::new("abandoned-temp");
+        let file = file_project(&dir);
+        let abandoned = || {
+            let path = pm_kernel::project_io::temporary_sibling(&file);
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        let opened_left = abandoned();
+        let kept = [
+            (
+                pm_kernel::project_io::temporary_sibling(&file),
+                &b"partial"[..],
+            ),
+            (dir.0.join(".project.pmv.not-a-uuid.tmp"), b""),
+            (
+                pm_kernel::project_io::temporary_sibling(&dir.0.join("other.pmv")),
+                b"",
+            ),
+            (
+                dir.0
+                    .join(".project.pmv.6f1c2a3b-4d5e-4f60-8a7b-1c2d3e4f5a6b.tmp.bak"),
+                b"",
+            ),
+        ];
+        for (path, bytes) in &kept {
+            std::fs::write(path, bytes).unwrap();
+        }
+        let target = dir.0.join("elsewhere");
+        std::fs::write(&target, b"").unwrap();
+        let link = pm_kernel::project_io::temporary_sibling(&file);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut k = kernel(&dir.0.join("journals"), None);
+        let session = open(&mut k, &file);
+        assert!(!opened_left.exists(), "left by an earlier save");
+        let saved_left = abandoned();
+        handle(&mut k, rename("saved"));
+        k.shell(ShellCall::Save(session)).unwrap();
+        assert!(!saved_left.exists(), "left before this save");
+        for (path, _) in &kept {
+            assert!(path.exists(), "{path:?} is not ours to remove");
+        }
+        assert!(link.symlink_metadata().is_ok() && target.exists());
+    }
+
     /// Rewrites the first line of `path` (a segment head or checkpoint
     /// metadata) through `edit`, keeping a segment head's checksum valid.
     fn rewrite_head(path: &Path, checksummed: bool, edit: impl Fn(&mut pm_model::json::Map)) {

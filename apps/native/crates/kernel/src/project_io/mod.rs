@@ -49,6 +49,7 @@ use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_contai
 use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
+pub(crate) use durable::remove_abandoned_temps;
 pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     temporary_sibling,

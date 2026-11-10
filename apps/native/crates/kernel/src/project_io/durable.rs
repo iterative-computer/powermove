@@ -672,9 +672,18 @@ fn archived_key(name: &str) -> Option<BackupKey> {
     }
     let split = name.len().checked_sub(37)?;
     let (base, suffix) = (name.get(..split)?, name.get(split..)?);
-    let uuid = suffix.strip_prefix('.')?.as_bytes();
+    if is_uuid_v4(suffix.strip_prefix('.')?) {
+        backup_key(base)
+    } else {
+        None
+    }
+}
+
+/// [`random_uuid`]'s form: lowercase hex, hyphenated, version 4.
+fn is_uuid_v4(uuid: &str) -> bool {
+    let uuid = uuid.as_bytes();
     let hyphens = [8, 13, 18, 23];
-    let shaped = uuid.len() == 36
+    uuid.len() == 36
         && uuid.iter().enumerate().all(|(i, c)| {
             if hyphens.contains(&i) {
                 *c == b'-'
@@ -683,8 +692,55 @@ fn archived_key(name: &str) -> Option<BackupKey> {
             }
         })
         && uuid[14] == b'4'
-        && matches!(uuid[19], b'8' | b'9' | b'a' | b'b');
-    if shaped { backup_key(base) } else { None }
+        && matches!(uuid[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// Removes the empty staging files ([`temporary_sibling`]) a save cut short
+/// left next to `destination` (Quit Now exits before a staged file is
+/// written or dropped). Only `.<file name>.<uuid v4>.tmp` exactly, only an
+/// empty regular file, listed and removed through the folder held open
+/// without following links. Call it while holding the project's lock, so
+/// no save of this project is staging one. Best effort: returns how many
+/// went.
+pub(crate) fn remove_abandoned_temps(destination: &Path) -> usize {
+    let (Some(parent), Some(name)) = (destination.parent(), destination.file_name()) else {
+        return 0;
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let Some(name) = name.to_str() else {
+        return 0;
+    };
+    let ours = |entry: &str| {
+        entry
+            .strip_prefix('.')
+            .and_then(|e| e.strip_prefix(name))
+            .and_then(|e| e.strip_prefix('.'))
+            .and_then(|e| e.strip_suffix(".tmp"))
+            .is_some_and(is_uuid_v4)
+    };
+    let Ok(Some(dir)) = Dir::open(parent) else {
+        return 0;
+    };
+    let Ok(entries) = dir.entries() else {
+        return 0;
+    };
+    let mut removed = 0;
+    for (entry, kind) in entries {
+        if matches!(kind, Kind::File { size: 0 })
+            && entry.to_str().is_some_and(ours)
+            && dir.unlink(&entry).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        let _ = dir.sync();
+    }
+    removed
 }
 
 /// Directories held open by descriptor. Backups are listed, created and
