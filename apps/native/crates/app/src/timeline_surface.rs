@@ -1464,6 +1464,20 @@ impl TimelineSurface {
             cx.notify();
         }
     }
+    /// Development builds' review sweep: the pointer over `seconds` on the
+    /// ruler (`None`: it left), through the hover handler.
+    #[cfg(debug_assertions)]
+    pub fn review_hover(&mut self, seconds: Option<f64>, cx: &mut Context<Self>) {
+        match seconds {
+            Some(t) => {
+                let x = self.view.layer_column + (t - self.view.scroll_time) * self.view.pps;
+                let at =
+                    self.bounds.origin + point(px(x as f32), px(self.tokens.metrics.ruler / 2.));
+                self.hover(at, cx);
+            }
+            None => self.set_skimmer(None, cx),
+        }
+    }
     /// View ▸ Skimming changed: hide the skimmer when it went off.
     pub fn skimming_changed(&mut self, cx: &mut Context<Self>) {
         if !self.delegate.skimming(cx) {

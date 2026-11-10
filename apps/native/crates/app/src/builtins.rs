@@ -1244,7 +1244,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
-        let input = crate::session::Controller::event_time();
+        let input = crate::skimming::input();
         let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
     }
     fn skimming(&self, cx: &App) -> bool {

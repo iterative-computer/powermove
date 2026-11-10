@@ -120,3 +120,59 @@ impl Controller {
 pub fn on(controller: &gpui::WeakEntity<Controller>, cx: &App) -> bool {
     controller.upgrade().is_some_and(|c| c.read(cx).skimming.on)
 }
+
+thread_local! {
+    /// A review sweep's pointer time (development builds), standing in for
+    /// the NSEvent timestamp a real pointer move has.
+    static REVIEW_INPUT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+/// The pointer time of the skim being handled.
+pub fn input() -> f64 {
+    REVIEW_INPUT
+        .with(|r| r.get())
+        .unwrap_or_else(Controller::event_time)
+}
+/// Development builds: `powermove://review/skim/<from>/<to>/<seconds>`
+/// moves the pointer over the first editor's timeline from one time to
+/// another at 60 Hz (through the timeline's own hover handler), rests 0.5 s
+/// and leaves: background reviews cannot hover the window.
+#[cfg(debug_assertions)]
+pub fn review_sweep(editor: gpui::WeakEntity<Controller>, rest: &str, cx: &mut App) {
+    let parts: Vec<f64> = rest.split('/').filter_map(|p| p.parse().ok()).collect();
+    let [from, to, seconds] = parts[..] else {
+        return;
+    };
+    let Some(timeline) = editor
+        .upgrade()
+        .and_then(|c| c.read(cx).builtins.timeline.clone())
+    else {
+        return;
+    };
+    let timeline = timeline.downgrade();
+    cx.spawn(async move |cx| {
+        let steps = (seconds * 60.).round().max(1.) as usize;
+        let started = std::time::Instant::now();
+        for i in 0..=steps {
+            let due = started + std::time::Duration::from_secs_f64(i as f64 / 60.);
+            let wait = due.saturating_duration_since(std::time::Instant::now());
+            cx.background_executor().timer(wait).await;
+            let at = from + (to - from) * i as f64 / steps as f64;
+            let ok = cx.update(|cx| {
+                REVIEW_INPUT.with(|r| r.set(Some(pm_engine_service::trace::now())));
+                let ok = timeline
+                    .update(cx, |t, cx| t.review_hover(Some(at), cx))
+                    .is_ok();
+                REVIEW_INPUT.with(|r| r.set(None));
+                ok
+            });
+            if !ok {
+                return;
+            }
+        }
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(500))
+            .await;
+        let _ = cx.update(|cx| timeline.update(cx, |t, cx| t.review_hover(None, cx)));
+    })
+    .detach();
+}
