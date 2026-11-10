@@ -104,7 +104,14 @@ test("B367/B368 parameter animation and reset reach one kernel transaction, prec
     expect(c.snapshot().rows.find((r) => r.id === param.id)).toMatchObject({
       parameter: { animated: true, keyAtPlayhead: true },
     });
-    await c.drive({ type: "reset", id: "f1" });
+    // The parameter row's own Reset, as v1's channel-row context menu.
+    let menu: any[] = [];
+    h.kit.api.contextMenu = async (items) => {
+      menu = items;
+      return "reset";
+    };
+    await c.parameterMenu(param.id);
+    expect(menu.map((i) => i.label)).toEqual(["Reset"]);
     expect(c.snapshot().rows.find((r) => r.id === param.id)).toMatchObject({
       parameter: { value: 0, animated: false },
     });
@@ -112,6 +119,11 @@ test("B367/B368 parameter animation and reset reach one kernel transaction, prec
     await h.publish();
     expect(c.snapshot().rows.find((r) => r.id === param.id)).toMatchObject({
       parameter: { value: 24, animated: true },
+    });
+    // The effect header's Reset keys the default and keeps the animation (E07).
+    await c.drive({ type: "reset", id: "f1" });
+    expect(c.snapshot().rows.find((r) => r.id === param.id)).toMatchObject({
+      parameter: { value: 0, animated: true, keyAtPlayhead: true },
     });
   } finally {
     await h.close();

@@ -81,7 +81,11 @@ export type Intent =
   | { type: "reorder"; id: string; direction: -1 | 1 }
   | { type: "drop"; id: string; slot: number }
   | { type: "add"; definition: string; slot?: number }
-  | { type: "parameter"; id: string; action: "diamond" | "stopwatch" }
+  | {
+      type: "parameter";
+      id: string;
+      action: "diamond" | "stopwatch" | "reset";
+    }
   | { type: "range"; range: [number, number] };
 export interface MenuItem {
   id: string;
