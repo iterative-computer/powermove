@@ -35,5 +35,8 @@ base64 = "0.22"
 serde_json = "1"
 
 [features]
+# Panic injection on the transaction path (crate::fault_injection), for tests
+# of the hosts that must survive a contained kernel panic.
+fault-injection = []
 # Opt-in real OCCT import/save tests, with required explicit native helper paths.
 native-scene3d-cad-tests = ["pm-scene3d/native-cad-tests"]

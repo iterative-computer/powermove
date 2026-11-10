@@ -60,6 +60,13 @@ pub struct Controller {
     pub opening_name: Option<String>,
     /// The project whose panels haven't published since it landed.
     pub settling: Option<String>,
+    /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
+    pub(crate) open_timer: crate::diag::OpenTimer,
+    /// Project commands asked for while the project was arriving, bound to
+    /// that open: they run once it has settled here (`settled`).
+    pub(crate) after_open: crate::after_open::AfterOpen,
+    /// The open whose project is settling.
+    pub(crate) settling_open: u64,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -97,6 +104,11 @@ pub struct Controller {
     /// Keyframes in the open composition, for the status bar.
     pub keyframes: usize,
     pub recovery_pending: bool,
+    /// The document whose stop (an internal error) this window already
+    /// offered to reopen.
+    pub stop_offered: Option<u64>,
+    /// The next open is Reopen after such a stop (its recovery prompt says so).
+    reopening_stopped: bool,
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
@@ -163,7 +175,14 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
-        self.0.read(cx).disabled.clone()
+        let v = self.0.read(cx);
+        let mut off = v.disabled.clone();
+        // While a project arrives its commands stay available: they wait for
+        // it (`Controller::command`) instead of being refused.
+        if v.opening || v.settling.is_some() {
+            off.retain(|name| !crate::layer_commands::waits_for_project(name));
+        }
+        off
     }
     fn panel(
         &self,
@@ -352,6 +371,10 @@ impl Controller {
                                     v.message = format!("Recovery warning: {message}");
                                     v.errors.borrow_mut().push("Recovery", &message);
                                 }
+                                KernelEvent::Fault { message, .. } => {
+                                    v.message = "Something went wrong; see the Error Log.".into();
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
                                 KernelEvent::Notice { notice, .. } => {
                                     v.message = format!("Kernel notice: {notice:?}")
                                 }
@@ -420,6 +443,9 @@ impl Controller {
             busy: None,
             opening_name: None,
             settling: None,
+            open_timer: Default::default(),
+            after_open: Default::default(),
+            settling_open: 0,
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -451,6 +477,8 @@ impl Controller {
             background: None,
             keyframes: 0,
             recovery_pending: false,
+            stop_offered: None,
+            reopening_stopped: false,
             mcp,
             job_overrides: Default::default(),
             window_key: 0,
@@ -605,6 +633,10 @@ impl Controller {
             }
         }
         self.sync_rows(&p, cx);
+        if p.fault.is_some() && self.stop_offered != Some(p.snapshot.doc_id) {
+            self.stop_offered = Some(p.snapshot.doc_id);
+            self.offer_reopen(&p, cx);
+        }
         self.follow_project_hdr();
         let saving = p.saving || self.save_pending;
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
@@ -1105,10 +1137,17 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
+        let after_stop = std::mem::take(&mut self.reopening_stopped);
+        // Commands still waiting on an earlier open never reach this project.
+        let (open, dropped) = self.after_open.begin(&name);
         self.opening = true;
         self.busy = Some(crate::platform::Busy::begin("Opening a project"));
-        self.message = format!("Opening “{name}”…");
+        self.message = dropped.map_or_else(
+            || format!("Opening “{name}”…"),
+            |note| format!("{note} Opening “{name}”…"),
+        );
         self.opening_name = Some(name.clone());
+        self.open_timer.begin();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let _operation = operation;
@@ -1116,7 +1155,16 @@ impl Controller {
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
                     reply, &name, false, saved,
-                );
+                )
+                .map(|mut r| {
+                    let asks = r.alert.buttons.iter().any(|b| {
+                        b.action == crate::surfaces::recovery::Action::Recover
+                    });
+                    if after_stop && asks {
+                        r.alert = crate::surfaces::recovery::after_stop(r.alert, &name);
+                    }
+                    r
+                });
                 if let Some(recovery) = recovery {
                     let answer = this.update(cx, |v, _| {
                         if matches!(
@@ -1159,10 +1207,15 @@ impl Controller {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
                     _ => None,
                 };
+                v.settling_open = open;
                 // Held until the panels have drawn the project (`settled`).
                 if v.settling.is_none() {
                     v.opening_name = None;
                     v.busy = None;
+                    // No project arrived; its open failure says why.
+                    if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
+                        v.after_open.fail();
+                    }
                 }
                 match result {
                     Some(Ok(ShellReply::Opened {
@@ -1171,8 +1224,10 @@ impl Controller {
                         decision,
                         info,
                     })) => {
+                        v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
                         v.adopt(session, decision, info.history_rejected, cx);
+                        v.report_first_frame(cx);
                         if previous_save_failed {
                             v.message.push_str(
                                 " · Previous project could not be saved; its recovery journal is retained",
@@ -1185,7 +1240,11 @@ impl Controller {
                         v.message = String::new();
                         v.focus_project(&project, cx);
                     }
-                    Some(Err(error)) => v.report_open_failure(&name, path, &error, cx),
+                    Some(Err(error)) => {
+                        v.open_timer
+                            .mark("failed", serde_json::json!({"message": error.to_string()}));
+                        v.report_open_failure(&name, path, &error, cx)
+                    }
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
@@ -1193,6 +1252,40 @@ impl Controller {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+    /// `PM_NATIVE_MAIN_TRACE`: when the viewer first presents the opened project.
+    fn report_first_frame(&mut self, cx: &mut Context<Self>) {
+        if !self.open_timer.active() {
+            return;
+        }
+        let Some(doc) = self.published.as_ref().map(|p| p.snapshot.doc_id) else {
+            return;
+        };
+        let timer = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..24_000 {
+                let shown = this.update(cx, |v, _| {
+                    let status = v.viewer.as_ref().map(|v| v.status());
+                    let frame = status.as_ref().and_then(|s| s.frame.as_ref());
+                    if let Some(f) = frame.filter(|f| f.stamp.doc_id == doc && f.gpu_ok) {
+                        v.open_timer
+                            .mark("first_frame", serde_json::json!({"cache_hit": f.cache_hit}));
+                        return true;
+                    }
+                    if let Some(error) = status.and_then(|s| s.error) {
+                        v.open_timer
+                            .mark("viewer_error", serde_json::json!({"message": error}));
+                        return true;
+                    }
+                    false
+                });
+                if shown.unwrap_or(true) {
+                    break;
+                }
+                timer.timer(std::time::Duration::from_millis(5)).await;
+            }
         })
         .detach();
     }
@@ -1214,6 +1307,73 @@ impl Controller {
             let _ = window.update(cx, |_, w, _| w.activate());
         }
     }
+    /// An internal error stopped this window's project: the kernel takes no
+    /// more edits or saves for it. Reopen closes it (nothing is written) and
+    /// opens it again, where the recovery prompt brings back every change
+    /// made before the error.
+    fn offer_reopen(&mut self, p: &pm_kernel::Published, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, stopped};
+        let name = p
+            .snapshot
+            .root()
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned();
+        self.message = format!("“{name}” stopped after an internal error. Reopen it to recover.");
+        let rx = stopped(&name).sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await.ok().flatten() == Some(Action::Reopen) {
+                let _ = this.update(cx, |v, cx| v.reopen_stopped(name, cx));
+            }
+        })
+        .detach();
+    }
+    /// Closes the stopped project (the kernel writes nothing and keeps its
+    /// journal) and opens it again through the recovery prompt.
+    pub(crate) fn reopen_stopped(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(p) = self
+            .kernel
+            .published(&session.project)
+            .filter(|p| p.fault.is_some())
+        else {
+            return;
+        };
+        let Some(source) = reopen_source(&p, &self.profile) else {
+            return;
+        };
+        if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
+            self.message = "Finish the active open or recovery decision first".into();
+            cx.notify();
+            return;
+        }
+        let closing = self.kernel.shell(ShellCall::Close(session));
+        cx.spawn(async move |this, cx| {
+            let closed = matches!(closing.await, Some(Ok(ShellReply::Closed { .. })));
+            let _ = this.update(cx, |v, cx| {
+                if !closed {
+                    v.message = format!(
+                        "“{name}” couldn’t be closed to reopen it; its recovery data is kept."
+                    );
+                    cx.notify();
+                    return;
+                }
+                if let Some(viewer) = v.viewer.take() {
+                    viewer.retire();
+                }
+                v.session = None;
+                v.published = None;
+                v.mirror = None;
+                v.mcp.bind_window(v.window_key, None);
+                v.reopening_stopped = true;
+                v.open_named(source, Some(name), cx);
+            });
+        })
+        .detach();
+    }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_failure(
         &mut self,
@@ -1224,7 +1384,7 @@ impl Controller {
     ) {
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
-        let alert = documents::open_error(name, open_failure(error), exists);
+        let alert = documents::open_error(name, open_failure(error), exists).notice();
         self.errors.borrow_mut().push("Project", &alert.message);
         self.message = String::new();
         let rx = alert.sheet(&self.host.borrow().window);
@@ -1290,7 +1450,10 @@ impl Controller {
             return;
         };
         let comp = p.snapshot.render_comp();
-        let root = p.snapshot.document.root().unwrap();
+        // A document without a root has nothing to view.
+        let Some(root) = p.snapshot.document.root() else {
+            return;
+        };
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
         let number = |key: &str, default| {
             composition
@@ -1525,6 +1688,14 @@ impl Controller {
                 host.shell_state(serde_json::json!({ "tool": tool }));
             }
             return false;
+        }
+        // The menu or a launch argument during a long open: the project is
+        // coming, so the command waits for it rather than finding none.
+        if (self.opening || self.settling.is_some())
+            && crate::layer_commands::waits_for_project(&cmd.name)
+        {
+            self.after_open.defer(cmd.name.clone(), cmd.args.clone());
+            return true;
         }
         if self.extension_command(cmd, cx) {
             return true;
@@ -1854,6 +2025,19 @@ impl Controller {
         true
     }
 }
+/// Where an open project comes from, to open it again.
+pub(crate) fn reopen_source(
+    p: &pm_kernel::Published,
+    profile: &std::path::Path,
+) -> Option<SessionSource> {
+    Some(match &p.session.as_ref()?.destination {
+        SessionDestination::File(path) => SessionSource::File(path.clone()),
+        SessionDestination::Library(slot) => SessionSource::Library {
+            profile: profile.to_owned(),
+            project: slot.clone(),
+        },
+    })
+}
 /// Why the open failed, in the words the open alert has for it.
 fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailure {
     use crate::surfaces::documents::OpenFailure;
@@ -1862,6 +2046,8 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         KernelFailure::NoProject(_) => NotFound,
         // Unsaved work can't be protected without its journal: say so.
         KernelFailure::Journal(_) => return OpenFailure::Journal,
+        // An open never faults a project; a stopped one only refuses edits.
+        KernelFailure::Faulted(_) => Unavailable,
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {

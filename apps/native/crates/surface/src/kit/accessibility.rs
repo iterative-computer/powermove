@@ -18,6 +18,20 @@ pub fn spoken_unit(unit: &str) -> &str {
         other => other,
     }
 }
+/// At most three decimals, no trailing zeros (`73.53333…` → `73.533`), like
+/// the sheets' number fields.
+pub fn spoken_number(n: f64) -> String {
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    let text = format!("{n:.3}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.into()
+    }
+}
 fn role(node: &Node) -> Role {
     use Component::*;
     match Component::of(node) {
@@ -124,6 +138,12 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
                 .unwrap_or(text)
         } else {
             text
+        };
+        // A bare number reads as a sheet shows it (at most three decimals);
+        // the exact value stays in the numeric value below.
+        let text = match (value.as_f64(), text.parse::<f64>()) {
+            (Some(_), Ok(n)) => spoken_number(n),
+            _ => text,
         };
         let unit = source
             .props

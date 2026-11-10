@@ -58,6 +58,9 @@ pub struct Alert<A> {
     /// NSAlert order: the first is rightmost.
     pub buttons: Vec<Button<A>>,
     pub critical: bool,
+    /// Asks nothing (OK, Show in Finder): closing its window or quitting
+    /// dismisses it instead of being refused (`dismiss_notice`).
+    pub notice: bool,
 }
 impl<A> Alert<A> {
     pub fn new(
@@ -70,7 +73,12 @@ impl<A> Alert<A> {
             informative: informative.into(),
             buttons,
             critical: false,
+            notice: false,
         }
+    }
+    pub fn notice(mut self) -> Self {
+        self.notice = true;
+        self
     }
     pub fn critical(mut self) -> Self {
         self.critical = true;
@@ -129,13 +137,37 @@ impl<A: Clone + 'static> Alert<A> {
         let (tx, rx) = async_channel::bounded(1);
         let actions: Vec<A> = self.buttons.iter().map(|b| b.action.clone()).collect();
         let retained: Retained<NSAlert> = native.clone();
+        let sheet = native.window();
+        if self.notice {
+            NOTICES.with(|n| n.borrow_mut().push(sheet.clone()));
+        }
         let done = block2::RcBlock::new(move |response: NSModalResponse| {
             let _keep_alive = &retained;
+            NOTICES.with(|n| n.borrow_mut().retain(|w| !std::ptr::eq(&**w, &*sheet)));
             let _ = tx.try_send(chosen(&actions, response));
         });
         native.beginSheetModalForWindow_completionHandler(window, Some(&done));
         rx
     }
+}
+
+thread_local! {
+    /// Sheet windows of alerts that ask nothing (`Alert::notice`).
+    static NOTICES: std::cell::RefCell<Vec<Retained<objc2_app_kit::NSWindow>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Ends `window`'s sheet when it is an alert that asks nothing, as if
+/// dismissed; returns whether the window is now free of sheets.
+pub fn dismiss_notice(window: &NSWindow) -> bool {
+    let Some(sheet) = window.attachedSheet() else {
+        return true;
+    };
+    let notice = NOTICES.with(|n| n.borrow().iter().any(|w| std::ptr::eq(&**w, &*sheet)));
+    if notice {
+        window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+    }
+    window.attachedSheet().is_none()
 }
 
 /// A one-button alert as a sheet on the key window.
@@ -144,7 +176,9 @@ pub fn note(message: &str, informative: &str) {
     let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
         return;
     };
-    let _ = Alert::new(message, informative, vec![Button::new("OK", ()).default()]).sheet(&window);
+    let _ = Alert::new(message, informative, vec![Button::new("OK", ()).default()])
+        .notice()
+        .sheet(&window);
 }
 
 fn chosen<A: Clone>(actions: &[A], response: NSModalResponse) -> Option<A> {

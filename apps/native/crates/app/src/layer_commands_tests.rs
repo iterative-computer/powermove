@@ -463,3 +463,27 @@ fn a_burst_of_nudges_squashes_into_one_undo_step() {
     send(&kernel, HistoryCall::Undo.into());
     assert_eq!(x(&kernel), Some(40.), "one undo restores the burst");
 }
+
+#[test]
+fn project_commands_wait_for_an_arriving_project_and_others_do_not() {
+    use crate::layer_commands::waits_for_project;
+    for name in [
+        "compositionSettings",
+        "newComposition",
+        "export",
+        "precompose",
+        "delete",
+    ] {
+        assert!(waits_for_project(name), "{name}");
+    }
+    for name in [
+        "settings",
+        "agent",
+        "quit",
+        "newProject",
+        "openRecent",
+        "toolSelect",
+    ] {
+        assert!(!waits_for_project(name), "{name}");
+    }
+}

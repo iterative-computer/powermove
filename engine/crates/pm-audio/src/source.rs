@@ -268,9 +268,11 @@ pub struct SourceCache {
     /// handles or PCM live here; a changed file receives a fresh block key.
     source_ids: Mutex<HashMap<SourceKey, SourceIdentity>>,
 
-    blocks: Mutex<Blocks>,
+    /// Shared with the decode workers, which wait on it without keeping
+    /// the cache alive (`worker`).
+    blocks: Arc<Mutex<Blocks>>,
     ready: Condvar,
-    work: Condvar,
+    work: Arc<Condvar>,
     budget: usize,
     next_id: AtomicU64,
     decoded: AtomicU64,
@@ -280,7 +282,7 @@ pub struct SourceCache {
     /// Advances when a decoded block or a memoized decode error becomes
     /// visible. Missing-input preparation waits for progress, not a timer.
     publication_epoch: AtomicU64,
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     profile: bool,
     #[cfg(feature = "test-hooks")]
@@ -325,9 +327,9 @@ impl SourceCache {
         let cache = Arc::new(SourceCache {
             sources: Mutex::default(),
             source_ids: Mutex::default(),
-            blocks: Mutex::default(),
+            blocks: Arc::default(),
             ready: Condvar::new(),
-            work: Condvar::new(),
+            work: Arc::new(Condvar::new()),
             budget: budget_bytes
                 .min(crate::chromium::TODAYS_BUDGET as usize)
                 .max(BLOCK * 8 * 4),
@@ -337,7 +339,7 @@ impl SourceCache {
             misses: AtomicU64::new(0),
             evicted: AtomicU64::new(0),
             publication_epoch: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
             workers: Mutex::default(),
             profile,
             #[cfg(feature = "test-hooks")]
@@ -361,11 +363,17 @@ impl SourceCache {
     pub(crate) fn ensure_workers(self: &Arc<Self>, count: usize) {
         let mut handles = lock(&self.workers);
         for i in handles.len()..count {
-            let weak = Arc::downgrade(self);
+            let waiting = Waiting {
+                cache: Arc::downgrade(self),
+                blocks: self.blocks.clone(),
+                work: self.work.clone(),
+                stop: self.stop.clone(),
+                profile: self.profile,
+            };
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("pm-audio-decode-{i}"))
-                    .spawn(move || worker(weak))
+                    .spawn(move || worker(waiting))
                     .expect("spawn audio decode worker"),
             );
         }
@@ -892,13 +900,24 @@ fn block_span(source: &Source, start: i64, len: usize) -> Option<(u64, u64)> {
     Some((lo as u64 / BLOCK as u64, (hi - 1) as u64 / BLOCK as u64))
 }
 
-fn worker(cache: std::sync::Weak<SourceCache>) {
+/// What a decode worker waits on. It holds the cache itself only while it
+/// decodes a block: a worker that kept it while waiting kept every other
+/// worker's cache alive too, so a closed playback's cache, its decoded
+/// audio and its threads were never freed.
+struct Waiting {
+    cache: std::sync::Weak<SourceCache>,
+    blocks: Arc<Mutex<Blocks>>,
+    work: Arc<Condvar>,
+    stop: Arc<AtomicBool>,
+    profile: bool,
+}
+
+fn worker(w: Waiting) {
     loop {
-        let Some(c) = cache.upgrade() else { return };
         let job = {
-            let mut blocks = lock(&c.blocks);
+            let mut blocks = lock(&w.blocks);
             loop {
-                if c.stop.load(Ordering::SeqCst) {
+                if w.stop.load(Ordering::SeqCst) {
                     return;
                 }
                 if let Some((source, index)) = blocks.queue.pop_front() {
@@ -908,14 +927,14 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                         continue;
                     }
                     blocks.in_flight.insert(key);
-                    let claim_us = if c.profile {
+                    let claim_us = if w.profile {
                         crate::clock::host_now_us()
                     } else {
                         0
                     };
                     break Some((source, index, claim_us));
                 }
-                let (b, timeout) = c
+                let (b, timeout) = w
                     .work
                     .wait_timeout(blocks, std::time::Duration::from_millis(200))
                     .unwrap_or_else(|e| e.into_inner());
@@ -926,10 +945,13 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
             }
         };
         let Some((source, index, claim_us)) = job else {
-            // Re-check the weak reference so a dropped cache ends the thread.
-            drop(c);
+            // A dropped cache ends the thread.
+            if w.cache.strong_count() == 0 {
+                return;
+            }
             continue;
         };
+        let Some(c) = w.cache.upgrade() else { return };
         let key = (source.id, index);
         let mut trace = DecodeTrace::claimed(c.profile, claim_us);
         let decoded = c.decode(&source, index, &mut trace);
@@ -1049,5 +1071,31 @@ mod pressure_tests {
         cache.memory_pressure();
         assert_eq!(cache.stats().bytes, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    /// Decode workers end with their cache: with two of them, each used to
+    /// hold the cache while waiting and so kept it alive for the other.
+    #[test]
+    fn a_dropped_cache_frees_its_workers_and_blocks() {
+        let cache = SourceCache::new(1 << 20, 2);
+        let weak = Arc::downgrade(&cache);
+        let handles: Vec<_> = lock(&cache.workers).drain(..).collect();
+        assert_eq!(handles.len(), 2);
+        // Both workers are idle and waiting by now, as after a playback.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(cache);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while weak.strong_count() > 0 || handles.iter().any(|h| !h.is_finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cache or a worker outlived its owner"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

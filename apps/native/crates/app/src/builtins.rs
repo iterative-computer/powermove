@@ -249,8 +249,18 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
-            crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
+            // Bound to the open that brought `project`: they run only if this
+            // window still shows it.
+            let shown = self.session.as_ref().is_some_and(|s| s.project == project);
+            let (run, dropped) = self.after_open.settle(self.settling_open, shown);
+            if let Some(note) = dropped {
+                self.message = note;
+            }
+            for (name, args) in run {
+                self.host.borrow().send_command(&name, args);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its

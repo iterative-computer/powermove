@@ -115,7 +115,7 @@ pub struct SurfaceView {
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
     table: Arc<TokenTable>,
-    prepared: Rc<Prepared>,
+    pub(crate) prepared: Rc<Prepared>,
     window: AnyWindowHandle,
     appkit: bool,
     natives: Natives,
@@ -1362,6 +1362,18 @@ impl SurfaceView {
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
         let mut children: Vec<AnyElement> = vec![];
+        // A disabled field mounts no editor; it still shows its value, dimmed.
+        if let Some(text) = self.disabled_field_text(node) {
+            let t = &self.table.tokens;
+            children.push(
+                div()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_color(rgb(t.colors.muted))
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
         let wash = self.motion.hovers.amount(id);
         if wash > 0. && !node.disabled {
             let t = &self.table.tokens;
@@ -1403,6 +1415,33 @@ impl SurfaceView {
         }
         let element = element.children(children).children(self.probe(node.id));
         self.place(element.into_any_element(), node, window, cx)
+    }
+    /// What a disabled text or number field shows: its value as the editor
+    /// would (number precision, then the unit).
+    pub(crate) fn disabled_field_text(&self, node: &NodeView) -> Option<String> {
+        if !node.disabled
+            || !matches!(
+                node.component,
+                Some(Component::NumberField | Component::TextField)
+            )
+        {
+            return None;
+        }
+        let value = self
+            .publication
+            .surface
+            .node(node.id)?
+            .props
+            .get("value")
+            .filter(|v| !v.is_null())?;
+        let text = match (node.number, value.as_f64()) {
+            (Some(number), Some(n)) => number.text(n),
+            _ => value_text(value),
+        };
+        Some(match &node.unit {
+            Some(unit) if !text.is_empty() => format!("{text} {unit}"),
+            _ => text,
+        })
     }
     /// Anchored kit surfaces escape the panel clip and stack above it.
     fn place(

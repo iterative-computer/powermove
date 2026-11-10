@@ -262,7 +262,7 @@ pub fn packed_save() -> Check {
 }
 
 /// A model-valid lone UTF-16 code unit is authored data, not invalid JSON in
-/// Powermove's JavaScript/PMV model. Keep the current MCP ingress panic visible.
+/// Powermove's JavaScript/PMV model: MCP ingress opens it without a panic.
 pub fn utf16_ingress() -> Check {
     let mut f = Fixture::new()?;
     f.call("finish_session", json!({"commit":true}))?;

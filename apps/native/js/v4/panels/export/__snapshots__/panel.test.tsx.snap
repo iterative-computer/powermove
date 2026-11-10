@@ -32418,14 +32418,7 @@ exports[`wire snapshot: preparing 1`] = `
           "type": "text",
         },
         {
-          "children": [
-            {
-              "children": [],
-              "props": {},
-              "text": "Export progress",
-              "type": "text",
-            },
-          ],
+          "children": [],
           "props": {
             "data-pm-component": "progress-row",
             "data-pm-indeterminate": true,
@@ -32672,14 +32665,7 @@ exports[`wire snapshot: rendering with preview and ETA 1`] = `
           "type": "frame",
         },
         {
-          "children": [
-            {
-              "children": [],
-              "props": {},
-              "text": "Export progress",
-              "type": "text",
-            },
-          ],
+          "children": [],
           "props": {
             "aria-valuenow": 0.4,
             "data-pm-component": "progress-row",
@@ -32927,14 +32913,7 @@ exports[`wire snapshot: finishing 1`] = `
           "type": "text",
         },
         {
-          "children": [
-            {
-              "children": [],
-              "props": {},
-              "text": "Export progress",
-              "type": "text",
-            },
-          ],
+          "children": [],
           "props": {
             "aria-valuenow": 1,
             "data-pm-component": "progress-row",
@@ -33159,14 +33138,7 @@ exports[`wire snapshot: cancelling 1`] = `
           "type": "text",
         },
         {
-          "children": [
-            {
-              "children": [],
-              "props": {},
-              "text": "Export progress",
-              "type": "text",
-            },
-          ],
+          "children": [],
           "props": {
             "data-pm-component": "progress-row",
             "data-pm-indeterminate": true,
