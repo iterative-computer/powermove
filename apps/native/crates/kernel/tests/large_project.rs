@@ -440,3 +440,58 @@ fn a_large_document_checkpoints_by_journal_size_and_recovers_at_any_point() {
         "authored media order is journaled"
     );
 }
+
+/// A history stored as a dictionary (main's packed form; the library keeps
+/// every project's history so) is one this kernel reads and writes in full:
+/// editing it must not archive it. Archived, every save of a library project
+/// after an edit kept another full copy of its history (a 285 MB project
+/// grew 100 MB a save).
+#[test]
+fn an_edited_dictionary_history_is_not_archived() {
+    let dir = TempDir::new("dictionary-history");
+    let layer = |id: &str| {
+        format!(
+            r#"{{"id":"{id}","type":"shape","name":"{id}","from":0,"dur":2,"on":true,"p":{{"opacity":{{"v":100,"kf":[],"expr":null}}}}}}"#
+        )
+    };
+    let (one, two) = (layer("a"), format!("{},{}", layer("a"), layer("b")));
+    let history = parse(&format!(
+        r#"{{"version":1,"paths":"composition","index":0,"entries":[{{"label":"Add","forward":[{{"path":["comps","main","layers"],"exists":true,"value":[{two}]}}],"backward":[{{"path":["comps","main","layers"],"exists":true,"value":[{one}]}}]}}]}}"#
+    ))
+    .unwrap();
+    let packed = pm_kernel::history::pack(history);
+    assert!(packed.get("format").is_some(), "the input is a dictionary");
+    let source = dir.path("source.json");
+    std::fs::write(
+        &source,
+        format!(
+            r##"{{"v":"1.0.0","proj":{{"id":"dict","name":"Dict","compId":"main","compName":"Main","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{two}]}},"history":{}}}"##,
+            to_canonical_string(&packed)
+        ),
+    )
+    .unwrap();
+    let mut kernel = Kernel::new(KernelConfig::default());
+    let session = open_file(&mut kernel, &source);
+    assert!(
+        store(&kernel).history().can_undo(),
+        "the dictionary is read"
+    );
+    call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    let path = dir.path("saved.pmv");
+    let plan = kernel
+        .prepare_session_save(session, Some(path.clone()), false)
+        .unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let saved = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .document;
+    assert!(saved.get("nativeHistoryArchive").is_none());
+    let reopened = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+    assert_eq!(reopened.history.unwrap().len(), 2, "both edits are kept");
+}

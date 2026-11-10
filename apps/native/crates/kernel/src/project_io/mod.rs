@@ -698,9 +698,9 @@ fn normalize_compositions(project: &mut Value) {
     }
 }
 
-/// Known logical history can be re-exported without an archive. Dictionaries,
-/// refused histories and metadata the logical stack cannot represent must be
-/// retained when a later edit changes that stack.
+/// Known logical history can be re-exported without an archive, plain or as a
+/// dictionary. Refused histories and metadata the logical stack cannot
+/// represent must be retained when a later edit changes that stack.
 pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
     if History::from_saved(raw, open).is_none() {
         return true;
@@ -711,6 +711,37 @@ pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
                 .any(|key| !key.as_str().is_some_and(|key| known.contains(&key)))
         })
     };
+    // The dictionary form (main's `packHistory`, which this kernel writes for
+    // large histories) is a lossless packing: judge what it unpacks to. Read
+    // as unknown, every save after an edit archived the file's own history
+    // again, one more full copy a save.
+    let packed = raw.get("format").is_some();
+    let items_unknown = || {
+        raw.get("history")
+            .and_then(|h| h.get("entries"))
+            .and_then(Value::as_array)
+            .is_none_or(|entries| {
+                entries.iter().any(|entry| {
+                    ["forward", "backward"].into_iter().any(|side| {
+                        entry
+                            .get(side)
+                            .and_then(Value::as_array)
+                            .is_none_or(|items| {
+                                items.iter().any(|item| unknown(item, &["patch", "refs"]))
+                            })
+                    })
+                })
+            })
+    };
+    if packed && (unknown(raw, &["format", "version", "records", "history"]) || items_unknown()) {
+        return true;
+    }
+    let unpacked = if packed {
+        crate::history::unpack(raw)
+    } else {
+        None
+    };
+    let raw = unpacked.as_ref().unwrap_or(raw);
     if unknown(raw, &["version", "paths", "index", "entries"]) {
         return true;
     }
