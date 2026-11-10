@@ -345,6 +345,33 @@ fn sixty_thousand_clips_in_one_track_cull_by_time() {
 }
 
 #[test]
+fn a_marquee_covers_rows_the_frame_did_not_build_above_and_below_the_panel() {
+    let t = tokens();
+    let rows = (0..40)
+        .map(|i| {
+            row(
+                &format!("V{i}"),
+                RowContent::Track {
+                    clips: vec![clip(&format!("c{i}"))],
+                },
+            )
+        })
+        .collect();
+    let s = Scene::new(rows, 10., 30., &t).unwrap();
+    let mut v = viewport(&t);
+    v.scroll_y = s.span(15).unwrap().1;
+    let top = |i: usize| t.metrics.ruler as f64 + s.span(i).unwrap().1 - v.scroll_y;
+    let built = s.prepare(v, &t).unwrap().range;
+    assert!(built.start > 5 && built.end < 35, "{built:?}");
+    // From inside row 5 (scrolled above the panel) down into row 34 (below it).
+    let (from, to) = (top(5) + 2., top(35) - 2.);
+    let area = Rect::new(v.layer_column + 10., from, 40., to - from);
+    let covered = s.marquee(v, &t, area);
+    let expected: Vec<_> = (5..35).map(|i| format!("c{i}")).collect();
+    assert_eq!(covered.clips, expected);
+    assert!(covered.keys.is_empty());
+}
+#[test]
 fn every_paint_operation_has_a_unique_id_even_for_summary_and_property_keys() {
     let t = tokens();
     let f = scene(&t).prepare(viewport(&t), &t).unwrap();

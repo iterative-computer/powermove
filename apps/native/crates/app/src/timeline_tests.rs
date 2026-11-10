@@ -611,6 +611,74 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
     assert_eq!(s.start_of("b"), b_in);
 }
 #[gpui::test]
+fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &mut TestAppContext) {
+    // Eighty layers starting together, each with a key at 0.5 s.
+    let project = (0..80).fold(crate::v4_view_tests::project_json(80), |p, i| {
+        p.replace(&format!("\"from\":{},", i as f64 * 0.5), "\"from\":0,")
+    });
+    let mut s = stage_project(cx, project);
+    let commands = (0..80)
+        .map(|i| {
+            pm_kernel::KeyframeCommand::Add {
+                layer_id: format!("l{i}"),
+                channel: "opacity".into(),
+                time: 0.5,
+                key_id: format!("k{i}"),
+                value: Some(pm_model::Value::from(50.)),
+            }
+            .into()
+        })
+        .collect();
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(commands),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    // Down past the panel's bottom edge to just above layer l61's row: the
+    // frame holds only the rows on screen, and l60 is far below them.
+    let (frame, scene) = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.frame().unwrap(), t.scene().unwrap()));
+    let row = |layer: &str| {
+        let id = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer.into()));
+        tokens().metrics.ruler as f64 + scene.scroll_for(&id).unwrap() - frame.viewport.scroll_y
+    };
+    assert!(row("l60") > frame.viewport.height);
+    let key = op_center(&mut s, "key:");
+    let start = s.at(0, 3.);
+    let end = point(key.x - px(12.), s.origin().y + px(row("l61") as f32 - 2.));
+    s.drag(cx, start, end, Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .keys()
+        .to_vec();
+    assert_eq!(selected.len(), 61, "{selected:?}");
+    assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
+    assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
+}
+#[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
 ) {

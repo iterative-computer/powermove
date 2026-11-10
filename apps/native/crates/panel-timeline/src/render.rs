@@ -749,121 +749,7 @@ impl Scene {
         for i in range.clone() {
             let op_start = ops.len();
             let row = &self.rows[i];
-            let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
-            let h = row.height(t);
-            // Selection and hover fill the outline column only; in the tracks
-            // the clip's accent ring marks the selection (the owner's demo).
-            let rect = Rect::new(0., y, v.layer_column, h);
-            if row.selected || row.hovered {
-                ops.push(Op::new(
-                    format!("row:{}", row.id),
-                    "rect",
-                    rect,
-                    if row.selected {
-                        c.selected_fill
-                    } else {
-                        c.hover
-                    },
-                ));
-            }
-            if row.focused {
-                let mut o = Op::new(
-                    format!("focus:{}", row.id),
-                    "ring",
-                    Rect::new(1., y + 1., v.width - 2., h - 2.),
-                    c.focus,
-                );
-                o.stroke = 2.;
-                ops.push(o);
-            }
-            if t.accessibility.increase_contrast
-                && !matches!(row.content, RowContent::Property { .. })
-            {
-                ops.push(Op::new(
-                    format!("separator:{}", row.id),
-                    "rect",
-                    Rect::new(0., y + h - m.border as f64, v.width, m.border as f64),
-                    c.separator,
-                ));
-            }
-            match &row.content {
-                RowContent::Layer { clip, summary } => {
-                    if let Some(clip) = clip {
-                        paint_clip(clip, y, h, v, t, &mut ops);
-                    }
-                    // Summary marks only while the layer is collapsed: open, its
-                    // property rows show the keys themselves.
-                    let open = self
-                        .rows
-                        .get(i + 1)
-                        .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
-                    if !open {
-                        let ink = clip.as_ref().map_or(c.text, |clip| {
-                            t.clip_material(clip.label.color(t)).foreground
-                        });
-                        paint_keys(
-                            &row.id,
-                            summary,
-                            Some(ink),
-                            y + h - m.border as f64 - m.inner_radius as f64,
-                            v,
-                            t,
-                            &mut ops,
-                        );
-                    }
-                }
-                RowContent::Track { clips } => {
-                    let first =
-                        self.track_ends[&row.id].partition_point(|end| *end < v.scroll_time);
-                    let last = clips.partition_point(|clip| {
-                        clip.from <= v.scroll_time + (v.width - v.layer_column) / v.pps
-                    });
-                    for clip in &clips[first.min(last)..last] {
-                        paint_clip(clip, y, h, v, t, &mut ops);
-                    }
-                }
-                RowContent::Property { state, keys } => {
-                    let mut o = Op::new(
-                        format!("toggle:{}", row.id),
-                        match state {
-                            KeyState::Static => "diamond",
-                            KeyState::Animated => "diamond.lefthalf.filled",
-                            KeyState::AtPlayhead => "diamond.fill",
-                        },
-                        Rect::new(
-                            m.inset as f64 + m.hit as f64 + (m.hit - m.keyframe) as f64 / 2.,
-                            y + (h - m.keyframe as f64) / 2.,
-                            m.keyframe as f64,
-                            m.keyframe as f64,
-                        ),
-                        if *state == KeyState::Static {
-                            c.muted
-                        } else {
-                            c.accent
-                        },
-                    );
-                    o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
-                    controls.push((o.clone(), self.control_times[&row.id].clone()));
-                    ops.push(o);
-                    // The lane the keys sit on (v1): a faint line across the tracks.
-                    if !keys.is_empty() {
-                        let mut lane = Op::new(
-                            format!("lane:{}", row.id),
-                            "rect",
-                            Rect::new(
-                                v.layer_column,
-                                y + (h - m.border as f64) / 2.,
-                                v.width - v.layer_column,
-                                m.border as f64,
-                            ),
-                            c.text,
-                        );
-                        lane.opacity = t.translucency.grid as f64;
-                        ops.push(lane);
-                    }
-                    paint_keys(&row.id, keys, None, y + h / 2., v, t, &mut ops);
-                }
-            }
+            self.row_ops(i, v, t, &mut ops, Some(&mut controls));
             for op in &mut ops[op_start..] {
                 let track = op.id.starts_with("clip")
                     || op.id.starts_with("lane:")
@@ -923,6 +809,167 @@ impl Scene {
             accessibility: ax,
             controls,
         })
+    }
+    /// What a marquee rectangle (panel coordinates of viewport `v`) covers:
+    /// keys as `(layer, key)` and clips by id. It reads every row under the
+    /// rectangle, built or not: a frame holds only the rows on screen, and a
+    /// marquee dragged past the panel's edge covers rows outside it.
+    pub fn marquee(&self, v: Viewport, t: &Tokens, area: Rect) -> Marquee {
+        let ruler = t.metrics.ruler as f64;
+        let (top, bottom) = (
+            area.y - ruler + v.scroll_y,
+            area.y + area.height - ruler + v.scroll_y,
+        );
+        let first = self
+            .tops
+            .partition_point(|y| *y <= top)
+            .saturating_sub(1)
+            .min(self.total());
+        let end = self
+            .tops
+            .partition_point(|y| *y <= bottom)
+            .min(self.total());
+        let (mut covered, mut ops) = (Marquee::default(), vec![]);
+        for i in first..end {
+            ops.clear();
+            self.row_ops(i, v, t, &mut ops, None);
+            for o in ops.iter().filter(|o| intersects(o.bounds, area)) {
+                if let Some(id) = o.id.strip_prefix("clip:") {
+                    covered.clips.push(id.to_owned());
+                } else if o.id.starts_with("key:") {
+                    covered.keys.extend(key_identity(o).and_then(on_layer));
+                }
+            }
+        }
+        covered
+    }
+    /// Row `i`'s ops in panel space (unclipped), and its keyframe toggle
+    /// with its key times when `controls` is given.
+    fn row_ops(
+        &self,
+        i: usize,
+        v: Viewport,
+        t: &Tokens,
+        ops: &mut Vec<Op>,
+        mut controls: Option<&mut Vec<(Op, std::sync::Arc<[f64]>)>>,
+    ) {
+        let (m, c) = (t.metrics, &t.colors);
+        let row = &self.rows[i];
+        let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
+        let h = row.height(t);
+        // Selection and hover fill the outline column only; in the tracks
+        // the clip's accent ring marks the selection (the owner's demo).
+        let rect = Rect::new(0., y, v.layer_column, h);
+        if row.selected || row.hovered {
+            ops.push(Op::new(
+                format!("row:{}", row.id),
+                "rect",
+                rect,
+                if row.selected {
+                    c.selected_fill
+                } else {
+                    c.hover
+                },
+            ));
+        }
+        if row.focused {
+            let mut o = Op::new(
+                format!("focus:{}", row.id),
+                "ring",
+                Rect::new(1., y + 1., v.width - 2., h - 2.),
+                c.focus,
+            );
+            o.stroke = 2.;
+            ops.push(o);
+        }
+        if t.accessibility.increase_contrast && !matches!(row.content, RowContent::Property { .. })
+        {
+            ops.push(Op::new(
+                format!("separator:{}", row.id),
+                "rect",
+                Rect::new(0., y + h - m.border as f64, v.width, m.border as f64),
+                c.separator,
+            ));
+        }
+        match &row.content {
+            RowContent::Layer { clip, summary } => {
+                if let Some(clip) = clip {
+                    paint_clip(clip, y, h, v, t, ops);
+                }
+                // Summary marks only while the layer is collapsed: open, its
+                // property rows show the keys themselves.
+                let open = self
+                    .rows
+                    .get(i + 1)
+                    .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
+                if !open {
+                    let ink = clip.as_ref().map_or(c.text, |clip| {
+                        t.clip_material(clip.label.color(t)).foreground
+                    });
+                    paint_keys(
+                        &row.id,
+                        summary,
+                        Some(ink),
+                        y + h - m.border as f64 - m.inner_radius as f64,
+                        v,
+                        t,
+                        ops,
+                    );
+                }
+            }
+            RowContent::Track { clips } => {
+                let first = self.track_ends[&row.id].partition_point(|end| *end < v.scroll_time);
+                let last = clips.partition_point(|clip| {
+                    clip.from <= v.scroll_time + (v.width - v.layer_column) / v.pps
+                });
+                for clip in &clips[first.min(last)..last] {
+                    paint_clip(clip, y, h, v, t, ops);
+                }
+            }
+            RowContent::Property { state, keys } => {
+                let mut o = Op::new(
+                    format!("toggle:{}", row.id),
+                    match state {
+                        KeyState::Static => "diamond",
+                        KeyState::Animated => "diamond.lefthalf.filled",
+                        KeyState::AtPlayhead => "diamond.fill",
+                    },
+                    Rect::new(
+                        m.inset as f64 + m.hit as f64 + (m.hit - m.keyframe) as f64 / 2.,
+                        y + (h - m.keyframe as f64) / 2.,
+                        m.keyframe as f64,
+                        m.keyframe as f64,
+                    ),
+                    if *state == KeyState::Static {
+                        c.muted
+                    } else {
+                        c.accent
+                    },
+                );
+                o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
+                if let Some(controls) = controls.as_deref_mut() {
+                    controls.push((o.clone(), self.control_times[&row.id].clone()));
+                }
+                ops.push(o);
+                // The lane the keys sit on (v1): a faint line across the tracks.
+                if !keys.is_empty() {
+                    let mut lane = Op::new(
+                        format!("lane:{}", row.id),
+                        "rect",
+                        Rect::new(
+                            v.layer_column,
+                            y + (h - m.border as f64) / 2.,
+                            v.width - v.layer_column,
+                            m.border as f64,
+                        ),
+                        c.text,
+                    );
+                    lane.opacity = t.translucency.grid as f64;
+                    ops.push(lane);
+                }
+                paint_keys(&row.id, keys, None, y + h / 2., v, t, ops);
+            }
+        }
     }
     fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
         let (m, c) = (t.metrics, &t.colors);
@@ -1497,6 +1544,14 @@ impl ClipNode {
 fn intersects(a: Rect, b: Rect) -> bool {
     a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
 }
+/// What a marquee covers. See [`Scene::marquee`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Marquee {
+    /// `(layer, key)`, in row and time order.
+    pub keys: Vec<(String, String)>,
+    /// Clip ids, in row and time order.
+    pub clips: Vec<String>,
+}
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub viewport: Viewport,
@@ -1644,15 +1699,6 @@ impl Frame {
     pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
         self.hit_key(x, y, slop).and_then(on_layer)
     }
-    /// The keys a marquee covers, as `(layer, key)`.
-    pub fn keys_in(&self, area: Rect) -> Vec<(String, String)> {
-        self.ops
-            .iter()
-            .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
-            .filter_map(key_identity)
-            .filter_map(on_layer)
-            .collect()
-    }
     /// One accessible element per painted clip, in paint order: its name and
     /// times, whether it is selected, and its visible body within the tracks.
     pub fn clip_nodes(&self) -> Vec<ClipNode> {
@@ -1689,14 +1735,6 @@ impl Frame {
                     bounds,
                 })
             })
-            .collect()
-    }
-    /// Every clip whose painted body meets the rectangle.
-    pub fn clips_in(&self, area: Rect) -> Vec<String> {
-        self.ops
-            .iter()
-            .filter(|o| o.id.starts_with("clip:") && intersects(o.bounds, area))
-            .map(|o| o.id[5..].to_owned())
             .collect()
     }
     pub fn hit_clip(&self, x: f64, y: f64) -> Option<(&str, Option<Edge>)> {

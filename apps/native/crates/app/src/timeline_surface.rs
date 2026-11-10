@@ -1275,16 +1275,16 @@ impl TimelineSurface {
             return;
         }
         let area = Rect::new(ax, ay, bx - ax, by - ay);
-        let Some(frame) = &self.frame else {
+        let (Some(frame), Some(scene)) = (&self.frame, &self.scene) else {
             return;
         };
-        let keys = frame.keys_in(area);
+        let covered = scene.marquee(frame.viewport, &self.tokens, area);
         let layers = if self.model.mode == TimelineMode::Tracks {
-            frame.clips_in(area)
+            covered.clips
         } else {
             vec![]
         };
-        let plan = session.update(keys, layers);
+        let plan = session.update(covered.keys, layers);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
