@@ -207,7 +207,7 @@ fn a_panic_in_one_request_is_contained_and_reported() {
             .recv_timeout(Duration::from_secs(5))
             .expect("fault event")
         {
-            KernelEvent::Fault { message } => break message,
+            KernelEvent::Fault { message, .. } => break message,
             _ => continue,
         }
     };

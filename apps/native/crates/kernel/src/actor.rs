@@ -205,6 +205,10 @@ pub struct Published {
     pub session: Option<crate::session::SessionMetadata>,
     pub media: crate::project_io::MediaTable,
     pub path: Option<std::path::PathBuf>,
+    /// Set when an internal error stopped this project
+    /// ([`Kernel::quarantine`]): this publication is the last one before
+    /// the error, and the project takes no edits or saves until reopened.
+    pub fault: Option<String>,
 }
 
 impl Published {
@@ -248,8 +252,11 @@ pub enum KernelEvent {
     },
     /// A request failed with an internal error (a contained panic); the
     /// kernel keeps serving. Hosts show it in the Error Log.
+    /// A panic was contained to one call. `projects` stopped
+    /// ([`Kernel::quarantine`]); empty when nothing could be half applied.
     Fault {
         message: String,
+        projects: Vec<String>,
     },
 }
 
@@ -562,6 +569,26 @@ impl KernelHandle {
         request: Request,
         reply: impl FnOnce(Result<Ack, KernelFailure>) + Send + 'static,
     ) {
+        // The callback is the caller's code: a panic in it is reported and
+        // stays there. The call it answers has already committed, and the
+        // rest of its turn (events, realm messages, deferred answers) runs.
+        let shared = self.shared.clone();
+        let reply = move |answer| {
+            if let Err(panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reply(answer)))
+            {
+                emit(
+                    &shared,
+                    KernelEvent::Fault {
+                        message: format!(
+                            "A kernel reply handler failed: {}",
+                            panic_detail(panic.as_ref())
+                        ),
+                        projects: Vec::new(),
+                    },
+                );
+            }
+        };
         self.send(Msg::Call {
             project: project.to_owned(),
             request,
@@ -701,6 +728,16 @@ fn publish_timed(
             }
         }
     }
+    if kernel.fault(project).is_some() {
+        // A stopped project keeps its last publication: its live state may
+        // be half applied.
+        return shared
+            .published
+            .lock()
+            .expect("published")
+            .get(project)
+            .map(|p| p.revision());
+    }
     let publication_started = std::time::Instant::now();
     let p = kernel.project(project)?;
     let store = p.store();
@@ -734,8 +771,10 @@ fn publish_timed(
         session: kernel.session_metadata(project),
         media: store.media().clone(),
         path: store.path().map(std::path::Path::to_path_buf),
+        fault: None,
     };
     published.publication_work = publication_started.elapsed();
+    crate::fault_injection::hit(crate::fault_injection::Stage::InPublish);
     let revision = published.revision();
     shared
         .published
@@ -762,19 +801,53 @@ struct Turns {
     pro_clock_token: u64,
 }
 
+/// What a message can change, so a panic in it stops exactly that.
+enum Scope {
+    /// Reads, and state transactions (staged, swapped in at the end).
+    Nothing,
+    Project(String),
+    /// Shell calls open, save and close any project.
+    Every,
+}
+
+fn scope(msg: &Msg) -> Scope {
+    match msg {
+        Msg::Call { project, .. }
+        | Msg::ProEditing { project, .. }
+        | Msg::Open { project, .. }
+        | Msg::Close { project, .. } => Scope::Project(project.clone()),
+        Msg::PrepareSave { session, .. } => Scope::Project(session.project.clone()),
+        Msg::FinishSave { completion, .. } => Scope::Project(completion.project().to_owned()),
+        Msg::Shell { .. } => Scope::Every,
+        Msg::State { .. }
+        | Msg::ProClock { .. }
+        | Msg::Profile { .. }
+        | Msg::PrepareExport { .. }
+        | Msg::Recover { .. }
+        | Msg::Sync { .. }
+        | Msg::Shutdown => Scope::Nothing,
+    }
+}
+
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     let mut turns = Turns::default();
     for msg in rx {
         let shutdown = matches!(msg, Msg::Shutdown);
+        let scope = scope(&msg);
+        crate::fault_injection::enter(match &scope {
+            Scope::Project(id) => Some(id),
+            _ => None,
+        });
         // A panic in one call must not take the kernel (and every open
-        // project's unsaved work) down with it: that call's reply is dropped
-        // (its caller sees `None`), the fault is reported, and the next
-        // message is served. Journals already hold every acknowledged edit.
+        // project's unsaved work) down with it, nor leave a project half
+        // applied: the projects the call could change stop (`contain`), its
+        // reply is dropped (its caller sees `None`) and the next message is
+        // served.
         let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             step(&mut kernel, &shared, &mut turns, msg)
         }));
         if let Err(panic) = turn {
-            fault(&shared, panic.as_ref());
+            contain(&mut kernel, &shared, &mut turns, scope, panic.as_ref());
         }
         if shutdown {
             break;
@@ -783,21 +856,92 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     kernel.sync_all();
 }
 
-/// Reports a contained panic and clears lock poison so later turns work.
-fn fault(shared: &Shared, panic: &(dyn std::any::Any + Send)) {
+fn panic_detail(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown cause".into())
+}
+
+/// After a contained panic: clears lock poison, stops every project the
+/// call could have changed, answers its deferred callers with the failure,
+/// flags its last publication, and reports the fault. A project the call
+/// was opening (never published) is released so opening it again works;
+/// its journal stays.
+fn contain(
+    kernel: &mut Kernel,
+    shared: &Shared,
+    turns: &mut Turns,
+    scope: Scope,
+    panic: &(dyn std::any::Any + Send),
+) {
     shared.published.clear_poison();
     shared.state.clear_poison();
     shared.subscribers.clear_poison();
     shared.realms.clear_poison();
-    let detail = panic
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown cause".into());
+    let detail = panic_detail(panic);
+    let ids: Vec<String> = match scope {
+        Scope::Nothing => Vec::new(),
+        Scope::Project(id) => vec![id],
+        Scope::Every => kernel.projects().map(str::to_owned).collect(),
+    };
+    let mut stopped = Vec::new();
+    for id in ids {
+        if !kernel.quarantine(&id, &detail) {
+            continue;
+        }
+        let failure = kernel.refuse_faulted(&id).unwrap_err();
+        let waiting: Vec<_> = turns
+            .deferred
+            .keys()
+            .filter(|(project, _)| *project == id)
+            .cloned()
+            .collect();
+        for key in waiting {
+            if let Some(reply) = turns.deferred.remove(&key) {
+                reply(Err(failure.clone()));
+            }
+        }
+        turns.pro_clocks.remove(&id);
+        let mut published = shared.published.lock().expect("published");
+        match published.get(&id) {
+            Some(last) => {
+                let mut flagged = Published::clone(last);
+                flagged.fault = Some(detail.clone());
+                let revision = flagged.revision();
+                published.insert(id.clone(), Arc::new(flagged));
+                drop(published);
+                emit(
+                    shared,
+                    KernelEvent::Published {
+                        project: id.clone(),
+                        revision,
+                    },
+                );
+            }
+            None => {
+                drop(published);
+                let _ = kernel.flush_project(&id);
+                kernel.remove_closed_project(&id);
+            }
+        }
+        stopped.push(id);
+    }
+    let message = if stopped.is_empty() {
+        format!("An internal error stopped one request: {detail}")
+    } else {
+        format!(
+            "An internal error stopped one request: {detail}. Editing stopped in {} so nothing \
+             half done is kept; reopen to recover every edit made before the error.",
+            stopped.join(", ")
+        )
+    };
     emit(
         shared,
         KernelEvent::Fault {
-            message: format!("An internal error stopped one request: {detail}"),
+            message,
+            projects: stopped,
         },
     );
 }
@@ -1024,6 +1168,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             if let Some(finish) = source_finish {
                 crate::pro_editing::finish_source(kernel, &project, finish, &mut handled);
             }
+            crate::fault_injection::hit(crate::fault_injection::Stage::BeforePublish);
             if before_state.revision != kernel.state().revision {
                 *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
             }
@@ -1187,6 +1332,10 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
         Msg::Shutdown => {}
     }
 }
+
+#[cfg(test)]
+#[path = "actor_fault_tests.rs"]
+mod fault_tests;
 
 // ── the UI's synchronous query mirror ───────────────────────────────────────
 

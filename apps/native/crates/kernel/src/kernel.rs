@@ -87,6 +87,9 @@ pub enum KernelFailure {
     AlreadyOpen(String),
     Journal(String),
     Storage(String),
+    /// The project stopped after an internal error ([`Kernel::quarantine`]):
+    /// it takes no edits or saves until it is reopened from its journal.
+    Faulted(String),
 }
 
 impl std::fmt::Display for KernelFailure {
@@ -94,7 +97,7 @@ impl std::fmt::Display for KernelFailure {
         match self {
             KernelFailure::NoProject(id) => write!(f, "No open project {id}"),
             KernelFailure::AlreadyOpen(id) => write!(f, "Project {id} is already open"),
-            KernelFailure::Storage(m) => write!(f, "{m}"),
+            KernelFailure::Storage(m) | KernelFailure::Faulted(m) => write!(f, "{m}"),
             KernelFailure::Journal(m) => {
                 write!(f, "The recovery journal could not be started: {m}")
             }
@@ -108,6 +111,8 @@ pub(crate) struct Slot {
     pub project: Project,
     journal: Option<Journal>,
     base_hash: String,
+    /// Set by [`Kernel::quarantine`]; never cleared (reopen to recover).
+    fault: Option<String>,
 }
 
 /// Every open project. See the module docs.
@@ -162,6 +167,42 @@ impl Kernel {
 
     pub fn durability(&self) -> Option<&Durability> {
         self.durability.as_ref()
+    }
+
+    /// Why `id` stopped taking edits, if an internal error stopped it.
+    pub fn fault(&self, id: &str) -> Option<&str> {
+        self.slots.get(id).and_then(|s| s.fault.as_deref())
+    }
+
+    /// Stops `id` after a panic interrupted a call on it, whose changes may
+    /// be half applied: it refuses edits, saves and exports from now on,
+    /// and nothing more of it reaches its journal (the durable change of the
+    /// interrupted call, if not yet appended, is dropped). Its journal holds
+    /// every edit acknowledged before the error; closing keeps it, and the
+    /// next open offers to recover it. Returns whether `id` was open.
+    pub fn quarantine(&mut self, id: &str, reason: &str) -> bool {
+        let Some(slot) = self.slots.get_mut(id) else {
+            return false;
+        };
+        if slot.fault.is_none() {
+            slot.fault = Some(reason.to_owned());
+        }
+        let store = slot.project.store_mut();
+        drop(store.take_tap());
+        drop(slot.project.take_outbox());
+        drop(slot.project.take_notices());
+        true
+    }
+
+    /// Refuses `id` if it stopped after an internal error.
+    pub(crate) fn refuse_faulted(&self, id: &str) -> Result<(), KernelFailure> {
+        match self.fault(id) {
+            Some(reason) => Err(KernelFailure::Faulted(format!(
+                "This project stopped after an internal error ({reason}). Reopen it to recover \
+                 every edit made before the error."
+            ))),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn project_dir(&self, id: &str) -> Option<PathBuf> {
@@ -336,6 +377,7 @@ impl Kernel {
                 project,
                 journal,
                 base_hash,
+                fault: None,
             },
         );
         self.maintain_history(id);
@@ -494,6 +536,7 @@ impl Kernel {
                 ));
             }
         }
+        self.refuse_faulted(id)?;
         let slot = self
             .slots
             .get_mut(id)

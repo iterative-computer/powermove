@@ -96,6 +96,9 @@ pub struct Controller {
     /// Keyframes in the open composition, for the status bar.
     pub keyframes: usize,
     pub recovery_pending: bool,
+    /// The document whose stop (an internal error) this window already
+    /// offered to reopen.
+    pub stop_offered: Option<u64>,
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
@@ -353,7 +356,7 @@ impl Controller {
                                     v.message = format!("Recovery warning: {message}");
                                     v.errors.borrow_mut().push("Recovery", &message);
                                 }
-                                KernelEvent::Fault { message } => {
+                                KernelEvent::Fault { message, .. } => {
                                     v.message = "Something went wrong; see the Error Log.".into();
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
@@ -452,6 +455,7 @@ impl Controller {
             background: None,
             keyframes: 0,
             recovery_pending: false,
+            stop_offered: None,
             mcp,
             job_overrides: Default::default(),
             window_key: 0,
@@ -606,6 +610,10 @@ impl Controller {
             }
         }
         self.sync_rows(&p, cx);
+        if p.fault.is_some() && self.stop_offered != Some(p.snapshot.doc_id) {
+            self.stop_offered = Some(p.snapshot.doc_id);
+            self.offer_reopen(&p, cx);
+        }
         self.follow_project_hdr();
         let saving = p.saving || self.save_pending;
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
@@ -1252,6 +1260,72 @@ impl Controller {
             let _ = window.update(cx, |_, w, _| w.activate());
         }
     }
+    /// An internal error stopped this window's project: the kernel takes no
+    /// more edits or saves for it. Reopen closes it (nothing is written) and
+    /// opens it again, where the recovery prompt brings back every change
+    /// made before the error.
+    fn offer_reopen(&mut self, p: &pm_kernel::Published, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, stopped};
+        let name = p
+            .snapshot
+            .root()
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned();
+        self.message = format!("“{name}” stopped after an internal error. Reopen it to recover.");
+        let rx = stopped(&name).sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await.ok().flatten() == Some(Action::Reopen) {
+                let _ = this.update(cx, |v, cx| v.reopen_stopped(name, cx));
+            }
+        })
+        .detach();
+    }
+    /// Closes the stopped project (the kernel writes nothing and keeps its
+    /// journal) and opens it again through the recovery prompt.
+    pub(crate) fn reopen_stopped(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(p) = self
+            .kernel
+            .published(&session.project)
+            .filter(|p| p.fault.is_some())
+        else {
+            return;
+        };
+        let Some(source) = reopen_source(&p, &self.profile) else {
+            return;
+        };
+        if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
+            self.message = "Finish the active open or recovery decision first".into();
+            cx.notify();
+            return;
+        }
+        let closing = self.kernel.shell(ShellCall::Close(session));
+        cx.spawn(async move |this, cx| {
+            let closed = matches!(closing.await, Some(Ok(ShellReply::Closed { .. })));
+            let _ = this.update(cx, |v, cx| {
+                if !closed {
+                    v.message = format!(
+                        "“{name}” couldn’t be closed to reopen it; its recovery data is kept."
+                    );
+                    cx.notify();
+                    return;
+                }
+                if let Some(viewer) = v.viewer.take() {
+                    viewer.retire();
+                }
+                v.session = None;
+                v.published = None;
+                v.mirror = None;
+                v.mcp.bind_window(v.window_key, None);
+                v.open_named(source, Some(name), cx);
+            });
+        })
+        .detach();
+    }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_failure(
         &mut self,
@@ -1849,6 +1923,19 @@ impl Controller {
         true
     }
 }
+/// Where an open project comes from, to open it again.
+pub(crate) fn reopen_source(
+    p: &pm_kernel::Published,
+    profile: &std::path::Path,
+) -> Option<SessionSource> {
+    Some(match &p.session.as_ref()?.destination {
+        SessionDestination::File(path) => SessionSource::File(path.clone()),
+        SessionDestination::Library(slot) => SessionSource::Library {
+            profile: profile.to_owned(),
+            project: slot.clone(),
+        },
+    })
+}
 /// Why the open failed, in the words the open alert has for it.
 fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailure {
     use crate::surfaces::documents::OpenFailure;
@@ -1857,6 +1944,8 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         KernelFailure::NoProject(_) => NotFound,
         // Unsaved work can't be protected without its journal: say so.
         KernelFailure::Journal(_) => return OpenFailure::Journal,
+        // An open never faults a project; a stopped one only refuses edits.
+        KernelFailure::Faulted(_) => Unavailable,
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {
