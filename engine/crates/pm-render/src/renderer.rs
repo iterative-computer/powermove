@@ -648,7 +648,8 @@ impl Renderer {
             error::{ErrorCode, ErrorScope},
             validate::Validate,
         };
-        let mut set = crate::effects::versions::for_document(document);
+        let mut set =
+            crate::effects::versions::for_document(document, &mut self.effects.effect_types);
         let mut refused = Vec::new();
         let mut accepted = std::collections::BTreeSet::<DefinitionId>::new();
         for definition in contributed {

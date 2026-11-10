@@ -39,8 +39,10 @@ pub(crate) struct Assets {
     /// Prepared assets' textures, by content. Only what `prepared` holds stays.
     uploads: HashMap<[u8; 32], pm_gpu::Target>,
     /// The effect asset references of the last document walked, by its
-    /// edition: a frame of an unchanged document skips the whole-tree walk.
+    /// edition: a frame of an unchanged document skips the walk.
     walked: Option<(u64, BTreeSet<Request>)>,
+    /// A new edition re-walks only the subtrees its edits copied.
+    memo: crate::doc_walk::SubtreeMemo<Request>,
 }
 impl Assets {
     /// `asset`'s texture, uploaded on first use.
@@ -90,31 +92,21 @@ impl Assets {
         document: &pm_model::Document,
         resolver: &dyn crate::assets::AssetResolver,
     ) {
-        fn walk(n: &pm_model::Node, out: &mut BTreeSet<(String, bool)>) {
-            match n.kind() {
-                pm_model::NodeKind::Object(map) => {
-                    let lut = node::is_str(node::member(Some(n), "type"), "applyColorLut");
-                    if let Some(inputs) = node::member(Some(n), "inputs")
-                        && let pm_model::NodeKind::Object(inputs) = inputs.kind()
-                    {
-                        for input in inputs.values() {
-                            if node::is_str(node::member(Some(input), "kind"), "asset")
-                                && let Some(id) = node::string(node::member(Some(input), "assetId"))
-                            {
-                                out.insert((id.to_string_lossy(), lut));
-                            }
+        /// One node's asset references: an effect's `inputs` of kind asset.
+        fn visit(n: &pm_model::Node, out: &mut Vec<Request>) {
+            if let pm_model::NodeKind::Object(_) = n.kind() {
+                let lut = node::is_str(node::member(Some(n), "type"), "applyColorLut");
+                if let Some(inputs) = node::member(Some(n), "inputs")
+                    && let pm_model::NodeKind::Object(inputs) = inputs.kind()
+                {
+                    for input in inputs.values() {
+                        if node::is_str(node::member(Some(input), "kind"), "asset")
+                            && let Some(id) = node::string(node::member(Some(input), "assetId"))
+                        {
+                            out.push((id.to_string_lossy(), lut));
                         }
                     }
-                    for child in map.values() {
-                        walk(child, out);
-                    }
                 }
-                pm_model::NodeKind::Array(a) => {
-                    for child in a.iter() {
-                        walk(child, out);
-                    }
-                }
-                _ => {}
             }
         }
         let Some(root) = document.root() else {
@@ -125,11 +117,7 @@ impl Assets {
         };
         let requests = match self.walked.take() {
             Some((edition, requests)) if edition == document.edition() => requests,
-            _ => {
-                let mut requests = BTreeSet::new();
-                walk(root, &mut requests);
-                requests
-            }
+            _ => self.memo.walk(root, &mut visit).into_iter().collect(),
         };
         self.walked = Some((document.edition(), requests.clone()));
         let old = std::mem::take(&mut self.prepared);

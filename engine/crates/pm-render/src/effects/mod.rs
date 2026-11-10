@@ -101,6 +101,9 @@ pub struct Effects {
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
     pub(crate) assets: resources::Assets,
+    /// The effect types each subtree of the document uses
+    /// ([`versions::for_document`]).
+    pub(crate) effect_types: crate::doc_walk::SubtreeMemo<String>,
     mips: Option<crate::sampling::gpu::Resampler>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
     /// Programs built ahead of their first frame (decision PROBE-1).
@@ -253,6 +256,7 @@ impl Effects {
     fn with_cache(cache: Arc<pm_glsl::Cache>, context: String) -> Effects {
         Effects {
             assets: Default::default(),
+            effect_types: Default::default(),
             mips: None,
             file_app_version: None,
             versioned_builtins: false,

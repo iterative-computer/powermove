@@ -193,35 +193,29 @@ impl Effects {
     }
 }
 
-pub fn for_document(document: &pm_model::Document) -> DefinitionSetSnapshot {
-    let mut ids = std::collections::HashSet::new();
-    fn walk(node: &pm_model::Node, ids: &mut std::collections::HashSet<String>) {
-        match node.kind() {
-            pm_model::NodeKind::Object(map) => {
-                if let Some(fx) = map.get(b"fx" as &[u8]) {
-                    for effect in pm_eval::node::array(Some(fx)).unwrap_or(&[]) {
-                        if let Some(id) =
-                            pm_eval::node::string(pm_eval::node::member(Some(effect), "type"))
-                        {
-                            ids.insert(id.to_string_lossy());
-                        }
-                    }
-                }
-                for child in map.values() {
-                    walk(child, ids);
-                }
-            }
-            pm_model::NodeKind::Array(array) => {
-                for child in array.iter() {
-                    walk(child, ids);
+/// The built-in definitions the document's effects use. `memo` keeps each
+/// unchanged subtree's effect types from the last call.
+pub(crate) fn for_document(
+    document: &pm_model::Document,
+    memo: &mut crate::doc_walk::SubtreeMemo<String>,
+) -> DefinitionSetSnapshot {
+    /// One node's effect types: the `type` of each entry of its `fx`.
+    fn visit(node: &pm_model::Node, ids: &mut Vec<String>) {
+        if let pm_model::NodeKind::Object(map) = node.kind()
+            && let Some(fx) = map.get(b"fx" as &[u8])
+        {
+            for effect in pm_eval::node::array(Some(fx)).unwrap_or(&[]) {
+                if let Some(id) = pm_eval::node::string(pm_eval::node::member(Some(effect), "type"))
+                {
+                    ids.push(id.to_string_lossy());
                 }
             }
-            _ => {}
         }
     }
-    if let Some(root) = document.root() {
-        walk(root, &mut ids);
-    }
+    let ids: std::collections::HashSet<String> = document
+        .root()
+        .map(|root| memo.walk(root, &mut visit).into_iter().collect())
+        .unwrap_or_default();
     let mut set = builtin_snapshot();
     set.definitions.retain(|d| {
         d.kind != DefinitionKind::Effect
