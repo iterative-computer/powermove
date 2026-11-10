@@ -1417,6 +1417,15 @@ fn paint_keys(
         }
     }
 }
+/// A key op's `(row, key)` as `(layer, key)`.
+fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
+    match crate::v4::parse_row(&row).ok()? {
+        crate::RowId::Layer(layer)
+        | crate::RowId::Property {
+            layer_id: layer, ..
+        } => Some((layer, key)),
+    }
+}
 fn key_identity(op: &Op) -> Option<(String, String)> {
     serde_json::from_str(op.id.strip_prefix("key:")?).ok()
 }
@@ -1607,19 +1616,18 @@ impl Frame {
     pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
         key_identity(self.hit_op("key:", x, y, slop)?)
     }
-    /// Every key whose diamond meets the rectangle, for marquee selection.
+    /// The key under a point as `(layer, key)`: key ids may repeat across
+    /// layers, so the row it sits on names its layer.
+    pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
+        self.hit_key(x, y, slop).and_then(on_layer)
+    }
     /// The keys a marquee covers, as `(layer, key)`.
     pub fn keys_in(&self, area: Rect) -> Vec<(String, String)> {
         self.ops
             .iter()
             .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
             .filter_map(key_identity)
-            .filter_map(|(row, key)| match crate::v4::parse_row(&row).ok()? {
-                crate::RowId::Layer(layer)
-                | crate::RowId::Property {
-                    layer_id: layer, ..
-                } => Some((layer, key)),
-            })
+            .filter_map(on_layer)
             .collect()
     }
     /// One accessible element per painted clip, in paint order: its name and

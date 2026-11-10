@@ -195,6 +195,15 @@ impl Graph {
     pub fn curves(&self) -> &[Curve] {
         &self.curves
     }
+    /// The layer of the curve showing key `key` (key ids may repeat across
+    /// layers).
+    pub fn key_layer(&self, key: &str) -> Option<&str> {
+        self.curves
+            .iter()
+            .find(|c| c.points.iter().any(|p| p.id == key))
+            .and_then(|c| c.id.rsplit_once(':'))
+            .map(|(layer, _)| layer)
+    }
     /// The value at `y` in a graph drawn into `area`.
     pub fn value_at(&self, area: Rect, y: f64) -> f64 {
         self.max - (y - area.y) / area.height.max(1.) * (self.max - self.min)
