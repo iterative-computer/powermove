@@ -1,7 +1,8 @@
 use crate::{
-    layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, LayoutStore, Rect},
+    layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, Rect},
     native::{Command, Host, MenuEntry, MenuState},
-    session::{Session, WindowState},
+    session::WindowState,
+    workspace,
 };
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
@@ -54,8 +55,21 @@ pub struct Editor {
     ringed_panel: Option<String>,
     workspace_focus: FocusHandle,
     pub status: String,
-    store: LayoutStore,
-    path: Option<PathBuf>,
+    /// This window's copy of the kernel's workspace store.
+    workspaces: Rc<workspace::Store>,
+    /// The active workspace record as this window last read or wrote it.
+    record: serde_json::Value,
+    /// Records this window wrote that the store has not shown back yet.
+    pending: Vec<serde_json::Value>,
+    /// What the store last said this window should show.
+    seen: Option<serde_json::Value>,
+    /// The workspace this window last showed by choice (restored or
+    /// activated); a new window follows the store's last activated one.
+    preferred: Option<String>,
+    /// Writes for the kernel, sent on the next frame.
+    outbox: Vec<workspace::Write>,
+    /// The status last passed to the app's status line.
+    noted: String,
     project: String,
     split_focus: Option<Divider>,
     /// Session window id; 0 until the window is registered (tests, smoke).
@@ -64,10 +78,10 @@ pub struct Editor {
     session_pending: bool,
     tool: String,
 }
-/// Layout store and window session paths. `PM_NATIVE_SHELL_STATE` selects an
-/// isolated layout file; its directory then also holds the session.
-pub fn state_paths() -> Option<(PathBuf, PathBuf)> {
-    let layouts = std::env::var_os("PM_NATIVE_SHELL_STATE")
+/// The window session file. `PM_NATIVE_SHELL_STATE` names an isolated state
+/// file; its directory then holds the session.
+pub fn session_path() -> Option<PathBuf> {
+    let state = std::env::var_os("PM_NATIVE_SHELL_STATE")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| {
@@ -75,33 +89,15 @@ pub fn state_paths() -> Option<(PathBuf, PathBuf)> {
                     .join("Library/Application Support/Powermove Native/Shell/layouts.json")
             })
         })?;
-    let session = layouts.with_file_name("session.json");
-    Some((layouts, session))
+    Some(state.with_file_name("session.json"))
 }
 impl Editor {
     pub fn new(tokens: Tokens, host: Option<Rc<RefCell<Host>>>, cx: &mut Context<Self>) -> Self {
-        let paths = if host.is_none() { None } else { state_paths() };
-        let path = paths.as_ref().map(|p| p.0.clone());
-        let store = path
-            .as_deref()
-            .filter(|p| p.exists())
-            .map(LayoutStore::load)
-            .transpose();
-        let (store, status) = match store {
-            Ok(s) => (s.unwrap_or_default(), String::new()),
-            Err(e) => {
-                eprintln!("Workspace store could not be read: {e}");
-                (
-                    LayoutStore::default(),
-                    "Your workspaces couldn’t be restored, so the default is shown.".into(),
-                )
-            }
-        };
+        let session_path = if host.is_none() { None } else { session_path() };
+        let workspaces = Rc::new(workspace::Store::local());
+        let record = workspaces.active(None);
+        let layout = workspace::layout(&record);
         let project = "shell-untitled".to_string();
-        let layout = store.get(
-            &project,
-            store.active.get(&project).map_or("design", String::as_str),
-        );
         Self {
             integration: None,
             layout,
@@ -117,13 +113,18 @@ impl Editor {
             ringed_panel: None,
             panel_order: vec![],
             workspace_focus: cx.focus_handle().tab_stop(true).tab_index(2000),
-            status,
-            store,
-            path,
+            status: String::new(),
+            workspaces,
+            record,
+            pending: vec![],
+            seen: None,
+            preferred: None,
+            outbox: vec![],
+            noted: String::new(),
             project,
             split_focus: None,
             window_id: 0,
-            session_path: paths.map(|p| p.1),
+            session_path,
             session_pending: false,
             tool: "toolSelect".into(),
         }
@@ -132,7 +133,8 @@ impl Editor {
     pub fn restore(&mut self, state: &WindowState) {
         self.window_id = state.id;
         self.project = state.project.clone();
-        self.layout = self.store.get(&self.project, &state.workspace);
+        self.preferred = Some(state.workspace.clone());
+        self.show_record(self.workspaces.active(self.preferred.as_deref()));
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
@@ -189,36 +191,159 @@ impl Editor {
         }
     }
     pub fn bind_project(&mut self, project: String) {
-        self.save();
         self.project = project;
-        self.layout = self.store.get(
-            &self.project,
-            self.store
-                .active
-                .get(&self.project)
-                .map_or("design", String::as_str),
-        );
+        // The project's own workspace arrives with the store; until then the
+        // window keeps showing what it showed.
+        self.seen = None;
         self.persist_session();
     }
+    /// Writes the window's layout into its workspace record (the project's
+    /// saved workspace and its entry in `workspaces`), then the session.
     pub fn save(&mut self) {
-        if let Some(path) = &self.path
-            && path.exists()
-        {
-            match LayoutStore::load(path) {
-                Ok(latest) => self.store = latest,
-                Err(e) => {
-                    self.status = format!("Layout could not be saved: {e}");
-                    return;
-                }
-            }
+        // A parked panel keeps its place in the workspace (v1 kept a retired
+        // panel's spec); only this window's view leaves it out.
+        let mut written = self.layout.clone();
+        for (id, (place, _)) in &self.parked {
+            written.insert_at(id, *place);
         }
-        self.store.put(&self.project, self.layout.clone());
-        if let Some(p) = &self.path
-            && let Err(e) = self.store.save(p)
-        {
-            self.status = format!("Layout could not be saved: {e}");
+        let after = workspace::write(&written, &self.record);
+        if after != self.record {
+            self.commit(after);
         }
         self.persist_session();
+    }
+    /// The window now shows `after`: the store learns it on the next frame.
+    fn commit(&mut self, after: serde_json::Value) {
+        let before = self
+            .pending
+            .last()
+            .cloned()
+            .or_else(|| self.workspaces.project.clone())
+            .unwrap_or_default();
+        let write = workspace::Write::Active {
+            before,
+            after: after.clone(),
+        };
+        Rc::make_mut(&mut self.workspaces).apply(&write);
+        self.outbox.push(write);
+        self.pending.push(after.clone());
+        self.record = after;
+    }
+    fn show_record(&mut self, record: serde_json::Value) {
+        self.maximized_panel = None;
+        self.layout = workspace::layout(&record);
+        self.record = record;
+    }
+    /// Shows workspace `record` in this window and makes it the active one.
+    fn activate_record(&mut self, record: serde_json::Value) {
+        self.preferred = workspace::record_id(&record).map(str::to_owned);
+        self.show_record(record.clone());
+        self.commit(record);
+        self.persist_session();
+    }
+    /// Sends queued writes and takes in what the kernel's store says now. A
+    /// record this window wrote changes nothing when it comes back; anyone
+    /// else's change to the window's workspace (an extension's
+    /// `workspace.mutate`, another window) relays the panels.
+    fn sync_workspaces(&mut self, cx: &mut App) {
+        if let Some(error) = crate::session::take_error() {
+            self.status = error;
+        }
+        let Some(integration) = self.integration.clone() else {
+            return;
+        };
+        if self.status != self.noted {
+            self.noted = self.status.clone();
+            if !self.status.is_empty() {
+                integration.note(&self.status, cx);
+            }
+        }
+        for write in std::mem::take(&mut self.outbox) {
+            integration.write_workspace(write, cx);
+        }
+        let Some(store) = integration.workspaces(cx) else {
+            return;
+        };
+        if !Rc::ptr_eq(&store, &self.workspaces) {
+            self.workspaces = store;
+        }
+        let target = self.workspaces.active(self.preferred.as_deref());
+        if self.seen.as_ref() == Some(&target) {
+            return;
+        }
+        self.seen = Some(target.clone());
+        if let Some(i) = self.pending.iter().position(|p| *p == target) {
+            self.pending.drain(..=i);
+            return;
+        }
+        if target != self.record {
+            self.pending.clear();
+            if self
+                .workspaces
+                .project
+                .as_ref()
+                .is_some_and(|p| self.workspaces.deleted(p))
+            {
+                // Another window deleted this project's workspace: it moves
+                // to the fallback, and the project keeps that one.
+                self.activate_record(target);
+                return;
+            }
+            self.show_record(target);
+            self.persist_session();
+        }
+    }
+    /// Applies a Workspace Definition (S100): `args` are the text and the
+    /// definition the sheet opened with. A workspace changed meanwhile is
+    /// left alone; a built-in is never overwritten, it is saved as a copy.
+    fn define_workspace(&mut self, args: &[serde_json::Value]) {
+        let text = args.first().and_then(|v| v.as_str()).unwrap_or_default();
+        let opened = args.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+        if serde_json::from_str::<serde_json::Value>(opened)
+            .ok()
+            .as_ref()
+            != Some(&self.record)
+        {
+            self.status = "This workspace changed while you were editing. Edit it again to see the latest version.".into();
+            return;
+        }
+        let mut value = match workspace::check_definition(text) {
+            Ok(v) => v,
+            Err(why) => {
+                self.status = why;
+                return;
+            }
+        };
+        if workspace::is_builtin(&self.record) {
+            let name = workspace::record_name(&self.record);
+            if workspace::record_name(&value) == name {
+                value["name"] = format!("{name} Copy").into();
+            }
+            value["id"] = workspace::new_id().into();
+            value["builtin"] = false.into();
+        } else {
+            value["id"] = self.layout.workspace.clone().into();
+        }
+        self.activate_record(value);
+        self.status = "Workspace updated".into();
+    }
+    /// The workspace records this window offers: (id, name, built-in).
+    pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
+        self.workspaces
+            .offered()
+            .into_iter()
+            .map(|r| {
+                (
+                    workspace::record_id(r).unwrap_or_default().to_owned(),
+                    workspace::record_name(r).to_owned(),
+                    workspace::is_builtin(r),
+                )
+            })
+            .collect()
+    }
+    /// The active workspace record.
+    pub fn workspace_record(&self) -> &serde_json::Value {
+        &self.record
     }
     /// This window's restorable state, read from AppKit.
     pub fn window_state(&self) -> Option<WindowState> {
@@ -232,8 +357,8 @@ impl Editor {
             fullscreen: host.is_fullscreen(),
         })
     }
-    /// Read-modify-write of the shared session file (other windows write too).
-    /// A malformed or newer file is reported and never overwritten.
+    /// Queues this window's state for the shared session file (other windows
+    /// write too): written off the main thread, in order (`session::write`).
     pub fn persist_session(&mut self) {
         if self.window_id == 0 {
             return;
@@ -242,39 +367,14 @@ impl Editor {
             return;
         };
         let key = self.host.as_ref().is_some_and(|h| h.borrow().is_key());
-        let id = self.window_id;
-        self.update_session(&path, |s| {
-            s.upsert(state);
-            if key {
-                s.key = Some(id);
-            }
-        });
+        crate::session::write(&path, crate::session::Change::Upsert { state, key });
     }
     /// Removes this window from the session (the user closed it).
     pub fn forget_session(&mut self) {
         if let Some(path) = self.session_path.clone()
             && self.window_id != 0
         {
-            let id = self.window_id;
-            self.update_session(&path, |s| s.remove(id));
-        }
-    }
-    fn update_session(&mut self, path: &std::path::Path, f: impl FnOnce(&mut Session)) {
-        let mut session = if path.exists() {
-            match Session::load(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.status = format!("Window session could not be saved: {e}");
-                    return;
-                }
-            }
-        } else {
-            Session::default()
-        };
-        f(&mut session);
-        session.version = 1;
-        if let Err(e) = session.save(path) {
-            self.status = format!("Window session could not be saved: {e}");
+            crate::session::write(&path, crate::session::Change::Remove(self.window_id));
         }
     }
     /// Coalesces live-resize/move notifications into one session write.
@@ -295,13 +395,20 @@ impl Editor {
         .detach();
     }
     /// The panels this window offers.
+    /// The panels this window offers: built-ins, extension panels, then the
+    /// workspace's generated panels (its `custom` sections).
     pub fn panels(&self, cx: &App) -> layout::Panels {
-        layout::Panels::new(
-            self.integration
-                .as_ref()
-                .map(|i| i.contributed_panels(cx))
-                .unwrap_or_default(),
-        )
+        let mut contributed = self
+            .integration
+            .as_ref()
+            .map(|i| i.contributed_panels(cx))
+            .unwrap_or_default();
+        for (id, title) in workspace::generated(&self.record) {
+            if !contributed.iter().any(|(c, _)| *c == id) {
+                contributed.push((id, title));
+            }
+        }
+        layout::Panels::new(contributed)
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
@@ -317,7 +424,7 @@ impl Editor {
                 .into_iter()
                 .map(String::from)
                 .collect(),
-            saved: self.store.saved.keys().cloned().collect(),
+            workspaces: self.workspace_choices(),
             workspace: self.layout.workspace.clone(),
             sidebar: self.dock_visible("left"),
             inspector: self.dock_visible("right"),
@@ -452,27 +559,56 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow().prompt_workspace_name(&self.layout.workspace);
+                    h.borrow()
+                        .prompt_workspace_name(workspace::record_name(&self.record));
                 }
                 Ok(())
             }
-            ("layout", "save") => {
-                let layout = self.layout.clone();
-                let mut saved = String::new();
-                self.mutate_store(|s| s.save_named(rest, &layout).map(|n| saved = n))
-                    .map(|_| self.status = format!("Saved workspace “{saved}”"))
-            }
-            ("layout", "apply") => self
-                .store
-                .named(rest, &self.layout.workspace)
-                .map(|l| self.layout = l)
-                .ok_or_else(|| anyhow::anyhow!("There’s no workspace named “{rest}”.")),
-            ("layout", "delete") => self.mutate_store(|s| {
-                s.delete_named(rest);
-                Ok(())
+            ("layout", "save") => layout::layout_name(rest).map(|name| {
+                let mut copy = workspace::write(&self.layout, &self.record);
+                copy["id"] = workspace::new_id().into();
+                copy["name"] = name.clone().into();
+                copy["builtin"] = false.into();
+                copy["scope"] = "global".into();
+                copy["projectId"] = serde_json::Value::Null;
+                self.activate_record(copy);
+                self.status = format!("Saved workspace “{name}”");
             }),
+            ("layout", "edit") => {
+                if let Some(h) = &self.host {
+                    let json = serde_json::to_string_pretty(&self.record).unwrap_or_default();
+                    h.borrow().edit_workspace_definition(&json);
+                }
+                Ok(())
+            }
+            ("layout", "delete") => match self.workspaces.get(rest).cloned() {
+                Some(r) if workspace::is_builtin(&r) => {
+                    Err(anyhow::anyhow!("Built-in workspaces can’t be deleted."))
+                }
+                Some(r) => {
+                    let write = workspace::Write::Archive(rest.to_owned());
+                    Rc::make_mut(&mut self.workspaces).apply(&write);
+                    self.outbox.push(write);
+                    if self.layout.workspace == rest {
+                        let fallback = self.workspaces.fallback();
+                        self.activate_record(fallback);
+                    }
+                    self.status = format!("Deleted workspace “{}”", workspace::record_name(&r));
+                    Ok(())
+                }
+                None => Err(anyhow::anyhow!("That workspace no longer exists.")),
+            },
             ("layout", "reset") => {
-                self.layout = Layout::preset(&self.layout.workspace);
+                // A built-in returns to how it shipped; a saved workspace keeps
+                // its generated panels and settings and takes its base's panels.
+                let id = self.layout.workspace.clone();
+                let after = workspace::preset(&id).unwrap_or_else(|| {
+                    let base = self.record["base"].as_str().unwrap_or(workspace::FALLBACK);
+                    let mut l = Layout::preset(base);
+                    l.workspace = id;
+                    workspace::write(&l, &self.record)
+                });
+                self.activate_record(after);
                 Ok(())
             }
             _ => return false,
@@ -486,22 +622,6 @@ impl Editor {
         }
         cx.notify();
         true
-    }
-    /// Reloads the latest store (other windows write it), applies `f` and writes
-    /// it back atomically. A malformed/newer store is reported, never replaced.
-    fn mutate_store(
-        &mut self,
-        f: impl FnOnce(&mut LayoutStore) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        if let Some(p) = self.path.clone().filter(|p| p.exists()) {
-            self.store = LayoutStore::load(&p)?;
-        }
-        f(&mut self.store)?;
-        if let Some(p) = &self.path {
-            self.store.version = 1;
-            self.store.save(p)?;
-        }
-        Ok(())
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
         if cmd.name == "shellReplayComplete" {
@@ -689,6 +809,7 @@ impl Editor {
                     }
                 }
             }
+            "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
             "newTab" => crate::open_editor_tab(cx, self.window_id),
@@ -699,12 +820,13 @@ impl Editor {
                     handled = false;
                 }
             }
-            name if name.starts_with("workspace:") => {
-                self.maximized_panel = None;
-                self.save();
-                self.layout = self.store.get(&self.project, &name[10..]);
-                self.save();
-            }
+            name if name.starts_with("workspace:") => match self.workspaces.get(&name[10..]) {
+                Some(r) => {
+                    let r = r.clone();
+                    self.activate_record(r);
+                }
+                None => self.status = "That workspace no longer exists.".into(),
+            },
             name if name.starts_with("tool") && name.len() > 4 => {}
             name if self.shell_command(name, cx) => {}
             name => {
@@ -875,36 +997,49 @@ impl Editor {
                 serde_json::json!({"id":dock.id,"size":dock.size,"panels":panels})
             })
             .collect();
-        let name = crate::layout::PRESETS
-            .iter()
-            .find(|(id, _)| *id == self.layout.workspace)
-            .map_or(self.layout.workspace.as_str(), |(_, name)| name);
+        let name = workspace::record_name(&self.record);
         serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
     }
-    /// What set_panel_layout's background write needs: the layout file, this
-    /// window's project key, and `docks` as a layout of this workspace.
-    pub fn agent_layout_plan(
-        &self,
+    /// set_panel_layout: `docks` become a new workspace (a copy of this one,
+    /// named `name`, or `name 2`… when taken) that this window shows and new
+    /// projects start with. Returns its id and name.
+    pub fn save_agent_layout(
+        &mut self,
+        name: &str,
         docks: Vec<crate::layout::Dock>,
-    ) -> (Option<PathBuf>, String, Layout) {
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<(String, String)> {
+        let base = layout::layout_name(name)?;
         let layout = Layout {
             version: self.layout.version,
-            workspace: self.layout.workspace.clone(),
+            workspace: workspace::new_id(),
             docks,
         };
-        (self.path.clone(), self.project.clone(), layout)
-    }
-    /// Shows a layout whose store write already landed (no disk access here).
-    pub fn adopt_agent_layout(
-        &mut self,
-        store: LayoutStore,
-        layout: Layout,
-        cx: &mut Context<Self>,
-    ) {
-        self.store = store;
-        self.layout = layout;
-        self.maximized_panel = None;
+        layout.validate()?;
+        let taken: Vec<String> = self
+            .workspaces
+            .records
+            .iter()
+            .map(|r| workspace::record_name(r).to_owned())
+            .collect();
+        let mut name = base.clone();
+        let mut n = 2;
+        while taken.contains(&name) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        let mut record = workspace::write(&layout, &self.record);
+        record["id"] = layout.workspace.clone().into();
+        record["name"] = name.clone().into();
+        record["builtin"] = false.into();
+        record["scope"] = "global".into();
+        record["projectId"] = serde_json::Value::Null;
+        self.activate_record(record);
+        let write = workspace::Write::Default(layout.workspace.clone());
+        Rc::make_mut(&mut self.workspaces).apply(&write);
+        self.outbox.push(write);
         cx.notify();
+        Ok((layout.workspace, name))
     }
     /// Runs a shell command without an AppKit host (tests).
     #[doc(hidden)]
@@ -983,20 +1118,17 @@ impl Editor {
     /// The status bar's workspace pop-up: presets (current checked) and saved ones.
     fn workspace_menu(&self, position: Point<Pixels>) {
         let Some(h) = &self.host else { return };
-        let mut items: Vec<_> = layout::PRESETS
-            .iter()
-            .map(|(id, label)| {
-                MenuEntry::item(*label, format!("workspace:{id}"))
-                    .checked(*id == self.layout.workspace)
-            })
-            .collect();
-        if !self.store.saved.is_empty() {
-            items.push(MenuEntry::separator());
-            items.extend(
-                self.store
-                    .saved
-                    .keys()
-                    .map(|n| MenuEntry::item(n.clone(), format!("layout:apply:{n}"))),
+        // Built-ins, then saved workspaces (a quiet separator between).
+        let mut items = vec![];
+        let mut builtin = true;
+        for (id, name, b) in self.workspace_choices() {
+            if builtin && !b {
+                items.push(MenuEntry::separator());
+            }
+            builtin = b;
+            items.push(
+                MenuEntry::item(name, format!("workspace:{id}"))
+                    .checked(id == self.layout.workspace),
             );
         }
         items.push(MenuEntry::separator());
@@ -1125,6 +1257,7 @@ impl Render for Editor {
         {
             self.bind_project(id);
         }
+        self.sync_workspaces(cx);
         let t = self.tokens.clone();
         let m = t.metrics;
         let c = t.colors.clone();
@@ -1745,8 +1878,15 @@ impl Render for Editor {
             if let Some(content) = content {
                 panel = panel.child(content);
             } else {
-                let (heading, line, action) = layout::empty_state(&id);
-                let mut empty = empty_state(&t, heading, line).h(px((p.rect.h - m.header).max(0.)));
+                let unknown = format!("No installed extension provides “{id}”.");
+                let (heading, line, action) = if panels.contains(&id) {
+                    layout::empty_state(&id)
+                } else {
+                    ("Panel Unavailable", unknown.as_str(), None)
+                };
+                let mut empty = empty_state(&t, heading, line)
+                    .h(px((p.rect.h - m.header).max(0.)))
+                    .overflow_hidden();
                 // Actions run only with an app attached (the bare shell has no importer).
                 if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
                     empty = empty.child(
@@ -1871,10 +2011,7 @@ impl Render for Editor {
                     .child(panels.title(&drag.id).to_string()),
             );
         }
-        let workspace = layout::PRESETS
-            .iter()
-            .find(|p| p.0 == self.layout.workspace)
-            .map_or("Custom", |p| p.1);
+        let workspace = workspace::record_name(&self.record).to_owned();
         // Status bar (language §2): quiet facts. Left: document facts (or a
         // message); right: the workspace pop-up.
         let left = self
@@ -2229,6 +2366,152 @@ mod keyboard_tests {
                 let group = &v.layout.docks[0].groups[0];
                 assert_eq!(group.tabs, ["assets"]);
                 assert_eq!(group.active, 0);
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    // Not a glob: gpui's own `test` attribute would shadow the standard one.
+    use super::{Editor, Rc, Tokens, workspace};
+    use gpui::{AnyElement, App, TestAppContext, Window};
+    use std::cell::RefCell;
+
+    /// The kernel's store as a window reads it, and what the window writes.
+    #[derive(Default)]
+    struct Kernel {
+        store: RefCell<Rc<workspace::Store>>,
+        writes: RefCell<Vec<workspace::Write>>,
+    }
+    struct Stub(Rc<Kernel>);
+    impl crate::integration::Integration for Stub {
+        fn observe(&self, _: &mut gpui::Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn workspaces(&self, _: &App) -> Option<Rc<workspace::Store>> {
+            Some(self.0.store.borrow().clone())
+        }
+        fn write_workspace(&self, write: workspace::Write, _: &mut App) {
+            self.0.writes.borrow_mut().push(write);
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            Some("p".into())
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    #[gpui::test]
+    fn a_workspace_deleted_by_another_window_moves_this_one_to_the_fallback(
+        cx: &mut TestAppContext,
+    ) {
+        let mut mine = workspace::preset("edit").unwrap();
+        mine["id"] = "mine".into();
+        mine["name"] = "Mine".into();
+        mine["builtin"] = false.into();
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&mine)),
+            current: Some("mine".into()),
+            default: None,
+            project: Some(mine.clone()),
+            project_id: Some("p".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "mine");
+                // Another window deletes it; this project still holds it.
+                let before = (**kernel.store.borrow()).clone();
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    records: workspace::seeded(&[]),
+                    trashed: vec!["mine".into()],
+                    ..before
+                });
+                kernel.writes.borrow_mut().clear();
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, workspace::FALLBACK);
+                // The next frame sends it.
+                v.sync_workspaces(cx);
+                let writes = kernel.writes.borrow();
+                assert!(
+                    matches!(&writes[..], [workspace::Write::Active { after, .. }]
+                        if workspace::record_id(after) == Some(workspace::FALLBACK)),
+                    "the project should keep the fallback: {writes:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn deleting_the_active_workspace_moves_to_the_fallback_and_never_refiles_it(
+        cx: &mut TestAppContext,
+    ) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let window = cx.add_window(|_, cx| Editor::new(tokens, None, cx));
+        window
+            .update(cx, |v, _, cx| {
+                let mut mine = workspace::preset("edit").unwrap();
+                mine["id"] = "mine".into();
+                mine["name"] = "Mine".into();
+                mine["builtin"] = false.into();
+                v.workspaces = Rc::new(workspace::Store {
+                    records: workspace::seeded(std::slice::from_ref(&mine)),
+                    current: Some("mine".into()),
+                    default: None,
+                    project: Some(mine.clone()),
+                    project_id: Some("p".into()),
+                    trashed: vec![],
+                });
+                v.show_record(mine);
+                v.outbox.clear();
+                assert!(v.run_shell_command("layout:delete:mine", cx));
+                assert_eq!(v.layout.workspace, workspace::FALLBACK);
+                assert!(
+                    v.workspaces.get("mine").is_none(),
+                    "{:?}",
+                    v.workspaces.records
+                );
+                assert_eq!(
+                    workspace::record_id(&v.workspaces.active(None)),
+                    Some(workspace::FALLBACK)
+                );
+                let archived = v
+                    .outbox
+                    .iter()
+                    .position(|w| *w == workspace::Write::Archive("mine".into()))
+                    .expect("archived");
+                assert!(
+                    v.outbox[archived..].iter().all(|w| match w {
+                        workspace::Write::Active { after, .. }
+                        | workspace::Write::Upsert(after) =>
+                            workspace::record_id(after) != Some("mine"),
+                        _ => true,
+                    }),
+                    "the deleted record was written again: {:?}",
+                    v.outbox
+                );
             })
             .unwrap();
     }

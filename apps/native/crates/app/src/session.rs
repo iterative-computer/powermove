@@ -80,6 +80,16 @@ pub struct Controller {
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
+    /// The workspace store this window last built (`crate::workspaces`).
+    pub workspace_store: crate::workspaces::Cache,
+    /// The Workspaces panel's last action, for its status line.
+    pub workspaces_status: String,
+    /// The layer a generated select's open menu edits, bound when it opened.
+    pub(crate) generated_menu_layer: Option<String>,
+    /// This window's shell view (its live layout).
+    pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
+    /// Cloud media offered and downloading in this window.
+    pub cloud: crate::cloud_media::State,
     pub captions: crate::captions_panel::State,
     pub shader: crate::shader_panel::State,
     pub takes: crate::takes_panel::State,
@@ -170,6 +180,8 @@ pub struct Bridge(pub Entity<Controller>);
 impl pm_shell::integration::Integration for Bridge {
     fn observe(&self, cx: &mut gpui::Context<pm_shell::view::Editor>) {
         cx.observe(&self.0, |_, _, cx| cx.notify()).detach();
+        let shell = cx.weak_entity();
+        self.0.update(cx, |v, _| v.shell = Some(shell));
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
@@ -202,6 +214,8 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
+                .or_else(|| crate::generated_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -210,6 +224,16 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
+        Some(self.0.read(cx).workspace_store())
+    }
+    fn note(&self, text: &str, cx: &mut App) {
+        let text = text.to_owned();
+        self.0.update(cx, |v, cx| v.note(text, cx));
+    }
+    fn write_workspace(&self, write: pm_shell::workspace::Write, cx: &mut App) {
+        self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
@@ -456,6 +480,11 @@ impl Controller {
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
+            workspace_store: Default::default(),
+            workspaces_status: String::new(),
+            generated_menu_layer: None,
+            shell: None,
+            cloud: Default::default(),
             captions: Default::default(),
             shader: Default::default(),
             takes: Default::default(),
@@ -520,12 +549,22 @@ impl Controller {
         }
     }
     /// A window restored at launch reopens its project when that project has
-    /// unsaved work from a crash (so the person is asked about it at once) or
-    /// when the system keeps documents open across quits.
+    /// unsaved work from a crash (so the person is asked about it at once),
+    /// when the system keeps documents open across quits, or when Settings ›
+    /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
+    /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
+        let keep = keep
+            || self
+                .kernel
+                .state()
+                .settings
+                .get("restoreWindows")
+                .and_then(pm_model::Value::as_bool)
+                != Some(false);
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -984,17 +1023,22 @@ impl Controller {
         self.seek_at(seconds, Self::event_time());
     }
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
+        let mut target = None;
         if let Some(v) = &self.viewer {
             let frame = self
                 .rate
                 .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
-            if let Ok(time) = self.rate.frame_start(frame)
-                && let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input)
-            {
-                self.message = e.to_string();
+            if let Ok(time) = self.rate.frame_start(frame) {
+                target = Some(time as f64 / TICKS_PER_SECOND as f64);
+                if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                    self.message = e.to_string();
+                }
             }
         }
-        self.persist_ui();
+        // The viewer's clock lands later (always so for a viewer bound a
+        // moment ago, as on open): record the time asked for, so MCP's
+        // playhead and the saved transport never read the old one.
+        let _ = self.write_ui_at(target.unwrap_or_else(|| self.time()));
     }
     pub fn persist_ui(&self) {
         let _ = self.write_ui();
@@ -1002,6 +1046,13 @@ impl Controller {
     /// Resolves once the kernel has taken the write.
     pub(crate) fn write_ui(
         &self,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        self.write_ui_at(self.time())
+    }
+    fn write_ui_at(
+        &self,
+        time: f64,
     ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
     {
         let (Some(s), Some(p)) = (&self.session, &self.published) else {
@@ -1015,7 +1066,7 @@ impl Controller {
             }
         }
         if let pm_model::Value::Object(m) = &mut ui.transport {
-            m.insert("time", pm_model::Value::from(self.time()));
+            m.insert("time", pm_model::Value::from(time));
             m.insert(
                 "playing",
                 pm_model::Value::from(
@@ -1562,6 +1613,10 @@ impl Controller {
             self.message = "Finish the recovery decision or current save first".into();
             return;
         }
+        let path = as_path.clone();
+        if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
@@ -1651,6 +1706,9 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::generated_panel::pick(self, &cmd.name, cx) {
+            return true;
+        }
         if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
             self.restore_take(id, cx);
             return true;

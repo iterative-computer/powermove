@@ -3295,6 +3295,16 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
                     )
                     .unwrap(),
                 }),
+                pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    id: "com.example.away".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Away","about":"Glows","unavailable":true}}"#,
+                    )
+                    .unwrap(),
+                }),
             ],
         })
         .wait()
@@ -3326,6 +3336,11 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
     );
     assert_eq!(listed("com.example.glow")["canArchive"], true);
     assert_eq!(listed("builtin.panel")["canArchive"], false);
+    // Its folder can't be reached (an unmounted volume): listed, and said so.
+    assert_eq!(
+        listed("com.example.away")["about"],
+        "Unavailable: its folder can't be reached."
+    );
     let revision = publication["revision"].clone();
     let mut perform = |action: Value| {
         backend.native.platform.clear();

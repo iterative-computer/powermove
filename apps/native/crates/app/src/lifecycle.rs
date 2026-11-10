@@ -114,6 +114,57 @@ fn next_quit(cx: &mut App) {
             return;
         }
     }
+    // The window session's queued writes land first; a failed one is asked
+    // about while the library is still held, so Cancel leaves all as it was.
+    cx.spawn(async move |cx| {
+        let flushed = cx
+            .background_executor()
+            .spawn(async { pm_shell::session::flush() })
+            .await;
+        cx.update(|cx| match flushed {
+            Ok(()) => finish_quit(cx),
+            Err(error) => ask_session_failed(&error, cx),
+        });
+    })
+    .detach();
+}
+/// The quit alert for a window session that couldn't be written.
+fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    Alert::new(
+        "Powermove couldn’t save your window arrangement.",
+        format!("{error}. If you quit anyway, your windows open as they were last saved."),
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new("Quit Anyway", true),
+        ],
+    )
+}
+fn ask_session_failed(error: &str, cx: &mut App) {
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    let Some(window) = window else {
+        return finish_quit(cx);
+    };
+    let answer = session_failed_alert(error).sheet(&window);
+    cx.spawn(async move |cx| {
+        let quit = answer.recv().await.ok().flatten() == Some(true);
+        cx.update(|cx| {
+            if quit {
+                finish_quit(cx)
+            } else {
+                cancel_quit(cx)
+            }
+        });
+    })
+    .detach();
+}
+/// Compacts and releases the library, then quits.
+fn finish_quit(cx: &mut App) {
     let host = cx.global::<QuitCoordinator>().host.clone();
     cx.spawn(async move |cx| {
         let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
@@ -254,11 +305,56 @@ impl Controller {
         self.mcp.closing.store(false, Ordering::Release);
         cx.notify();
     }
+    /// Commits an open text edit on the canvas, as v1 flushed edits before a
+    /// save or close; `then` runs once the project holds no open entry (or
+    /// after three seconds). `false` when nothing was being edited.
+    pub(crate) fn finish_edits_then(
+        &mut self,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) -> bool {
+        let Some(gizmos) = self.builtins.gizmos.clone() else {
+            return false;
+        };
+        if !gizmos.update(cx, |g, cx| g.finish_text(true, cx)) {
+            return false;
+        }
+        let kernel = self.kernel.clone();
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        cx.spawn(async move |this, cx| {
+            for _ in 0..60 {
+                let open = project
+                    .as_ref()
+                    .and_then(|p| kernel.published(p))
+                    .is_some_and(|p| p.entry.is_some());
+                let editing = this
+                    .update(cx, |v, cx| {
+                        v.builtins
+                            .gizmos
+                            .as_ref()
+                            .is_some_and(|g| g.read(cx).text_open().is_some())
+                    })
+                    .unwrap_or(false);
+                if !open && !editing {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            }
+            let _ = this.update(cx, |v, cx| then(v, cx));
+        })
+        .detach();
+        true
+    }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
             }
+            return;
+        }
+        if self.finish_edits_then(cx, move |v, cx| v.request_close(intent, cx)) {
             return;
         }
         if intent == Intent::Quit && self.stop_hung_extensions_for_quit() {
@@ -463,6 +559,23 @@ impl Controller {
 mod tests {
     use super::*;
     use pm_kernel::*;
+
+    #[test]
+    fn a_window_session_that_fails_to_save_asks_before_quitting() {
+        // A session file the writer must not overwrite (a newer version):
+        // the flush quit runs fails, and the quit alert carries why.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, br#"{"version":9,"windows":[]}"#).unwrap();
+        pm_shell::session::write(&path, pm_shell::session::Change::Remove(1));
+        let error = pm_shell::session::flush().unwrap_err();
+        let _ = pm_shell::session::take_error();
+        let alert = session_failed_alert(&error);
+        assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.informative.contains("Unsupported window session"));
+    }
     use std::{
         future::Future,
         sync::Arc,

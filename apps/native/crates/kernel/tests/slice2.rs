@@ -1617,3 +1617,109 @@ fn duplicating_the_entry_of_a_deleted_file_copies_its_newest_work() {
         Some(23.0)
     );
 }
+#[test]
+fn an_unchanged_file_reopens_with_the_workspace_it_was_closed_with() {
+    let dir = common::TempDir::new("file-workspace");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    let ws = parse(r#"{"id":"w1","name":"Mine","layout":{"docks":[{"id":"center","panels":[{"id":"viewer","flex":true}]}]}}"#).unwrap();
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "P", SessionSource::File(path.clone()));
+    let expected = k.project("P").unwrap().workspace().clone();
+    let _ack = k
+        .handle(
+            "P",
+            Request::new(
+                Caller::native(),
+                WorkspaceCall::Replace {
+                    expected,
+                    next: ws.clone(),
+                },
+            ),
+        )
+        .unwrap();
+    // The kernel files it as the active workspace record too.
+    assert_eq!(k.state().settings["workspace"].as_str(), Some("w1"));
+    k.shell(ShellCall::Close(h)).unwrap();
+    // A panel change is not a document change: the file is not rewritten.
+    assert_eq!(fs::read_to_string(&path).unwrap(), PROJECT);
+    drop(k);
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "P", SessionSource::File(path.clone()));
+    assert_eq!(k.project("P").unwrap().workspace(), &ws);
+    k.shell(ShellCall::Close(h)).unwrap();
+    drop(k);
+    // A file changed elsewhere since brings its own workspace.
+    fs::write(&path, PROJECT.replace("Fixture", "Elsewhere")).unwrap();
+    let mut k = kernel(&profile);
+    open(&mut k, "P", SessionSource::File(path));
+    assert_ne!(k.project("P").unwrap().workspace(), &ws);
+}
+#[test]
+fn two_projects_on_one_workspace_keep_each_others_changes() {
+    let dir = common::TempDir::new("shared-workspace");
+    let profile = dir.path("native");
+    let mut k = kernel(&profile);
+    for id in ["P", "Q"] {
+        let path = dir.path(&format!("{id}.pmv"));
+        fs::write(&path, PROJECT).unwrap();
+        open(&mut k, id, SessionSource::File(path));
+    }
+    let ws =
+        parse(r#"{"id":"w1","name":"Mine","layout":{"left":{"size":200},"right":{"size":300}}}"#)
+            .unwrap();
+    let replace = |k: &mut Kernel, id: &str, next: &pm_model::Value| {
+        let expected = k.project(id).unwrap().workspace().clone();
+        k.handle(
+            id,
+            Request::new(
+                Caller::native(),
+                WorkspaceCall::Replace {
+                    expected,
+                    next: next.clone(),
+                },
+            ),
+        )
+        .unwrap();
+    };
+    replace(&mut k, "P", &ws);
+    replace(&mut k, "Q", &ws);
+    // Each window changes its own part, neither having seen the other's.
+    let with = |json: &str| parse(json).unwrap();
+    replace(
+        &mut k,
+        "P",
+        &with(r#"{"id":"w1","name":"Mine","layout":{"left":{"size":250},"right":{"size":300}}}"#),
+    );
+    replace(
+        &mut k,
+        "Q",
+        &with(r#"{"id":"w1","name":"Mine","layout":{"left":{"size":200},"right":{"size":350}}}"#),
+    );
+    let stored = k.state().settings["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w.get("id").and_then(pm_model::Value::as_str) == Some("w1"))
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        stored,
+        with(r#"{"id":"w1","name":"Mine","layout":{"left":{"size":250},"right":{"size":350}}}"#)
+    );
+    // A stale replace (its expected value is old) changes nothing anywhere.
+    let before = k.state().settings["workspaces"].clone();
+    k.handle(
+        "P",
+        Request::new(
+            Caller::native(),
+            WorkspaceCall::Replace {
+                expected: ws.clone(),
+                next: with(r#"{"id":"w1","name":"Stale"}"#),
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(k.state().settings["workspaces"], before);
+}

@@ -494,27 +494,21 @@ impl Scene {
                 }
             }
             let mut tracks = vec![];
-            for (area, count) in [
-                (Area::Video, layout.video),
-                (Area::Audio, layout.audio),
-                (Area::Captions, layout.captions),
-            ] {
-                for lane in 0..count {
-                    tracks.push(PaintRow {
-                        id: json!(["track", format!("{area:?}"), lane]).to_string(),
-                        accessibility_label: p
-                            .track_accessibility_label(area, lane)
-                            .ok_or(Error::MissingTrackPresentation)?,
-                        depth: 0,
-                        selected: false,
-                        hovered: false,
-                        focused: false,
-                        content: RowContent::Track {
-                            clips: clips.remove(&(area, lane)).unwrap_or_default(),
-                        },
-                    });
-                    tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
-                }
+            for (area, lane) in layout.display_order() {
+                tracks.push(PaintRow {
+                    id: json!(["track", format!("{area:?}"), lane]).to_string(),
+                    accessibility_label: p
+                        .track_accessibility_label(area, lane)
+                        .ok_or(Error::MissingTrackPresentation)?,
+                    depth: 0,
+                    selected: false,
+                    hovered: false,
+                    focused: false,
+                    content: RowContent::Track {
+                        clips: clips.remove(&(area, lane)).unwrap_or_default(),
+                    },
+                });
+                tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
             }
             tracks
         } else {

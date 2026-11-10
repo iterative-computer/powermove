@@ -1289,7 +1289,7 @@ impl GizmoSurface {
             .as_ref()
             .map_or(0, |p| p.targets.iter().map(|t| t.vertices.len()).sum())
     }
-    #[cfg(test)]
+    /// The text session, including one still finishing.
     pub fn text_open(&self) -> Option<&text::TextSession> {
         self.text.as_ref()
     }

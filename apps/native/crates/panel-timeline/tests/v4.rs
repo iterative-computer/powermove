@@ -437,35 +437,36 @@ fn window_refreshes_the_actual_kernel_publication_without_an_intervening_client_
     assert_eq!(result["window"]["rows"][1]["selected"], true);
 }
 
+use pm_design::{Accessibility, Scheme, Tokens};
+use pm_panel_timeline::render as paint;
+struct Presentation;
+impl paint::ModelPresenter for Presentation {
+    fn accessibility_label(&self, row: &RowId) -> String {
+        v4::row_id(row)
+    }
+    fn layer_label(&self, _: &Layer) -> paint::Label {
+        paint::Label::Blue
+    }
+    fn media(&self, _: &Layer) -> paint::Media {
+        paint::Media::Ready
+    }
+    fn waveform(&self, _: &Layer) -> Option<Option<paint::Waveform>> {
+        Some(Some(paint::Waveform {
+            peaks: vec![0., 0.25, 0.5].into(),
+            rate: 100.,
+            trim: 0.,
+        }))
+    }
+    fn interpolation(&self, _: &Key) -> paint::Interpolation {
+        paint::Interpolation::Linear
+    }
+    fn track_accessibility_label(&self, area: tracks::Area, lane: usize) -> Option<String> {
+        Some(format!("{area:?} {}", lane + 1))
+    }
+}
+
 #[test]
 fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
-    use pm_design::{Accessibility, Scheme, Tokens};
-    use pm_panel_timeline::render as paint;
-    struct Presentation;
-    impl paint::ModelPresenter for Presentation {
-        fn accessibility_label(&self, row: &RowId) -> String {
-            v4::row_id(row)
-        }
-        fn layer_label(&self, _: &Layer) -> paint::Label {
-            paint::Label::Blue
-        }
-        fn media(&self, _: &Layer) -> paint::Media {
-            paint::Media::Ready
-        }
-        fn waveform(&self, _: &Layer) -> Option<Option<paint::Waveform>> {
-            Some(Some(paint::Waveform {
-                peaks: vec![0., 0.25, 0.5].into(),
-                rate: 100.,
-                trim: 0.,
-            }))
-        }
-        fn interpolation(&self, _: &Key) -> paint::Interpolation {
-            paint::Interpolation::Linear
-        }
-        fn track_accessibility_label(&self, area: tracks::Area, lane: usize) -> Option<String> {
-            Some(format!("{area:?} {}", lane + 1))
-        }
-    }
     let (_actor, mut c) = client();
     dispatch(
         &mut c,
@@ -971,4 +972,45 @@ fn presentation_can_hold_one_immutable_publication_while_actor_advances() {
         .find(|r| r["layer"] == "b")
         .unwrap();
     assert_eq!(new_b["visible"], false);
+}
+
+#[test]
+fn tracks_stack_like_premiere_captions_then_highest_video_down_then_audio() {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[
+    {"id":"top","name":"Title","type":"shape","from":0,"dur":4,"on":true,"p":{}},
+    {"id":"base","name":"Plate","type":"shape","from":0,"dur":4,"on":true,"p":{}},
+    {"id":"music","name":"Music","type":"audio","from":0,"dur":4,"on":true,"p":{}}
+    ]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    // The layer that composites on top sits on the higher track, drawn above V1.
+    let frame = v4::window(&mut c, 0, 10).unwrap();
+    let labels: Vec<_> = frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(labels, ["V2", "V1", "A1"]);
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    let painted: Vec<_> = (0..scene.total())
+        .filter_map(|i| scene.navigate_first(i))
+        .collect();
+    assert_eq!(
+        painted,
+        [
+            r#"["track","Video",1]"#,
+            r#"["track","Video",0]"#,
+            r#"["track","Audio",0]"#
+        ]
+    );
+    let top = scene.row(r#"["track","Video",1]"#).unwrap();
+    assert!(
+        matches!(&top.content, paint::RowContent::Track { clips } if clips.len() == 1 && clips[0].id == "top")
+    );
 }

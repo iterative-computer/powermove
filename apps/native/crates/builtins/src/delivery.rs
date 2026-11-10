@@ -183,12 +183,10 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         let tc = pm_time::TimecodeFormat::for_rate(rate).format(rate.frame_of(start));
         format!("{}×{} · frame at {tc}", width, height)
     } else {
-        format!(
-            "{frames} frames · {} s · {}×{}",
-            pm_time::seconds_from_ticks(end - start),
-            width,
-            height
-        )
+        // Two places at most, as the timeline's readouts: 73.53 s, 1.05 s, 10 s.
+        let seconds = format!("{:.2}", pm_time::seconds_from_ticks(end - start));
+        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
+        format!("{frames} frames · {seconds} s · {}×{}", width, height)
     };
     Ok(Plan {
         settings: Some(settings),
@@ -389,17 +387,10 @@ pub fn capabilities(
                 mode: Some(0o600),
                 seed: 0,
             };
-            let plan = pm_export::render::plan_export(&job).map_err(|e| e.to_string())?;
-            if !plan.offline.is_empty() {
-                return Err(format!(
-                    "Original media is unavailable: {}",
-                    plan.offline
-                        .iter()
-                        .map(|m| m.asset.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
+            // Offline originals are the job's to name: it refuses with their
+            // names and the sheet offers Export Without Them.
+            let plan = pm_export::render::plan_export_with(&job, &probe_check)
+                .map_err(|e| e.to_string())?;
             let _encoder = pm_export::OutputSink::new(&plan.spec).map_err(|e| e.to_string())?;
             Ok(())
         })();
@@ -409,6 +400,33 @@ pub fn capabilities(
         };
     }
     result
+}
+
+/// What the sheet can know before an export starts. The export job draws
+/// text with the system's fonts and resolves effects, transitions and
+/// extension layers against the built-in and installed definitions (a missing
+/// one stops the job with its name and the choice to export without it), so
+/// only the rest (media, image sequences, ...) can make a format unavailable.
+#[cfg(target_os = "macos")]
+fn probe_check(
+    document: &pm_model::Document,
+    composition: &str,
+    media: &pm_export::render::MediaPaths,
+) -> Vec<pm_render::Unsupported> {
+    use pm_render::capability::Feature;
+    pm_render::capability::unsupported_with_fonts(document, composition, Some(media))
+        .into_iter()
+        .filter(|u| {
+            !matches!(
+                u.feature,
+                Feature::Effects
+                    | Feature::Adjustment
+                    | Feature::Transition
+                    | Feature::ExtensionDefinition(_)
+                    | Feature::Definition(_)
+            )
+        })
+        .collect()
 }
 
 /// An unavailable format: one short sentence for the sheet, the planner's full
@@ -514,6 +532,23 @@ mod tests {
             assert_eq!(super::options(&wire).unwrap(), o);
         }
     }
+    /// The sheet must not refuse what the export job draws: text (system
+    /// fonts) and effects (definitions the job loads). A real project has both.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn text_and_effects_leave_video_formats_available() {
+        let project = DocumentStore::new_untitled(
+            pm_model::json::parse(r##"{"id":"synthetic","compId":"C","name":"Film","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[
+            {"id":"t","type":"text","from":0,"dur":10,"d":{"text":"Title"}},
+            {"id":"s","type":"solid","from":0,"dur":10,"d":{"color":"#336699"},"fx":[{"type":"blur","p":{"radius":{"v":4}}}]}]}"##)
+            .unwrap(),
+        )
+        .snapshot();
+        let found = capabilities(&project, &options(), 0., &BTreeMap::new());
+        for format in ["prores", "mp4", "webm", "png", "still"] {
+            assert_eq!(found[format]["available"], true, "{format}: {found}");
+        }
+    }
     #[test]
     fn rational_work_range_and_frame_count_match_engine_half_up_rule() {
         let s = fixture(",\"work\":[2,3.05]");
@@ -527,6 +562,10 @@ mod tests {
         assert_eq!(p.captions, 1);
         assert!(!settings.delivery.hide_captions);
         assert!(p.summary.starts_with("31 frames · 1.05 s"));
+        // 181 frames at 24 fps (7.5416… s) read at two places.
+        o.fps = 24.;
+        let s = fixture(",\"work\":[0,7.541666666666667]");
+        assert!(plan(&s, &o, 0.).unwrap().summary.contains(" · 7.54 s · "));
     }
     #[test]
     fn missing_or_invalid_work_area_refuses_instead_of_exporting_all() {

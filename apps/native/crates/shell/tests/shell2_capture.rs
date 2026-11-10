@@ -91,10 +91,15 @@ fn drag_to_dock_preview_and_result_render() {
         // Saved layout round trip through the shell command path (no AppKit host).
         window
             .update(&mut cx, |v, _, cx| {
+                let edited = v.layout.clone();
                 assert!(v.run_shell_command("layout:save:Bottom effects", cx));
+                let saved = v.layout.workspace.clone();
+                assert_ne!(saved, "design");
+                assert_eq!(v.layout.docks, edited.docks);
                 assert!(v.run_shell_command("layout:reset", cx));
-                assert_eq!(v.layout, Layout::preset("design"));
-                assert!(v.run_shell_command("layout:apply:Bottom effects", cx));
+                assert_eq!(v.layout.docks, Layout::preset("design").docks);
+                assert!(v.run_shell_command("layout:delete:design", cx));
+                assert!(v.status.contains("can’t be deleted"));
                 assert!(v.run_shell_command("panel:close:timeline", cx));
                 assert!(!v.layout.open_panels().contains(&"timeline"));
                 assert!(v.run_shell_command("panel:toggle:timeline", cx));

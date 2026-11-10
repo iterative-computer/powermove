@@ -451,8 +451,10 @@ pub(crate) struct Look {
     alpha: AlphaOutput,
     motion_blur: bool,
 }
+/// An agent's still and contact sheet: opaque over the composition's
+/// background, as the viewer shows it (v1's snapshots were JPEGs).
 const MCP_LOOK: Look = Look {
-    alpha: AlphaOutput::Straight,
+    alpha: AlphaOutput::None,
     motion_blur: false,
 };
 fn never() -> bool {
