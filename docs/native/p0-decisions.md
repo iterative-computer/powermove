@@ -396,6 +396,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Skimming keys: ⌥S and ⌥⇧S, not Final Cut's S and ⇧S, which are v1's Reveal Scale (After Effects muscle memory). View ▸ Skimming ▸ Skimming / Audio Skimming shows them display-only (the chord resolver owns them, so ⌥S still types in text). Both on by default, saved per person in `<profile>/Viewer/skimming.json`.
 - Audio skimming plays grains of the mix (`TransportCommand::Grain { time, rate }`, additive to pm-protocol's transport commands): 60 ms or a frame with 4 ms fades, chained to the latest skimmer position (never cut), forward or backward at 1x, or 2x past 1.5x real time, silent at rest.
 - Frame uniforms (draw quads and legacy effect blocks) share one pool, `Effects::uniforms`, written on the CPU and sent with one queue write per chunk by `UniformPool::flush`: every submission of the frame encoder must flush first (frame end, the effect runner's fallback readback, `with_gpu`). Text glyph-edge chunks upload through a reused mapped belt (`pm_render::upload::Belt`) closed into the same encoder.
+- Viewer frames take the playback resampler while playing and for a drag's reduced (below full resolution) Scrub frames, which the settle refine redraws with the final resampler; paused frames and full-resolution drags keep the final one.
 
 ## Stability lane (wave 21)
 
