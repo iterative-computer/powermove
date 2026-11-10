@@ -299,9 +299,15 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let what = match &missing.revision {
+            Some(revision) => format!(
+                "Effect saved by a newer Powermove: {} version {revision}",
+                missing.effect
+            ),
+            None => format!("Effect not installed: {}", missing.effect),
+        };
         Some(format!(
-            "Effect not installed: {}, bypassed on {}{}",
-            missing.effect,
+            "{what}, bypassed on {}{}",
             layers(missing.layers),
             more(self.missing_effects.len() - 1)
         ))
@@ -324,6 +330,8 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    /// A Mixer monitor solo not yet handed to the transport.
+    monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
@@ -333,6 +341,18 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    /// Auto draws dragged frames of a slow project reduced (an editor's
+    /// viewer); otherwise every paused frame is exact.
+    adapt_drags: bool,
+    /// The skimmer (Final Cut's): while paused the viewer shows this time,
+    /// and the playhead stays where it is.
+    skim: Option<Ticks>,
+    /// The skimmer's last position and pointer time, for its velocity.
+    skim_input: Option<f64>,
+    skim_rate: pm_protocol::common::PlaybackRate,
+    /// The skimmer moved since the worker last looked.
+    skim_moved: bool,
+    skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
 }
@@ -398,6 +418,9 @@ struct Shared {
     panic_frames: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     invalid_call: std::sync::atomic::AtomicBool,
+    /// Every still costs more than a refresh (drag adaptation tests).
+    #[cfg(test)]
+    slow_stills: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -532,6 +555,50 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Auto draws this viewer's dragged frames at reduced resolution while
+    /// the project is slower than a refresh, and the frame exact once the
+    /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    pub fn adapt_drags(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.adapt_drags = on;
+            Ok(())
+        })
+    }
+    /// The skimmer: while paused the viewer shows `time` (on the drag path:
+    /// reduced while it moves, exact once it rests) without moving the
+    /// playhead; `None` returns to the playhead's frame. `input` is the
+    /// pointer event's host time; the pointer's speed sets the skim
+    /// audio's direction and speed.
+    pub fn skim(&self, time: Option<Ticks>, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.edit(|v| {
+            if v.skim == time {
+                return Ok(());
+            }
+            v.skim_rate = match (v.skim, time, v.skim_input) {
+                (Some(a), Some(b), Some(at)) if input > at => skim_rate(
+                    (b.get() - a.get()) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                    input - at,
+                ),
+                _ => pm_protocol::common::PlaybackRate::NORMAL,
+            };
+            v.skim = time;
+            v.skim_input = Some(input);
+            v.skim_moved = true;
+            v.input = Some(input);
+            v.pipeline.request = trace::now();
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Audio skimming: grains of the mix follow the skimmer.
+    pub fn skim_audio(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.skim_audio = Some(on);
+            Ok(())
+        })
+    }
     /// Interactive scrubbing pauses and immediately requests the exact frame.
     pub fn scrub(&self, time: Ticks) -> Result<()> {
         self.scrub_at(time, trace::now())
@@ -626,6 +693,16 @@ impl Viewer {
         use pm_protocol::validate::Validate;
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         self.edit(|v| v.enqueue(cmd))
+    }
+    /// The Mixer's monitor solo: only these top-level layers are heard
+    /// (empty: every strip). Meters still read every strip.
+    pub fn monitor_solo(&self, solo: Vec<String>) -> Result<()> {
+        ensure!(solo.len() <= 4096, "too many solo strips");
+        self.edit(|v| {
+            v.monitor = Some(solo);
+            v.dirty = true;
+            Ok(())
+        })
     }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
@@ -806,6 +883,8 @@ impl EngineService {
             panic_frames: Default::default(),
             #[cfg(test)]
             invalid_call: Default::default(),
+            #[cfg(test)]
+            slow_stills: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
@@ -917,6 +996,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
                     proxied,
@@ -929,6 +1009,12 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                adapt_drags: false,
+                skim: None,
+                skim_input: None,
+                skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
+                skim_moved: false,
+                skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
             },
@@ -975,6 +1061,9 @@ struct Runtime {
     scrub: bool,
     /// The last frame showed stand-ins: the landed counter it was drawn at.
     stand_in: Option<u64>,
+    /// A dragged frame was drawn below full resolution: draw it exact once
+    /// the playhead has stayed put until then (host s).
+    refine_at: Option<f64>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1149,6 +1238,17 @@ const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
+/// The skim audio's J/K/L rate for a skimmer that moved `seconds` of media
+/// in `elapsed` seconds: its direction, and 2x once it moves faster than
+/// one and a half times real time.
+fn skim_rate(seconds: f64, elapsed: f64) -> pm_protocol::common::PlaybackRate {
+    let speed = seconds / elapsed;
+    let num = if speed.abs() > 1.5 { 2 } else { 1 };
+    pm_protocol::common::PlaybackRate {
+        num: if seconds < 0. { -num } else { num },
+        den: 1,
+    }
+}
 /// Runs the worker; a panic in it (a bug a frame hit) must not leave every
 /// viewer blank, or poison the state the UI thread reads. The worker starts
 /// again on a fresh engine, as after a lost GPU, every view draws again, and
@@ -1394,10 +1494,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
         while i < flights.len() {
+            // Retired once its completion handler has recorded the outcome:
+            // Metal reports the status before that handler runs on its own
+            // queue, and a frame read in between looked failed (gpu_ok still
+            // false) and was never drawn again.
             if !matches!(
                 flights[i].submission.command.status(),
                 metal::MTLCommandBufferStatus::Completed | metal::MTLCommandBufferStatus::Error
-            ) {
+            ) || flights[i].submission.trace.lock().unwrap().completed == 0.
+            {
                 i += 1;
                 continue;
             }
@@ -1450,6 +1555,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     r.auto
                         .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
+                if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    #[cfg(test)]
+                    let cost = if shared
+                        .slow_stills
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        f64::MAX
+                    } else {
+                        cost
+                    };
+                    r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
@@ -1457,7 +1575,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
-                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
                         "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
@@ -1613,6 +1731,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     ahead: 1.,
                     scrub: false,
                     stand_in: None,
+                    refine_at: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -1643,8 +1762,30 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             while let Some(cmd) = v.commands.pop_front() {
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    r.refine_at = None;
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
+            }
+            if let Some(solo) = v.monitor.take() {
+                r.transport.monitor(solo);
+            }
+            if std::mem::take(&mut v.skim_moved) {
+                // A skim draws on the drag path; leaving returns exact.
+                r.scrub = v.skim.is_some();
+                r.refine_at = None;
+                let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
+                    (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
+                });
+                if let Some(a) = &r.transport.audio {
+                    a.send(audio::AudioCtl::Skim {
+                        at: v.skim.map(Ticks::get),
+                        rate: v.skim_rate,
+                        grain_ms: frame_ms.max(pm_audio::transport::GRAIN_MIN_MS as u64),
+                    });
+                }
+            }
+            if let (Some(on), Some(a)) = (v.skim_audio.take(), &r.transport.audio) {
+                a.send(audio::AudioCtl::SkimAudio(on));
             }
             let sample = r.transport.poll((now * 1e6) as i64);
             changed |= v
@@ -1705,6 +1846,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
             }
+            // The playhead stopped on a frame dragged at reduced resolution.
+            // A new picture of the same time: its own `frame:rendered`.
+            if !playing && r.refine_at.is_some_and(|at| now >= at) {
+                r.refine_at = None;
+                r.scrub = false;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
             }
@@ -1745,7 +1894,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     plain
                 }
             } else {
-                sample.media_time
+                // Paused under the skimmer: its time, not the playhead's.
+                v.skim.filter(|_| !playing).unwrap_or(sample.media_time)
             };
             let time =
                 Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
@@ -1780,7 +1930,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     time,
                     output: v.config.output,
                     moment,
-                    scale: v.quality.scale(&r.auto, moment),
+                    // A capture reads the exact picture: Auto never adapts it.
+                    scale: v.quality.scale(
+                        &r.auto,
+                        if capture || (moment == Moment::Scrub && !v.adapt_drags) {
+                            Moment::Paused
+                        } else {
+                            moment
+                        },
+                    ),
                     decode_deadline: playing.then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
                     }),
@@ -1851,6 +2009,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 target: due.unwrap_or(0.),
                 requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
                 predicted: plan.map_or(0., |p| p.shown),
+                count_work: recorder.is_some(),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -1963,6 +2122,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
+                            if spec.moment == Moment::Scrub && spec.scale < 1. {
+                                r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
                             r.refusals = 0;
@@ -2071,6 +2233,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let waiting = runtime
                 .values()
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
+            // A dragged frame waiting to be drawn exact wakes the loop then.
+            let settle = runtime
+                .values()
+                .filter_map(|r| r.refine_at)
+                .map(|at| (at - now).max(0.001))
+                .fold(f64::INFINITY, f64::min);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             // Only back-offs pending, nothing playing: sleep until the first is due.
@@ -2115,6 +2283,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
+            let timeout = if settle.is_finite() {
+                timeout.min(Duration::from_secs_f64(settle))
+            } else {
+                timeout
+            };
             let _ = wakes.recv_timeout(timeout);
         }
     }
@@ -2383,6 +2556,7 @@ mod worker_tests {
     fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
         let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
             effect: effect.into(),
+            revision: None,
             layers,
         };
         let mut status = ViewerStatus {
@@ -2392,6 +2566,17 @@ mod worker_tests {
         assert_eq!(
             status.notice().as_deref(),
             Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+        );
+        let newer = ViewerStatus {
+            missing_effects: vec![pm_render::effects::versions::MissingEffect {
+                revision: Some("99".into()),
+                ..missing("blur", 1)
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            newer.notice().as_deref(),
+            Some("Effect saved by a newer Powermove: blur version 99, bypassed on 1 layer")
         );
         status.layer_failures = vec![pm_render::LayerFailure {
             composition: "c".into(),
@@ -2645,6 +2830,157 @@ mod worker_tests {
             new.as_ptr(),
             "the layer follows the rebuild"
         );
+    }
+
+    /// Metal reports a command buffer complete before its completion handler
+    /// runs; a frame retired in between must not read as failed. Under load
+    /// the dragged frame then never showed (the bench's "scrub stuck").
+    #[test]
+    fn a_late_completion_handler_never_loses_a_dragged_frame() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("late-completion-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        crate::render::LATE_COMPLETION_MS.store(30, std::sync::atomic::Ordering::Relaxed);
+        for (i, at) in (1..=8).map(|i| {
+            (
+                i,
+                Ticks::new(i * pm_protocol::common::TICKS_PER_SECOND / 6).unwrap(),
+            )
+        }) {
+            v.scrub(at).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                // Display ticks keep the worker polling, as a display link and
+                // the bench do: it looks at its flights while the handler is late.
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status.frame.as_ref().is_some_and(|f| {
+                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "drag step {i} never showed: {status:?}"
+                );
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+        crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
+    }
+
+    /// The skimmer shows its time without moving the playhead, and the
+    /// viewer returns to the playhead's frame when the pointer leaves.
+    #[test]
+    fn the_skimmer_shows_its_frame_and_leaves_the_playhead() {
+        let service = EngineService::start(pm_gpu::Gpu::new("skim-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let frame = |v: &Viewer, at: Ticks| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+                {
+                    return status;
+                }
+                assert!(std::time::Instant::now() < deadline, "{at:?}: {status:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let playhead = Ticks::new(pm_protocol::common::TICKS_PER_SECOND / 3).unwrap();
+        v.scrub(playhead).unwrap();
+        frame(&v, playhead);
+        for (i, at) in [1, 2, 3, 2]
+            .map(|s| Ticks::new(s * pm_protocol::common::TICKS_PER_SECOND / 2).unwrap())
+            .into_iter()
+            .enumerate()
+        {
+            v.skim(Some(at), trace::now() + i as f64 * 0.016).unwrap();
+            let status = frame(&v, at);
+            assert_eq!(
+                status.clock.unwrap().media_time,
+                playhead,
+                "skimming never moves the playhead"
+            );
+        }
+        v.skim(None, trace::now()).unwrap();
+        frame(&v, playhead);
+        v.retire();
+    }
+
+    #[test]
+    fn skim_rates_follow_the_pointer() {
+        assert_eq!(skim_rate(0.05, 0.1).num, 1);
+        assert_eq!(skim_rate(-0.05, 0.1).num, -1);
+        assert_eq!(skim_rate(0.4, 0.1).num, 2);
+        assert_eq!(skim_rate(-0.4, 0.1).num, -2);
+    }
+
+    /// A slow project's drag draws reduced; the stopped frame is drawn again
+    /// exact, as a picture of its own.
+    #[test]
+    fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();
+        let shown = |v: &Viewer| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !v.status().frame.is_some_and(|f| f.gpu_ok) {
+                assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_stills
+            .store(true, std::sync::atomic::Ordering::Release);
+        shown(&v);
+        let at = Ticks::from_whole_seconds(1);
+        v.scrub(at).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let reduced = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.gpu_ok) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            reduced.scale,
+            crate::policy::AUTO_FLOOR,
+            "a slow drag is reduced"
+        );
+        // Settled: the same time again, exact, as a picture of its own (a
+        // new stamp: the window tells extensions `frame:rendered` again).
+        let exact = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale == 1.) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline, "never drawn exact");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(exact.stamp.sequence > reduced.stamp.sequence);
+        // A viewer that does not adapt keeps every paused frame exact.
+        let plain = shapes_viewer(&service, None);
+        shown(&plain);
+        plain.scrub(at).unwrap();
+        let f = loop {
+            if let Some(f) = plain.status().frame.filter(|f| f.time == at) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(f.scale, 1.);
+        v.retire();
+        plain.retire();
     }
 
     /// A validation error fails the frame that raised it, visibly, without a

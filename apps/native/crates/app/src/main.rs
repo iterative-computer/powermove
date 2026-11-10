@@ -1,8 +1,12 @@
 mod after_open;
+mod agent_clients;
 mod alert;
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
+mod cloud;
+#[cfg(test)]
+mod cloud_tests;
 mod colour;
 mod colour_panel;
 mod diag;
@@ -13,10 +17,14 @@ mod error_log;
 mod export_coordinator;
 mod extension_authoring;
 mod extensions;
+mod figma_paste;
 mod first_run;
 mod gizmo;
 mod keyframe_sheets;
 
+mod agent_speech;
+mod captions_generate;
+mod captions_panel;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
@@ -28,7 +36,10 @@ mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
+mod media_sequence;
 mod migration_report;
+mod mixer_panel;
+mod notes_panel;
 mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
@@ -41,21 +52,32 @@ mod playback;
 mod playhead;
 mod pro_media;
 mod project_library;
+mod providers;
+mod publish;
 mod raster_overrides;
 mod render_frames;
 mod rows;
 mod session;
+mod shader_panel;
 mod shape_tool;
 mod sheets;
+mod skimming;
 mod smoke;
+mod store_window;
+#[cfg(test)]
+mod store_window_tests;
 mod surface_routes;
 mod surfaces;
+#[cfg(test)]
+mod takes_notes_tests;
+mod takes_panel;
 mod tasks_window;
 mod text_host;
 mod ticket;
 mod timeline_surface;
 #[cfg(test)]
 mod timeline_tests;
+mod transcription;
 mod updates;
 mod v4_compile;
 mod v4_control;
@@ -139,9 +161,7 @@ fn main() -> Result<()> {
             ));
         } else if let Some(name) = review_override(&args[i], cfg!(debug_assertions)) {
             i += 1;
-            let value = args
-                .get(i)
-                .context("--appearance/--accessibility need a value")?;
+            let value = args.get(i).context("development overrides need a value")?;
             // SAFETY: single-threaded here; nothing has read the environment yet.
             unsafe { std::env::set_var(name, value) };
         } else if args[i].to_string_lossy().starts_with('-') {
@@ -188,6 +208,7 @@ fn main() -> Result<()> {
         return mcp_services::headless(profile, exports, launch);
     }
     std::fs::create_dir_all(&profile)?;
+    transcription::install(&profile);
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
     unsafe {
         std::env::set_var("PM_NATIVE_SHELL_STATE", profile.join("shell-layouts.json"));
@@ -294,6 +315,10 @@ fn main() -> Result<()> {
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
+                entity.update(cx, |c, cx| {
+                    c.apply_skimming(cx);
+                    c.load_skimming(cx);
+                });
                 // Each window owns its project: MCP's slot for this window, and
                 // the window wakes only when MCP changes that slot.
                 let key = window.window_handle().window_id().as_u64();
@@ -317,6 +342,9 @@ fn main() -> Result<()> {
                     .or_else(|| launch.take().map(entry::Pending::File));
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
                 entry::register(&entity, window.window_handle(), cx);
+                cloud::init(profile.clone(), cx);
+                providers::init(profile.clone(), cx);
+                agent_clients::init(profile.clone(), cx);
                 if let Some(ns) = platform::ns_window(window) {
                     updates::after_launch(profile.clone(), ns, cx);
                 }
@@ -365,6 +393,11 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
         "--draw-occluded" => Some("PM_NATIVE_DRAW_OCCLUDED"),
         "--save-dir" => Some("PM_NATIVE_REVIEW_SAVE_DIR"),
+        // A fixture Store on this Mac and its test signing key (store_install).
+        "--dev-store-origin" => Some("PM_DEV_STORE_ORIGIN"),
+        "--dev-store-key" => Some("PM_DEV_STORE_KEY"),
+        // A scratch home whose agent apps a review registers (agent_clients).
+        "--dev-agent-home" => Some("PM_DEV_AGENT_HOME"),
         _ => None,
     }
 }
@@ -399,6 +432,9 @@ mod review_override_tests {
             "--accessibility",
             "--open",
             "--draw-occluded",
+            "--dev-store-origin",
+            "--dev-store-key",
+            "--dev-agent-home",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());

@@ -79,6 +79,15 @@ pub enum ShellCall {
         id: String,
         name: String,
     },
+    /// The library's takes (v1's `takes` store), newest first.
+    Takes,
+    /// Replaces the takes only while they still equal `expected` (what the
+    /// caller read), so a take saved elsewhere meanwhile is never lost.
+    /// Replies `Changed(false)` when they no longer match.
+    ReplaceTakes {
+        expected: Vec<Value>,
+        next: Vec<Value>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryDecision {
@@ -556,6 +565,19 @@ impl Kernel {
                         .trash(&id)
                         .map_err(failure)?,
                 ))
+            }
+            ShellCall::Takes => {
+                let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
+                Ok(ShellReply::Recent(w.rows("takes").map_err(failure)?))
+            }
+            ShellCall::ReplaceTakes { expected, next } => {
+                let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
+                if w.rows("takes").map_err(failure)? != expected {
+                    return Ok(ShellReply::Changed(false));
+                }
+                w.set("takes", Value::Array(next)).map_err(failure)?;
+                w.flush().map_err(failure)?;
+                Ok(ShellReply::Changed(true))
             }
             ShellCall::Restore(id) => Ok(ShellReply::Changed(
                 self.library

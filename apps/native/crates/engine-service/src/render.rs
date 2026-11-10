@@ -661,6 +661,7 @@ impl Engine {
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
+                let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -674,6 +675,9 @@ impl Engine {
                     let mut t = trace.lock().unwrap();
                     t.render_submitted = now();
                     t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
+                    if let Some(work) = work {
+                        t.work = pm_perf::snapshot().since(&work);
+                    }
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
@@ -852,6 +856,12 @@ impl Engine {
             .unwrap_or_default()
     }
 }
+/// Delays every completion handler (tests: Metal's completion queue running
+/// late under load).
+#[cfg(test)]
+pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl Submission {
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();
@@ -916,6 +926,10 @@ impl Submission {
         self.command.add_completed_handler(
             &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
                 let _keep_until_complete = &lease;
+                #[cfg(test)]
+                std::thread::sleep(std::time::Duration::from_millis(
+                    LATE_COMPLETION_MS.load(std::sync::atomic::Ordering::Relaxed),
+                ));
                 let mut t = t.lock().unwrap();
                 t.gpu_start = gpu_time(b, true);
                 t.gpu_done = gpu_time(b, false);
@@ -1028,6 +1042,67 @@ mod lifetime_tests {
         event.set_signaled_value(1);
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
+    }
+    #[test]
+    fn only_a_traced_frame_counts_its_work() {
+        let mut engine = Engine::new(Gpu::new("work-count-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let comp = doc
+            .to_value()
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get("compId")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp,
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut draw = |at: i32, count_work: bool| {
+            let trace = Arc::new(std::sync::Mutex::new(Trace {
+                count_work,
+                ..Default::default()
+            }));
+            let spec = FrameSpec::exact(Ticks::from_whole_seconds(at), output);
+            loop {
+                match engine.frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    false,
+                    trace.clone(),
+                ) {
+                    Err(e) if transient(&e) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    other => {
+                        other.unwrap().unwrap().commit();
+                        break;
+                    }
+                }
+            }
+            trace.lock().unwrap().work
+        };
+        assert_eq!(draw(0, false), pm_perf::Counters::default());
+        assert!(draw(1, true).get(pm_perf::Counter::LayersPlanned) > 0);
     }
     #[test]
     fn a_contributed_effect_changes_rendered_pixels_through_its_snapshot() {

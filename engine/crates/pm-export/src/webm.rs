@@ -174,6 +174,9 @@ pub struct WebmSink {
     sampled: Vec<u64>,
     blocks: Vec<BlockSample>,
     capture: Option<InputCapture>,
+    /// Lossless libvpx with a short keyframe interval (Import Image Sequence)
+    /// instead of the export's realtime rate control.
+    lossless: bool,
 }
 
 // The FFmpeg contexts are used from one thread at a time.
@@ -197,8 +200,26 @@ fn threads(width: u32, height: u32) -> i64 {
     want.min(cores)
 }
 
+/// Keyframe interval of a lossless still sequence: today's importer's `-g 15`,
+/// so scrubbing a sequence never decodes more than 15 frames.
+const LOSSLESS_KEY_INTERVAL: u64 = 15;
+
 impl WebmSink {
     pub fn new(spec: &ExportSpec) -> Result<Self, Error> {
+        Self::open_sink(spec, false)
+    }
+
+    /// Lossless VP9 (libvpx `lossless=1`, `deadline=good`, `cpu-used=4`, a
+    /// keyframe every 15 frames): today's image sequence converter. The spec's
+    /// bit rate is unused.
+    pub fn new_lossless(spec: &ExportSpec) -> Result<Self, Error> {
+        if !matches!(spec.codec, Codec::Vp9 { .. }) {
+            return Err(Error::InvalidSpec("lossless WebM is VP9".into()));
+        }
+        Self::open_sink(spec, true)
+    }
+
+    fn open_sink(spec: &ExportSpec, lossless: bool) -> Result<Self, Error> {
         spec.validate()?;
         if spec.container != Container::Webm {
             return Err(Error::InvalidSpec(format!(
@@ -232,6 +253,7 @@ impl WebmSink {
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
             capture: None,
+            lossless,
         };
         this.open()?;
         this.capture = InputCapture::from_env()?;
@@ -315,25 +337,39 @@ impl WebmSink {
             if (*(*self.fmt).oformat).flags & ff::AVFMT_GLOBALHEADER as c_int != 0 {
                 c.flags |= ff::AV_CODEC_FLAG_GLOBAL_HEADER as c_int;
             }
-            let mut opts = vec![
-                ("deadline", "realtime".to_string()),
-                (
-                    "cpu-used",
-                    if matches!(spec.codec, Codec::Vp9 { .. }) {
-                        "7"
-                    } else {
-                        "-6"
-                    }
-                    .to_string(),
-                ),
-                ("lag-in-frames", "0".to_string()),
-                ("auto-alt-ref", "0".to_string()),
-                ("undershoot-pct", "50".to_string()),
-                ("overshoot-pct", "50".to_string()),
-                ("drop-threshold", "0".to_string()),
-                ("static-thresh", "1".to_string()),
-                ("max-intra-rate", "600".to_string()),
-            ];
+            if self.lossless {
+                c.bit_rate = 0;
+                c.gop_size = LOSSLESS_KEY_INTERVAL as c_int;
+                c.rc_buffer_size = 0;
+                c.rc_initial_buffer_occupancy = 0;
+            }
+            let mut opts = if self.lossless {
+                vec![
+                    ("lossless", "1".to_string()),
+                    ("deadline", "good".to_string()),
+                    ("cpu-used", "4".to_string()),
+                ]
+            } else {
+                vec![
+                    ("deadline", "realtime".to_string()),
+                    (
+                        "cpu-used",
+                        if matches!(spec.codec, Codec::Vp9 { .. }) {
+                            "7"
+                        } else {
+                            "-6"
+                        }
+                        .to_string(),
+                    ),
+                    ("lag-in-frames", "0".to_string()),
+                    ("auto-alt-ref", "0".to_string()),
+                    ("undershoot-pct", "50".to_string()),
+                    ("overshoot-pct", "50".to_string()),
+                    ("drop-threshold", "0".to_string()),
+                    ("static-thresh", "1".to_string()),
+                    ("max-intra-rate", "600".to_string()),
+                ]
+            };
             if matches!(spec.codec, Codec::Vp9 { .. }) {
                 opts.push(("row-mt", "1".into()));
                 let tile_columns = spec.width.div_ceil(256);
@@ -564,7 +600,11 @@ impl WebmSink {
             let rate = self.spec.rate.to_f64();
             f.pts = 0;
             f.duration = (1_000_000.0 / rate).round() as i64;
-            let key_interval = (2.0 * rate).round().max(1.0) as u64;
+            let key_interval = if self.lossless {
+                LOSSLESS_KEY_INTERVAL
+            } else {
+                (2.0 * rate).round().max(1.0) as u64
+            };
             f.pict_type = if index.is_multiple_of(key_interval) {
                 ff::AV_PICTURE_TYPE_I
             } else {

@@ -4675,9 +4675,12 @@ dependencies = [
 name = "pm-builtins"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "futures-lite",
  "pm-agents",
  "pm-audio",
+ "pm-captions",
  "pm-design",
  "pm-export",
  "pm-fx-defs",
@@ -4687,6 +4690,7 @@ dependencies = [
  "pm-panel-agentpanel",
  "pm-panel-inspector",
  "pm-panel-media",
+ "pm-panel-studio3d",
  "pm-panel-timeline",
  "pm-panel-viewerchrome",
  "pm-promedia",
@@ -4697,8 +4701,10 @@ dependencies = [
  "pm-surface",
  "pm-text",
  "pm-time",
+ "pm-transcribe",
  "serde_json",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]
@@ -4767,6 +4773,7 @@ dependencies = [
  "png",
  "regex",
  "resvg",
+ "semver",
  "serde_json",
  "sha2",
  "tar",
@@ -5085,6 +5092,8 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "block2 0.6.2",
+ "ed25519-dalek",
+ "flate2",
  "foreign-types",
  "fs2",
  "gpui-ce",
@@ -5102,6 +5111,7 @@ dependencies = [
  "pm-agents",
  "pm-audio",
  "pm-builtins",
+ "pm-captions",
  "pm-color",
  "pm-compat-host",
  "pm-compat-runner",
@@ -5128,15 +5138,19 @@ dependencies = [
  "pm-runtime-v8",
  "pm-services",
  "pm-shell",
+ "pm-store-host",
  "pm-surface",
  "pm-text",
  "pm-time",
+ "pm-transcribe",
  "pm-update-policy",
  "png",
  "raw-window-handle",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
+ "tar",
  "tempfile",
  "url",
 ]
@@ -5470,15 +5484,18 @@ name = "pm-services"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "fs2",
  "pm-captions",
  "pm-model",
  "pm-native-migrate",
  "pm-promedia",
  "pm-update-policy",
+ "regex",
  "semver",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tempfile",
  "toml_edit",
@@ -8725,6 +8742,34 @@ dependencies = [
  "potential_utf",
  "resb",
  "serde",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

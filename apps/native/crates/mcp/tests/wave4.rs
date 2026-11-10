@@ -421,7 +421,7 @@ fn remaining_16_bodies_remain_explicit_blockers_without_mutating_the_project() {
         .map(|t| t["name"].as_str().unwrap())
         .filter(|n| !catalog::IMPLEMENTED.contains(n))
         .collect();
-    assert_eq!(pending.len(), 16);
+    assert_eq!(pending.len(), 14);
     let historical = evidence["cases"].as_array().unwrap();
     assert_eq!(historical.len(), 35);
     // Studio and durable project-memory bodies have their own admitted regressions.

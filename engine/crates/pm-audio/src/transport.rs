@@ -36,10 +36,13 @@ enum Mode {
         /// Project samples per output frame: 1, 2, −1, −2.
         rate: i64,
     },
+    /// A grain over `[start, end)`, played from `start` upward (`rate` > 0)
+    /// or from `end - 1` downward; afterwards the position is `back`.
     Grain {
         start: i64,
         end: i64,
         back: i64,
+        rate: i64,
     },
 }
 
@@ -149,7 +152,7 @@ impl Transport {
         match self.mode {
             Mode::Stopped => 0,
             Mode::Playing { rate, .. } => rate,
-            Mode::Grain { .. } => 1,
+            Mode::Grain { rate, .. } => rate,
         }
     }
     pub fn is_running(&self) -> bool {
@@ -208,13 +211,25 @@ impl Transport {
     }
 
     fn start_grain(&mut self, at: i64) -> Effect {
-        let end = at + self.grain_len();
-        self.mode = Mode::Grain {
-            start: at,
-            end,
-            back: at,
+        self.start_grain_at_rate(at, 1, at)
+    }
+
+    /// A grain at `at` played at `rate` samples per output frame: forward
+    /// from `at`, or backward to `at`; the position returns to `back`.
+    fn start_grain_at_rate(&mut self, at: i64, rate: i64, back: i64) -> Effect {
+        let span = self.grain_len() * rate.abs();
+        let (start, end) = if rate > 0 {
+            (at, at + span)
+        } else {
+            ((at - span).max(0), at.max(1))
         };
-        self.position = at;
+        self.mode = Mode::Grain {
+            start,
+            end,
+            back,
+            rate,
+        };
+        self.position = if rate > 0 { start } else { end - 1 };
         self.restart()
     }
 
@@ -339,6 +354,20 @@ impl Transport {
                 };
                 self.restart()
             }
+            TransportCommand::Grain { time, rate } => {
+                let rate = jkl_rate(rate).expect("validated");
+                match self.mode {
+                    Mode::Playing { .. } => Effect::None,
+                    Mode::Grain { back, .. } => {
+                        let at = self.sample_of(time.get());
+                        self.start_grain_at_rate(at, rate, back)
+                    }
+                    Mode::Stopped => {
+                        let (at, back) = (self.sample_of(time.get()), self.position);
+                        self.start_grain_at_rate(at, rate, back)
+                    }
+                }
+            }
             TransportCommand::AudioScrub { enabled } => {
                 self.audio_scrub = enabled;
                 Effect::None
@@ -355,11 +384,19 @@ impl Transport {
         let state = self.state();
         match self.mode {
             Mode::Stopped => None,
-            Mode::Grain { start, end, .. } => {
-                if self.position >= end {
+            Mode::Grain {
+                start, end, rate, ..
+            } => {
+                // Whole output frames whose samples stay inside the grain.
+                let left = if rate > 0 {
+                    (end - self.position) / rate
+                } else {
+                    (self.position - start + 1) / -rate
+                };
+                if left <= 0 {
                     return None;
                 }
-                let n = ((end - self.position) as usize).min(max);
+                let n = (left as usize).min(max);
                 let seg = Segment {
                     start: self.position,
                     frames: n,
@@ -367,9 +404,9 @@ impl Transport {
                     epoch: self.epoch,
                     grain: Some((start, end)),
                     loop_range: None,
-                    rate: 1,
+                    rate,
                 };
-                self.position += n as i64;
+                self.position += n as i64 * rate;
                 Some(seg)
             }
             Mode::Playing { rate, .. } if rate < 0 => self.next_reverse(max, rate, state),
@@ -663,6 +700,62 @@ mod tests {
         assert_eq!(total, 36_000);
         assert_eq!(tr.take_stop(), Effect::Stopped);
         assert_eq!(tr.position(), 96_000);
+    }
+
+    #[test]
+    fn skim_grains_follow_direction_and_speed_and_leave_the_position() {
+        let mut tr = Transport::new(48_000);
+        tr.set_composition(Some(Rate::FPS_24), None);
+        tr.apply(&TransportCommand::Seek {
+            time: t(1.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        let grain = |tr: &mut Transport, at: f64, num: i32| {
+            tr.apply(&TransportCommand::Grain {
+                time: t(at),
+                rate: PlaybackRate { num, den: 1 },
+            })
+            .unwrap();
+            let mut segs = vec![];
+            while let Some(s) = tr.next(512) {
+                segs.push(s);
+            }
+            tr.take_stop();
+            segs
+        };
+        // Forward at 1x: 60 ms from the skim position, faded at both ends.
+        let f = grain(&mut tr, 3.0, 1);
+        let (first, last) = (f[0], *f.last().unwrap());
+        assert_eq!((first.start, first.rate), (144_000, 1));
+        let played: usize = f.iter().map(|s| s.frames).sum();
+        assert_eq!(played, 2_880);
+        let g = first.grain.unwrap();
+        assert_eq!(tr.grain_gain(g, first.start), 0.0);
+        assert!(tr.grain_gain(g, last.start + last.frames as i64 - 1) < 0.01);
+        assert_eq!(tr.position(), 48_000, "the playhead position stays");
+        // Backward: from the skim position down, the same length.
+        let b = grain(&mut tr, 3.0, -1);
+        assert_eq!((b[0].start, b[0].rate), (143_999, -1));
+        assert_eq!(b.iter().map(|s| s.frames).sum::<usize>(), 2_880);
+        // 2x covers twice the samples in the same output frames.
+        let fast = grain(&mut tr, 3.0, 2);
+        assert_eq!(fast.iter().map(|s| s.frames).sum::<usize>(), 2_880);
+        assert_eq!(fast[0].media_span().0, 144_000);
+        assert_eq!(tr.position(), 48_000);
+        // While playing, a grain is ignored.
+        tr.apply(&TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        assert_eq!(
+            tr.apply(&TransportCommand::Grain {
+                time: t(3.0),
+                rate: PlaybackRate::NORMAL
+            })
+            .unwrap(),
+            Effect::None
+        );
     }
 
     #[test]

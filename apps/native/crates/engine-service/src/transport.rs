@@ -51,6 +51,9 @@ pub struct Transport {
     audible: bool,
     /// Latest known vsync (host s) and refresh interval for this viewer.
     pub grid: Option<(f64, f64)>,
+    /// The Mixer's monitor solo (`None`: every strip), kept for a link that
+    /// opens later.
+    solo: Option<std::collections::HashSet<String>>,
 }
 /// The first vsync on `grid` at or after `at` (host µs). The picture can only
 /// change on vsync, so a run whose first sample is heard exactly on that line
@@ -75,6 +78,7 @@ impl Transport {
             fallback: false,
             audible: false,
             grid: None,
+            solo: None,
         }
     }
     /// Worker only. AudioLink lazily opens Playback after WARM_IDLE if audible.
@@ -89,6 +93,9 @@ impl Transport {
         let link =
             AudioLink::start(doc.clone(), comp, media, levels).map_err(anyhow::Error::msg)?;
         link.send(AudioCtl::Warm);
+        if self.solo.is_some() {
+            link.send(AudioCtl::Solo(self.solo.clone()));
+        }
         self.audio = Some(link);
         Ok(audible?)
     }
@@ -116,6 +123,14 @@ impl Transport {
         let audible = pm_audio::graph::audible(doc, comp, &mut pm_eval::Evaluator::new());
         self.audible = matches!(audible, Ok(true));
         audible.map(drop)
+    }
+    /// The Mixer's monitor solo: the strips heard (empty: every strip). A
+    /// listening aid; never part of the document or an export.
+    pub fn monitor(&mut self, solo: Vec<String>) {
+        self.solo = (!solo.is_empty()).then(|| solo.into_iter().collect());
+        if let Some(a) = &self.audio {
+            a.send(AudioCtl::Solo(self.solo.clone()));
+        }
     }
     pub fn command(&mut self, cmd: TransportCommand, now: i64) {
         let before = self

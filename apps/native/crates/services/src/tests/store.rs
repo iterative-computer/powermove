@@ -48,7 +48,7 @@ fn store_client(responses: Vec<Value>) -> store::StoreClient<TransportDouble> {
 }
 #[test]
 fn search_uses_frozen_route_categories_and_encoded_query() {
-    let listing = json!({"repoId":REPO,"slug":"synthetic-extension","iconUrl":format!("/v1/store/icons/{}.png","a".repeat(64)),"future":{"kept":true}});
+    let listing = json!({"repoId":REPO,"owner":{"handle":"synthetic"},"slug":"synthetic-extension","iconUrl":format!("/v1/store/icons/{}.png","a".repeat(64)),"future":{"kept":true}});
     let mut client = store_client(vec![json!({"items":[listing],"nextCursor":"next"})]);
     let result = client
         .search(store::Search {
@@ -85,7 +85,7 @@ fn unsafe_icon_is_replaced_with_null() {
         "https://registry.invalid/v1/store/icons/a.png?credentials=x",
     ] {
         let mut client = store_client(vec![
-            json!({"items":[{"repoId":REPO,"slug":"synthetic-extension","iconUrl":icon}],"nextCursor":null}),
+            json!({"items":[{"repoId":REPO,"owner":{"handle":"synthetic"},"slug":"synthetic-extension","iconUrl":icon}],"nextCursor":null}),
         ]);
         assert!(client.search(store::Search::default()).unwrap().items[0]["iconUrl"].is_null());
     }
@@ -235,4 +235,89 @@ fn nullable_store_fields_are_required_in_wire_metadata() {
             .versions(&[installed()])
             .is_err()
     );
+}
+fn listing_dto(slug: &str) -> Value {
+    json!({"repoId":REPO,"owner":{"id":REPO,"handle":"synthetic","tombstoned":false,"verified":true},
+        "slug":slug,"name":"Synthetic","tagline":"A line","category":"effects","iconUrl":null,
+        "latest":{"id":NEW,"version":"1.2.3","publishedAt":"2026-11-01T00:00:00Z","apiVersion":3,"yankedAt":null},
+        "permissions":["network","full-access"],"installCount":7})
+}
+#[test]
+fn browse_and_detail_use_their_routes_and_admit_every_listing() {
+    let mut client = store_client(vec![
+        json!({"sections":[{"id":"featured","title":"Featured","items":[listing_dto("one")]}]}),
+    ]);
+    let shelves = client.browse().unwrap();
+    assert_eq!(shelves[0].title, "Featured");
+    assert_eq!(client.transport.requests[0].url.path(), "/v1/store/browse");
+    // A listing without a publisher is refused, not shown half-empty.
+    let mut bad = listing_dto("two");
+    bad["owner"] = Value::Null;
+    let mut client = store_client(vec![
+        json!({"sections":[{"id":"new","title":"New","items":[bad]}]}),
+    ]);
+    assert!(client.browse().is_err());
+
+    let mut detail = listing_dto("synthetic-extension");
+    detail["about"] = Value::Null;
+    detail["releases"] = json!([
+        {"id":NEW,"version":"1.2.3","publishedAt":"2026-11-01T00:00:00Z","yankedAt":null,"notes":"Faster","apiVersion":3,
+         "manifest":{"description":"From the manifest","contributes":["effects","palette"],"vars":[{"key":"API_KEY","label":"Key"}],"links":["https://example.com"]}},
+        {"id":OLD,"version":"1.0.0","publishedAt":"2026-10-01T00:00:00Z","yankedAt":"2026-10-02T00:00:00Z","notes":null,"apiVersion":3,"manifest":{}}
+    ]);
+    let mut client = store_client(vec![detail]);
+    let value = client.detail("synthetic", "synthetic-extension").unwrap();
+    assert_eq!(
+        client.transport.requests[0].url.path(),
+        "/v1/store/x/synthetic/synthetic-extension"
+    );
+    let detail = crate::surfaces::store::Detail::from_value(&value).unwrap();
+    assert_eq!(detail.about.as_deref(), Some("From the manifest"));
+    assert!(detail.declares_values);
+    assert_eq!(detail.link_hosts, ["example.com"]);
+    assert_eq!(detail.releases.len(), 2);
+    assert!(detail.releases[1].withdrawn);
+    assert_eq!(detail.listing.coordinate(), "synthetic/synthetic-extension");
+    assert!(detail.listing.verified);
+    assert_eq!(
+        crate::surfaces::store::includes_text(&detail.contributes),
+        "Effects, Command palette"
+    );
+    assert_eq!(
+        crate::surfaces::store::permission_lines(&detail.listing.permissions),
+        [
+            ("Needs full access to Powermove", true),
+            ("Uses the network", false)
+        ]
+    );
+    // Handles and slugs are checked before anything is sent.
+    let mut client = store_client(vec![]);
+    assert!(client.detail("../x", "synthetic").is_err());
+    assert!(client.detail("synthetic", "a/b").is_err());
+    assert!(client.transport.requests.is_empty());
+}
+#[test]
+fn relative_dates_read_like_the_shipped_store() {
+    use crate::surfaces::store::{civil_days, civil_from_days, relative_date};
+    let today = (2026, 11, 9);
+    assert_eq!(relative_date("2026-11-09T10:00:00Z", today), "Today");
+    assert_eq!(relative_date("2026-11-08T10:00:00Z", today), "Yesterday");
+    assert_eq!(relative_date("2026-11-05T10:00:00Z", today), "4 days ago");
+    assert_eq!(relative_date("2026-09-19T10:00:00Z", today), "Sep 19");
+    assert_eq!(relative_date("2025-09-19T10:00:00Z", today), "Sep 19, 2025");
+    assert_eq!(relative_date("nonsense", today), "");
+    assert_eq!(civil_from_days(civil_days(today)), today);
+    assert_eq!(civil_days((1970, 1, 1)), 0);
+}
+#[cfg(debug_assertions)]
+#[test]
+fn development_builds_take_a_loopback_fixture_store_only() {
+    assert!(store::StoreClient::new("http://127.0.0.1:4100/", TransportDouble::default()).is_ok());
+    for origin in [
+        "http://localhost:4100/",
+        "http://10.0.0.1/",
+        "http://example.com/",
+    ] {
+        assert!(store::StoreClient::new(origin, TransportDouble::default()).is_err());
+    }
 }

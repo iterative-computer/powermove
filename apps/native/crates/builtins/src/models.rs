@@ -539,13 +539,31 @@ impl Backend {
         let window =
             pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
         let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
-        let snapshot = window
+        let mut snapshot = window
             .snapshot(
                 panel,
                 count.saturating_sub(64)..count,
                 crate::agent_host::now_ms(),
             )
             .map_err(|e| format!("{e:?}"))?;
+        // The images, videos and sounds each reply names, for its cards.
+        let home = reply_home();
+        for item in snapshot["rows"]["items"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            let value = &mut item["value"];
+            let media: Vec<Value> = reply_media(value, &home)
+                .iter()
+                .map(
+                    |m| json!({"kind":m.kind_name(),"path":m.path,"name":m.name,"remote":m.remote}),
+                )
+                .collect();
+            if !media.is_empty() {
+                value["media"] = json!(media);
+            }
+        }
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
         let needs_answer = session.needs_answer();
@@ -568,10 +586,18 @@ impl Backend {
             json!({"id":p.project,"name":name})
         });
         let state = self.kernel.state();
+        let mods =
+            pm_services::surface_backing::projects::mods(&mod_records(&state)).unwrap_or_default();
         let extensions = state
             .extensions
             .values()
+            .filter(|e| !archived(e))
             .map(|e| {
+                let can_archive = mods.iter().any(|m| {
+                    m.id == e.id
+                        && m.actions
+                            .contains(&pm_services::surface_backing::projects::ModAction::Archive)
+                });
                 let host = e.source.get("hostRecord");
                 let text = |key: &str| {
                     host.and_then(|h| h.get(key))
@@ -601,15 +627,22 @@ impl Backend {
                     == Some(true);
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
                     "enabled":e.enabled && !stopped,"about":text("about").unwrap_or_default(),"includes":includes,
-                    "shortcuts":[],"files":[],"variables":[],"canArchive":false})
+                    "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
         let accounts = self.account_rows();
-        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready","speech":[]});
+        let speech = crate::speech::status();
+        let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default()});
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(speech_rows.iter().cloned());
+        }
         if let Some(project) = project {
             publication["project"] = project;
             let mut rows = self.settings_rows()?;
             rows.extend(self.account_rows());
+            rows.extend(speech_rows);
             publication["rows"] = json!(rows);
             let p = self.published().ok_or("Project closed")?;
             let root = p.snapshot.root().ok_or("Project closed")?;
@@ -1173,6 +1206,27 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openMedia" {
+                        // Only a file or address one of this thread's replies names.
+                        let path = action["path"].as_str().unwrap_or_default();
+                        let home = reply_home();
+                        let media = state
+                            .panel
+                            .session(&thread)
+                            .map_err(|e| format!("{e:?}"))?
+                            .conversation
+                            .values()
+                            .flat_map(prose_rows)
+                            .flat_map(|row| reply_media(row, &home))
+                            .find(|m| m.path == path)
+                            .ok_or("This file can't be opened from here.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.media".into(),
+                            json!({"path":media.path,"remote":media.remote,"reveal":action["reveal"] == true}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "openVisual" {
                         // A saved reply is checked again before it's shown (main's
                         // readVisualReply); the window opens its own viewer.
@@ -1414,6 +1468,66 @@ pub(crate) fn layer_numbers(p: &Published) -> bool {
         .and_then(|c| c.get("timeline"))
         .and_then(|t| t.get("showLayerNumbers"))
         .is_none_or(|v| *v != pm_model::Value::Bool(false))
+}
+
+/// The home folder `~/` paths in replies resolve against.
+fn reply_home() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(Into::into).unwrap_or_default()
+}
+/// The media an agent's prose names: an assistant message, or a text step of
+/// a run's trace (one row each in the panel); none for anything else.
+fn reply_media(
+    row: &Value,
+    home: &std::path::Path,
+) -> Vec<pm_services::surfaces::agent_reply::ReplyMedia> {
+    let prose = (row["role"] == "assistant" && row["error"] != true) || row["kind"] == "text";
+    if !prose {
+        return Vec::new();
+    }
+    pm_services::surfaces::agent_reply::reply_media(row["text"].as_str().unwrap_or_default(), home)
+}
+/// Every row of a stored message that can carry agent prose.
+fn prose_rows(message: &Value) -> Vec<&Value> {
+    match message["steps"].as_array() {
+        Some(steps) if message["role"] == "trace" => steps.iter().collect(),
+        _ => vec![message],
+    }
+}
+
+/// The Mods records (S105) of the extensions the kernel knows: built-ins and
+/// what this Mac installed or made, with their health as the host saw it.
+pub(crate) fn mod_records(
+    state: &pm_kernel::state::StateSnapshot,
+) -> pm_services::surface_backing::Records {
+    let entries = state
+        .extensions
+        .values()
+        .filter(|e| !archived(e))
+        .map(|e| {
+            let host = e
+                .source
+                .get("hostRecord")
+                .map(|h| serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(h)))
+                .and_then(Result::ok)
+                .unwrap_or(Value::Null);
+            let stopped = host["stopped"] == true;
+            json!({"id":e.id,"scope":if e.installed { "user" } else { "builtin" },
+                "enabled":e.enabled && !stopped,"health":host["health"],"manifest":{}})
+        })
+        .collect();
+    pm_services::surface_backing::Records {
+        revision: state.revision,
+        entries,
+    }
+}
+/// Deleted from Settings: the folder is in the archive, its values are kept.
+fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+    entry
+        .source
+        .get("hostRecord")
+        .and_then(|r| r.get("archived"))
+        .and_then(pm_model::Value::as_bool)
+        == Some(true)
 }
 
 #[cfg(test)]

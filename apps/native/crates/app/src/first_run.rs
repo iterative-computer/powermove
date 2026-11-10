@@ -565,7 +565,8 @@ impl Flow {
                 title: "Pick Your Speech Model.".into(),
                 line: "Captions and your agent can transcribe speech on this Mac. It’s optional, and the download runs while you work."
                     .into(),
-                // No speech model service in the app yet: the spec's unavailable state.
+                // Models download from Settings › Transcription (S092) and the
+                // Generate Captions sheet (S091); S109's in-flow chooser isn't built.
                 status: Some("Speech models can be downloaded later from Settings.".into()),
                 ..Frame::default()
             }),

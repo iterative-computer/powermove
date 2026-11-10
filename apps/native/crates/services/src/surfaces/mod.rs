@@ -13,6 +13,7 @@ pub mod client_consent;
 pub mod copy;
 pub mod easing;
 pub mod providers;
+pub mod publish_tree;
 pub mod publishing;
 pub mod shader;
 pub mod store;

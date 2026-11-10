@@ -358,6 +358,277 @@ pub fn detail_action(
     DetailAction::Open
 }
 
+/// The Store's seven kinds, in sidebar order: (category, plural label).
+pub const KINDS: [(&str, &str); 7] = [
+    ("effects", "Effects"),
+    ("transitions", "Transitions"),
+    ("panels", "Panels"),
+    ("themes", "Themes"),
+    ("commands", "Commands"),
+    ("layers", "Layers"),
+    ("tools", "Tools"),
+];
+/// A kind's singular label, as a listing's second line names it.
+pub fn kind_label(category: &str) -> &str {
+    match category {
+        "effects" => "Effect",
+        "transitions" => "Transition",
+        "panels" => "Panel",
+        "themes" => "Theme",
+        "commands" => "Commands",
+        "layers" => "Layer",
+        "tools" => "Tool",
+        other => other,
+    }
+}
+/// What an extension declares it uses, as the Store discloses it (v1.2.0
+/// `PERMISSION_LABEL`), full access first. `true` marks the one to warn about.
+pub fn permission_lines(permissions: &[String]) -> Vec<(&'static str, bool)> {
+    ordered_permissions(permissions)
+        .into_iter()
+        .filter_map(|p| {
+            Some(match p {
+                "full-access" => ("Needs full access to Powermove", true),
+                "project:write" => ("Edits your project", false),
+                "assets" => ("Imports files", false),
+                "network" => ("Uses the network", false),
+                "clipboard" => ("Uses the clipboard", false),
+                _ => return None,
+            })
+        })
+        .collect()
+}
+/// What the extension adds, as a person would say it (v1.2.0 `includesText`).
+pub fn includes_text(contributes: &[String]) -> String {
+    contributes
+        .iter()
+        .map(|kind| match kind.as_str() {
+            "panels" => "Panels",
+            "inspector" => "Inspector",
+            "media" => "Media",
+            "commands" => "Commands",
+            "keybindings" => "Shortcuts",
+            "effects" => "Effects",
+            "transitions" => "Transitions",
+            "layers" => "Layers",
+            "themes" => "Themes",
+            "palette" => "Command palette",
+            "menus" => "Menus",
+            "status" => "Status bar",
+            "hooks" => "Hooks",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+/// API versions are capabilities, not app release numbers.
+pub fn requires_text(api: Option<u32>) -> &'static str {
+    match compatibility(api) {
+        Compatibility::SupportedLegacy | Compatibility::NativeV4 => {
+            "Supported by this version of Powermove"
+        }
+        _ => "A newer version of Powermove",
+    }
+}
+/// "Today", "Yesterday", "3 days ago", then "Sep 19" (and the year once it
+/// isn't this one), from an ISO date against `today` (`(year, month, day)`).
+pub fn relative_date(iso: &str, today: (i32, u32, u32)) -> String {
+    let parse = |s: &str| -> Option<(i32, u32, u32)> {
+        let mut parts = s.get(..10)?.split('-');
+        let year = parts.next()?.parse().ok()?;
+        let month = parts
+            .next()?
+            .parse()
+            .ok()
+            .filter(|m| (1..=12).contains(m))?;
+        let day = parts
+            .next()?
+            .parse()
+            .ok()
+            .filter(|d| (1..=31).contains(d))?;
+        Some((year, month, day))
+    };
+    let Some(then) = parse(iso) else {
+        return String::new();
+    };
+    let days = civil_days(today) - civil_days(then);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    match days {
+        ..=0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..=6 => format!("{days} days ago"),
+        _ if then.0 == today.0 => format!("{} {}", MONTHS[then.1 as usize - 1], then.2),
+        _ => format!("{} {}, {}", MONTHS[then.1 as usize - 1], then.2, then.0),
+    }
+}
+/// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's algorithm).
+pub fn civil_days((year, month, day): (i32, u32, u32)) -> i64 {
+    let y = i64::from(year) - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+/// The date `days` after 1970-01-01, the inverse of [`civil_days`].
+pub fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    ((yoe + era * 400 + i64::from(month <= 2)) as i32, month, day)
+}
+
+/// A storefront card or search result, from a listing the client admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listing {
+    pub repo_id: String,
+    pub handle: String,
+    pub verified: bool,
+    pub slug: String,
+    pub name: String,
+    pub tagline: String,
+    pub category: String,
+    /// The latest release: (release id, version, apiVersion, published).
+    pub latest: Option<(String, String, Option<u32>, String)>,
+    pub permissions: Vec<String>,
+    pub install_count: u64,
+}
+impl Listing {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        let latest = value.get("latest").filter(|l| !l.is_null()).and_then(|l| {
+            Some((
+                l.get("id")?.as_str()?.to_owned(),
+                l.get("version")?.as_str()?.to_owned(),
+                l.get("apiVersion")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+                l.get("publishedAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        });
+        Some(Self {
+            repo_id: text("repoId")?,
+            handle: value.pointer("/owner/handle")?.as_str()?.to_owned(),
+            verified: value.pointer("/owner/verified") == Some(&Value::Bool(true)),
+            slug: text("slug")?,
+            name: text("name").unwrap_or_default(),
+            tagline: text("tagline").unwrap_or_default(),
+            category: text("category").unwrap_or_default(),
+            latest,
+            permissions: strings(value.get("permissions")),
+            install_count: value
+                .get("installCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        })
+    }
+    /// `publisher/slug`, the Store coordinate.
+    pub fn coordinate(&self) -> String {
+        format!("{}/{}", self.handle, self.slug)
+    }
+}
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect()
+}
+/// One entry of a detail page's version list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Release {
+    pub id: String,
+    pub version: String,
+    pub published_at: String,
+    pub notes: Option<String>,
+    pub withdrawn: bool,
+    pub api_version: Option<u32>,
+}
+/// A detail page: the listing, its about text and every release, newest first
+/// as the Store sends them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Detail {
+    pub listing: Listing,
+    pub about: Option<String>,
+    pub contributes: Vec<String>,
+    /// Hosts `links` lets it open without asking; only with `network`.
+    pub link_hosts: Vec<String>,
+    /// The latest release declares values a person sets up.
+    pub declares_values: bool,
+    pub releases: Vec<Release>,
+}
+impl Detail {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let listing = Listing::from_value(value)?;
+        let releases: Vec<&Value> = value.get("releases")?.as_array()?.iter().collect();
+        let latest_id = listing.latest.as_ref().map(|l| l.0.clone());
+        let latest = releases
+            .iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == latest_id.as_deref())
+            .or_else(|| {
+                releases
+                    .iter()
+                    .find(|r| r.get("yankedAt").is_none_or(Value::is_null))
+            });
+        let manifest = latest.and_then(|r| r.get("manifest"));
+        let about = value
+            .get("about")
+            .and_then(Value::as_str)
+            .or_else(|| manifest?.get("description")?.as_str())
+            .map(str::to_owned);
+        let link_hosts = if listing.permissions.iter().any(|p| p == "network") {
+            strings(manifest.and_then(|m| m.get("links")))
+                .into_iter()
+                .map(|origin| origin.trim_start_matches("https://").to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(Self {
+            about,
+            contributes: strings(manifest.and_then(|m| m.get("contributes"))),
+            link_hosts,
+            declares_values: manifest
+                .and_then(|m| m.get("vars"))
+                .and_then(Value::as_array)
+                .is_some_and(|v| !v.is_empty()),
+            releases: releases
+                .iter()
+                .filter_map(|r| {
+                    Some(Release {
+                        id: r.get("id")?.as_str()?.to_owned(),
+                        version: r.get("version")?.as_str()?.to_owned(),
+                        published_at: r
+                            .get("publishedAt")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        notes: r.get("notes").and_then(Value::as_str).map(str::to_owned),
+                        withdrawn: r.get("yankedAt").is_some_and(|y| !y.is_null()),
+                        api_version: r
+                            .get("apiVersion")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| u32::try_from(n).ok()),
+                    })
+                })
+                .collect(),
+            listing,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,7 +662,7 @@ mod tests {
         work.run(&mut client)
     }
     fn listing(name: &str) -> Value {
-        json!({"repoId":"11111111-1111-4111-8111-111111111111","slug":"synthetic-extension","name":name,"iconUrl":null,"future":1})
+        json!({"repoId":"11111111-1111-4111-8111-111111111111","owner":{"handle":"synthetic"},"slug":"synthetic-extension","name":name,"iconUrl":null,"future":1})
     }
     #[test]
     fn stale_search_and_close_cannot_publish() {

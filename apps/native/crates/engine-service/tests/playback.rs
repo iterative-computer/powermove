@@ -520,3 +520,63 @@ fn extension_effects_from_the_resource_snapshot_render_natively() {
         "inverted red is cyan: {centre:?}"
     );
 }
+
+/// A project saved by the shipped app at current main
+/// (`pm-kernel/tests/fixtures/main-current`) draws in the viewer: no error and
+/// no hang, frames at several times, and what this build can't draw yet is
+/// bypassed and named (an effect type nothing provides, and a revision newer
+/// than this build), never dropped from the document.
+#[cfg(feature = "kernel")]
+#[test]
+fn a_current_main_project_draws_and_names_what_this_build_bypasses() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../kernel/tests/fixtures/main-current/current.pmv");
+    let opened = pm_kernel::open_project(&path, Default::default()).unwrap();
+    let store = pm_kernel::DocumentStore::open(opened);
+    let before =
+        pm_model::json::to_canonical_string(&store.snapshot().document.root().unwrap().to_value());
+    let service = service("main-current");
+    let v = service
+        .viewer(config(
+            store.snapshot(),
+            MediaCatalog::default(),
+            output(320, 180),
+        ))
+        .unwrap();
+    for seconds in [0, 1, 3] {
+        v.command(C::Seek {
+            time: Ticks::new(seconds * TICKS_PER_SECOND).unwrap(),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        v.capture_next().unwrap();
+        let stamp = v.stamp().unwrap();
+        let status = wait(&v, "a current-main frame", |s| {
+            s.error.is_some()
+                || s.frame
+                    .as_ref()
+                    .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+        });
+        assert_eq!(status.error, None, "t={seconds}");
+        let named = |effect: &str, revision: Option<&str>| {
+            status
+                .missing_effects
+                .iter()
+                .any(|m| m.effect == effect && m.revision.as_deref() == revision)
+        };
+        assert!(
+            named("blur", Some("99")) && named("futureEffect", None),
+            "t={seconds}: {:?}",
+            status.missing_effects
+        );
+        // Whatever else can't draw yet (inputs, fonts this test service
+        // lacks) is a named layer failure, and the notice says so.
+        assert!(status.layer_failures.iter().all(|f| !f.message.is_empty()));
+        assert!(status.notice().is_some());
+    }
+    assert_eq!(
+        pm_model::json::to_canonical_string(&store.snapshot().document.root().unwrap().to_value()),
+        before,
+        "drawing never rewrites the document"
+    );
+}

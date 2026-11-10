@@ -21,6 +21,9 @@ pub struct TextField {
     /// The newest host replacement this field took (see
     /// [`Self::set_value_from_host`]).
     host_value: u64,
+    /// A multiline editor that takes its container's whole height (Shader Lab,
+    /// Notes) instead of four rows.
+    fill: bool,
 }
 impl EventEmitter<TextEvent> for TextField {}
 impl TextField {
@@ -80,7 +83,47 @@ impl TextField {
             tokens,
             submitted: None,
             host_value: 0,
+            fill: false,
         }
+    }
+    /// A multiline editor in `family` (code editors use the mono face) that
+    /// fills its parent's height.
+    pub fn code_editor(&mut self, family: &str) {
+        let size = self.tokens.typography.body as f64;
+        // The family's PostScript face when installed, else Menlo (always is).
+        let face = [
+            format!("{}-Regular", family.replace(' ', "")),
+            "Menlo-Regular".into(),
+        ]
+        .into_iter()
+        .find(|name| {
+            objc2_app_kit::NSFont::fontWithName_size(
+                &objc2_foundation::NSString::from_str(name),
+                size,
+            )
+            .is_some()
+        })
+        .unwrap_or_default();
+        self.slot.set_font(&face, size);
+        // Code: no spelling marks, corrections or smart substitutions.
+        if let Some(view) = self
+            .slot
+            .native_view()
+            .downcast_ref::<objc2_app_kit::NSTextView>()
+        {
+            view.setContinuousSpellCheckingEnabled(false);
+            view.setAutomaticSpellingCorrectionEnabled(false);
+            view.setAutomaticQuoteSubstitutionEnabled(false);
+            view.setAutomaticDashSubstitutionEnabled(false);
+            view.setAutomaticTextReplacementEnabled(false);
+            view.setGrammarCheckingEnabled(false);
+        }
+        self.fill = true;
+    }
+    /// The editor fills its container's height (a notes pane) instead of
+    /// four rows.
+    pub fn set_fill(&mut self, fill: bool) {
+        self.fill = fill;
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
     pub fn set_unit(&mut self, unit: Option<SharedString>) {
@@ -159,16 +202,19 @@ impl Render for TextField {
             .id("native-text")
             .relative()
             .w_full()
-            .h(px(if self.kind == TextKind::Composer {
-                // Grows with its lines, up to the composer's limit.
-                let lines = (self.value.lines().count().max(1) as f32)
-                    .min(self.tokens.metrics.composer_max_lines);
-                (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
-            } else if self.kind == TextKind::Multiline {
-                self.tokens.metrics.row * 4.
-            } else {
-                self.tokens.metrics.field
-            }))
+            .when(self.fill, |d| d.h_full())
+            .when(!self.fill, |d| {
+                d.h(px(if self.kind == TextKind::Composer {
+                    // Grows with its lines, up to the composer's limit.
+                    let lines = (self.value.lines().count().max(1) as f32)
+                        .min(self.tokens.metrics.composer_max_lines);
+                    (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
+                } else if self.kind == TextKind::Multiline {
+                    self.tokens.metrics.row * 4.
+                } else {
+                    self.tokens.metrics.field
+                }))
+            })
             // A well with a unit trades side padding for the value's room.
             .px(px(if self.unit.is_some() {
                 self.tokens.metrics.inner_radius

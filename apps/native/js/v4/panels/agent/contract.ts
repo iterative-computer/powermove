@@ -116,7 +116,8 @@ export type Action =
   | { type: "chooseAnswer"; step: string; question: string; option: string }
   | { type: "typeAnswer"; step: string; question: string; text: string }
   | { type: "answer"; step: string; skip: boolean }
-  | { type: "artifact"; path: string; import: boolean };
+  | { type: "artifact"; path: string; import: boolean }
+  | { type: "openMedia"; path: string; reveal: boolean };
 export interface Publication {
   generation: number;
   sequence: number;

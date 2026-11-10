@@ -11,6 +11,7 @@
 //!   [`verify`] and an [`atomic`] move into place.
 //! * `webm` (macOS engine integration): VP9 and VP8 (with alpha) through libvpx and Opus through libopus,
 //!   muxed by FFmpeg, verified by demuxing and decoding.
+//! * `stills` (macOS engine integration): Import Image Sequence's lossless VP9 WebM.
 //! * [`png`]: PNG sequences and stills, 8 or 16-bit, verified losslessly.
 //! * [`software`]: headless FFmpeg software codecs through the same [`Sink`] trait.
 //! * [`export`]: platform delivery for every format ([`OutputSink`]).
@@ -37,6 +38,8 @@ pub mod render;
 pub mod schedule;
 pub mod settings;
 pub mod software;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod stills;
 pub mod timescale;
 pub mod verify;
 #[cfg(all(feature = "engine", target_os = "macos"))]

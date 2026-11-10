@@ -43,10 +43,26 @@ for line in expanded.splitlines():
     rows.append(row)
 if len(rows) != 57 or len({row["id"] for row in rows}) != 57:
     raise SystemExit("delta inventory changed; reconcile ownership")
-output = json.dumps(rows, indent=2) + "\n"
 path = ROOT / "apps/native/crates/acceptance/data/main-deltas.json"
+# The ledger's current-main overlay (w21-main): per-row `current_main` status
+# against CURRENT_MAIN and `M` rows for current-main data the anchored
+# inventory predates. Both are maintained in the JSON itself.
+CURRENT_MAIN = "6d5bceb63218b96e751d77ac0450a3a3f22293ec"
+existing = json.loads(path.read_text()) if path.exists() else []
+overlay = {row["id"]: row["current_main"] for row in existing if "current_main" in row}
+for row in rows:
+    if row["id"] in overlay:
+        if overlay[row["id"]].get("reference") != CURRENT_MAIN:
+            raise SystemExit(f"{row['id']}: current_main overlay is not anchored at {CURRENT_MAIN}")
+        row["current_main"] = overlay[row["id"]]
+# Current-main data the anchored inventory predates (its own file, so the
+# pinned 57-row inventory stays exact).
+extra = json.loads((path.parent / "main-deltas-current.json").read_text())
+if any(not r["id"].startswith("M") or r["reference"] != CURRENT_MAIN or r["current_main"]["reference"] != CURRENT_MAIN for r in extra):
+    raise SystemExit("main-deltas-current.json rows must be M rows anchored at current main")
+output = json.dumps(rows, indent=2) + "\n"
 if "--write" in sys.argv:
     path.write_text(output)
 elif path.read_text() != output:
     raise SystemExit("delta routes or pinned source provenance drift")
-print("57 delta rows and pinned A01–A10 source hashes verified; shared docs read-only")
+print(f"57 delta rows, {len(extra)} current-main rows and pinned A01–A10 source hashes verified; shared docs read-only")

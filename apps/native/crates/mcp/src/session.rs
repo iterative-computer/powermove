@@ -602,6 +602,36 @@ impl McpSession {
             }
 
             "export_captions" => host.export_captions(&id, args),
+            "transcribe_media" => {
+                let speech = host
+                    .speech
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let frozen = host.freeze(&id)?;
+                drop(host);
+                speech.transcribe(&frozen, args)
+            }
+            "generate_captions" => {
+                let speech = host
+                    .speech
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let frozen = host.freeze(&id)?;
+                drop(host);
+                let mut result = speech.captions(&frozen, args, self.writer)?;
+                if result["status"] != "done" {
+                    return Ok(result);
+                }
+                // The captions land in this run's transaction, as one step.
+                let command = result["command"].take();
+                let label = args["label"].as_str().unwrap_or("Generate Captions");
+                self.dispatch(
+                    "apply_commands",
+                    &json!({"commands":[command.clone()],"label":label}),
+                )?;
+                Ok(json!({"status":"done","layerId":command["id"],
+                    "cues":result["cues"],"language":result["language"]}))
+            }
             "import_media" | "replace_media" | "import_media_to_timeline" => {
                 let importer = host
                     .media_importer

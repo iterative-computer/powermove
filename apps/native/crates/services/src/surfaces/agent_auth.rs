@@ -71,7 +71,7 @@ fn base64url(bytes: &[u8]) -> String {
 
 pub fn registry_origin(raw: &str) -> Option<String> {
     let url = Url::parse(raw).ok()?;
-    (url.scheme() == "https"
+    ((url.scheme() == "https" || crate::store::dev_loopback(&url))
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none()

@@ -126,8 +126,12 @@ signature: they arrive over the same channel as the bytes.
 - The private key stays server-side. Each `(publisher, key_id, public key)` the app
   trusts is a compile-time entry in `PINNED_KEYS` (`compat-runner/src/store_install.rs`);
   rotation ships a new pin in an app release before the server signs with the new key.
+- The app installs a signed release only for what the Store page offered: `extension` must
+  be the listing's `slug`, `release_id` the release asked for, and the archive's
+  manifest `version` that release's version; an update must be a newer semver than the
+  active release (a replayed older envelope is refused, never a downgrade).
 
-Until a key is pinned, the palette offers no Store install and `install` refuses with
+Until a key is pinned, Store › Install is disabled with
 "Store installs need a signed release, and the Store doesn't sign releases yet."
 Installs the shipped app made keep running with legacy provenance.
 

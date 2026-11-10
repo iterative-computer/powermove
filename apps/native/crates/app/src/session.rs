@@ -79,8 +79,14 @@ pub struct Controller {
     pub project_hdr: bool,
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
+    pub mixer: crate::mixer_panel::State,
+    pub captions: crate::captions_panel::State,
+    pub shader: crate::shader_panel::State,
+    pub takes: crate::takes_panel::State,
+    pub notes: crate::notes_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
+    pub skimming: crate::skimming::Skimming,
     pub popout: Option<crate::viewer2::Popout>,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
@@ -191,6 +197,11 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
+                .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::captions_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -443,8 +454,14 @@ impl Controller {
             project_hdr: false,
             scopes: Default::default(),
             perf: Default::default(),
+            mixer: Default::default(),
+            captions: Default::default(),
+            shader: Default::default(),
+            takes: Default::default(),
+            notes: Default::default(),
             safe_areas: false,
             guides: false,
+            skimming: Default::default(),
             popout: None,
             main_output: Default::default(),
             selected: None,
@@ -886,6 +903,10 @@ impl Controller {
     }
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::layer_commands::Clipboard;
+        // Figma's layers claim the paste ahead of the app's own clipboard.
+        if self.paste_figma(cx) {
+            return true;
+        }
         let time = self.time();
         match self.clipboard.clone() {
             Clipboard::Empty => false,
@@ -911,7 +932,11 @@ impl Controller {
         );
     }
     /// One Undo step, then the selection it leads to.
-    fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
+    pub(crate) fn run_layer_plan(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        cx: &mut Context<Self>,
+    ) {
         let revision = self.published.as_ref().map(|p| p.revision());
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {
@@ -947,7 +972,7 @@ impl Controller {
             .and_then(|v| v.status().clock)
             .map_or(0., |c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64)
     }
-    fn event_time() -> f64 {
+    pub(crate) fn event_time() -> f64 {
         objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap())
             .currentEvent()
             .map(|e| e.timestamp())
@@ -1460,7 +1485,13 @@ impl Controller {
             end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
             audio: true,
         }) {
-            Ok(viewer) => self.viewer = Some(viewer),
+            Ok(viewer) => {
+                // The editor's viewer drags a slow project at reduced resolution.
+                let _ = viewer.adapt_drags(true);
+                let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
+                self.skimming.at = None;
+                self.viewer = Some(viewer)
+            }
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
         self.apply_extension_resources();
@@ -1619,6 +1650,14 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
+            self.restore_take(id, cx);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("takeDelete:") {
+            self.delete_take(id, cx);
+            return true;
+        }
         if cmd.name == "toolShape" {
             // The segment menu names a variant; Q again on the Shape tool
             // cycles them; a toolbar click keeps the current one.
@@ -1691,6 +1730,8 @@ impl Controller {
                 };
                 return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
             }
+            "toggleSkimming" => self.toggle_skimming(cx),
+            "toggleAudioSkimming" => self.toggle_audio_skimming(cx),
             "toggleLayerControls" => {
                 if let Some(gizmos) = self.builtins.gizmos.clone() {
                     let shown = gizmos.update(cx, |g, cx| {
@@ -1712,10 +1753,23 @@ impl Controller {
             }
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),
-            // The engine draws no sequence yet; say so rather than do nothing.
-            "importSequence" => {
-                self.message = "Image sequences can't be imported yet".into();
-                cx.notify();
+            "importSequence" => self.pick_sequence(cx),
+            "addCaption" | "importCaptions" | "exportCaptions" | "generateCaptions"
+            | "deleteCaptions" | "splitCaption" => {
+                return self.captions_command(&cmd.name, window, cx);
+            }
+            "speechDelete" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    self.confirm_speech_delete(id, cx);
+                }
+            }
+            "shader.compile" => return self.shader_command(&cmd.name, cx),
+            name if name.starts_with("shader.preset:") => return self.shader_command(name, cx),
+            name if name.starts_with("captions.cue:") => {
+                return self.captions_command(name, window, cx);
+            }
+            name if name.starts_with("captions.layer:") => {
+                return self.captions_command(name, window, cx);
             }
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
@@ -1879,6 +1933,31 @@ impl Controller {
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
             | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
             | "nextVisibleEvent" => {
+                // Final Cut: Space plays from the skimmer, only while the
+                // pointer is over the timeline now; otherwise from the playhead.
+                let over = self
+                    .builtins
+                    .timeline
+                    .as_ref()
+                    .is_some_and(|t| t.read(cx).pointer_over(window));
+                if cmd.name == "play" && !over && self.skimming.at.is_some() {
+                    self.skim(None, Self::event_time());
+                    if let Some(t) = self.builtins.timeline.clone() {
+                        // The surface calls back into this controller.
+                        cx.defer(move |cx| t.update(cx, |t, cx| t.skimming_changed(cx)));
+                    }
+                }
+                if cmd.name == "play"
+                    && over
+                    && let Some(at) = self.skimming.at
+                    && self.viewer.as_ref().is_some_and(|v| {
+                        v.status()
+                            .clock
+                            .is_some_and(|c| c.state == TransportState::Stopped)
+                    })
+                {
+                    self.seek(at);
+                }
                 let Some(v) = &self.viewer else { return false };
                 let command = match cmd.name.as_str() {
                     "play" => {
