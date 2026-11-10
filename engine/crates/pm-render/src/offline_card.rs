@@ -3,7 +3,9 @@
 //! Frames that isolate failing layers (the viewer, agent stills) draw it in
 //! the layer's own box where the media is offline; exports never do. The card
 //! is an SVG document drawn through the SVG image path, so it is resolved at
-//! output resolution like any SVG image layer.
+//! output resolution like any SVG image layer. It uses only what the GPU
+//! painter draws (paths, fills, text outlines): a `<pattern>` would send
+//! every card to the CPU rasterizer (seconds per frame in a debug build).
 //!
 //! It is drawn over the image, so it uses the dark-scheme design tokens in
 //! both appearances (language §4, "Over the image"):
@@ -122,9 +124,33 @@ pub fn svg(file: &str, w: f64, h: f64, tier: Tier) -> String {
             escape(text),
         ));
     }
+    let hatch = hatch(w, h, stripe, period);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.3}" height="{h:.3}" viewBox="0 0 {w:.3} {h:.3}"><defs><pattern id="hatch" width="{period:.3}" height="{period:.3}" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="{stripe:.3}" height="{period:.3}" fill="{DANGER}" fill-opacity="0.18"/></pattern></defs><rect width="{w:.3}" height="{h:.3}" fill="{VIEWER}"/><rect width="{w:.3}" height="{h:.3}" fill="url(#hatch)"/><rect x="{px:.3}" y="{py:.3}" width="{plate_w:.3}" height="{plate_h:.3}" rx="{radius:.3}" fill="{VIEWER}" fill-opacity="0.94" stroke="{WHITE}" stroke-opacity="0.08" stroke-width="{hairline:.3}"/>{body}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.3}" height="{h:.3}" viewBox="0 0 {w:.3} {h:.3}"><rect width="{w:.3}" height="{h:.3}" fill="{VIEWER}"/><path d="{hatch}" fill="{DANGER}" fill-opacity="0.18"/><rect x="{px:.3}" y="{py:.3}" width="{plate_w:.3}" height="{plate_h:.3}" rx="{radius:.3}" fill="{VIEWER}" fill-opacity="0.94" stroke="{WHITE}" stroke-opacity="0.08" stroke-width="{hairline:.3}"/>{body}</svg>"#
     )
+}
+
+/// The 45° hatch over a `w` × `h` box: bands `stripe` wide every `period`,
+/// measured across the stripes, the first starting at the top-left corner
+/// (`x + y = 0`). Each band is a parallelogram spanning the box's height; the
+/// SVG viewport clips what reaches past its sides.
+fn hatch(w: f64, h: f64, stripe: f64, period: f64) -> String {
+    let (step, width) = (
+        period * std::f64::consts::SQRT_2,
+        stripe * std::f64::consts::SQRT_2,
+    );
+    let mut d = String::new();
+    let mut s0 = 0.0;
+    while s0 < w + h {
+        let s1 = s0 + width;
+        d.push_str(&format!(
+            "M{s0:.3} 0H{s1:.3}L{:.3} {h:.3}H{:.3}Z",
+            s1 - h,
+            s0 - h
+        ));
+        s0 += step;
+    }
+    d
 }
 
 /// Cards kept on disk and in memory by this process. A card for the same
@@ -232,8 +258,26 @@ mod tests {
                 tier != Tier::Compact
             );
             assert_eq!(doc.contains("Locate File"), tier == Tier::Full);
-            pm_vector::render::svg::SvgDocument::parse(doc.as_bytes()).expect("valid SVG");
+            let parsed =
+                pm_vector::render::svg::SvgDocument::parse(doc.as_bytes()).expect("valid SVG");
+            // Drawn on the GPU, never by the CPU fallback.
+            assert_eq!(parsed.unsupported_feature(), None, "{tier:?}");
         }
+    }
+
+    /// The hatch covers the whole box: every point of it is either on a
+    /// band or in the gap of the band before it, 45° apart.
+    #[test]
+    fn the_hatch_covers_the_box_at_45_degrees() {
+        let (w, h, stripe, period) = (300.0, 100.0, 3.5, 9.0);
+        let d = hatch(w, h, stripe, period);
+        let bands = d.matches('M').count();
+        let step = period * std::f64::consts::SQRT_2;
+        assert_eq!(bands, ((w + h) / step).ceil() as usize);
+        assert!(
+            d.starts_with("M0.000 0H4.950L-95.050 100.000H-100.000Z"),
+            "{d}"
+        );
     }
 
     #[test]
