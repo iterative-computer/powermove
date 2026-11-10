@@ -72,12 +72,17 @@ export async function studioSwatch(id: string, p: Record<string, number | string
     });
     target.trace(32, 6, true, 64);
     target.resolve(2);
-    const gpuCanvas = target.present(`swatch:${id}`, 0, false);
-    // Copy out in the same task, before the WebGPU canvas is presented.
+    // Mapping the completed buffer waits asynchronously. A GPU canvas copy
+    // followed by toDataURL can still block on Chromium's separate copy queue.
+    const beauty = await target.readBeauty(), pixels = new Uint8ClampedArray(beauty.length);
+    for (let i = 0; i < pixels.length; i += 4) {
+      const alpha = Math.max(0, Math.min(1, beauty[i + 3]!));
+      pixels[i + 3] = alpha * 255;
+      if (alpha > 0) for (let c = 0; c < 3; c++) pixels[i + c] = Math.max(0, Math.min(1, beauty[i + c]! / alpha)) * 255;
+    }
     const out = document.createElement('canvas');
     out.width = out.height = SIZE;
-    out.getContext('2d')!.drawImage(gpuCanvas, 0, 0);
-    await target.done();
+    out.getContext('2d', { willReadFrequently: true })!.putImageData(new ImageData(pixels, SIZE, SIZE), 0, 0);
     return out.toDataURL('image/png');
   }).catch(() => null);
   queue = pending;

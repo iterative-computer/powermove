@@ -261,7 +261,10 @@ export class StudioTarget {
   }
 
   setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas | Uint8Array)[]): void {
-    this.invalidateHistory();
+    // Live validates reprojected depth and normals per pixel. Scene refreshes
+    // during camera movement must not discard that accumulation each frame.
+    // Quality history remains stricter and resets on every scene edit.
+    if (!this.live) this.invalidateHistory();
     if (studioTargetBytes(this.width, this.height, studioMaxBindingBytes()) + studioSceneBytes(scene, maps.length, studioMaxBindingBytes()) > STUDIO_SESSION_BYTES)
       throw new Error('Studio exceeds the 2 GiB session budget; reduce mesh detail or output size');
     const bytesOf = (data: ArrayBufferView | ArrayBuffer) => data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
