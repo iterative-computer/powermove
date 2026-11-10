@@ -705,9 +705,46 @@ impl Backend {
                     ops: vec![pm_kernel::state::StateOp::Extension(entry)],
                 }))
             }
-            // Speech and archive actions require their actual services.
+            // Mods (S105): Show in Finder and Delete… are the app's (Finder,
+            // a confirmation, then the archive), for what the row allows.
+            Some(kind @ ("extension.finder" | "extension.archive")) => {
+                use pm_services::surface_backing::projects::{self, ModAction};
+                let id = action["id"].as_str().ok_or("Extension id")?;
+                let (action, command) = if kind == "extension.finder" {
+                    (ModAction::Reveal, "extensionReveal")
+                } else {
+                    (ModAction::Archive, "extensionArchive")
+                };
+                let records = crate::models::mod_records(&self.kernel.state());
+                let mut host = PushMod {
+                    platform: &mut self.native.platform,
+                    command,
+                };
+                projects::act_on_mod(&mut host, &records, id, action).map_err(|e| e.to_string())?;
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            // Speech actions require their actual services.
             _ => Err("Settings service is unavailable for this action".into()),
         }
+    }
+}
+/// Hands an allowed Mods action to the app as `<command>.<id>`.
+struct PushMod<'a> {
+    platform: &'a mut Vec<(String, Value)>,
+    command: &'static str,
+}
+impl pm_services::surface_backing::projects::ModsHost for PushMod<'_> {
+    fn act(
+        &mut self,
+        _: u64,
+        id: &str,
+        _: pm_services::surface_backing::projects::ModAction,
+    ) -> pm_services::Result<()> {
+        self.platform.push((
+            "command".into(),
+            json!({"name": format!("{}.{id}", self.command)}),
+        ));
+        Ok(())
     }
 }
 /// Settings › Accounts › Powermove Account, from the app's `cloud` fact

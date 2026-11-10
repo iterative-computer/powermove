@@ -3191,3 +3191,72 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
     backend.native.facts["cloud"]["revision"] = json!(5);
     assert_ne!(backend.settings_snapshot().unwrap()["revision"], revision);
 }
+#[test]
+fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
+    let actor = actor();
+    let entry = |id: &str, installed: bool| {
+        pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+            id: id.into(),
+            installed,
+            enabled: true,
+            version: "1.0.0".into(),
+            source: pm_model::json::parse(
+                r#"{"hostRecord":{"name":"Glow","health":{"state":"ok"}}}"#,
+            )
+            .unwrap(),
+        })
+    };
+    actor
+        .handle()
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![
+                entry("com.example.glow", true),
+                entry("builtin.panel", false),
+            ],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let listed = |id: &str| {
+        publication["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(listed("com.example.glow")["canArchive"], true);
+    assert_eq!(listed("builtin.panel")["canArchive"], false);
+    let revision = publication["revision"].clone();
+    let mut perform = |action: Value| {
+        backend.native.platform.clear();
+        let result = backend.native_command(
+            "panel.settings",
+            &json!({"revision":revision,"action":action}),
+        );
+        (result.is_ok(), backend.native.platform.clone())
+    };
+    for (kind, command) in [
+        ("extension.finder", "extensionReveal.com.example.glow"),
+        ("extension.archive", "extensionArchive.com.example.glow"),
+    ] {
+        let (ok, platform) = perform(json!({"type":kind,"id":"com.example.glow"}));
+        assert!(ok);
+        assert_eq!(
+            platform,
+            [("command".to_owned(), json!({ "name": command }))]
+        );
+        // A built-in has no folder to show and is never deleted.
+        let (_, platform) = perform(json!({"type":kind,"id":"builtin.panel"}));
+        assert!(platform.is_empty());
+    }
+}
