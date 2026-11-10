@@ -554,6 +554,9 @@ impl Kernel {
             request.call,
             Call::Workspace(WorkspaceCall::Mutate { .. } | WorkspaceCall::Replace { .. })
         );
+        // What this project last saw of its workspace: only its own change
+        // lands on the shared record, never over another project's.
+        let workspace_base = workspace_write.then(|| slot.project.workspace().clone());
         let mut handled = slot.project.handle(request);
         if let (Some(journal), Some(durability)) = (&mut slot.journal, &self.durability) {
             let taps = slot.project.store_mut().take_tap();
@@ -594,7 +597,10 @@ impl Kernel {
                 let tx = crate::state::StateTransaction {
                     expected_revision: None,
                     ops: vec![
-                        crate::state::StateOp::Workspace { record: ws.clone() },
+                        crate::state::StateOp::Workspace {
+                            record: ws.clone(),
+                            base: workspace_base,
+                        },
                         crate::state::StateOp::Setting {
                             key: "workspace".into(),
                             value: Some(Value::from(ws_id)),

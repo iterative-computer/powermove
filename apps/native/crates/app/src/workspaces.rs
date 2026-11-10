@@ -78,7 +78,10 @@ impl Controller {
                 }
                 let id = after["id"].as_str().map(pm_model::Value::from);
                 vec![
-                    StateOp::Workspace { record: next },
+                    StateOp::Workspace {
+                        record: next,
+                        base: Some(expected),
+                    },
                     StateOp::Setting {
                         key: "workspace".into(),
                         value: id,
@@ -86,7 +89,7 @@ impl Controller {
                 ]
             }
             Write::Upsert(record) => match model(&record) {
-                Some(record) => vec![StateOp::Workspace { record }],
+                Some(record) => vec![StateOp::Workspace { record, base: None }],
                 None => return,
             },
             Write::Archive(id) => vec![StateOp::ArchiveWorkspace {
