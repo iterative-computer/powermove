@@ -734,7 +734,8 @@ impl Kernel {
             .map_err(failure)?;
         // Durable before the worker can replace the file the journal is
         // based on; edits while it runs are journalled after this point.
-        self.mark_save_point(&session.project, &plan.document, plan.revision);
+        // Without it the save does not start (the plan and lock drop here).
+        self.mark_save_point(&session.project, &plan.document, plan.revision)?;
         let ticket = crate::new_id("save");
         self.sessions
             .get_mut(&session.project)
@@ -784,6 +785,7 @@ impl Kernel {
             .store_mut()
             .finish_save(receipt)
             .map_err(failure)?;
+        self.save_published(&session.project);
         if let Some(path) = pending.path {
             let s = self.sessions.get_mut(&session.project).unwrap();
             s.destination = Destination::File(path);
@@ -1684,12 +1686,16 @@ impl Kernel {
             };
             let plan = p.store_mut().prepare_save(target, options);
             if let Ok(plan) = &plan {
-                self.mark_save_point(id, &plan.document, plan.revision);
+                // No save point, no save: the file stays as it is.
+                self.mark_save_point(id, &plan.document, plan.revision)?;
             }
             let p = self.project_mut(id).unwrap();
             let result = plan
                 .and_then(|plan| plan.run())
                 .and_then(|receipt| p.store_mut().finish_save(receipt));
+            if result.is_ok() {
+                self.save_published(id);
+            }
             if let Err(e) = result {
                 if save_as.is_some() {
                     return Err(failure(e));

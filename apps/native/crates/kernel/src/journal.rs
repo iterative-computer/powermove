@@ -52,11 +52,22 @@
 //! supersedes them once its own first checkpoint is durable, and until then
 //! recovery continues from the session it superseded.
 //!
-//! **Save points.** A save journals `{"t":"save"}` with the hash of the state
-//! it is about to publish, durably, before it replaces the file. The file is
-//! then either the old base or that save, and recovery replays onto either
-//! (from the start, or from just after the save point) without waiting for
-//! any checkpoint; a base the session passed through is adopted, not copied.
+//! **Save points.** A save journals `{"t":"save"}` with the hash of the
+//! document it is about to publish and the identity of the undo history it
+//! writes, durably, before it replaces the file; a save whose save point
+//! cannot be made durable does not publish. The file is then either the old
+//! base or that save, and recovery replays onto either (from the start, or
+//! from just after the save point) without waiting for any checkpoint. A
+//! save point is adopted only when the file holds both its document and its
+//! history: another writer that installed the same document with its own
+//! history gets a copy, never this session's history over its own. Later
+//! heads and checkpoints list a save as an ancestor only once it published.
+//!
+//! **Format.** Heads and checkpoints carry `version` ([`FORMAT`]). A reader
+//! replays every version up to its own and refuses a newer one as made by a
+//! newer Powermove (the files are kept), instead of failing on a record it
+//! does not know. Version 2 added save points and ancestors with history
+//! identities.
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
@@ -79,6 +90,11 @@ use crate::history::{History, HistoryRecord, HistorySnapshot};
 
 const JOURNAL_FORMAT: &str = "powermove-kernel-journal";
 const CHECKPOINT_FORMAT: &str = "powermove-kernel-checkpoint";
+/// The journal and checkpoint version this build writes and the newest it
+/// reads.
+pub const FORMAT: u32 = 2;
+/// Why a journal from a newer build is not replayed.
+pub const NEWER_FORMAT: &str = "This recovery journal was made by a newer Powermove. Open the project there; the journal is kept.";
 
 /// A document this size or larger checkpoints by journal size (`VERIFY_MIN_CHARS`).
 const LARGE_DOCUMENT_BYTES: u64 = 4 << 20;
@@ -98,6 +114,21 @@ pub struct JournalConfig {
     /// large document does.
     #[doc(hidden)]
     pub hold_checkpoints: Option<Arc<(Mutex<bool>, Condvar)>>,
+    /// Failure injection (tests): the next save point fails this way.
+    #[doc(hidden)]
+    pub fail_save_point: Option<Arc<Mutex<Option<SaveFault>>>>,
+}
+
+/// How an injected save-point failure goes (tests).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveFault {
+    /// Half the line reaches the file, then the write fails.
+    TornWrite,
+    /// The line is written; its `F_FULLFSYNC` fails.
+    SyncFails,
+    /// A torn write the segment cannot be truncated back from.
+    TornWriteUntruncatable,
 }
 
 impl Default for JournalConfig {
@@ -107,6 +138,7 @@ impl Default for JournalConfig {
             checkpoint_revisions: 50,
             max_segment_bytes: 4 * 1024 * 1024,
             hold_checkpoints: None,
+            fail_save_point: None,
         }
     }
 }
@@ -166,9 +198,9 @@ enum Job {
         base: String,
         segment: u64,
         state: Box<CheckpointState>,
-        /// Hashes of states the session passed through that may be on disk
-        /// (its base and its saves): any of them is an ancestor of `state`.
-        bases: Vec<String>,
+        /// States the session passed through that may be on disk (its base
+        /// and its published saves): any of them is an ancestor of `state`.
+        bases: Vec<Ancestor>,
         /// Sessions this one replaces once its checkpoint is durable.
         supersedes: Vec<PathBuf>,
         /// Told the checkpoint's size, which says whether the document is large.
@@ -424,7 +456,36 @@ pub struct Journal {
     deferred: Option<Box<CheckpointState>>,
     /// The base and every state a save published since: what a file or slot
     /// may hold that this session's work descends from.
-    bases: Vec<String>,
+    bases: Vec<Ancestor>,
+    /// The save point of a save that has not published yet.
+    pending: Option<Ancestor>,
+}
+
+/// A state a session's work descends from: a document hash and, for a save,
+/// the identity of the undo history it wrote ([`History::identity`]). A
+/// session's start base has none: it is the base whatever history it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ancestor {
+    pub hash: String,
+    pub history: Option<String>,
+}
+
+impl Ancestor {
+    fn start(hash: &str) -> Ancestor {
+        Ancestor {
+            hash: hash.to_owned(),
+            history: None,
+        }
+    }
+    /// Whether a base whose document hashes to `hash`, with undo history of
+    /// identity `history` (`None`: unknown), is this state.
+    fn is(&self, hash: &str, history: Option<&str>) -> bool {
+        self.hash == hash
+            && self
+                .history
+                .as_deref()
+                .is_none_or(|own| history == Some(own))
+    }
 }
 
 /// How many save points a session remembers as possible bases.
@@ -501,7 +562,7 @@ impl Journal {
         let dir = project_dir.join(session_name());
         fs::create_dir_all(&dir)?;
         sync_dir(project_dir)?;
-        let bases = vec![base.to_owned()];
+        let bases = vec![Ancestor::start(base)];
         // Adopted recovered work starts from checkpoint 0, not the base.
         // Until that lands, the session it supersedes here still holds the
         // state, and recovery continues from it.
@@ -546,6 +607,7 @@ impl Journal {
         }
         Ok(Journal {
             bases,
+            pending: None,
             deferred,
             checkpoint_bytes,
             dir,
@@ -657,32 +719,87 @@ impl Journal {
     }
 
     /// Records that a save is about to publish the state as of this line
-    /// (canonical hash `hash`, at `revision`) and makes it durable before
-    /// returning. Call it after freezing the save's snapshot and before the
-    /// file or slot is replaced. Whatever the disk then holds, the old base
-    /// or this save, recovery replays onto it: from the start, or from just
-    /// after this line, so edits journalled while the save ran (or that a
-    /// Quit Now left without a checkpoint) are never stranded on a base
-    /// that is gone.
-    pub(crate) fn mark_save(&mut self, hash: &str, revision: u64) -> io::Result<()> {
+    /// (document hash `hash` and undo history `history`, at `revision`) and
+    /// makes it durable before returning: the barrier a save must pass
+    /// before the file or slot is replaced. Whatever the disk then holds,
+    /// the old base or this save, recovery replays onto it: from the start,
+    /// or from just after this line, so edits journalled while the save ran
+    /// (or that a Quit Now left without a checkpoint) are never stranded on
+    /// a base that is gone.
+    ///
+    /// On an error the save must not publish. The segment is cut back to
+    /// before the line, so a torn save point never stands between the edits
+    /// before it and those after; when it cannot be cut, the journal moves
+    /// to a new segment and checkpoint (`state`).
+    pub(crate) fn mark_save(
+        &mut self,
+        durability: &Durability,
+        hash: &str,
+        history: &str,
+        revision: u64,
+        state: impl FnOnce() -> CheckpointState,
+    ) -> io::Result<()> {
         let mut point = Map::new();
         point.insert("h", Value::from(hash));
+        point.insert("hh", Value::from(history));
         point.insert("r", Value::Number(revision as f64));
         let mut m = Map::new();
         m.insert("t", Value::from("save"));
         m.insert("v", Value::Object(point));
         let mut buf = String::new();
         line(&mut buf, &Value::Object(m));
-        (&self.file).write_all(buf.as_bytes())?;
-        self.bytes += buf.len() as u64;
-        self.target.dirty.store(true, Ordering::Release);
-        self.target.sync()?;
-        self.bases.retain(|b| b != hash);
-        self.bases.push(hash.to_owned());
-        if self.bases.len() > MAX_BASES {
-            self.bases.remove(0);
+        let fault = durability
+            .config()
+            .fail_save_point
+            .as_ref()
+            .and_then(|f| f.lock().expect("save fault").take());
+        let len = self.file.metadata()?.len();
+        let written = match fault {
+            Some(SaveFault::TornWrite | SaveFault::TornWriteUntruncatable) => {
+                (&self.file).write_all(&buf.as_bytes()[..buf.len() / 2])?;
+                Err(io::Error::other("injected torn save point"))
+            }
+            _ => (&self.file).write_all(buf.as_bytes()),
+        };
+        let synced = written.and_then(|()| {
+            self.target.dirty.store(true, Ordering::Release);
+            if fault == Some(SaveFault::SyncFails) {
+                return Err(io::Error::other("injected save point sync failure"));
+            }
+            self.target.sync()
+        });
+        if let Err(e) = synced {
+            let cut = if fault == Some(SaveFault::TornWriteUntruncatable) {
+                Err(io::Error::other("injected truncate failure"))
+            } else {
+                self.file.set_len(len)
+            };
+            self.target.dirty.store(true, Ordering::Release);
+            if cut.is_err() {
+                self.rotate(durability, state())?;
+            }
+            return Err(e);
         }
+        self.bytes += buf.len() as u64;
+        self.pending = Some(Ancestor {
+            hash: hash.to_owned(),
+            history: Some(history.to_owned()),
+        });
         Ok(())
+    }
+
+    /// The save whose save point was journalled last has published: later
+    /// heads and checkpoints list it as an ancestor.
+    pub(crate) fn published(&mut self) {
+        let Some(save) = self.pending.take() else {
+            return;
+        };
+        self.bases.retain(|b| *b != save);
+        self.bases.push(save);
+        if self.bases.len() > MAX_BASES {
+            // The start base stays: it is what the session was opened on.
+            self.bases.remove(1);
+        }
     }
 
     /// Flushes now (clean close; tests). Never on the main thread.
@@ -730,7 +847,7 @@ fn archive_path(path: &mut PathBuf) -> io::Result<()> {
 struct Head<'a> {
     project: &'a str,
     base: &'a str,
-    bases: &'a [String],
+    bases: &'a [Ancestor],
     /// The session holding the start state until checkpoint 0 lands.
     start: Option<&'a str>,
     segment: u64,
@@ -761,7 +878,7 @@ fn open_segment(
     let mut head = Map::new();
     head.insert("t", Value::from("head"));
     head.insert("format", Value::from(JOURNAL_FORMAT));
-    head.insert("version", Value::Number(1.0));
+    head.insert("version", Value::Number(f64::from(FORMAT)));
     head.insert("project", Value::from(project));
     head.insert("base", Value::from(base));
     head.insert("bases", bases_value(bases));
@@ -781,24 +898,60 @@ fn open_segment(
     Ok((file, target))
 }
 
-fn bases_value(bases: &[String]) -> Value {
-    Value::Array(bases.iter().map(|b| Value::from(b.as_str())).collect())
+/// `bases`: a start base as its hash, a save as `{"h","hh"}`.
+fn bases_value(bases: &[Ancestor]) -> Value {
+    Value::Array(
+        bases
+            .iter()
+            .map(|b| match &b.history {
+                None => Value::from(b.hash.as_str()),
+                Some(history) => {
+                    let mut m = Map::new();
+                    m.insert("h", Value::from(b.hash.as_str()));
+                    m.insert("hh", Value::from(history.as_str()));
+                    Value::Object(m)
+                }
+            })
+            .collect(),
+    )
 }
 
-/// A head's or checkpoint's `bases`, or just its `base` (older journals).
-fn bases_of(m: &Map, base: &str) -> Vec<String> {
-    let mut bases: Vec<String> = m
-        .get("bases")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    if !bases.iter().any(|b| b == base) {
-        bases.insert(0, base.to_owned());
+/// A head's or checkpoint's version: `Err` for one newer than this build.
+fn version_of(m: &Map) -> Result<u32, String> {
+    let version = m.get("version").and_then(Value::as_f64).unwrap_or(1.0);
+    if version > f64::from(FORMAT) {
+        return Err(NEWER_FORMAT.into());
+    }
+    Ok(version as u32)
+}
+
+/// A head's or checkpoint's ancestors. Version 1 listed saves by document
+/// hash alone, before they published: only its `base` is an ancestor.
+fn bases_of(m: &Map, base: &str) -> Vec<Ancestor> {
+    let mut bases: Vec<Ancestor> = Vec::new();
+    if version_of(m).is_ok_and(|v| v >= 2)
+        && let Some(listed) = m.get("bases").and_then(Value::as_array)
+    {
+        for b in listed {
+            match b {
+                Value::String(_) => bases.extend(b.as_str().map(Ancestor::start)),
+                Value::Object(o) => {
+                    if let (Some(h), Some(hh)) = (
+                        o.get("h").and_then(Value::as_str),
+                        o.get("hh").and_then(Value::as_str),
+                    ) {
+                        bases.push(Ancestor {
+                            hash: h.to_owned(),
+                            history: Some(hh.to_owned()),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !bases.iter().any(|b| b.hash == base && b.history.is_none()) {
+        bases.insert(0, Ancestor::start(base));
     }
     bases
 }
@@ -917,7 +1070,7 @@ fn write_checkpoint(
     dir: &Path,
     project: &str,
     base: &str,
-    bases: &[String],
+    bases: &[Ancestor],
     segment: u64,
     state: &CheckpointState,
 ) -> io::Result<u64> {
@@ -947,7 +1100,7 @@ fn write_checkpoint(
     };
     let mut meta = Map::new();
     meta.insert("format", Value::from(CHECKPOINT_FORMAT));
-    meta.insert("version", Value::Number(1.0));
+    meta.insert("version", Value::Number(f64::from(FORMAT)));
     meta.insert("project", Value::from(project));
     meta.insert("base", Value::from(base));
     meta.insert("bases", bases_value(bases));
@@ -989,7 +1142,7 @@ fn prune_before(dir: &Path, segment: u64) {
 struct Loaded {
     revision: u64,
     base: String,
-    bases: Vec<String>,
+    bases: Vec<Ancestor>,
     document: Option<pm_model::Node>,
     history: LoadedHistory,
     workspace: Value,
@@ -1001,17 +1154,33 @@ enum LoadedHistory {
 
 /// A checkpoint whose recorded document hash is `base`'s takes its document
 /// from `base` (a session's first checkpoint is the state it opened), so only
-/// its metadata line is read.
-fn read_checkpoint(path: &Path, base: Option<&Document>) -> Option<Loaded> {
+/// its metadata line is read. `Err` for one a newer build wrote.
+fn read_checkpoint(path: &Path, base: Option<&Document>) -> Result<Option<Loaded>, String> {
     use std::io::BufRead;
-    let mut file = io::BufReader::with_capacity(1 << 20, File::open(path).ok()?);
+    let Ok(file) = File::open(path) else {
+        return Ok(None);
+    };
+    let mut file = io::BufReader::with_capacity(1 << 20, file);
     let mut meta = String::new();
-    file.read_line(&mut meta).ok()?;
-    let meta = parse(meta.strip_suffix('\n')?).ok()?;
-    let m = meta.as_object()?;
-    if m.get("format")?.as_str()? != CHECKPOINT_FORMAT {
-        return None;
+    let meta = file
+        .read_line(&mut meta)
+        .ok()
+        .and_then(|_| parse(meta.strip_suffix('\n')?).ok());
+    let Some(Value::Object(m)) = meta else {
+        return Ok(None);
+    };
+    if m.get("format").and_then(Value::as_str) != Some(CHECKPOINT_FORMAT) {
+        return Ok(None);
     }
+    version_of(&m)?;
+    Ok(load_checkpoint(&m, file, base))
+}
+
+fn load_checkpoint(
+    m: &Map,
+    mut file: io::BufReader<File>,
+    base: Option<&Document>,
+) -> Option<Loaded> {
     let hash = m.get("documentHash")?.as_str()?;
     let revision = m.get("revision")?.as_f64()? as u64;
     let document = match base.filter(|b| b.canonical_hash().as_deref() == Some(hash)) {
@@ -1046,8 +1215,9 @@ pub struct Recovered {
     /// matched.
     pub base: String,
     /// Every base the recovered state descends from: the session's base and
-    /// each save it published. A current base among them is safe to adopt.
-    pub bases: Vec<String>,
+    /// each save it journalled. A current base that is one of them, history
+    /// included, is safe to adopt.
+    pub bases: Vec<Ancestor>,
     pub revision: u64,
     pub document: Document,
     pub history: History,
@@ -1118,6 +1288,13 @@ pub fn recover_from(
     let Some(session) = sessions(project_dir).pop() else {
         return Recovery::Nothing;
     };
+    if let Some(head) = numbered(&session, "journal-", ".log")
+        .first()
+        .and_then(|&n| segment_head(&session.join(segment_name(n))))
+        && let Err(reason) = version_of(&head)
+    {
+        return Recovery::Unrecoverable { session, reason };
+    }
     if numbered(&session, "checkpoint-", ".json").is_empty()
         && !has_changes(&session)
         && continued(&session).is_none()
@@ -1128,9 +1305,15 @@ pub fn recover_from(
     match recover_session(&session, base) {
         Err(reason) => Recovery::Unrecoverable { session, reason },
         Ok(mut recovered) => match current_base {
-            // A base the session passed through (its start or one of its
-            // saves) is an ancestor of the recovered state: adopt it.
-            Some(current) if recovered.bases.iter().any(|b| b == current) => {
+            // A base the session passed through (its start, or one of its
+            // saves with the history that save wrote) is an ancestor of the
+            // recovered state: adopt it.
+            Some(current)
+                if recovered
+                    .bases
+                    .iter()
+                    .any(|b| b.is(current, history_identity(base).as_deref())) =>
+            {
                 recovered.base = current.to_owned();
                 Recovery::Recovered(recovered)
             }
@@ -1141,6 +1324,15 @@ pub fn recover_from(
             _ => Recovery::Recovered(recovered),
         },
     }
+}
+
+/// The identity of the undo history a base holds (`None`: no base given).
+fn history_identity(base: Option<Base>) -> Option<String> {
+    let base = base?;
+    Some(match base.history {
+        Some(history) => history.identity(),
+        None => History::new().identity(),
+    })
 }
 
 /// The session a session continues while its checkpoint 0 has not landed.
@@ -1192,7 +1384,8 @@ fn is_bookkeeping_line(line: &[u8]) -> bool {
 }
 
 /// A segment's checksummed lines after its header, up to the first torn or
-/// corrupt one (`Err(())` marks where the valid prefix ends).
+/// corrupt one (`Err(())` marks where the valid prefix ends). `Err` for a
+/// segment a newer build wrote.
 fn segment_lines(path: &Path) -> Result<Vec<Result<Value, ()>>, String> {
     let mut text = Vec::new();
     File::open(path)
@@ -1200,7 +1393,12 @@ fn segment_lines(path: &Path) -> Result<Vec<Result<Value, ()>>, String> {
         .map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&text);
     let mut lines = text.split_inclusive('\n');
-    let _head = lines.next();
+    if let Some((sum, json)) = lines.next().and_then(|h| h.trim_end().split_once(' '))
+        && checksum(json) == sum
+        && let Ok(Value::Object(head)) = parse(json)
+    {
+        version_of(&head)?;
+    }
     let mut out = Vec::new();
     for raw in lines {
         let value = raw
@@ -1219,14 +1417,24 @@ fn segment_lines(path: &Path) -> Result<Vec<Result<Value, ()>>, String> {
     Ok(out)
 }
 
-/// A `save` line's hash and revision ([`Journal::mark_save`]).
-fn save_point(value: &Value) -> Option<(&str, u64)> {
+/// A `save` line ([`Journal::mark_save`]): the ancestor it names, `None`
+/// for one without a history identity (version 1, never adopted), and its
+/// revision.
+fn save_point(value: &Value) -> Option<(Option<Ancestor>, u64)> {
     let m = value.as_object()?;
     if m.get("t")?.as_str()? != "save" {
         return None;
     }
     let point = m.get("v")?.as_object()?;
-    Some((point.get("h")?.as_str()?, point.get("r")?.as_f64()? as u64))
+    let ancestor = point.get("hh").and_then(Value::as_str).map(|hh| Ancestor {
+        hash: point
+            .get("h")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        history: Some(hh.to_owned()),
+    });
+    Some((ancestor, point.get("r")?.as_f64()? as u64))
 }
 
 fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, String> {
@@ -1244,15 +1452,6 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
         .and_then(Value::as_str)
         .ok_or("the journal has no base")?
         .to_owned();
-    let mut lines = Vec::new();
-    for &n in &segments {
-        let segment = segment_lines(&session.join(segment_name(n)))?;
-        let torn = segment.last().is_some_and(Result::is_err);
-        lines.push((n, segment));
-        if torn {
-            break;
-        }
-    }
     // The newest checkpoint that verifies.
     let mut start = None;
     for n in numbered(session, "checkpoint-", ".json").into_iter().rev() {
@@ -1262,8 +1461,20 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
         if let Some(loaded) = read_checkpoint(
             &session.join(checkpoint_name(n)),
             base.as_ref().map(|b| b.document),
-        ) {
+        )? {
             start = Some(((n, 0), loaded));
+            break;
+        }
+    }
+    // The lines from the segment recovery starts at; older segments (kept
+    // until the checkpoint's prune) are behind it.
+    let from = start.as_ref().map_or(first, |((n, _), _)| *n);
+    let mut lines = Vec::new();
+    for &n in segments.iter().filter(|&&n| n >= from) {
+        let segment = segment_lines(&session.join(segment_name(n)))?;
+        let torn = segment.last().is_some_and(Result::is_err);
+        lines.push((n, segment));
+        if torn {
             break;
         }
     }
@@ -1284,8 +1495,9 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
                     base: earlier.base,
                     bases: {
                         let mut bases = earlier.bases;
-                        if !bases.contains(&session_base) {
-                            bases.push(session_base.clone());
+                        let start = Ancestor::start(&session_base);
+                        if !bases.contains(&start) {
+                            bases.push(start);
                         }
                         bases
                     },
@@ -1296,22 +1508,28 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
             )
         }
         None => {
+            let identity = history_identity(base);
             let base = base.ok_or("no checkpoint was written and no base was given")?;
             let hash = base.document.canonical_hash().unwrap_or_default();
             let mut bases = bases_of(&head, &session_base);
             // The base may be a save this session published while edits
             // went on (or that a Quit Now left without a checkpoint): replay
-            // what followed its save point.
+            // what followed its save point, if the base holds the history
+            // that save wrote too (another writer's same document with its
+            // own history is not this session's save).
             let mut point = None;
             if hash != session_base {
                 for (n, segment) in &lines {
                     for (i, value) in segment.iter().enumerate() {
-                        if let Some((h, revision)) = value.as_ref().ok().and_then(save_point) {
-                            bases.push(h.to_owned());
-                            if h == hash {
-                                point = Some(((*n, i + 1), revision));
-                            }
+                        let Some((ancestor, revision)) = value.as_ref().ok().and_then(save_point)
+                        else {
+                            continue;
+                        };
+                        let Some(ancestor) = ancestor else { continue };
+                        if ancestor.is(&hash, identity.as_deref()) {
+                            point = Some(((*n, i + 1), revision));
                         }
+                        bases.push(ancestor);
                     }
                 }
             }
@@ -1373,9 +1591,11 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
                 truncated = true;
                 break;
             };
-            if let Some((hash, _)) = save_point(value) {
-                if !bases.iter().any(|b| b == hash) {
-                    bases.push(hash.to_owned());
+            if let Some((ancestor, _)) = save_point(value) {
+                if let Some(ancestor) = ancestor
+                    && !bases.contains(&ancestor)
+                {
+                    bases.push(ancestor);
                 }
                 continue;
             }

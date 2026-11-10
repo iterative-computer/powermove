@@ -627,24 +627,51 @@ impl Kernel {
         Ok(handled)
     }
 
-    /// Start a new journal base only after its library/file save barrier.
     /// Journals the save point of a save about to publish `document` at
-    /// `revision` ([`Journal::mark_save`]), so recovery replays onto the
-    /// file whether or not the save lands. A journal that cannot record it
-    /// says so; the save still goes ahead, since the file is then the best
-    /// copy of the work.
-    pub(crate) fn mark_save_point(&mut self, id: &str, document: &Document, revision: u64) {
-        let Some(slot) = self.slots.get_mut(id) else {
-            return;
+    /// `revision` with the project's current undo history
+    /// ([`Journal::mark_save`]), so recovery replays onto the file whether
+    /// or not the save lands. The barrier a save passes before it may
+    /// replace anything: when the save point cannot be made durable, the
+    /// save must not publish (a published file the journal cannot replay
+    /// onto would strand the edits after it).
+    pub(crate) fn mark_save_point(
+        &mut self,
+        id: &str,
+        document: &Document,
+        revision: u64,
+    ) -> Result<(), KernelFailure> {
+        let (Some(slot), Some(durability)) = (self.slots.get_mut(id), &self.durability) else {
+            return Ok(());
         };
         let Some(journal) = &mut slot.journal else {
-            return;
+            return Ok(());
         };
         let hash = document.canonical_hash().unwrap_or_default();
-        if let Err(e) = journal.mark_save(&hash, revision) {
-            slot.project.push_notice(Notice::NotDurable {
-                message: e.to_string(),
-            });
+        let project = &slot.project;
+        let history = project.store().history().identity();
+        journal
+            .mark_save(durability, &hash, &history, revision, || {
+                let store = project.store();
+                CheckpointState {
+                    revision: store.revision(),
+                    document: store.current().clone(),
+                    history: store.history().snapshot(),
+                    workspace: project.workspace().clone(),
+                }
+            })
+            .map_err(|e| {
+                KernelFailure::Storage(format!(
+                    "Not saved: the recovery journal could not record the save ({e}). \
+                     The file was not changed; your work is still open."
+                ))
+            })
+    }
+
+    /// The save whose save point was journalled last published: the journal
+    /// lists it as an ancestor from now on ([`Journal::published`]).
+    pub(crate) fn save_published(&mut self, id: &str) {
+        if let Some(journal) = self.slots.get_mut(id).and_then(|s| s.journal.as_mut()) {
+            journal.published();
         }
     }
 
