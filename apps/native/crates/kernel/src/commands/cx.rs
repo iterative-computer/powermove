@@ -321,24 +321,27 @@ impl<'a> Cx<'a> {
             .unwrap_or_default()
     }
 
-    /// The layers of a composition with their top-level scalar fields only
-    /// (id, type, name, group, parent, lock, …): what stack, group, parent
-    /// and lock rules read, without converting each layer's properties.
-    pub fn layer_heads(&self, comp: Option<&str>) -> Vec<Value> {
-        let head = |layer: &Node| match layer.kind() {
-            pm_model::NodeKind::Object(members) => Value::Object(
-                members
+    /// The layers of a composition with only what stacking, grouping and
+    /// lock rules read: id, type, name, group, parent, lock, solo and matte
+    /// source.
+    pub fn layer_stack(&self, comp: Option<&str>) -> Vec<Value> {
+        const FIELDS: [&str; 8] = [
+            "id",
+            "type",
+            "name",
+            "group",
+            "parent",
+            "lock",
+            "solo",
+            "matteSource",
+        ];
+        let head = |layer: &Node| {
+            Value::Object(
+                FIELDS
                     .iter()
-                    .filter(|(_, v)| {
-                        !matches!(
-                            v.kind(),
-                            pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
-                        )
-                    })
-                    .map(|(k, v)| (k.clone(), v.to_value()))
+                    .filter_map(|&k| Some((k.into(), layer.get(k)?.to_value())))
                     .collect(),
-            ),
-            _ => layer.to_value(),
+            )
         };
         self.comp_node(comp)
             .map(|c| model::layers_of(c).map(head).collect())

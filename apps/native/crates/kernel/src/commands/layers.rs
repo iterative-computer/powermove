@@ -671,6 +671,32 @@ pub(crate) fn write_layers(
     cx.replace(path, Value::Array(next))
 }
 
+/// Stacks a composition's layers in the order of `layers` (heads or whole
+/// layers, the same set): one `Order` operation, nothing rewritten.
+pub(crate) fn write_order(
+    cx: &mut Cx<'_>,
+    comp: Option<&str>,
+    layers: &[Value],
+) -> Result<(), CommandError> {
+    let ids: Vec<String> = layers
+        .iter()
+        .filter_map(|l| values::text(l, "id").map(str::to_owned))
+        .collect();
+    cx.order_layers(comp, &ids)
+}
+
+/// `layers[index].<field>` of a composition.
+pub(crate) fn layer_field(
+    cx: &Cx<'_>,
+    comp: Option<&str>,
+    index: usize,
+    field: &str,
+) -> Vec<PathPart> {
+    let mut path = cx.layers_path(comp);
+    path.extend([PathPart::Index(index as f64), field.into()]);
+    path
+}
+
 /// `PM.wouldCycle(L, parentId)`.
 pub(crate) fn would_cycle(layers: &[Value], layer: &Value, parent_id: &str) -> bool {
     let id = values::text(layer, "id").unwrap_or_default();
@@ -962,7 +988,7 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
 /// `addLayer(command)`.
 fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
     let mut layer = build_layer(cx, c)?;
-    let layers = cx.layer_heads(c.comp.as_deref());
+    let layers = cx.layer_stack(c.comp.as_deref());
     if let Some(pid) = &c.parent {
         let parent = layers
             .iter()
@@ -1208,7 +1234,7 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         return Err(CommandError::Invalid("No layers to delete".into()));
     }
     for (comp, ids) in by_comp {
-        let layers = cx.layer_heads(comp.as_deref());
+        let layers = cx.layer_stack(comp.as_deref());
         let base: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let expanded = expand_groups(&layers, &base);
         let find = |id: &str| layers.iter().find(|l| values::text(l, "id") == Some(id));
@@ -1483,7 +1509,8 @@ fn reorder(cx: &mut Cx<'_>, layer_id: &str, index: usize, time: f64) -> Result<(
     let loc = cx.find(layer_id)?;
     cx.check_lock(&loc, layer_id)?;
     let comp = loc.comp_id.clone();
-    let layers = cx.layers(comp.as_deref());
+    // Stacking reads ids, types, groups and locks only.
+    let layers = cx.layer_stack(comp.as_deref());
     if layers.is_empty() {
         return Ok(());
     }
@@ -1530,7 +1557,7 @@ fn reorder(cx: &mut Cx<'_>, layer_id: &str, index: usize, time: f64) -> Result<(
             time,
         )?;
     }
-    let layers = cx.layers(comp.as_deref());
+    let layers = cx.layer_stack(comp.as_deref());
     let block: Vec<Value> = layers
         .iter()
         .filter(|l| values::text(l, "id").is_some_and(|i| block_ids.contains(i)))
@@ -1548,7 +1575,7 @@ fn reorder(cx: &mut Cx<'_>, layer_id: &str, index: usize, time: f64) -> Result<(
         .unwrap_or(0);
     remaining.splice(pos..pos, block);
     let next = normalize_group_stack(remaining);
-    write_layers(cx, comp.as_deref(), next)
+    write_order(cx, comp.as_deref(), &next)
 }
 
 /// Sets `group` on layers (by index) keeping their world poses

@@ -51,6 +51,67 @@ pub(crate) fn str_of(node: &Node) -> Option<&str> {
     string_of(node).and_then(JsString::as_str)
 }
 
+/// Keyframes (members of a `kf` array) under `node` whose id (`i`) is
+/// `wanted`, read on the tree without converting it.
+pub fn count_keys(node: &Node, wanted: &dyn Fn(&str) -> bool) -> usize {
+    match node.kind() {
+        NodeKind::Object(members) => members
+            .iter()
+            .map(|(key, value)| match value.kind() {
+                NodeKind::Array(keys) if key.as_str() == Some("kf") => keys
+                    .iter()
+                    .filter(|k| k.get("i").and_then(str_of).is_some_and(wanted))
+                    .count(),
+                _ => count_keys(value, wanted),
+            })
+            .sum(),
+        NodeKind::Array(items) => items.iter().map(|item| count_keys(item, wanted)).sum(),
+        _ => 0,
+    }
+}
+
+/// JavaScript truthiness of a node (`Value::is_truthy`).
+pub(crate) fn truthy(node: &Node) -> bool {
+    match node.kind() {
+        NodeKind::Null => false,
+        NodeKind::Bool(b) => *b,
+        NodeKind::Number(n) => *n != 0.0 && !n.is_nan(),
+        NodeKind::String(s) => !s.as_bytes().is_empty(),
+        NodeKind::Array(_) | NodeKind::Object(_) => true,
+    }
+}
+
+/// Whether any `expr` member under `node` is truthy (keyframe lists are not
+/// searched): a superset of the properties that carry an expression.
+pub(crate) fn holds_expression(node: &Node) -> bool {
+    match node.kind() {
+        NodeKind::Object(members) => members.iter().any(|(key, value)| match key.as_str() {
+            Some("expr") => truthy(value),
+            Some("kf") => false,
+            _ => holds_expression(value),
+        }),
+        NodeKind::Array(items) => items.iter().any(holds_expression),
+        _ => false,
+    }
+}
+
+/// [`count_keys`] over every composition's layers, the layers split across
+/// the worker threads.
+pub fn count_layer_keys(root: &Node, wanted: &(dyn Fn(&str) -> bool + Sync)) -> usize {
+    let layers: Vec<&Node> = match root.get("comps").map(Node::kind) {
+        Some(NodeKind::Object(comps)) => {
+            comps.iter().flat_map(|(_, comp)| layers_of(comp)).collect()
+        }
+        _ => Vec::new(),
+    };
+    holding_keys(&layers, wanted).into_iter().sum()
+}
+
+/// How many wanted keys each of `layers` holds, in parallel.
+pub(crate) fn holding_keys(layers: &[&Node], wanted: &(dyn Fn(&str) -> bool + Sync)) -> Vec<usize> {
+    pm_model::parallel::map(layers.len(), |i| count_keys(layers[i], wanted))
+}
+
 pub(crate) fn bool_of(node: &Node) -> Option<bool> {
     match node.kind() {
         NodeKind::Bool(b) => Some(*b),

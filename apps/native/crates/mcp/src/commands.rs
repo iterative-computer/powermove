@@ -19,7 +19,9 @@ use pm_kernel::{
     Command, CompCommand, ContentCommand, DocumentStore, EffectCommand, GroupCommand,
     KeyframeCommand, LayerCommand, LibraryCommand, MarkerCommand, Origin, PropertyCommand,
 };
+use pm_model::{Node, NodeKind};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 pub const OPERATIONS: &[&str] = &[
     "set_property",
@@ -978,13 +980,15 @@ fn plan_on(
             data = json!({"id":id,"removed":count(&p)-count(&after)});
         }
         if kind == "set_easing" {
-            let ids = c["keyframes"].as_array().unwrap();
-            let before = tracks(&p)?;
-            let count = before
+            let ids: HashSet<&str> = c["keyframes"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .flat_map(|(_, _, p)| p["kf"].as_array().into_iter().flatten())
-                .filter(|k| ids.contains(&k["i"]))
-                .count();
+                .filter_map(Value::as_str)
+                .collect();
+            let count = p.root().map_or(0, |root| {
+                pm_kernel::model::count_layer_keys(root, &|i| ids.contains(i))
+            });
             let curve = if c["curve"].is_string() {
                 crate::catalog::catalog()["easePresets"][c["curve"].as_str().unwrap()].clone()
             } else {
@@ -993,20 +997,34 @@ fn plan_on(
             data = json!({"keyframes":count,"curve":curve});
         }
         if kind == "simplify_keyframes" {
-            let before = tracks(&p)?;
-            let after_tracks = tracks(&after)?;
+            // The layers in scope only: none, for a whole-project simplify.
+            let scope: Option<HashSet<String>> = match c["scope"].as_str() {
+                Some("layers") => Some(
+                    targets(&c, &p, &batch.selection)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                ),
+                Some("properties") => Some(
+                    c["properties"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|r| r["layerId"].as_str().map(str::to_owned))
+                        .collect(),
+                ),
+                _ => None,
+            };
+            let before = tracks(&p, scope.as_ref())?;
+            let after_tracks = tracks(&after, scope.as_ref())?;
             let wanted = |id: &str, path: &str| -> bool {
                 match c["scope"].as_str() {
-                    Some("layers") => targets(&c, &p, &batch.selection)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|v| v == id),
                     Some("properties") => c["properties"]
                         .as_array()
                         .unwrap()
                         .iter()
                         .any(|r| r["layerId"] == id && r["path"] == path),
-                    _ => true,
+                    _ => scope.as_ref().is_none_or(|s| s.contains(id)),
                 }
             };
             let (mut keys_before, mut keys_after, mut changed, mut skipped) = (0, 0, 0, 0);
@@ -1329,21 +1347,32 @@ fn parameters(definition: &Value) -> Result<Vec<pm_kernel::commands::effects::Pa
         })
         .collect()
 }
-fn tracks(project: &Doc) -> Result<Vec<(String, String, Value)>> {
+/// Each animatable property of the layers (those in `only`, or all) as
+/// `(layer id, property key, property)`. Only those layers are converted.
+fn tracks(project: &Doc, only: Option<&HashSet<String>>) -> Result<Vec<(String, String, Value)>> {
     let mut store = DocumentStore::scratch(&project.0);
-    let canonical = json_value(&project.0.document.to_value().unwrap());
     let mut out = vec![];
-    let comps = canonical["comps"]
-        .as_object()
-        .map(|c| c.iter().collect::<Vec<_>>())
-        .unwrap_or_default();
-    for (comp, value) in comps {
-        for (index, layer) in value["layers"]
-            .as_array()
-            .unwrap_or(&vec![])
+    let comps = match project.root().and_then(|r| r.get("comps")).map(Node::kind) {
+        Some(NodeKind::Object(comps)) => comps
             .iter()
-            .enumerate()
-        {
+            .filter_map(|(id, comp)| Some((id.as_str()?.to_owned(), comp)))
+            .collect::<Vec<_>>(),
+        _ => vec![],
+    };
+    for (comp, value) in comps {
+        let layers = match value.get("layers").map(Node::kind) {
+            Some(NodeKind::Array(layers)) => layers.as_slice(),
+            _ => &[],
+        };
+        for (index, node) in layers.iter().enumerate() {
+            let id = node.get("id").and_then(|id| match id.kind() {
+                NodeKind::String(s) => s.as_str(),
+                _ => None,
+            });
+            if only.is_some_and(|only| !id.is_some_and(|id| only.contains(id))) {
+                continue;
+            }
+            let layer = &json_value(&node.to_value());
             let entries = json_value(
                 &store
                     .queries()

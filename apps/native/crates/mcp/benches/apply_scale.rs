@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 const FRAME: Duration = Duration::from_micros(16_667);
 const RUNS: usize = 15;
 
-fn command(kind: &str, layer: &str, n: usize) -> Value {
+fn command(kind: &str, layer: &str, spare: &str, n: usize) -> Value {
     match kind {
         "set_property" => {
             json!({"type":"set_property","target":layer,"path":"position.x","value":100 + n})
@@ -32,6 +32,14 @@ fn command(kind: &str, layer: &str, n: usize) -> Value {
         "by_index" => {
             json!({"type":"set_layer","target":2500,"patch":{"name":format!("Indexed {n}")}})
         }
+        "set_easing" => {
+            json!({"type":"set_easing","keyframes":[format!("k{layer}_position.x_{}", n % 4)],
+            "curve":if n.is_multiple_of(2) { "easeInOut" } else { "linear" }})
+        }
+        "simplify" => json!({"type":"simplify_keyframes","scope":"layers","targets":[layer]}),
+        "reorder" => json!({"type":"reorder_layer","target":layer,"index":n % 7}),
+        // A different layer each run: a layer is grouped once.
+        "group" => json!({"type":"group_layers","targets":[spare],"name":format!("Group {n}")}),
         _ => unreachable!(),
     }
 }
@@ -74,13 +82,22 @@ fn run(layers: usize) -> bool {
         "by_index",
         "add_layer",
         "delete",
-    ] {
+        "set_easing",
+        "simplify",
+        "reorder",
+        "group",
+    ]
+    .into_iter()
+    // `PM_BENCH_ONLY=reorder,group` times those alone (profiling).
+    .filter(|kind| {
+        std::env::var("PM_BENCH_ONLY").map_or(true, |only| only.split(',').any(|o| o == *kind))
+    }) {
         let mut times = vec![];
         for n in 0..RUNS {
             let t = Instant::now();
             let reply = session.call(
                 "apply_commands",
-                json!({"commands":[command(kind, &target, n)]}),
+                json!({"commands":[command(kind, &target, &ids[100 + n], n)]}),
             );
             times.push(t.elapsed());
             assert_eq!(reply["isError"], false, "{kind}: {reply}");
