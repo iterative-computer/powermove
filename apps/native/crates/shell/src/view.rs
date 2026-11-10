@@ -1,7 +1,7 @@
 use crate::{
     layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, Rect},
     native::{Command, Host, MenuEntry, MenuState},
-    session::{Session, WindowState},
+    session::WindowState,
     workspace,
 };
 use gpui::{prelude::*, *};
@@ -246,6 +246,9 @@ impl Editor {
     /// else's change to the window's workspace (an extension's
     /// `workspace.mutate`, another window) relays the panels.
     fn sync_workspaces(&mut self, cx: &mut App) {
+        if let Some(error) = crate::session::take_error() {
+            self.status = error;
+        }
         let Some(integration) = self.integration.clone() else {
             return;
         };
@@ -343,8 +346,8 @@ impl Editor {
             fullscreen: host.is_fullscreen(),
         })
     }
-    /// Read-modify-write of the shared session file (other windows write too).
-    /// A malformed or newer file is reported and never overwritten.
+    /// Queues this window's state for the shared session file (other windows
+    /// write too): written off the main thread, in order (`session::write`).
     pub fn persist_session(&mut self) {
         if self.window_id == 0 {
             return;
@@ -353,39 +356,14 @@ impl Editor {
             return;
         };
         let key = self.host.as_ref().is_some_and(|h| h.borrow().is_key());
-        let id = self.window_id;
-        self.update_session(&path, |s| {
-            s.upsert(state);
-            if key {
-                s.key = Some(id);
-            }
-        });
+        crate::session::write(&path, crate::session::Change::Upsert { state, key });
     }
     /// Removes this window from the session (the user closed it).
     pub fn forget_session(&mut self) {
         if let Some(path) = self.session_path.clone()
             && self.window_id != 0
         {
-            let id = self.window_id;
-            self.update_session(&path, |s| s.remove(id));
-        }
-    }
-    fn update_session(&mut self, path: &std::path::Path, f: impl FnOnce(&mut Session)) {
-        let mut session = if path.exists() {
-            match Session::load(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.status = format!("Window session could not be saved: {e}");
-                    return;
-                }
-            }
-        } else {
-            Session::default()
-        };
-        f(&mut session);
-        session.version = 1;
-        if let Err(e) = session.save(path) {
-            self.status = format!("Window session could not be saved: {e}");
+            crate::session::write(&path, crate::session::Change::Remove(self.window_id));
         }
     }
     /// Coalesces live-resize/move notifications into one session write.
@@ -601,7 +579,14 @@ impl Editor {
                     Rc::make_mut(&mut self.workspaces).apply(&write);
                     self.outbox.push(write);
                     if self.layout.workspace == rest {
-                        let fallback = self.workspaces.active(Some(workspace::FALLBACK));
+                        // Not `active()`: it prefers the project's copy, which
+                        // is the record just deleted, and would file it again.
+                        let fallback = self
+                            .workspaces
+                            .get(workspace::FALLBACK)
+                            .cloned()
+                            .or_else(|| workspace::preset(workspace::FALLBACK))
+                            .unwrap_or_default();
                         self.activate_record(fallback);
                     }
                     self.status = format!("Deleted workspace “{}”", workspace::record_name(&r));
@@ -2377,6 +2362,64 @@ mod keyboard_tests {
                 let group = &v.layout.docks[0].groups[0];
                 assert_eq!(group.tabs, ["assets"]);
                 assert_eq!(group.active, 0);
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    // Not a glob: gpui's own `test` attribute would shadow the standard one.
+    use super::{Editor, Rc, Tokens, workspace};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn deleting_the_active_workspace_moves_to_the_fallback_and_never_refiles_it(
+        cx: &mut TestAppContext,
+    ) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let window = cx.add_window(|_, cx| Editor::new(tokens, None, cx));
+        window
+            .update(cx, |v, _, cx| {
+                let mut mine = workspace::preset("edit").unwrap();
+                mine["id"] = "mine".into();
+                mine["name"] = "Mine".into();
+                mine["builtin"] = false.into();
+                v.workspaces = Rc::new(workspace::Store {
+                    records: workspace::seeded(std::slice::from_ref(&mine)),
+                    current: Some("mine".into()),
+                    default: None,
+                    project: Some(mine.clone()),
+                    project_id: Some("p".into()),
+                });
+                v.show_record(mine);
+                v.outbox.clear();
+                assert!(v.run_shell_command("layout:delete:mine", cx));
+                assert_eq!(v.layout.workspace, workspace::FALLBACK);
+                assert!(
+                    v.workspaces.get("mine").is_none(),
+                    "{:?}",
+                    v.workspaces.records
+                );
+                assert_eq!(
+                    workspace::record_id(&v.workspaces.active(None)),
+                    Some(workspace::FALLBACK)
+                );
+                let archived = v
+                    .outbox
+                    .iter()
+                    .position(|w| *w == workspace::Write::Archive("mine".into()))
+                    .expect("archived");
+                assert!(
+                    v.outbox[archived..].iter().all(|w| match w {
+                        workspace::Write::Active { after, .. }
+                        | workspace::Write::Upsert(after) =>
+                            workspace::record_id(after) != Some("mine"),
+                        _ => true,
+                    }),
+                    "the deleted record was written again: {:?}",
+                    v.outbox
+                );
             })
             .unwrap();
     }
