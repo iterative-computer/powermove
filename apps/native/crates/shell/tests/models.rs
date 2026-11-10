@@ -39,7 +39,7 @@ fn default_matches_approved_workspace() {
 }
 #[test]
 fn every_preset_and_small_window_is_bounded() {
-    for (id, _) in PRESETS {
+    for id in pm_shell::workspace::BUILTIN {
         let l = Layout::preset(id);
         l.validate().unwrap();
         for (w, h) in [(1428., 810.), (968., 528.), (350., 200.)] {
@@ -53,22 +53,19 @@ fn every_preset_and_small_window_is_bounded() {
     }
 }
 #[test]
-fn persistence_round_trip_and_project_isolation() {
-    let mut s = LayoutStore::default();
-    for (id, _) in PRESETS {
-        s.put("project-a", Layout::preset(id));
+fn edited_layouts_persist_in_their_workspace_record() {
+    use pm_shell::workspace::{layout, preset, write};
+    for id in pm_shell::workspace::BUILTIN {
+        let record = preset(id).unwrap();
+        let mut l = layout(&record);
+        if let Some(d) = l.docks.iter_mut().find(|d| d.size.is_some()) {
+            d.size = Some(410.);
+        }
+        let written = write(&l, &record);
+        assert_eq!(layout(&written), l, "{id}");
+        assert_eq!(written["name"], record["name"]);
+        assert_eq!(written["custom"], record["custom"]);
     }
-    let mut b = Layout::preset("design");
-    b.docks[0].size = Some(410.);
-    s.put("project-b", b.clone());
-    let path =
-        std::env::temp_dir().join(format!("pm-shell-layout-test-{}.json", std::process::id()));
-    s.save(&path).unwrap();
-    let loaded = LayoutStore::load(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
-    assert_eq!(s, loaded);
-    assert_eq!(loaded.get("project-b", "design"), b);
-    assert_eq!(loaded.get("project-a", "design").docks[0].size, Some(300.));
 }
 #[test]
 fn move_dock_and_tabs_is_atomic_and_preserves_panels() {

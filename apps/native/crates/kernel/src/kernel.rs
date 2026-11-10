@@ -548,28 +548,10 @@ impl Kernel {
         if workspace_write {
             let ws = self.project(id).unwrap().workspace().clone();
             if let Some(ws_id) = ws.get("id").and_then(Value::as_str) {
-                let mut all = self
-                    .state
-                    .settings
-                    .get("workspaces")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                if let Some(existing) = all
-                    .iter_mut()
-                    .find(|w| w.get("id").and_then(Value::as_str) == Some(ws_id))
-                {
-                    *existing = ws.clone();
-                } else {
-                    all.push(ws.clone());
-                }
                 let tx = crate::state::StateTransaction {
                     expected_revision: None,
                     ops: vec![
-                        crate::state::StateOp::Setting {
-                            key: "workspaces".into(),
-                            value: Some(Value::Array(all)),
-                        },
+                        crate::state::StateOp::Workspace { record: ws.clone() },
                         crate::state::StateOp::Setting {
                             key: "workspace".into(),
                             value: Some(Value::from(ws_id)),

@@ -84,7 +84,8 @@ pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
     pub open: Vec<String>,
-    pub saved: Vec<String>,
+    /// Window ▸ Workspace: id, name, built-in (built-ins first).
+    pub workspaces: Vec<(String, String, bool)>,
     pub workspace: String,
     pub sidebar: bool,
     pub inspector: bool,
@@ -658,14 +659,19 @@ fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
         }
     }
 }
-/// Window ▸ Workspace: presets (current one checked), saved workspaces, then
-/// Save / Delete / Reset. One vocabulary: a workspace is a panel arrangement.
+/// Window ▸ Workspace: built-ins, then saved workspaces (current one
+/// checked), then Save / Delete / Reset.
 fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
     let mtm = MainThreadMarker::new().unwrap();
     let mut items = vec![];
-    for (id, label) in crate::layout::PRESETS {
-        let item = named_item(mtm, label, &format!("workspace:{id}"));
-        item.setState(if id == state.workspace {
+    let mut builtin = true;
+    for (id, name, b) in &state.workspaces {
+        if builtin && !b {
+            items.push(NSMenuItem::separatorItem(mtm));
+        }
+        builtin = *b;
+        let item = named_item(mtm, name, &format!("workspace:{id}"));
+        item.setState(if *id == state.workspace {
             NSControlStateValueOn
         } else {
             NSControlStateValueOff
@@ -673,12 +679,6 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
         items.push(item);
     }
     items.push(NSMenuItem::separatorItem(mtm));
-    for name in &state.saved {
-        items.push(named_item(mtm, name, &format!("layout:apply:{name}")));
-    }
-    if !state.saved.is_empty() {
-        items.push(NSMenuItem::separatorItem(mtm));
-    }
     items.push(named_item(mtm, "Save Workspace…", "layout:save"));
     let delete = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -689,11 +689,11 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
         )
     };
     let names = NSMenu::new(mtm);
-    for name in &state.saved {
-        names.addItem(&named_item(mtm, name, &format!("layout:delete:{name}")));
+    for (id, name, _) in state.workspaces.iter().filter(|w| !w.2) {
+        names.addItem(&named_item(mtm, name, &format!("layout:delete:{id}")));
     }
     delete.setSubmenu(Some(&names));
-    delete.setEnabled(!state.saved.is_empty());
+    delete.setEnabled(state.workspaces.iter().any(|w| !w.2));
     items.push(delete);
     items.push(named_item(mtm, "Reset Workspace", "layout:reset"));
     items
@@ -1100,10 +1100,6 @@ fn base_choices() -> Vec<Choice> {
             label: i.label,
             command: i.command,
         })
-        .chain(crate::layout::PRESETS.iter().map(|(id, name)| Choice {
-            label: format!("Workspace: {name}"),
-            command: format!("workspace:{id}"),
-        }))
         .collect()
 }
 /// command → shortcut glyphs, preferring menu accelerators, then the first
@@ -1981,14 +1977,14 @@ impl Host {
             });
         }
         choices.extend(self.contributed_choices.iter().cloned());
-        for name in &state.saved {
+        for (id, name, _) in &state.workspaces {
             choices.push(Choice {
-                label: format!("Layout: {name}"),
-                command: format!("layout:apply:{name}"),
+                label: format!("Workspace: {name}"),
+                command: format!("workspace:{id}"),
             });
         }
         choices.push(Choice {
-            label: "Save Layout…".into(),
+            label: "Save Workspace…".into(),
             command: "layout:save".into(),
         });
         choices.push(Choice {
@@ -2032,11 +2028,7 @@ impl Host {
         if self.window.attachedSheet().is_some() {
             return;
         }
-        let preset = crate::layout::PRESETS
-            .iter()
-            .find(|p| p.0 == workspace)
-            .map_or("Custom", |p| p.1);
-        let sheet = workspace_sheet(&self.tokens, &format!("{preset} Copy"));
+        let sheet = workspace_sheet(&self.tokens, &format!("{workspace} Copy"));
         let field = sheet.field.clone();
         let sender = self.sender.clone();
         let handler = block2::RcBlock::new(move |response: NSModalResponse| {

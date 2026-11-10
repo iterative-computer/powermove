@@ -1,7 +1,7 @@
 //! Workspace geometry; bottom spans all columns except the full-height right dock.
 use pm_design::{Tokens, workspace::*};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
@@ -140,15 +140,9 @@ pub struct Geometry {
     pub panels: Vec<Placement>,
     pub dividers: Vec<Divider>,
 }
-pub const PRESETS: [(&str, &str); 7] = [
-    ("design", "Default"),
-    ("gradient", "Gradient"),
-    ("animate", "Animate"),
-    ("shaderlab", "Shader Lab"),
-    ("edit", "Edit"),
-    ("review", "Review"),
-    ("focus", "Focus"),
-];
+fn dock_for(id: &str, g: Group) -> Dock {
+    dock(id, Some(DEFAULT_RIGHT), vec![g])
+}
 fn group(ids: &[&str], size: Option<f32>) -> Group {
     Group {
         tabs: ids.iter().map(|s| s.to_string()).collect(),
@@ -165,95 +159,13 @@ fn dock(id: &str, size: Option<f32>, groups: Vec<Group>) -> Dock {
     }
 }
 impl Layout {
+    /// A built-in workspace's layout (the design one for any other id).
     pub fn preset(id: &str) -> Self {
-        let docks = match id {
-            "gradient" => vec![
-                dock(
-                    "left",
-                    Some(300.),
-                    vec![
-                        group(&["gradient-controls"], None),
-                        group(&["assets"], Some(190.)),
-                    ],
-                ),
-                dock("center", None, vec![group(&["viewer"], None)]),
-                dock("bottom", Some(300.), vec![group(&["timeline"], None)]),
-                dock("right", Some(340.), vec![group(&["inspector"], None)]),
-            ],
-            "animate" => vec![
-                dock(
-                    "left",
-                    Some(230.),
-                    vec![group(&["takes"], None), group(&["assets"], Some(170.))],
-                ),
-                dock(
-                    "center",
-                    None,
-                    vec![group(&["viewer"], Some(300.)), group(&["timeline"], None)],
-                ),
-                dock("right", Some(320.), vec![group(&["inspector"], None)]),
-            ],
-            "shaderlab" => vec![
-                dock("left", Some(460.), vec![group(&["shader"], None)]),
-                dock("center", None, vec![group(&["viewer"], None)]),
-                dock("bottom", Some(200.), vec![group(&["timeline"], None)]),
-                dock(
-                    "right",
-                    Some(290.),
-                    vec![group(&["inspector"], None), group(&["perf"], Some(190.))],
-                ),
-            ],
-            "edit" => vec![
-                dock(
-                    "left",
-                    Some(250.),
-                    vec![group(&["assets"], None), group(&["fxbrowser"], Some(240.))],
-                ),
-                dock("center", None, vec![group(&["viewer"], None)]),
-                dock("bottom", Some(360.), vec![group(&["timeline"], None)]),
-                dock("right", Some(280.), vec![group(&["inspector"], None)]),
-            ],
-            "review" => vec![
-                dock(
-                    "center",
-                    None,
-                    vec![group(&["viewer"], None), group(&["timeline"], Some(180.))],
-                ),
-                dock("right", Some(300.), vec![group(&["notes"], None)]),
-            ],
-            "focus" => vec![dock("center", None, vec![group(&["viewer"], None)])],
-            _ => vec![
-                dock(
-                    "left",
-                    Some(DEFAULT_LEFT),
-                    vec![group(&["assets", "layer-effects"], None)],
-                ),
-                dock("center", None, vec![group(&["viewer"], None)]),
-                dock(
-                    "bottom",
-                    Some(DEFAULT_TIMELINE),
-                    vec![group(&["timeline"], None)],
-                ),
-                dock(
-                    "right",
-                    Some(DEFAULT_RIGHT),
-                    vec![
-                        group(&["inspector"], None),
-                        group(&["fxbrowser"], Some(DEFAULT_EFFECTS)),
-                    ],
-                ),
-            ],
-        };
-        Self {
-            version: 1,
-            workspace: if PRESETS.iter().any(|p| p.0 == id) {
-                id
-            } else {
-                "design"
-            }
-            .into(),
-            docks,
-        }
+        crate::workspace::layout(
+            &crate::workspace::preset(id)
+                .or_else(|| crate::workspace::preset(crate::workspace::FALLBACK))
+                .unwrap_or_default(),
+        )
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.version == 1, "Unsupported shell layout version");
@@ -319,26 +231,48 @@ impl Layout {
     pub fn geometry(&self, bounds: Rect, t: &Tokens) -> Geometry {
         let mut out = Geometry::default();
         let gap = t.metrics.gap;
-        let visible = |id: &str| {
-            self.docks
-                .iter()
-                .enumerate()
-                .find(|(_, d)| d.id == id && !d.collapsed && !d.groups.is_empty())
+        let shown = |d: &&Dock| !d.collapsed && !d.groups.is_empty();
+        let right = self
+            .docks
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.id == "right" && shown(d));
+        let bottom = self
+            .docks
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.id == "bottom" && shown(d));
+        // v1's arrangement: every other dock is a column, in authored order;
+        // the fluid one (center, else the viewer's) takes the width left over.
+        let columns: Vec<usize> = (0..self.docks.len())
+            .filter(|&i| {
+                let d = &self.docks[i];
+                shown(&d) && d.id != "right" && d.id != "bottom"
+            })
+            .collect();
+        let fluid = self.fluid(&columns);
+        let width = |d: &Dock| {
+            d.size.unwrap_or(if d.id == "right" {
+                DEFAULT_RIGHT
+            } else {
+                DEFAULT_LEFT
+            })
         };
-        let left = visible("left");
-        let right = visible("right");
-        let bottom = visible("bottom");
-        let available = (bounds.w - t.metrics.min_center - gap * 2.).max(0.);
-        let requested = left.map_or(0., |(_, d)| d.size.unwrap_or(DEFAULT_LEFT))
-            + right.map_or(0., |(_, d)| d.size.unwrap_or(DEFAULT_RIGHT));
+        let fixed: Vec<usize> = columns
+            .iter()
+            .copied()
+            .filter(|&i| Some(i) != fluid)
+            .collect();
+        let gaps = (columns.len().saturating_sub(1) + usize::from(right.is_some())) as f32 * gap;
+        let available = (bounds.w - t.metrics.min_center - gaps).max(0.);
+        let requested = fixed.iter().map(|&i| width(&self.docks[i])).sum::<f32>()
+            + right.map_or(0., |(_, d)| width(d));
         let factor = if requested > available {
             available / requested
         } else {
             1.
         };
-        let lw = left.map_or(0., |(_, d)| d.size.unwrap_or(DEFAULT_LEFT) * factor);
-        let rw = right.map_or(0., |(_, d)| d.size.unwrap_or(DEFAULT_RIGHT) * factor);
-        let lg = if left.is_some() { gap } else { 0. };
+        let rw = right.map_or(0., |(_, d)| width(d) * factor);
         let rg = if right.is_some() { gap } else { 0. };
         let bh = bottom.map_or(0., |(_, d)| {
             d.size
@@ -348,38 +282,58 @@ impl Layout {
         });
         let bg = if bottom.is_some() { gap } else { 0. };
         let upper = bounds.h - bh - bg;
+        let row = (bounds.w - rw - rg).max(0.);
+        let fixed_w: f32 = fixed.iter().map(|&i| width(&self.docks[i]) * factor).sum();
+        let gaps_w = columns.len().saturating_sub(1) as f32 * gap;
+        let fluid_w = (row - fixed_w - gaps_w).max(0.);
+        let mut rects = std::collections::HashMap::new();
+        let mut x = bounds.x;
+        for &i in &columns {
+            let w = if Some(i) == fluid {
+                fluid_w
+            } else {
+                width(&self.docks[i]) * factor
+            };
+            rects.insert(
+                i,
+                Rect {
+                    x,
+                    y: bounds.y,
+                    w,
+                    h: upper,
+                },
+            );
+            x += w + gap;
+        }
+        if let Some((i, _)) = right {
+            rects.insert(
+                i,
+                Rect {
+                    x: bounds.x + bounds.w - rw,
+                    y: bounds.y,
+                    w: rw,
+                    h: bounds.h,
+                },
+            );
+        }
+        if let Some((i, _)) = bottom {
+            rects.insert(
+                i,
+                Rect {
+                    x: bounds.x,
+                    y: bounds.y + upper + bg,
+                    w: row,
+                    h: bh,
+                },
+            );
+        }
         for (di, d) in self
             .docks
             .iter()
             .enumerate()
             .filter(|(_, d)| !d.collapsed && !d.groups.is_empty())
         {
-            let rect = match d.id.as_str() {
-                "left" => Rect {
-                    x: bounds.x,
-                    y: bounds.y,
-                    w: lw,
-                    h: upper,
-                },
-                "right" => Rect {
-                    x: bounds.x + bounds.w - rw,
-                    y: bounds.y,
-                    w: rw,
-                    h: bounds.h,
-                },
-                "bottom" => Rect {
-                    x: bounds.x,
-                    y: bounds.y + upper + bg,
-                    w: bounds.w - rw - rg,
-                    h: bh,
-                },
-                _ => Rect {
-                    x: bounds.x + lw + lg,
-                    y: bounds.y,
-                    w: (bounds.w - lw - rw - lg - rg).max(0.),
-                    h: upper,
-                },
-            };
+            let rect = rects[&di];
             let n = d.groups.len();
             let space = (rect.h - gap * (n - 1) as f32).max(0.);
             let fixed: f32 = d.groups.iter().filter_map(|g| g.size).sum();
@@ -429,25 +383,9 @@ impl Layout {
                     y += gap;
                 }
             }
+            // Columns before the fluid one resize from their trailing edge,
+            // later ones (and the right dock) from their leading edge.
             let divider = match d.id.as_str() {
-                "left" => Some((
-                    false,
-                    Rect {
-                        x: rect.x + lw,
-                        y: bounds.y,
-                        w: gap,
-                        h: upper,
-                    },
-                )),
-                "right" => Some((
-                    false,
-                    Rect {
-                        x: rect.x - gap,
-                        y: bounds.y,
-                        w: gap,
-                        h: bounds.h,
-                    },
-                )),
                 "bottom" => Some((
                     true,
                     Rect {
@@ -457,7 +395,25 @@ impl Layout {
                         h: gap,
                     },
                 )),
-                _ => None,
+                _ if Some(di) == fluid => None,
+                _ if self.trailing(di) => Some((
+                    false,
+                    Rect {
+                        x: rect.x - gap,
+                        y: rect.y,
+                        w: gap,
+                        h: rect.h,
+                    },
+                )),
+                _ => Some((
+                    false,
+                    Rect {
+                        x: rect.x + rect.w,
+                        y: rect.y,
+                        w: gap,
+                        h: rect.h,
+                    },
+                )),
             };
             if let Some((horizontal, rect)) = divider {
                 out.dividers.push(Divider {
@@ -470,9 +426,43 @@ impl Layout {
         }
         out
     }
+    /// The column that takes the width the others leave: `center`, else the
+    /// viewer's or the timeline's dock, else the first column (v1's rule).
+    fn fluid(&self, columns: &[usize]) -> Option<usize> {
+        let has = |i: &usize, id: &str| {
+            self.docks[*i]
+                .groups
+                .iter()
+                .any(|g| g.tabs.iter().any(|t| t == id))
+        };
+        columns
+            .iter()
+            .find(|&&i| self.docks[i].id == "center")
+            .or_else(|| {
+                columns
+                    .iter()
+                    .find(|i| has(i, VIEWER) || has(i, "timeline"))
+            })
+            .or(columns.first())
+            .copied()
+    }
+    /// A dock that sits after the fluid column (or is the right dock): it
+    /// grows when its leading edge moves left.
+    fn trailing(&self, dock: usize) -> bool {
+        if self.docks[dock].id == "right" {
+            return true;
+        }
+        let columns: Vec<usize> = (0..self.docks.len())
+            .filter(|&i| {
+                let d = &self.docks[i];
+                !d.collapsed && !d.groups.is_empty() && d.id != "right" && d.id != "bottom"
+            })
+            .collect();
+        self.fluid(&columns).is_some_and(|f| dock > f)
+    }
     pub fn resize(&mut self, divider: &Divider, delta: f32, t: &Tokens) {
-        let d = &mut self.docks[divider.dock];
         if let Some(i) = divider.group {
+            let d = &mut self.docks[divider.dock];
             // Keep a flexible partner to fill the dock; resize either side of it.
             let target = if d.groups[i].size.is_some() { i } else { i + 1 };
             let sign = if target == i { 1. } else { -1. };
@@ -483,11 +473,12 @@ impl Layout {
                 d.groups[other].size = None;
             }
         } else {
-            let sign = if d.id == "right" || d.id == "bottom" {
+            let sign = if self.docks[divider.dock].id == "bottom" || self.trailing(divider.dock) {
                 -1.
             } else {
                 1.
             };
+            let d = &mut self.docks[divider.dock];
             let minimum = if d.id == "bottom" {
                 t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row
             } else {
@@ -721,8 +712,7 @@ impl Layout {
                         Edge::Right => DEFAULT_RIGHT,
                         Edge::Bottom => DEFAULT_TIMELINE,
                     };
-                    next.docks
-                        .push(dock(edge.dock_id(), Some(size), vec![moved]));
+                    next.add_dock(dock(edge.dock_id(), Some(size), vec![moved]));
                 }
             }
         }
@@ -823,11 +813,57 @@ impl Layout {
                     .iter()
                     .find(|d| d.id == home)
                     .and_then(|d| d.size);
-                next.docks
-                    .push(dock(home, size.or(Some(DEFAULT_RIGHT)), vec![g]));
+                next.add_dock(dock(home, size.or(Some(DEFAULT_RIGHT)), vec![g]));
             }
         }
         next.commit(self)
+    }
+    /// Puts panel `id` back at `place` without checks (a parked panel kept in
+    /// the saved workspace). Out-of-range places land at the nearest end.
+    pub fn insert_at(&mut self, id: &str, place: DropTarget) {
+        if self.find(id).is_some() {
+            return;
+        }
+        let single = || self::group(&[id], None);
+        match place {
+            DropTarget::Tab { dock, group, index } => {
+                match self
+                    .docks
+                    .get_mut(dock)
+                    .and_then(|d| d.groups.get_mut(group))
+                {
+                    Some(g) => {
+                        let at = index.min(g.tabs.len());
+                        g.tabs.insert(at, id.into());
+                        if at <= g.active && g.tabs.len() > 1 {
+                            g.active += 1;
+                        }
+                    }
+                    None => self.insert_at(id, DropTarget::Split { dock, group }),
+                }
+            }
+            DropTarget::Split { dock, group } => match self.docks.get_mut(dock) {
+                Some(d) => {
+                    let at = group.min(d.groups.len());
+                    d.groups.insert(at, single());
+                }
+                None => self.add_dock(dock_for("right", single())),
+            },
+            DropTarget::Edge(edge) => {
+                match self.docks.iter_mut().find(|d| d.id == edge.dock_id()) {
+                    Some(d) => d.groups.push(single()),
+                    None => self.add_dock(dock_for(edge.dock_id(), single())),
+                }
+            }
+        }
+    }
+    /// Adds a dock where its id puts it: a left dock is the first column.
+    fn add_dock(&mut self, d: Dock) {
+        if d.id == "left" {
+            self.docks.insert(0, d);
+        } else {
+            self.docks.push(d);
+        }
     }
     /// Panel ids currently in the layout, in dock/group/tab order.
     pub fn open_panels(&self) -> Vec<&str> {
@@ -884,52 +920,9 @@ impl Layout {
         self.move_panel_to(id, target)
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LayoutStore {
-    pub version: u32,
-    #[serde(default)]
-    pub active: std::collections::BTreeMap<String, String>,
-    pub projects: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Layout>>,
-    /// User-named workspaces, shared by every project (Window ▸ Workspace).
-    #[serde(default)]
-    pub saved: std::collections::BTreeMap<String, Layout>,
-    /// The saved layout new projects start with (an agent's set_panel_layout).
-    #[serde(default)]
-    pub default_layout: Option<String>,
-}
-/// Longest accepted saved-layout name, in characters.
+/// Longest accepted workspace name, in characters.
 pub const LAYOUT_NAME_MAX: usize = 80;
-/// Trims and validates a saved-layout name.
-/// set_panel_layout's write, off the main thread: the latest store from disk
-/// gains `layout` under a free name (a taken name gets a number), new projects
-/// start with it, and `project` shows it. Returns the store and the name.
-pub fn save_agent_layout(
-    path: Option<&Path>,
-    project: &str,
-    name: &str,
-    layout: &Layout,
-) -> anyhow::Result<(LayoutStore, String)> {
-    layout.validate()?;
-    let mut store = match path.filter(|p| p.exists()) {
-        Some(p) => LayoutStore::load(p)?,
-        None => LayoutStore::default(),
-    };
-    let base = layout_name(name)?;
-    let mut candidate = base.clone();
-    let mut n = 2;
-    while store.saved.contains_key(&candidate) {
-        candidate = format!("{base} {n}");
-        n += 1;
-    }
-    let saved = store.save_named(&candidate, layout)?;
-    store.default_layout = Some(saved.clone());
-    store.put(project, layout.clone());
-    store.version = 1;
-    if let Some(p) = path {
-        store.save(p)?;
-    }
-    Ok((store, saved))
-}
+/// Trims and validates a workspace name.
 pub fn layout_name(name: &str) -> anyhow::Result<String> {
     let name = name.trim();
     anyhow::ensure!(!name.is_empty(), "Enter a name for the workspace.");
@@ -942,75 +935,6 @@ pub fn layout_name(name: &str) -> anyhow::Result<String> {
         "Workspace names can’t contain control characters."
     );
     Ok(name.to_string())
-}
-impl LayoutStore {
-    /// Saves `layout` under a user name, replacing an existing one with that name.
-    pub fn save_named(&mut self, name: &str, layout: &Layout) -> anyhow::Result<String> {
-        let name = layout_name(name)?;
-        layout.validate()?;
-        self.version = 1;
-        self.saved.insert(name.clone(), layout.clone());
-        Ok(name)
-    }
-    /// The saved layout, re-labelled for `workspace` so it replaces that workspace's
-    /// arrangement (presets keep their identity; a saved layout is an arrangement).
-    pub fn named(&self, name: &str, workspace: &str) -> Option<Layout> {
-        self.saved.get(name).map(|l| Layout {
-            workspace: workspace.into(),
-            ..l.clone()
-        })
-    }
-    pub fn delete_named(&mut self, name: &str) -> bool {
-        self.saved.remove(name).is_some()
-    }
-    pub fn put(&mut self, project: &str, layout: Layout) {
-        self.version = 1;
-        self.active.insert(project.into(), layout.workspace.clone());
-        self.projects
-            .entry(project.into())
-            .or_default()
-            .insert(layout.workspace.clone(), layout);
-    }
-    pub fn get(&self, project: &str, workspace: &str) -> Layout {
-        self.projects
-            .get(project)
-            .and_then(|p| p.get(workspace))
-            .cloned()
-            .or_else(|| {
-                self.default_layout
-                    .as_deref()
-                    .and_then(|name| self.named(name, workspace))
-            })
-            .unwrap_or_else(|| Layout::preset(workspace))
-    }
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let s: Self = serde_json::from_slice(&std::fs::read(path)?)?;
-        anyhow::ensure!(s.version == 1, "Unsupported layout store");
-        for p in s.projects.values() {
-            for l in p.values() {
-                l.validate()?;
-            }
-        }
-        for (name, l) in &s.saved {
-            layout_name(name)?;
-            l.validate()?;
-        }
-        Ok(s)
-    }
-    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let tmp = path.with_extension("json.pending");
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&serde_json::to_vec_pretty(self)?)?;
-            f.sync_all()?;
-        }
-        std::fs::rename(tmp, path)?;
-        Ok(())
-    }
 }
 /// Share of the docking area an edge-dock preview covers (the outer 25 %).
 pub const EDGE_ZONE: f32 = 0.25;

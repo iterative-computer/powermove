@@ -21,6 +21,7 @@ pub mod theme;
 pub mod transient;
 #[cfg(target_os = "macos")]
 pub mod view;
+pub mod workspace;
 pub mod welcome;
 #[cfg(target_os = "macos")]
 pub mod welcome_view;

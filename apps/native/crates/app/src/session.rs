@@ -73,6 +73,8 @@ pub struct Controller {
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
+    /// The workspace store this window last built (`crate::workspaces`).
+    pub workspace_store: crate::workspaces::Cache,
     pub captions: crate::captions_panel::State,
     pub shader: crate::shader_panel::State,
     pub takes: crate::takes_panel::State,
@@ -190,6 +192,12 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
+        Some(self.0.read(cx).workspace_store())
+    }
+    fn write_workspace(&self, write: pm_shell::workspace::Write, cx: &mut App) {
+        self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
@@ -428,6 +436,7 @@ impl Controller {
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
+            workspace_store: Default::default(),
             captions: Default::default(),
             shader: Default::default(),
             takes: Default::default(),
