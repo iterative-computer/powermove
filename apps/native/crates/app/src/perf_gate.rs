@@ -72,7 +72,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 layer_id: layer.id.clone(),
                                 value: r["value"].as_f64().ok_or_else(|| anyhow::anyhow!("missing value"))?,
                             }]),
-                            }, now, cx);
+                            }, Some(now), cx);
                         },
                         "play" | "pause" => {
                             let viewer = v.viewer.as_ref().ok_or_else(|| anyhow::anyhow!("no viewer"))?;

@@ -1045,8 +1045,11 @@ impl GizmoSurface {
             cx.notify();
         }
         self.queue.push_back(Job::Step(commands, true));
-        self.step_input
-            .get_or_insert_with(crate::session::Controller::event_time);
+        // The viewer trace's input time; untraced, no timestamp is read.
+        if pm_engine_service::trace::enabled() {
+            self.step_input
+                .get_or_insert_with(crate::session::Controller::event_time);
+        }
         self.pump(cx);
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {

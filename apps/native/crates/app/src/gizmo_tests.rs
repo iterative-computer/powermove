@@ -27,6 +27,8 @@ struct Recorder {
     commands: RefCell<Vec<String>>,
     input: RefCell<Option<Rc<FakeInput>>>,
     variant: RefCell<Option<String>>,
+    /// Input times drag steps stamped for the viewer trace.
+    stamps: RefCell<Vec<f64>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -128,6 +130,9 @@ impl Host for Recording {
     }
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.into());
+    }
+    fn input(&self, at: f64, _: &mut App) {
+        self.0.stamps.borrow_mut().push(at);
     }
     fn shape_variant(&self, _: &App) -> String {
         self.0
@@ -322,6 +327,16 @@ fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContex
     assert_eq!(after.position[1], before.position[1] - 10.);
     s.undo(cx);
     assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn an_untraced_drag_reads_no_input_times(cx: &mut TestAppContext) {
+    assert!(!pm_engine_service::trace::enabled());
+    let mut s = stage(cx);
+    let (body, ..) = s.points();
+    let at = s.point_of([body[0] + 30., body[1] + 30.]);
+    s.drag(cx, at, point(px(40.), px(-10.)), Modifiers::none());
+    assert!(s.recorder.reports.borrow().is_empty());
+    assert!(s.recorder.stamps.borrow().is_empty());
 }
 #[gpui::test]
 fn dragging_a_corner_scales_and_undo_restores_it(cx: &mut TestAppContext) {

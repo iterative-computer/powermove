@@ -1386,23 +1386,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     shared.disk.set_wake(shared.wake.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
-    // `PM_ENGINE_TRACE`, or for a development bundle launched without a
-    // custom environment (`com.powermove.native.dev.*`) its own
-    // `PMEngineTrace` default; a shipped app never reads the default.
-    let trace_path = std::env::var_os("PM_ENGINE_TRACE").or_else(|| {
-        let bundle = objc2_foundation::NSBundle::mainBundle().bundleIdentifier()?;
-        if !bundle.to_string().starts_with("com.powermove.native.dev.") {
-            return None;
-        }
-        let key = objc2_foundation::NSString::from_str("PMEngineTrace");
-        // The app's own domain only, never an inherited (global) default.
-        objc2_foundation::NSUserDefaults::standardUserDefaults()
-            .persistentDomainForName(&bundle)?
-            .objectForKey(&key)?
-            .downcast::<objc2_foundation::NSString>()
-            .ok()
-            .map(|path| path.to_string().into())
-    });
+    let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
     let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
         Ok(recorder) => Some(recorder),
         Err(error) => {

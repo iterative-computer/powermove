@@ -445,3 +445,5 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The timeline prepares only the rows on screen (every scroll prepares a new frame); a key glyph identical to the key op before it on the same device half-pixel is marked `Op::covered` at prepare and skipped at paint, kept for hit testing and marquee.
 - Whole-document walks run per revision (effect asset references, effect types) are memoized per copy-on-write container (`pm_render::doc_walk::SubtreeMemo`, entries hold a clone so an allocation is never reused while remembered).
 - Area coverage zeroes a batch's cells with a `clear` dispatch in its own compute pass instead of a `clear_buffer` blit.
+- A timeline marquee asks the scene (`Scene::marquee`), which builds ops for just the rows under its rectangle: frames hold only the rows on screen, and a marquee dragged past the panel's edge covers rows outside them.
+- Input stamps for the viewer trace (event timestamps, `Viewer::input_event`) are taken only while `pm_engine_service::trace::enabled()` (the trace path, resolved once); the feel probe's file is opened and written on its own thread.

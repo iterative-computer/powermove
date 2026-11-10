@@ -370,7 +370,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 if !registered(editor, &panel, cx) {
                     return Err(Error::invalid("Unknown panel ID."));
                 }
-                gpui_macos::feel::note(gpui_macos::feel::now(), "panel");
+                gpui_macos::feel::note_now("panel");
                 c.read(cx)
                     .host
                     .borrow()
@@ -509,8 +509,14 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                                 PlatformInput::ScrollWheel(_) => "scroll",
                                 _ => "",
                             };
-                            let now = gpui_macos::feel::now();
-                            if !kind.is_empty() {
+                            // Untraced, nothing reads the clock here.
+                            let feel = gpui_macos::feel::enabled();
+                            let now = if feel || pm_engine_service::trace::enabled() {
+                                gpui_macos::feel::now()
+                            } else {
+                                0.
+                            };
+                            if feel && !kind.is_empty() {
                                 gpui_macos::feel::note(now, kind);
                             }
                             crate::session::DISPATCHING.set(Some(now));
@@ -518,7 +524,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                             crate::session::DISPATCHING.set(None);
                         }
                         Step::Key(keystroke) => {
-                            gpui_macos::feel::note(gpui_macos::feel::now(), "key");
+                            gpui_macos::feel::note_now("key");
                             window.dispatch_keystroke(keystroke, cx);
                         }
                     }

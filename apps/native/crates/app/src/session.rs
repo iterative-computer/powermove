@@ -22,7 +22,8 @@ struct CompositionView {
 
 thread_local! {
     /// The time of an input the app dispatches itself (MCP `computer_use_panel`),
-    /// which `event_time` reports instead of AppKit's last real event.
+    /// which `event_time` reports instead of AppKit's last real event; `0`
+    /// while no trace stamped it, so `event_time` reads the clock if asked.
     pub(crate) static DISPATCHING: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 pub struct Controller {
@@ -791,17 +792,21 @@ impl Controller {
         }
     }
     pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
-        self.call_at(call, Self::event_time(), cx);
+        let input = pm_engine_service::trace::enabled().then(Self::event_time);
+        self.call_at(call, input, cx);
     }
-    pub fn call_at(&mut self, call: Call, input: f64, cx: &mut Context<Self>) {
+    /// `input`: the edit's input time for the viewer trace, if traced.
+    pub fn call_at(&mut self, call: Call, input: Option<f64>, cx: &mut Context<Self>) {
         if self.close_pending {
             return;
         }
         let Some(session) = &self.session else { return };
-        if matches!(
-            call,
-            Call::Transact { .. } | Call::Gesture(GestureCall::Step { .. })
-        ) && let Some(viewer) = &self.viewer
+        if let Some(input) = input
+            && matches!(
+                call,
+                Call::Transact { .. } | Call::Gesture(GestureCall::Step { .. })
+            )
+            && let Some(viewer) = &self.viewer
         {
             viewer.input_event(input);
         }
@@ -1019,7 +1024,11 @@ impl Controller {
     }
     pub(crate) fn event_time() -> f64 {
         if let Some(t) = DISPATCHING.get() {
-            return t;
+            return if t > 0. {
+                t
+            } else {
+                pm_engine_service::trace::now()
+            };
         }
         objc2::MainThreadMarker::new()
             .and_then(|main| objc2_app_kit::NSApplication::sharedApplication(main).currentEvent())

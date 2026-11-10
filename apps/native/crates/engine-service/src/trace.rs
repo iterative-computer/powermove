@@ -38,6 +38,36 @@ pub fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime()
 }
 
+/// Where the viewer diagnostic trace goes, read once: `PM_ENGINE_TRACE`, or
+/// for a development bundle launched without a custom environment
+/// (`com.powermove.native.dev.*`) its own `PMEngineTrace` default; a shipped
+/// app never reads the default.
+pub fn path() -> Option<&'static std::ffi::OsStr> {
+    static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var_os("PM_ENGINE_TRACE").or_else(|| {
+            let bundle = objc2_foundation::NSBundle::mainBundle().bundleIdentifier()?;
+            if !bundle.to_string().starts_with("com.powermove.native.dev.") {
+                return None;
+            }
+            let key = objc2_foundation::NSString::from_str("PMEngineTrace");
+            // The app's own domain only, never an inherited (global) default.
+            objc2_foundation::NSUserDefaults::standardUserDefaults()
+                .persistentDomainForName(&bundle)?
+                .objectForKey(&key)?
+                .downcast::<objc2_foundation::NSString>()
+                .ok()
+                .map(|path| path.to_string().into())
+        })
+    })
+    .as_deref()
+}
+/// Whether viewer frames are traced. Untraced, callers skip input stamps
+/// (event timestamps and [`crate::Viewer::input_event`]) altogether.
+pub fn enabled() -> bool {
+    path().is_some()
+}
+
 /// This thread's CPU time in milliseconds.
 pub fn thread_cpu_ms() -> f64 {
     unsafe extern "C" {
