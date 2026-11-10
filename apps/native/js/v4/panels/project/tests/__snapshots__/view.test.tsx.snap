@@ -18361,3 +18361,386 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
   ],
 }
 `;
+
+exports[`no-project: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 4,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 5,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Project media",
+      "multiselectable": false,
+      "role": "List",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "No Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "No Project",
+      "multiselectable": false,
+      "role": "Heading",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": "No Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": "Open a project to see its media.",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 11,
+      "label": "Open a project to see its media.",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "end",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": true,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": true,
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 0,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "div",
+                {
+                  "attr": {
+                    "symbol": "photo.on.rectangle",
+                  },
+                  "data-pm-component": "empty-state",
+                  "label": "No Project",
+                  "role": "group",
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "justifyContent": "center",
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {
+                      "role": "heading",
+                      "style": {
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.heading",
+                        },
+                        "fontWeight": {
+                          "token": "typography.semibold_weight",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "No Project",
+                        [],
+                      ],
+                    ],
+                  ],
+                  [
+                    "text",
+                    {
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "fontSize": {
+                          "token": "typography.reading",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Open a project to see its media.",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
