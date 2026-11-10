@@ -302,7 +302,10 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     // so adding objects cannot occupy all native sessions with obsolete jobs.
     const overlap=j.slot===slot && j.runtime===runtime && [...depthIds].some(id=>j.depthIds.has(id));
     const obsolete=overlap && (j.separate!==fork || j.depthIds.size!==depthIds.size || [...depthIds].some(id=>!j.depthIds.has(id)));
-    if (obsolete || j.backend.id==='webgpu' && j.deviceGeneration!==studioGpuGeneration() || performance.now() - j.usedAt > JOB_TTL_MS || j.factoryRevision !== studioBackendRevision()) { disposeJob(j); s.jobs.delete(k); }
+    // A slow quality image (or a long pause) does not make its current session
+    // idle. Only retire unused targets after their queued work has finished.
+    const expired=k!==setKey && !j.pending.size && !j.chain && performance.now()-j.usedAt>JOB_TTL_MS;
+    if (obsolete || j.backend.id==='webgpu' && j.deviceGeneration!==studioGpuGeneration() || expired || j.factoryRevision !== studioBackendRevision()) { disposeJob(j); s.jobs.delete(k); }
   }
   let job = s.jobs.get(setKey);
   const screenKey = `${time}:${PM.animVersion?.() ?? ''}:${PM.preparedVideoVersion ?? ''}`;

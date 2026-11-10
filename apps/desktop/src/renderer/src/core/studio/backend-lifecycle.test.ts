@@ -16,6 +16,18 @@ import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, stud
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
 afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
+ it('keeps the current native session after a slow quality frame or a long pause',async()=>{
+  let now=0;const clock=vi.spyOn(performance,'now').mockImplementation(()=>now),dispose=vi.fn(),create=vi.fn();
+  const source=document.createElement('canvas');
+  registerStudioBackend(()=>{create();return {id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>({source,width:64,height:64,samples:r.samples,version:'quality'}),dispose} as unknown as StudioBackend;});
+  const {PM,draw}=fixture();
+  try{
+   draw();await studioIdle(PM);draw();await studioIdle(PM);
+   now=15_000;expect(draw()?.canvas).toBe(source);
+   draw(1);await studioIdle(PM);expect(draw(1)?.canvas).toBe(source);
+   expect(create).toHaveBeenCalledOnce();expect(dispose).not.toHaveBeenCalled();
+  }finally{disposeSceneRuntimes(PM);clock.mockRestore();}
+ });
  it('clears preparation for a deleted depth set after importing or removing a model',async()=>{
   const {PM,runtime,draw}=fixture();runtime.geometryPending=1;draw();expect(PM.Studio.status().preparing).toBeTruthy();
   const scene=createScene();scene.objects=[createObject('other')];runtime.geometryPending=0;runtime.sync(scene);
