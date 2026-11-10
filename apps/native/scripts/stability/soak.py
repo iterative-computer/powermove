@@ -10,14 +10,22 @@ frontmost) on a copy of the project and a scratch profile, then loops until
   playback     play for a few seconds, pause; step frames; back to start
   render cache render_frames at spread times
   export       one export_video per --export-every minutes
+  windows      New Window (review link), then that window's close button (a
+               background command would close the project's window, the main
+               one): the window count must come back
+  projects     every other cycle, switches between the project and a second
+               one made through MCP (finish_session, create_project /
+               open_project, start_session): the project closes and reopens
 and, once half-way, kills the app (-9) and relaunches it on the same profile:
 the recovery question is answered Recover, so the session continues on the
 recovered work. Every 10 s it samples RSS, threads, open files, Metal memory
 (footprint) and new DiagnosticReports for powermove-native; PM_MAIN stall
-lines are counted. Exit 1 on a crash, a hang (an MCP call without an answer
+lines are counted; live heap is the malloc zones' allocated bytes and
+blocks (vmmap). Exit 1 on a crash, a hang (an MCP call without an answer
 in 60 s), or growth past the limits printed at the end.
 
-  soak.py --binary $CARGO_TARGET_DIR/debug/powermove-native --minutes 30 PROJECT.pmv
+  soak.py --binary $CARGO_TARGET_DIR/soak/powermove-native --minutes 30 PROJECT.pmv
+The `soak` profile is release code with review links (apps/native/Cargo.toml).
 """
 import argparse, json, os, random, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
@@ -142,7 +150,43 @@ def sample(pid):
     m = re.search(r'([\d.]+)\s*([KMG])B\s+[\d.]+\s*[KMG]B\s+[\d.]+\s*[KMG]B\s+\d+\s+IOAccelerator', fp)
     if m:
         out['gpu_mb'] = round(float(m.group(1)) * {'K': 1 / 1024, 'M': 1, 'G': 1024}[m.group(2)])
+    vm = subprocess.run(['vmmap', '-summary', str(pid)], capture_output=True, text=True).stdout
+    zones = vm[vm.find('MALLOC ZONE'):]
+    m = re.search(r'^TOTAL\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+([\d.]+)([KMG])', zones, re.M)
+    if m:
+        out['heap_blocks'] = int(m.group(1))
+        out['heap_mb'] = round(float(m.group(2)) * {'K': 1 / 1024, 'M': 1, 'G': 1024}[m.group(3)])
     return out
+
+
+def editor_windows(pid):
+    """On-screen editor windows (not their palette and menu children)."""
+    out = subprocess.run([str(CUA), 'call', 'list_windows', json.dumps({'pid': pid})],
+                         capture_output=True, text=True).stdout
+    try:
+        return {w['window_id'] for w in json.loads(out).get('windows', [])
+                if w['bounds']['width'] > 800 and w.get('is_on_screen')}
+    except ValueError:
+        return None
+
+
+CLOSE = """
+const app = await cua.getApp({pid: PID, windowId: WID});
+const buttons = await app.query({role: "button"});
+const corner = buttons.filter(b => !b.label && b.frame)
+  .sort((a, b) => (a.frame.x + a.frame.y) - (b.frame.x + b.frame.y))[0];
+if (!corner) throw new Error("no close button");
+await app.click(corner.element_token);
+return corner.frame;
+"""
+
+
+def close_window(pid, wid):
+    """Press a window's close button (the titlebar's first button)."""
+    script = CLOSE.replace('PID', str(pid)).replace('WID', str(wid))
+    out = subprocess.run([str(CUA), 'call', 'run_script', json.dumps({'script': script})],
+                         capture_output=True, text=True).stdout
+    return '"ok": true' in out or '"ok":true' in out
 
 
 def window_id(pid, title=None):
@@ -181,10 +225,11 @@ def press_button(pid, label):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--binary', type=Path, required=True, help='a development build (review links)')
-    p.add_argument('--lane', default='w21-stability')
+    p.add_argument('--lane', default='w22-scale')
     p.add_argument('--minutes', type=float, default=30)
     p.add_argument('--export-every', type=float, default=10)
-    p.add_argument('--scratch', type=Path, default=Path('/private/tmp/pm-w21/soak'))
+    p.add_argument('--scratch', type=Path, default=Path('/private/tmp/pm-w22-scale/soak'))
+    p.add_argument('--no-switch', action='store_true', help='skip the project switches')
     p.add_argument('--profile-template', type=Path)
     p.add_argument('--no-crash', action='store_true', help='skip the kill and recovery step')
     p.add_argument('--seed', type=int, default=21)
@@ -197,6 +242,7 @@ def main():
     a.scratch.mkdir(parents=True)
     project = a.scratch / a.project.name
     subprocess.run(['cp', '-c', str(a.project), str(project)], check=True)
+
     profile = a.scratch / 'profile'
     if a.profile_template:
         subprocess.run(['cp', '-cR', str(a.profile_template), str(profile)], check=True)
@@ -210,6 +256,7 @@ def main():
     reports = set(REPORTS.glob('powermove-native*'))
     log = a.scratch / 'app.log'
     pid = launch(app, profile, project, log)
+
     started = time.monotonic()
     samples, events, failures, refusals = [], {}, [], {}
 
@@ -220,6 +267,8 @@ def main():
             text = reason if isinstance(reason, str) else json.dumps(reason)
             if text[:300] not in refusals[kind]:
                 refusals[kind].append(text[:300])
+
+    projects = []
 
     def connect():
         for _ in range(240):
@@ -234,6 +283,8 @@ def main():
             if project_id:
                 break
             time.sleep(1)
+        if project_id not in projects:
+            projects.append(project_id)
         ok, value = mcp.tool('open_project', {'projectId': project_id})
         if not ok:
             raise RuntimeError(f'open_project: {value}')
@@ -241,6 +292,23 @@ def main():
         if not ok:
             raise RuntimeError(f'start_session: {value}')
         return mcp
+
+    def switch(mcp):
+        """Finish the session, open the other project, start a new session."""
+        mcp.tool('finish_session', {'commit': True})
+        if len(projects) < 2:
+            ok, value = mcp.tool('create_project', {'name': 'Soak B'}, timeout=120)
+            if ok and isinstance(value, dict) and value.get('projectId'):
+                projects.append(value['projectId'])
+        else:
+            ok, value = mcp.tool('list_projects')
+            current = value.get('currentProjectId') if ok and isinstance(value, dict) else None
+            target = projects[1] if current == projects[0] else projects[0]
+            ok, value = mcp.tool('open_project', {'projectId': target}, timeout=120)
+        note('switch' if ok else 'switch_refused', None if ok else value)
+        ok, value = mcp.tool('start_session', {'prompt': 'stability soak', 'access': 'project'})
+        if not ok:
+            raise RuntimeError(f'start_session after switch: {value}')
 
     def layers(mcp):
         ok, value = mcp.tool('get_timeline', {'limit': 200})
@@ -293,6 +361,24 @@ def main():
                 command(a.lane, 'nextFrame')
             command(a.lane, 'gotoStart')
             note('playback')
+            # Windows: open one, close it, the count comes back.
+            before = editor_windows(pid)
+            command(a.lane, 'newWindow')
+            time.sleep(3)
+            new = (editor_windows(pid) or set()) - (before or set())
+            for wid in new:
+                close_window(pid, wid)
+            time.sleep(2)
+            after = editor_windows(pid)
+            if before is not None and not new:
+                note('new_window_no_window', {'before': len(before)})
+            elif before is not None and after != before:
+                note('window_count_drift', {'before': len(before), 'after': len(after or ())})
+            else:
+                note('window_cycle')
+            # Project switch.
+            if not a.no_switch and cycle % 2 == 0:
+                switch(mcp)
             # Render cache.
             ok, value = mcp.tool('render_frames', {'times': [rng.uniform(0, 5) for _ in range(4)], 'width': 480}, timeout=120)
             note('render_frames' if ok else 'render_frames_refused', None if ok else value)
@@ -353,8 +439,9 @@ def main():
     if panics:
         failures.append(f'panics: {panics[:3]}')
     third = samples[len(samples) // 3:] if len(samples) >= 6 else samples
-    growth = {k: (third[-1].get(k, 0) or 0) - (third[0].get(k, 0) or 0) for k in ('rss_mb', 'threads', 'fds', 'gpu_mb')} if third else {}
-    limits = {'rss_mb': 300, 'threads': 8, 'fds': 30}
+    growth = {k: (third[-1].get(k, 0) or 0) - (third[0].get(k, 0) or 0)
+              for k in ('rss_mb', 'heap_mb', 'heap_blocks', 'threads', 'fds', 'gpu_mb')} if third else {}
+    limits = {'rss_mb': 300, 'heap_mb': 200, 'threads': 8, 'fds': 30, 'gpu_mb': 300}
     for k, limit in limits.items():
         if growth.get(k, 0) > limit:
             failures.append(f'{k} grew {growth[k]} over the last two thirds (limit {limit})')
