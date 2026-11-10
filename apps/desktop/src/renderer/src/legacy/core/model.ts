@@ -1,3 +1,4 @@
+import { resolveStudioQuality } from '../../../../shared/studio-quality';
 import { sceneProperties } from '../../core/scene3d/schema';
 import { CHANNELS_3D } from './space-3d';
 import { normalizeColorDepth } from '../../core/color-depth';
@@ -192,6 +193,7 @@ PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
   colorDepth: normalizeColorDepth(o.colorDepth),
   scene3dDefaultsVersion: 2,
+  studioQuality: resolveStudioQuality('production'),
   switch3DVersion: SWITCH_3D_VERSION,
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,

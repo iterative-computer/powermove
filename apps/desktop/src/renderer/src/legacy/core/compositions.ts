@@ -1,3 +1,4 @@
+import { resolveStudioQuality } from '../../../../shared/studio-quality';
 import { compositionDependencies } from '../../core/scene3d/material-maps';
 import { remapLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue, isProperty } from './content-properties';
@@ -22,11 +23,11 @@ import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'scene3dDefaultsVersion', 'views3d'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'scene3dDefaultsVersion', 'views3d', 'studioQuality'] as const;
 /** Composition fields that may be absent (absent = default). When the open
  * composition changes they must be cleared rather than inherited, or one
  * composition's value would leak into the next. */
-const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain', 'scene3dDefaultsVersion', 'views3d']);
+const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain', 'scene3dDefaultsVersion', 'views3d', 'studioQuality']);
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',
@@ -313,6 +314,7 @@ export function install(PM: PMRegistry): void {
       w, h, fps, dur, bg, backgroundFill: PM.normalizeFill({ type: 'solid', color: bg }, bg),
       layers: [], comps: {}, markers: [], work: [0, dur], shutter: base.shutter ?? .5,
       scene3dDefaultsVersion: settings.scene3dDefaultsVersion ?? 2,
+      studioQuality: resolveStudioQuality(settings.studioQuality ?? 'production'),
     };
   };
 

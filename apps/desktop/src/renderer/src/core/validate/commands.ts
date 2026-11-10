@@ -1,3 +1,4 @@
+import { parseStudioQualityInput } from '../../../../shared/studio-quality';
 import { validateEffectInputs } from '../effect-inputs';
 import { parseStoredViews } from '../scene3d/view-state';
 import type { BlendMode, Layer, LayerType } from '../types/project';
@@ -70,7 +71,7 @@ const LAYER_FIELDS = new Set([
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
-  'shutter', 'workArea', 'audioGain', 'colorDepth', 'views3d'
+  'shutter', 'workArea', 'audioGain', 'colorDepth', 'views3d', 'studioQuality'
 ]);
 const EFFECT_FIELDS = new Set(['enabled', 'open', 'index', 'inputs']);
 const EASING_PRESETS = new Set([
@@ -476,6 +477,10 @@ function parseCompositionPatch(value: unknown): CompositionPatch | ValidationErr
     if (!COMPOSITION_FIELDS.has(key)) return invalid(`unknown composition field "${key}"`, 'patch');
   }
   const out: CompositionPatch = {};
+  if (patch.studioQuality != null) {
+    try { out.studioQuality = parseStudioQualityInput(patch.studioQuality); }
+    catch { return invalid('invalid Studio render quality settings', 'patch.studioQuality'); }
+  }
   if (patch.views3d != null) {
     try { out.views3d = parseStoredViews(patch.views3d); }
     catch { return invalid('invalid 3D view layout or camera pose', 'patch.views3d'); }

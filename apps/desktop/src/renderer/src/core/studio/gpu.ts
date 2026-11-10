@@ -221,6 +221,10 @@ export class StudioTarget {
   /** Caustic photons: allocated the first time a scene can focus light. */
   private grid: any; private gridSize = 0;
   private caustics = false;
+  causticsEnabled = true;
+  precomputeCaustics = false;
+  private hasMedia = false;
+  guideSamples = 64;
   private photonsEmitted = 0;
   private bounds: [number, number, number, number] = [0, 0, 0, 1];
   private display: any[];
@@ -295,6 +299,7 @@ export class StudioTarget {
     this.instanceCount = scene.instanceCount;
     // Caustics only where something can focus light: glass or polished metal.
     const m = scene.materials;
+    this.hasMedia = !!scene.world?.atmosphere?.density || !!scene.world?.volumes?.length;
     this.caustics = false;
     for (let i = 0; i + STUDIO_MATERIAL_FLOATS <= m.length; i += STUDIO_MATERIAL_FLOATS) {
       if (m[i + 7]! * (1 - m[i + 3]!) > 0.5 || (m[i + 3]! > 0.5 && m[i + 4]! < 0.25)) { this.caustics = true; break; }
@@ -315,6 +320,7 @@ export class StudioTarget {
     // Maps change with the scene (a live screen's frame, a new texture): always write them.
     maps.forEach((source, layer) => this.writeMap(layer, source));
     this.traceGroup = null;
+    this.photonsEmitted = 0;
     this.samples = 0;
   }
   private geometryKey = '';
@@ -324,6 +330,7 @@ export class StudioTarget {
 
   /** Replace one texture layer (a live screen's new frame). */
   writeMap(layer: number, source: HTMLCanvasElement | OffscreenCanvas | Uint8Array): void {
+    this.photonsEmitted=0;
     if (!this.mapTexture) return;
     if (source instanceof Uint8Array) {
       device.queue.writeTexture({ texture: this.mapTexture, origin: [0, 0, layer] }, source, { bytesPerRow: this.mapSize * 4, rowsPerImage: this.mapSize }, [this.mapSize, this.mapSize, 1]);
@@ -354,23 +361,25 @@ export class StudioTarget {
     this.samples = 0;
   }
 
-  setAdaptiveSampling(enabled: boolean): void {
+  setPrecomputedCaustics(enabled: boolean): void {if(this.precomputeCaustics!==enabled)this.photonsEmitted=0;this.precomputeCaustics=enabled;}
+
+  setAdaptiveSampling(enabled: boolean, minSamples = 64, noiseThreshold = .015): void {
     const row = this.lightCount * 4 + this.instanceCount * 9 + 5;
     if (this.sceneBuffers[3]?.size >= (row + 1) * 16)
-      device.queue.writeBuffer(this.sceneBuffers[3], row * 16, new Float32Array([enabled ? 1 : 0, 64, .015, .0005]));
+      device.queue.writeBuffer(this.sceneBuffers[3], row * 16, new Float32Array([enabled ? 1 : 0, minSamples, noiseThreshold, .0005]));
   }
 
-  /** Bound quality work between batches; never stop before its sample floor. */
-  async traceQuality(goal: number, reset: boolean, salt: number, budgetMs: number, signal?: AbortSignal): Promise<void> {
+  /** Bound tracing between submissions; the deadline may preempt the noise floor. */
+  async traceQuality(goal: number, reset: boolean, salt: number, budgetMs: number, signal?: AbortSignal, minSamples = 256, bounces = 8): Promise<void> {
     const started = performance.now();
     let first = true;
     if (reset) this.samples = 0;
     while (this.samples < goal) {
       if (signal?.aborted) throw new Error('Studio frame cancelled');
-      this.trace(Math.min(32, goal - this.samples), 8, first && reset, 64, salt);
+      this.trace(Math.min(this.hasMedia ? 1 : 4, goal - this.samples), bounces, first && reset, 64, salt);
       await device.queue.onSubmittedWorkDone();
       first = false;
-      if (budgetMs > 0 && this.samples >= Math.min(256, goal) && performance.now() - started >= budgetMs) break;
+      if (budgetMs > 0 && performance.now() - started >= budgetMs) break;
     }
   }
 
@@ -386,9 +395,9 @@ export class StudioTarget {
     this.traceGroup ??= this.groupWith(this.params);
     // Live keeps counting, so frames blended over time average out.
     if (reset && !this.live) this.frame = Math.imul(salt >>> 0, 4099) >>> 0;
-    if (reset) this.photonsEmitted = 0;
+    if (reset && !this.precomputeCaustics) this.photonsEmitted = 0;
     // Caustics: photons from the lights through glass and mirrors (Refine, Final, stills).
-    const photons = studioOptions.caustics && this.caustics && !this.live && this.lightCount > 0;
+    const photons = studioOptions.caustics && this.causticsEnabled && this.caustics && !this.live && this.lightCount > 0;
     if (photons && this.gridSize < GRID_SLOTS * 32) {
       this.grid.destroy();
       this.grid = device.createBuffer({ label: 'photon grid', size: GRID_SLOTS * 32, usage: U.STORAGE | U.COPY_DST });
@@ -412,22 +421,25 @@ export class StudioTarget {
       f.set(this.bounds, 48);
       f.set(this.view!.camera.iris ?? [0,0,0,1],52);
       f.set([...(this.view!.ambient ?? [0,0,0]),0],56);
-      if (photons) {
+      if (photons && (!this.precomputeCaustics || this.photonsEmitted === 0)) {
         // Photons first, in their own submission, so this batch's camera paths see them.
         const pe = device.createCommandEncoder();
-        if (reset && first) pe.clearBuffer(this.grid);
-        const photonCount = reset && first ? PHOTONS_PER_PASS * 4 : PHOTONS_PER_PASS;
+        if (reset && first || this.photonsEmitted === 0) pe.clearBuffer(this.grid);
+        const photonCount = this.precomputeCaustics ? PHOTONS_PER_PASS * 32 : reset && first ? PHOTONS_PER_PASS * 4 : PHOTONS_PER_PASS;
         f.set([this.bounds[3] / 160, this.photonsEmitted, 1, photonCount], 44);
+        if(this.precomputeCaustics)u[30]=1;
         device.queue.writeBuffer(this.params, 0, this.base);
         const pp = pe.beginComputePass();
         pp.setPipeline(p.photons);
         pp.setBindGroup(0, this.traceGroup);
-        pp.dispatchWorkgroups(Math.ceil(photonCount / 64));
+        pp.dispatchWorkgroups(Math.min(4096, Math.ceil(photonCount / 64)), Math.ceil(photonCount / (64 * 4096)));
         pp.end();
         device.queue.submit([pe.finish()]);
         this.photonsEmitted += photonCount;
         f[45] = this.photonsEmitted;
       }
+      u[30]=this.frame;
+      if (photons && this.precomputeCaustics) f.set([this.bounds[3] / 160, this.photonsEmitted, 2, 0], 44);
       device.queue.writeBuffer(this.params, 0, this.base);
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
@@ -546,6 +558,10 @@ export class StudioTarget {
     }
     const b = this.sceneBuffers, groups = [Math.ceil(this.width / 8), Math.ceil(this.height / 8)] as const;
     const cam = this.view!.camera;
+    // Guides use a separate ray budget; the shared auxiliary prefilter removes
+    // guide noise before either beauty or shadow-catcher filtering.
+    new Float32Array(this.base)[47] = -Math.max(4, Math.min(64, this.guideSamples));
+    device.queue.writeBuffer(this.params, 0, this.base);
     // Guides with the trace's own camera and seed (its params are still bound).
     const guides = enc.beginComputePass();
     guides.setPipeline(d.aovs);

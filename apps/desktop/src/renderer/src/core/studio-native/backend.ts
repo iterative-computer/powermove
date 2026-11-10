@@ -1,5 +1,5 @@
 import type { StudioNativeBridge, StudioNativeCommand, StudioNativeReply } from '../../../../shared/studio-native';
-import { patchStudioScene, type StudioBackend, type StudioBounds, type StudioCameraDescription, type StudioCameraOptions, type StudioFrame, type StudioPick, type StudioRenderRequest, type StudioSceneDescription, type StudioScenePatch, type StudioTextureSource } from '../scene3d/studio-backend';
+import { patchStudioScene, type StudioBackend, type StudioBounds, type StudioCameraDescription, type StudioCameraOptions, type StudioFrame, type StudioPick, type StudioRenderRequest, type StudioSceneDescription, type StudioScenePatch, type StudioTextureSource, type StudioShutterSample } from '../scene3d/studio-backend';
 import { MAP_SIZE, STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS, type StudioScene } from '../studio/extract';
 import type { StudioView } from '../studio/gpu';
 import { compileSceneDescription, viewFromDescription } from '../studio/scene-description';
@@ -29,6 +29,7 @@ export class NativeStudioBackend implements StudioBackend {
   private uploaded = -1;
   private sceneRevision=0;
   private uploadedSceneRevision=-1;
+  shutterAccumulation=false;
   private supportsViewPatch=false;
   private supportsChunkedUpload=false;
   private supportsInstanceParts=false;
@@ -81,6 +82,7 @@ export class NativeStudioBackend implements StudioBackend {
       for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;this.releaseTexture(old);this.textureFrames.delete(key);}
     })??null;
     const hello = await this.send({ op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
+    this.shutterAccumulation=hello.result?.capabilities?.includes('shutterAccumulation')??false;
     this.supportsChunkedUpload=hello.result?.capabilities?.includes('preparedUpload')??false;
     this.supportsInstanceParts=hello.result?.capabilities?.includes('instanceParts')??false;
     this.supportsCancelRefine=hello.result?.capabilities?.includes('cancelRefine')??false;
@@ -205,6 +207,18 @@ export class NativeStudioBackend implements StudioBackend {
     }
     this.uploadedMaps = [...maps];this.uploadedMapSize=mapSize;
   }
+  async renderShutter(samples:StudioShutterSample[], key:string):Promise<StudioFrame> {
+    let result:StudioFrame|undefined;
+    for(let index=0;index<samples.length;index++){
+      const sample=samples[index]!;
+      result?.release?.();
+      this.setPreparedScene(sample.scene,sample.maps,()=>{throw new Error('Native shutter preparation requires binary scene support');});
+      this.setView(sample.view);this.setTime(sample.time);
+      result=await this.render({...sample.request,shutter:{key,index,count:samples.length}});
+    }
+    if(!result)throw new Error('Studio shutter has no samples');
+    return result;
+  }
   render(request: StudioRenderRequest): Promise<StudioFrame> {
     const queuedAt=performance.now();
     const generation=this.refineGeneration;
@@ -225,9 +239,10 @@ export class NativeStudioBackend implements StudioBackend {
       const layer = index === -1 ? objects.length : index;
       const renderKey=`${this.revision}:${this.time}:${this.width}:${this.height}:${request.tier}:${request.samples}:${request.denoise!==false}`;
       const sentAt=performance.now();
-      const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, adaptive: request.adaptive === true, timeBudgetMs: request.timeBudgetMs ?? 0, temporal: request.temporal === true, time: this.time });
+      const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, adaptive: request.adaptive === true, timeBudgetMs: request.timeBudgetMs ?? 0, minSamples: request.minSamples, noiseThreshold: request.noiseThreshold, maxBounces: request.maxBounces, caustics: request.caustics, temporal: request.temporal === true, shutter: request.shutter, time: this.time });
       const replyAt=performance.now();
       const meta = reply.result;
+      if(meta.deferred){const source=new OffscreenCanvas(2,2);return {source,width:this.width,height:this.height,samples:meta.samples,version:'deferred',release:()=>{source.width=source.height=0;}};}
       try {
         if (request.signal?.aborted) throw new Error('Studio frame cancelled');
         cancelled();

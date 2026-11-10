@@ -6,6 +6,15 @@ import { StudioPacketDecoder, studioPacket } from './protocol';
 import { STUDIO_MAX_BINARY, STUDIO_MAX_JSON, STUDIO_PROTOCOL, type StudioNativeCommand, type StudioNativeReply, type StudioNativeStatus } from '../../shared/studio-native';
 
 type Pending = { resolve(value: StudioNativeReply): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; started: number; bytes: number };
+/** Sampling limits are frame-local; leave filtering and readback a margin.
+ * Explicit unlimited quality requests retain a one-hour transport watchdog. */
+export function studioCommandTimeoutMs(command:StudioNativeCommand):number {
+  if(command.op!=='render')return 30_000;
+  if(command.tier==='live' || command.minSamples===undefined)return 120_000;
+  const budget=Number(command.timeBudgetMs);
+  return Number.isFinite(budget) && budget>0 ? Math.max(120_000,Math.min(3_600_000,budget)+60_000) : 3_660_000;
+}
+
 export type HostOptions = {
   executable: string | null;
   args?: string[];
@@ -98,7 +107,7 @@ export class StudioHostManager {
     const bytes = parts.reduce((n, part) => n + part.byteLength, 0);
     if (this.queuedBytes + bytes > (this.options.maxQueuedBytes ?? STUDIO_MAX_BINARY + STUDIO_MAX_JSON + 4096)) return Promise.reject(new Error('Native Studio queue memory budget exceeded'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error('Native Studio response timed out')), this.options.timeoutMs ?? (command.op === 'render' ? 120_000 : 30_000));
+      const timer = setTimeout(() => this.fail(new Error('Native Studio response timed out')), this.options.timeoutMs ?? studioCommandTimeoutMs(command));
       timer.unref?.();
       this.pending.set(id, { resolve, reject, timer, started: performance.now(), bytes });
       this.queuedBytes += bytes;

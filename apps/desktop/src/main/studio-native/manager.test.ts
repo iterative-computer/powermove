@@ -1,3 +1,4 @@
+import { studioCommandTimeoutMs } from './manager';
 import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -115,4 +116,11 @@ describe('native Studio framing', () => {
     const header = Buffer.alloc(12); header.write('PMS1'); header.writeUInt32LE(0xffffffff, 4);
     expect(() => new StudioPacketDecoder().push(header)).toThrow('size limit');
   });
+});
+
+it('keeps custom quality deadlines longer than their tracing limit',()=>{
+  expect(studioCommandTimeoutMs({op:'render',tier:'final',minSamples:4,timeBudgetMs:600000})).toBe(660000);
+  expect(studioCommandTimeoutMs({op:'render',tier:'final',minSamples:4,timeBudgetMs:0})).toBe(3660000);
+  expect(studioCommandTimeoutMs({op:'render',tier:'live'})).toBe(120000);
+  expect(studioCommandTimeoutMs({op:'bounds'})).toBe(30000);
 });

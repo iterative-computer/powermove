@@ -46,6 +46,27 @@ session; they do not create a native host session for each sample. Static
 layers receive the full Final sample budget; blurred layers divide it across
 their shutter samples, including descendants of a blurred group.
 
+The saved sampling policy lives on the composition as `studioQuality`, with
+Production supplied on migration. `StudioRenderRequest` carries `minSamples`,
+`noiseThreshold`, `maxBounces`, `caustics`, `denoise` and `timeBudgetMs` alongside
+the sample ceiling. Changing any policy field invalidates completed quality
+work. A time cap preempts the adaptive noise floor, and masked layers reuse a
+completed bounded trace even with noise stopping disabled.
+
+A backend advertising `shutterAccumulation` may implement
+`renderShutter(samples, frameKey)`. Each sample owns its prepared scene, maps,
+view, time and divided request budget. Capture traversal collects the complete
+frame plan before dispatch. Native requests send `{key,index,count}` in
+`shutter`; nonfinal strata return `deferred:true` with no image. Scene and view
+updates retain the accumulation, and each stratum takes the first stratum's
+sample count so temporal weights remain equal. Guides are averaged in the same
+frame. Only the final stratum resolves, filters and reads back the image.
+Prepared capture keys for its times share that completed physical image.
+Normal 3D depth sets may include transmission; effects, opacity, mattes, mixed
+blur switches and 2D compositing boundaries retain the separate-image path.
+Fallback after a failed batch replays all strata with the portable backend.
+This is frame-local integration, without reprojecting prior output images.
+
 The three tiers use the same geometry/material/light model. Fast preview uses
 Studio Live with fewer pixels/samples; Quality refines while idle. In-page
 WebGPU remains the fallback for the native backend. Neither backend uses

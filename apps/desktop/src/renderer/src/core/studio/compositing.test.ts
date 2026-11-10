@@ -8,7 +8,7 @@ describe('opaque Studio depth-set output',()=>{
     expect(combineOpaqueDepthSet(pm(),new Set(['a']),new Set(),0)).toBe(false);
     expect(combineOpaqueDepthSet(pm(),ids,new Set(['b']),0)).toBe(false);
   });
-  it.each([{blend:'multiply'},{blend:{v:'screen'}},{matteSource:'m'},{matteSources:[{source:'m'}]},{transitionIn:{}},{transitionOut:{}}])('retains styled layer boundaries: %j',patch=>{
+  it.each([{blend:'multiply'},{blend:{v:'screen'}},{matteSource:'m'},{matteSources:[{source:'m'}]},{transitionIn:{}},{transitionOut:{}},{mblur:true}])('retains styled layer boundaries: %j',patch=>{
     expect(combineOpaqueDepthSet(pm(patch),ids,new Set(),0)).toBe(false);
   });
   it('uses the active composition pass and evaluates animated blend modes',()=>{
@@ -20,5 +20,6 @@ describe('opaque Studio depth-set output',()=>{
   it('keeps transmissive glass on the established individual-output path',()=>{
     const runtime={objects:new Map([['b',{traverseVisible:(visit:any)=>visit({isMesh:true,material:{transmission:1}})}]])};
     expect(combineOpaqueDepthSet(pm(),ids,new Set(),0,runtime)).toBe(false);
+    expect(combineOpaqueDepthSet(pm(),ids,new Set(),0,runtime,true)).toBe(true);
   });
 });

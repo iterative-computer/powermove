@@ -489,6 +489,7 @@ export interface MemoryEntry {
  * map, even though the current UI only creates one nesting level at a time.
  */
 export interface Comp {
+  studioQuality?: import('../../../../shared/studio-quality').StudioQuality;
   id: string;
   name: string;
   w: number;

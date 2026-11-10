@@ -1,3 +1,4 @@
+import { resolveStudioQuality, STUDIO_QUALITY_PRESETS } from '../../../../shared/studio-quality';
 import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
 import { viewerService } from '../../legacy/core/services';
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
@@ -33,11 +34,15 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
   let navigation:SceneNavigation|null=null;
   const thumbnails=createMaterialThumbnails(PM);
   const materialListeners=new Set<()=>void>();
+  const qualityListeners=new Set<()=>void>();
+  let qualitySignature='';
   // All mutation paths, reopen, composition rotation and history replay publish
   // these events. UI consumers never need to intercept individual commands.
   let materialSignature='';
   const changed=()=>{
     const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.group,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.d?.extrusion,l.threeD,l.type])]);
+    const qualityKey=JSON.stringify([(PM.curComp?.() || PM.proj)?.compId,(PM.curComp?.() || PM.proj)?.studioQuality]);
+    if(qualityKey!==qualitySignature){qualitySignature=qualityKey;for(const listener of qualityListeners)listener();}
     if(signature===materialSignature)return;materialSignature=signature;
     emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object || extrusionEligible(l)).map((l:any)=>l.id) || []});
     for(const listener of materialListeners)listener();
@@ -63,6 +68,12 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     geometryBounds:(ids,time)=>geometryBounds(PM,ids,time),
     nullViewerPosition:(id,time,rect)=>nullViewerPosition(PM,id,time,rect),
     nullViewerState:(id,time,rect)=>nullViewerState(PM,id,time,rect),
+    renderQuality: {
+      presets: STUDIO_QUALITY_PRESETS,
+      onChange: listener => {qualityListeners.add(listener);return {dispose:()=>qualityListeners.delete(listener)};},
+      get: () => resolveStudioQuality((PM.curComp?.() || PM.proj).studioQuality),
+      set: (quality, meta) => editScene(PM, {operation:'set_render_quality', ...(typeof quality === 'string' ? {preset:quality} : {patch:quality})}, {origin:'interface',label:'Change render quality',...meta}),
+    },
     getExtrusion:(layerId,time)=>readExtrusion(PM,PM.L?.(layerId),time),
     setExtrusion:(layerId,patch,meta)=>editScene(PM,{operation:'set_extrusion',target:layerId,patch},{origin:'interface',...meta}),
     listSurfaces:layerId=>listExtrusionSurfaces(PM,layerId),

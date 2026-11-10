@@ -91,3 +91,14 @@ it('exports 3D render passes through the authenticated sequence exporter',async(
   expect(PM.Export.run).toHaveBeenCalledWith(expect.objectContaining({format:'png',passes:['depth','normal'],fps:30,reportPath:true}));
   await expect(mcpProjectTool(PM as never,'__mcp_export_video',{format:'mp4',passes:['depth']})).rejects.toThrow('require format png');
 });
+
+ it('validates export quality overrides while preserving composition defaults',async()=>{
+  const PM:any=editor();PM.proj.studioQuality={preset:'draft'};
+  await mcpProjectTool(PM as never,'__mcp_export_video',{studioQuality:{denoise:false}});
+  expect(PM.Export.run).toHaveBeenCalledWith(expect.objectContaining({studioQuality:expect.objectContaining({preset:'custom',minSamples:4,maxSamples:16,denoise:false})}));
+  expect(PM.proj.studioQuality).toEqual({preset:'draft'});
+  const count=PM.Export.run.mock.calls.length;
+  for(const studioQuality of [{minSamples:100,maxSamples:2},{maxSamples:50000},{caustics:1},{preset:'unknown'}])
+    await expect(mcpProjectTool(PM as never,'__mcp_export_video',{studioQuality})).rejects.toThrow();
+  expect(PM.Export.run).toHaveBeenCalledTimes(count);
+ });

@@ -53,8 +53,12 @@ fn aovs(@builtin(global_invocation_id) gid:vec3u){
   // Deterministic strata keep the lens guides stable across output frames.
   seed=pcg(idx^0x5bd1e995u);
   var albedo=vec3f(0.);var normal=vec3f(0.);var hits=0.;var dist=0.;var specular=0.;
-  for(var k=0u;k<64u;k++){
-    let jitter=(vec2f(f32(k&7u),f32(k>>3u))+rnd2())/8.;
+  let count=u32(select(64.,clamp(-P.caustic.w,1.,64.),P.caustic.w<0.));
+  var columns=u32(ceil(sqrt(f32(count))));
+  loop {if(count%columns==0u){break;}columns-=1u;}
+  let rows=count/columns;
+  for(var k=0u;k<count;k++){
+    let jitter=(vec2f(f32(k%columns),f32(k/columns))+rnd2())/vec2f(f32(columns),f32(rows));
     let ray=camera_ray(vec2f(gid.xy)+jitter);
     let guide=denoising_guide(ray[0],ray[1]);
     // Negative depth marks any near-specular coverage: temporal history
@@ -63,6 +67,13 @@ fn aovs(@builtin(global_invocation_id) gid:vec3u){
     albedo+=guide.albedo*guide.coverage;normal+=guide.normal;
     hits+=guide.coverage;dist+=guide.depth;specular+=guide.specular;
   }
-  aov[2u*idx]=vec4f(albedo/max(hits,1.),hits/64.);
-  aov[2u*idx+1u]=vec4f(normal/64.,select(1.,-1.,specular>0.)*dist/max(hits,1.));
+  var a=vec4f(albedo/max(hits,1.),hits/f32(count));
+  var n=vec4f(normal/f32(count),select(1.,-1.,specular>0.)*dist/max(hits,1.));
+  if(P.counts.z==2u && P.dims.z>0u){
+    let weight=f32(P.dims.z);let old=aov[2u*idx];let previous=aov[2u*idx+1u];
+    let coverage=old.w*weight+a.w;
+    a=vec4f((old.xyz*old.w*weight+a.xyz*a.w)/max(coverage,1e-6),coverage/(weight+1.));
+    n=vec4f((previous.xyz*weight+n.xyz)/(weight+1.),select(1.,-1.,previous.w<0. || n.w<0.)*(abs(previous.w)*weight+abs(n.w))/(weight+1.));
+  }
+  aov[2u*idx]=a;aov[2u*idx+1u]=n;
 }

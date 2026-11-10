@@ -19,7 +19,7 @@ export class WebGpuStudioBackend implements StudioBackend {
   private viewKey = '';
   private deviceGeneration = studioGpuGeneration();
   private disposed = false;
-  private targets = new Map<string, { target: StudioTarget; bytes: number; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean; adaptive: boolean; completedGoal: number }>();
+  private targets = new Map<string, { target: StudioTarget; bytes: number; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean; adaptive: boolean; completedGoal: number; policy?: string }>();
   async initialize(): Promise<void> { if (!await initStudioGpu()) throw new Error('Studio could not start WebGPU'); }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
     studioSceneBytes(scene, maps.length, studioMaxBindingBytes() || Infinity);
@@ -83,10 +83,15 @@ export class WebGpuStudioBackend implements StudioBackend {
     const temporal = request.temporal === true && request.tier === 'final' && request.denoise !== false;
     if ((request.tier !== 'live' && !temporal) || this.time < entry.time || this.time - entry.time > .1 || t.qualityTemporal !== temporal) t.invalidateHistory?.();
     t.qualityTemporal = temporal;
-    const changed = entry.viewKey !== this.viewKey || entry.time !== this.time || entry.adaptive !== adaptive;
+    const policy = JSON.stringify([request.minSamples, request.noiseThreshold, request.maxBounces, request.caustics, request.timeBudgetMs]);
+    const changed = entry.policy !== policy || entry.viewKey !== this.viewKey || entry.time !== this.time || entry.adaptive !== adaptive;
     if (changed) { t.setView({ ...this.view, camera: { ...this.view.camera, aspect: width / height } }); entry.viewKey = this.viewKey; entry.time = this.time; entry.resolved = -1; entry.completedGoal = -1; entry.adaptive = adaptive; }
+    entry.policy = policy;
+    t.causticsEnabled = request.caustics !== false;
+    t.setPrecomputedCaustics(request.minSamples !== undefined && (request.noiseThreshold ?? 0)>=.025);
+    t.guideSamples = (request.noiseThreshold ?? 0) >= .06 ? 8 : (request.noiseThreshold ?? 0) >= .025 ? 32 : 64;
     const goal = Math.max(1, Math.min(4096, Math.ceil(request.samples)));
-    t.setAdaptiveSampling(adaptive);
+    t.setAdaptiveSampling(adaptive, request.minSamples, request.noiseThreshold);
     const finish = (): StudioFrame => {
       const denoise = request.denoise !== false;
       if (entry!.resolved !== t.samples || entry!.denoise !== denoise) {
@@ -99,14 +104,14 @@ export class WebGpuStudioBackend implements StudioBackend {
     };
     // Unprepared synchronous readback queues its bounded sample ceiling
     // immediately. A CPU time-budget loop is only possible for async captures.
-    const bounded = adaptive && (request.timeBudgetMs ?? 0) > 0;
+    const bounded = (request.timeBudgetMs ?? 0) > 0;
     if (bounded && (changed || entry.completedGoal !== goal)) {
-      return t.traceQuality(goal, changed, Math.round(this.time * 9600), request.timeBudgetMs ?? 0, request.signal).then(() => {
+      return t.traceQuality(goal, changed, Math.round(this.time * 9600), request.timeBudgetMs ?? 0, request.signal, request.minSamples, request.maxBounces).then(() => {
         entry!.completedGoal = goal;
         return finish();
       });
     }
-    if (!bounded && (changed || t.samples < goal)) t.trace(Math.max(0, goal - t.samples), request.tier === 'live' ? 2 : 8, changed, request.tier === 'live' ? 6 : 64, Math.round(this.time * 9600));
+    if (!bounded && (changed || t.samples < goal)) t.trace(Math.max(0, goal - t.samples), request.tier === 'live' ? 2 : request.maxBounces ?? 8, changed, request.tier === 'live' ? 6 : 64, Math.round(this.time * 9600));
     return finish();
   }
 

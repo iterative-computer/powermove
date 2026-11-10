@@ -1,0 +1,42 @@
+{
+  "draft": {
+    "noiseThreshold": 0.12,
+    "minSamples": 4,
+    "maxSamples": 16,
+    "timeLimitSeconds": 0.5,
+    "maxBounces": 4,
+    "caustics": false,
+    "denoise": true,
+    "motionBlurSamples": 1
+  },
+  "preview": {
+    "noiseThreshold": 0.06,
+    "minSamples": 16,
+    "maxSamples": 64,
+    "timeLimitSeconds": 2,
+    "maxBounces": 6,
+    "caustics": false,
+    "denoise": true,
+    "motionBlurSamples": 2
+  },
+  "production": {
+    "noiseThreshold": 0.03,
+    "minSamples": 32,
+    "maxSamples": 128,
+    "timeLimitSeconds": 3,
+    "maxBounces": 8,
+    "caustics": true,
+    "denoise": true,
+    "motionBlurSamples": 2
+  },
+  "final": {
+    "noiseThreshold": 0.015,
+    "minSamples": 512,
+    "maxSamples": 1024,
+    "timeLimitSeconds": 20,
+    "maxBounces": 8,
+    "caustics": true,
+    "denoise": true,
+    "motionBlurSamples": 2
+  }
+}

@@ -18,9 +18,12 @@ backend dispatch, extractor, compositor and final-frame preparation.
   camera motion, diffuse/specular albedo, view normals, roughness, jitter and
   camera matrices, then denoises and upscales to the output size. Object,
   material and lighting changes reset history; camera movement retains it.
-- **Refine/Final:** the same tracer accumulates at output resolution. At sixteen
-  samples and above, Open Image Denoise filters color and shadow-catcher
-  shading with albedo/normal guides. The bundled OIDN build uses its CPU device.
+- **Refine/Final:** the same tracer accumulates at output resolution using saved
+  Draft/Preview/Production/Final (Max) or Custom settings. Native Draft uses a
+  fast GPU filter; other presets use OIDN with prefiltered path-following guides
+  for beauty and catcher shading. Time caps can finish before the noise floor.
+  Eligible shutter frames accumulate before one OIDN finish. The bundled OIDN
+  build uses its CPU device.
 - **Portable fallbacks:** WGSL BVH traversal without ray queries, temporal
   reprojection plus edge-aware à-trous filtering without MetalFX, binary RGBA
   frames without the surface addon, and the in-page WebGPU backend after a
@@ -692,3 +695,53 @@ after its successful Node exit marker. The ordinary smoke process is separately
 bounded and discarded. This is functional acceptance, not an editor performance
 benchmark: the [production checklist](production-readiness.md#performance-acceptance-base-m5--16-gb)
 defines the M5 timing/memory gates and the visible-editor benchmark entry point.
+
+## Saved quality and frame budgets (Lane Q)
+
+`studioQuality` is composition data, migrated to Production, guarded by normal
+edits and Undo. The shared preset source is
+[`studio-quality-presets.json`](../../apps/desktop/src/shared/studio-quality-presets.json);
+[the Studio API guide](../../apps/desktop/docs/STUDIO.md#saved-render-quality-and-export-overrides)
+lists every default, bound and export/agent override. No visual controls are
+introduced by this engine change.
+
+Native quality requests explicitly set noise threshold, floor, ceiling, bounce
+limit, caustics, denoise and tracing deadline. The deadline now preempts the
+noise floor. Fog uses one-sample submissions so a four-sample dispatch cannot
+consume several seconds before checking that deadline. Pixel error needs at
+least two observations; raw/unlimited references retain their requested budget.
+Layer masks reuse the completed bounded trace with error stopping on or off.
+Custom long tracing limits receive a matching transport watchdog.
+
+Production uses a fixed, hardware-traced photon prepass before camera samples.
+This removes the drifting-map reason for DN2's per-pixel 512-sample floor.
+Camera-only changes retain that scene-dependent map; geometry, materials,
+lighting, bounds and texture changes invalidate it. Final (Max) retains the
+progressive high-quality photon estimator. Scenes with no qualifying caustic
+materials skip the photon work. No prior output image is reused temporally.
+
+Eligible native shutter frames keep scene/BLAS state, distribute a common
+camera-sample budget across the evaluated times, accumulate linear radiance and
+path-following guides, and finish OIDN once. Equal sample counts per stratum
+keep their weights equal. Styled/partly transparent layer boundaries, mixed
+blur switches and WebGPU retain separate images. Export's existing queued
+encoder write overlaps following GPU preparation; this change does not claim a
+new encoder pipeline. Public layer identity, transmission and camera policies
+remain covered by the existing tests.
+
+The measurement harness is `engine/tools/render-quality.py`, using DN's SSIM,
+CIEDE2000 and frozen-sequence flicker metrics without lowering acceptance
+thresholds. Supply an exact PMS1 glass replay and independently rendered raw
+references. It reads the application's preset JSON directly and records native
+RT, actual samples, tracing/filtering/readback, cold setup, three warm timings
+and eight advancing-seed frames. It does not count frozen images as moving-film
+proof. All raw images, replays and logs remain outside Git.
+
+```sh
+nice -n 10 python3 engine/tools/render-quality.py \
+  --host apps/desktop/resources/studio/pm-studio-host \
+  --out /tmp/pm-shots/studio3d/laneQ/presets \
+  --glass /absolute/path/to/glass.pms \
+  --references /absolute/path/to/audited-raw-references \
+  --sequence 8 --timing-runs 3 --check
+```

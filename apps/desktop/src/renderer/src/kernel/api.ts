@@ -1,3 +1,4 @@
+export type { StudioQuality, StudioQualityInput, StudioQualityPreset } from '../../../shared/studio-quality';
 /*
  * Powermove kernel API — the surface every extension programs against.
  * FROZEN for apiVersion 1. Additive changes only; breaking changes bump
@@ -380,6 +381,7 @@ export interface Scene3DAPI {
    * morphs, extrusion and native planes. No projection or viewport clipping.
    * Missing/loading geometry throws; an entirely nonvisual selection is null. */
   geometryBounds(layerIds:readonly string[],time?:number):Bounds3D|null;
+  renderQuality: { onChange(listener: () => void): Disposable; presets: typeof import('../../../shared/studio-quality').STUDIO_QUALITY_PRESETS; get(): import('../../../shared/studio-quality').StudioQuality; set(quality: import('../../../shared/studio-quality').StudioQualityInput, meta?: import('../core/types/commands').EditMeta): import('../core/types/commands').EditResult };
   /** Text/shape geometry is opt-in. Enabling extrusion also enables native 3D. */
   getExtrusion(layerId:string,time?:number):import('../core/scene3d/extrusion-data').ExtrusionState|null;
   setExtrusion(layerId:string,patch:import('../core/scene3d/extrusion-data').ExtrusionPatch,meta?:EditMeta):EditResult;
