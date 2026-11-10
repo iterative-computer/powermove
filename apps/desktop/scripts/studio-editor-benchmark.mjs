@@ -212,7 +212,11 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
    const before=machine(),owned=processTree(before,pid).owned;owned.add(process.pid);const state=machine(owned),row={name,machine:state,runs:[]};delete row.machine.processes;report.rows.push(row);await save();
    if(!config.diagnostic)assert(state.quiet,'Another lane became active before measurement');
    try {
-    const cold=Date.now();await author(page,name,config);row.native=await nativeReady(page);row.coldSeconds=(Date.now()-cold)/1000;
+    let coldCdp,coldClock;
+    if(config.profile){coldCdp=await page.context().newCDPSession(page);await coldCdp.send('Profiler.enable');await coldCdp.send('Profiler.setSamplingInterval',{interval:1000});coldClock=await page.evaluate(()=>performance.now());await coldCdp.send('Profiler.start');}
+    const cold=Date.now();
+    try{await author(page,name,config);row.native=await nativeReady(page);row.coldSeconds=(Date.now()-cold)/1000;}
+    finally{if(coldCdp){try{const profile=await coldCdp.send('Profiler.stop');await writeFile(path.join(config.evidence,`${name}-cold.cpuprofile`),JSON.stringify({...profile,rendererClockAtStart:coldClock}));}finally{await coldCdp.detach();}}}
     const coldTasks=await page.evaluate(()=>window.__studioPerf.tasks.filter(t=>t.at+t.ms>window.__studioPerf.sceneStarted));row.coldLongTasks=distribution(coldTasks.map(t=>t.ms));await writeFile(path.join(config.evidence,`${name}-cold-long-tasks.json`),JSON.stringify(coldTasks));
     row.scene=await page.evaluate(()=>({layers:window.PM.proj.layers.map(l=>({name:l.name,scatter:l.d?.data?.object?.scatter?.p?.count?.v})),allPanesDynamic:!!window.__studioPerf.allPanesDynamic,motionBlur:window.PM.proj.layers.some(l=>!!(typeof l.mblur==='object'?l.mblur?.v:l.mblur)),shutter:window.PM.proj.shutter,viewer:{width:document.querySelector('#gl').width,height:document.querySelector('#gl').height,pixelRatio:devicePixelRatio}}));
     await page.waitForTimeout(1500);
