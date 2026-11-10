@@ -25,15 +25,20 @@ const freeDiskBytes=()=>{const s=statfsSync('/');return s.bavail*s.bsize;};
 const diskReserve=5_500_000_000;
 function processes() {return command('/bin/ps',['-axo','pid=,ppid=,rss=,comm=']).split('\n').map(line=>line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean).map(m=>({pid:+m[1],parent:+m[2],rssMiB:+m[3]/1024,name:m[4]}));}
 function competingProcesses(owned=new Set()) {
- let listed='';try{listed=command('/usr/bin/pgrep',['-fl','playwright|Electron|cargo|rustc|pm-studio-host']);}catch(error){if(error.status!==1)throw error;}
+ let listed='';try{listed=command('/usr/bin/pgrep',['-fl','playwright|Electron|cargo|rustc|pm-studio-host|Blender']);}catch(error){if(error.status!==1)throw error;}
  return listed.split('\n').map(line=>line.match(/^(\d+)\s+(.+)$/)).filter(Boolean).map(m=>({pid:+m[1],name:m[2].slice(0,200)})).filter(p=>!owned.has(p.pid)&&!p.name.includes('chrome_crashpad_handler')&&!owned.has(Number(safeCommand('/bin/ps',['-p',String(p.pid),'-o','ppid=']))));
+}
+function userActivity() {
+ const frontmost=safeCommand('/usr/bin/osascript',['-e','tell application "System Events" to get name of first application process whose frontmost is true']);
+ const idle=safeCommand('/usr/sbin/ioreg',['-c','IOHIDSystem']).match(/"HIDIdleTime" = (\d+)/)?.[1];
+ return {frontmost,idleSeconds:idle?Number(idle)/1e9:null,ownerAppFrontmost:!['Electron','Powermove'].includes(frontmost)};
 }
 function machine(owned=new Set()) {
  const rows=processes(),active=competingProcesses(owned);
  return {date:new Date().toISOString(),host:os.cpus()[0]?.model,ramGiB:os.totalmem()/1024**3,os:safeCommand('/usr/bin/sw_vers',['-productVersion']),
   power:safeCommand('/usr/bin/pmset',['-g','batt']),powerSettings:safeCommand('/usr/bin/pmset',['-g','custom']),thermal:safeCommand('/usr/bin/pmset',['-g','therm']),
   swap:safeCommand('/usr/sbin/sysctl',['vm.swapusage']),pressure:safeCommand('/usr/bin/memory_pressure',['-Q']),disk:safeCommand('/usr/sbin/diskutil',['info','/']).split('\n').find(l=>l.includes('Container Free Space'))?.trim(),
-  active,quiet:active.length===0,freeDiskBytes:freeDiskBytes(),processes:rows};
+  activity:userActivity(),active,quiet:active.length===0,freeDiskBytes:freeDiskBytes(),processes:rows};
 }
 function processTree(state,pid) {
  const owned=new Set([pid]);let changed=true;
@@ -43,7 +48,7 @@ function processTree(state,pid) {
 function memorySample(pid) {
  const state={processes:processes(),swap:safeCommand('/usr/sbin/sysctl',['vm.swapusage'])},tree=processTree(state,pid),hosts=tree.rows.filter(p=>p.name.endsWith('/pm-studio-host'));
  tree.owned.add(process.pid);const active=competingProcesses(tree.owned);
- return {at:Date.now(),rssMiB:tree.rows.reduce((n,p)=>n+p.rssMiB,0),hostMiB:hosts.reduce((n,p)=>n+p.rssMiB,0),maxHostMiB:Math.max(0,...hosts.map(p=>p.rssMiB)),processes:tree.rows,swap:state.swap,active,quiet:active.length===0,freeDiskBytes:freeDiskBytes()};
+ return {at:Date.now(),rssMiB:tree.rows.reduce((n,p)=>n+p.rssMiB,0),hostMiB:hosts.reduce((n,p)=>n+p.rssMiB,0),maxHostMiB:Math.max(0,...hosts.map(p=>p.rssMiB)),processes:tree.rows,swap:state.swap,activity:userActivity(),active,quiet:active.length===0,freeDiskBytes:freeDiskBytes()};
 }
 function measurementState(pid) {
  const state=machine(),owned=processTree(state,pid).owned;owned.add(process.pid);
@@ -52,7 +57,7 @@ function measurementState(pid) {
 const swapMiB=text=>Number(text.match(/used =\s*([\d.]+)M/)?.[1]??NaN);
 function options() {
  const value=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallback:process.argv[i+1];};
- return {dev:process.argv.includes('--dev'),seconds:Number(value('--seconds','30')),runs:Number(value('--runs','3')),finalFrames:Number(value('--final-frames','30')),
+ return {dragTarget:value('--drag-target','orbit'),liveOnly:process.argv.includes('--live-only'),qualityOnly:process.argv.includes('--quality-only'),presets:value('--presets','production').split(',').filter(Boolean),dev:process.argv.includes('--dev'),seconds:Number(value('--seconds','30')),runs:Number(value('--runs','3')),finalFrames:Number(value('--final-frames','30')),
   stressMinutes:Number(value('--stress-minutes','0')),stressWarmupMinutes:Number(value('--stress-warmup-minutes','5')),stressFixedProjects:process.argv.includes('--stress-fixed-projects'),diagnostic:process.argv.includes('--diagnostic'),profile:process.argv.includes('--cpu-profile'),scenes:value('--scenes','hero,edge,macro,back,chrome,materials,caustics,wet,landscape,room,street,4view').split(',').filter(Boolean),
   heapSnapshots:process.argv.includes('--heap-snapshots'),
   evidence:path.resolve(process.env.PM_STUDIO_SHOTS??'/tmp/pm-shots/studio3d/laneP4'),fixtures:value('--fixtures',path.join(studioCargoTarget(),'release/studio-environments'))};
@@ -70,7 +75,7 @@ async function installProbe(page) {
    if(probe.pending.length>=32){const old=probe.pending.shift();gl.deleteSync(old.sync);old.row.pixelError='GPU completion queue full';}
    const sync=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);if(!sync){row.pixelError='No GPU completion fence';return;}probe.pending.push({sync,row});gl.flush();if(!probe.polling){probe.polling=true;requestAnimationFrame(poll);}
   });
-  window.addEventListener('pointermove',e=>{if(probe.active==='drag'&&e.buttons)probe.inputs.push({at:performance.now(),kind:'pointer',time:PM.time,x:e.clientX,y:e.clientY,eventTime:e.timeStamp});},true);
+  window.addEventListener('pointermove',e=>{if(probe.active==='drag'&&e.buttons)probe.inputs.push({at:performance.now(),kind:'pointer',time:PM.time,x:e.clientX,y:e.clientY,eventTime:e.timeStamp,value:PM.L(probe.targetLayer)?.p?.['position.x']?.v});},true);
   PM.bus.on('time',()=>{if(probe.active==='playback'){const time=Math.floor(PM.time*PM.proj.fps+1e-7)/PM.proj.fps;if(time!==probe.lastTime){probe.lastTime=time;probe.inputs.push({at:performance.now(),kind:'time',time});}}});
  });
 }
@@ -149,26 +154,34 @@ async function nativeReady(page) {
  assert(state.jobs.length&&state.jobs.every(j=>j.backend==='native-studio'),`Every viewer pane must stay native: ${JSON.stringify(state)}`);return state;
 }
 
-async function interval(page,kind,seconds) {
- const start=await page.evaluate(kind=>{const p=window.__studioPerf;p.active=kind;p.presentations=[];p.inputs=[];p.tasks=[];p.lastTime=null;const start=performance.now();if(kind==='drag'){window.PM.Kernel.api('studio-perf').scene3d.setView('editor');window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('orbit');if(p.allPanesDynamic){window.PM.setTime(0);window.PM.play();}}if(kind==='playback'){window.PM.Kernel.api('studio-perf').scene3d.setView('camera');window.PM.setTime(0);window.PM.play();}return start;},kind);
+async function interval(page,kind,seconds,target='orbit') {
+ let field;
+ if(kind==='drag'&&target!=='orbit'){
+  assert(['model','light','camera'].includes(target),'Unknown drag target');
+  await page.evaluate(target=>{const PM=window.PM,api=PM.Kernel.api('studio-perf').scene3d;PM.pause();PM.setTime(0);api.setView('camera');api.setNavigationMode('select');const layer=PM.proj.layers.find(l=>target==='model'?l.d?.data?.object?.source?.assetId:target==='light'?l.d?.data?.light:l.d?.data?.camera);if(!layer)throw new Error(`No ${target} to drag`);PM.selectLayers([layer.id]);window.__studioPerf.targetLayer=layer.id;PM.invalidate();},target);
+  const control=page.locator('#panel-inspector [data-channel="position.x"] input[role="spinbutton"]').first();
+  await control.waitFor({state:'visible'});await control.scrollIntoViewIfNeeded();field=await control.boundingBox();assert(field,'A visible Position X control is required');
+ }
+
+ const start=await page.evaluate(({kind,target})=>{const p=window.__studioPerf;p.active=kind;p.presentations=[];p.inputs=[];p.tasks=[];p.lastTime=null;const start=performance.now();if(kind==='drag'&&target==='orbit'){window.PM.Kernel.api('studio-perf').scene3d.setView('editor');window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('orbit');if(p.allPanesDynamic){window.PM.setTime(0);window.PM.play();}}if(kind==='playback'){window.PM.Kernel.api('studio-perf').scene3d.setView('camera');window.PM.setTime(0);window.PM.play();}return start;},{kind,target});
  if(kind==='drag'){
-  const stage=await page.locator('#stage').boundingBox();assert(stage,'Visible editor stage required');
-  await page.keyboard.down('Alt');await page.mouse.move(stage.x+stage.width*.5,stage.y+stage.height*.5);await page.mouse.down();
+  const stage=field??await page.locator('#stage').boundingBox();assert(stage,'Visible editor stage required');
+  if(!field)await page.keyboard.down('Alt');await page.mouse.move(stage.x+stage.width*.5,stage.y+stage.height*.5);await page.mouse.down();
   const stop=Date.now()+seconds*1000;let i=0;
-  while(Date.now()<stop){await page.mouse.move(stage.x+stage.width*(.5+.12*Math.sin(i*.055)),stage.y+stage.height*(.5+.08*Math.sin(i*.037)));i++;}
-  await page.mouse.up();await page.keyboard.up('Alt');assert.equal(await page.evaluate(()=>window.PM.Kernel.api('studio-perf').scene3d.getView()),'editor','A real Free View orbit must occur');
+  while(Date.now()<stop){await page.mouse.move(stage.x+stage.width*.5+(field?40:stage.width*.12)*Math.sin(i*.055),stage.y+stage.height*.5+(field?0:stage.height*.08)*Math.sin(i*.037));i++;}
+  await page.mouse.up();if(!field)await page.keyboard.up('Alt');if(!field)assert.equal(await page.evaluate(()=>window.PM.Kernel.api('studio-perf').scene3d.getView()),'editor','A real Free View orbit must occur');
  }else await page.waitForTimeout(seconds*1000);
  const end=await page.evaluate(()=>{const p=window.__studioPerf;p.active=null;const end=performance.now();window.PM.pause();window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('select');return end;});
  await page.waitForFunction(()=>window.__studioPerf.pending.length===0,undefined,{timeout:10000});
  const raw=await page.evaluate(({start,end})=>{const p=window.__studioPerf;return {start,end,presentations:p.presentations,inputs:p.inputs,tasks:p.tasks};},{start,end});
- raw.tasks=overlappingTasks(raw.tasks,start,end);return raw;
+ raw.tasks=overlappingTasks(raw.tasks,start,end);raw.dragTarget=kind==='drag'?target:null;if(field){assert(new Set(raw.inputs.map(i=>i.value)).size>2,'Pointer drag must change the selected layer');await page.evaluate(()=>{window.PM.hist.undo();window.PM.selectLayers([]);window.__studioPerf.targetLayer=null;});}return raw;
 }
 function summarize(raw,hz) {
  const metrics=presentationMetrics(raw.presentations,raw.start,raw.end,hz);
  const latency=inputLatencyMetrics(raw.presentations,raw.inputs);
  const slots=[...new Set(raw.presentations.flatMap(p=>p.jobs.map(j=>j.slot)))],panes=slots.map(slot=>({slot,...presentationMetrics(raw.presentations.map(p=>({...p,signature:p.jobs.find(j=>j.slot===slot)?.version??''})),raw.start,raw.end,hz)}));
  const seen=new Set(),native=[];for(const p of raw.presentations)for(const j of p.jobs){const key=`${j.slot}:${j.version}`;if(j.version&&!seen.has(key)){seen.add(key);native.push(j.native?.host?.timings??{});}}
- return {...metrics,...latency,nativeTimingMs:{host:distribution(native.map(n=>n.hostMs)),trace:distribution(native.map(n=>n.traceMs)),post:distribution(native.map(n=>n.postMs))},pass:metrics.pass&&panes.every(p=>p.pass),panes,longTasks:distribution(raw.tasks.map(t=>t.ms)),peakGpuMiB:Math.max(0,...raw.presentations.map(p=>[...new Map(p.jobs.map(j=>[j.hostPid??j.session,j.native?.host?.gpuAllocatedMiB??0])).values()].reduce((a,b)=>a+b,0))),nativeOnly:raw.presentations.every(p=>p.backend==='native-studio'&&p.jobs.every(j=>j.backend==='native-studio'))};
+ return {dragTarget:raw.dragTarget,...metrics,...latency,nativeTimingMs:{host:distribution(native.map(n=>n.hostMs)),trace:distribution(native.map(n=>n.traceMs)),post:distribution(native.map(n=>n.postMs))},pass:metrics.pass&&panes.every(p=>p.pass),panes,longTasks:distribution(raw.tasks.map(t=>t.ms)),peakGpuMiB:Math.max(0,...raw.presentations.map(p=>[...new Map(p.jobs.map(j=>[j.hostPid??j.session,j.native?.host?.gpuAllocatedMiB??0])).values()].reduce((a,b)=>a+b,0))),nativeOnly:raw.presentations.every(p=>p.backend==='native-studio'&&p.jobs.every(j=>j.backend==='native-studio'))};
 }
 export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm64/Powermove.app')) {
  const config=options();await mkdir(config.evidence,{recursive:true});
@@ -220,48 +233,56 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     const coldTasks=await page.evaluate(()=>window.__studioPerf.tasks.filter(t=>t.at+t.ms>window.__studioPerf.sceneStarted));row.coldLongTasks=distribution(coldTasks.map(t=>t.ms));await writeFile(path.join(config.evidence,`${name}-cold-long-tasks.json`),JSON.stringify(coldTasks));
     row.scene=await page.evaluate(()=>({layers:window.PM.proj.layers.map(l=>({name:l.name,scatter:l.d?.data?.object?.scatter?.p?.count?.v})),allPanesDynamic:!!window.__studioPerf.allPanesDynamic,motionBlur:window.PM.proj.layers.some(l=>!!(typeof l.mblur==='object'?l.mblur?.v:l.mblur)),shutter:window.PM.proj.shutter,viewer:{width:document.querySelector('#gl').width,height:document.querySelector('#gl').height,pixelRatio:devicePixelRatio}}));
     await page.waitForTimeout(1500);
-    for(let run=0;run<config.runs;run++){
+    for(let run=0;run<(config.qualityOnly?0:config.runs);run++){
      // Warmup through real camera navigation, then retain at least 30 completions.
      let warmed=0,attempts=0;while(warmed<30&&attempts++<30){const warm=await interval(page,'drag',2);warmed+=presentationMetrics(warm.presentations,warm.start,warm.end,hz).presentations;}
      assert(warmed>=30,'Warmup requires at least 30 native presentations');
-     const result={run,warmupPresentations:warmed};
+     const result={run,dragTarget:config.dragTarget,warmupPresentations:warmed};
      for(const kind of ['drag','playback']){
       const machineBefore=measurementState(pid);if(!config.diagnostic)assert(machineBefore.quiet,'Another lane became active before measurement');
       let cdp,clock;if(config.profile){cdp=await page.context().newCDPSession(page);await cdp.send('Profiler.enable');await cdp.send('Profiler.setSamplingInterval',{interval:1000});clock=await page.evaluate(()=>performance.now());await cdp.send('Profiler.start');}
-      const intervalEpochStart=Date.now(),raw=await interval(page,kind,config.seconds),intervalEpochEnd=Date.now();
+      const intervalEpochStart=Date.now(),raw=await interval(page,kind,config.seconds,config.dragTarget),intervalEpochEnd=Date.now();
       if(cdp){const profile=await cdp.send('Profiler.stop');await writeFile(path.join(config.evidence,`${name}-${run}-${kind}.cpuprofile`),JSON.stringify({...profile,rendererClockAtStart:clock}));await cdp.detach();}
       const machineAfter=measurementState(pid);await memoryPending;const during=report.memory.filter(s=>s.at>=intervalEpochStart&&s.at<=intervalEpochEnd),machineDuring={polls:during.length,quiet:during.every(s=>s.quiet),active:during.flatMap(s=>s.active.map(p=>({at:s.at,...p})))};
       raw.machineDuring=machineDuring;await writeFile(path.join(config.evidence,`${name}-${run}-${kind}.json.gz`),await gzip(JSON.stringify(raw),{level:1}));result[kind]={...summarize(raw,hz),machineBefore,machineAfter,machineDuring};if(!config.diagnostic)assert(machineAfter.quiet&&machineDuring.quiet,'Another lane became active during measurement');await nativeReady(page);
      }
      row.runs.push(result);await save();console.log(name,JSON.stringify({run,drag:{...result.drag,machineBefore:undefined,machineAfter:undefined},playback:{...result.playback,machineBefore:undefined,machineAfter:undefined}}));
     }
-    const release=await page.evaluate(()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');const start=performance.now();PM.setTime(0);PM.invalidate('render');return start;});
-    await page.waitForFunction(release=>(window.PM.Studio.diagnostics?.()??[]).some(j=>!j.slot&&j.version&&j.inputAt>=release&&j.native?.host?.tier==='refine'&&j.native.host.samples>=32),release,{timeout:120000});
-    row.refineViewer=await page.evaluate(release=>({seconds:(performance.now()-release)/1000,frames:window.PM.Studio.diagnostics(),longTasks:window.__studioPerf.tasks.filter(t=>t.at+t.ms>release)}),release);
+    row.editingLongTasks=distribution(await page.evaluate(()=>{const p=window.__studioPerf;return p.sceneTasks.filter(t=>t.at+t.ms>p.sceneStarted).map(t=>t.ms);}));
+    if(config.liveOnly)continue;
+    row.qualities=[];
+    for(const preset of config.presets){
+    const quality={preset,final:[]};row.qualities.push(quality);
+    const release=await page.evaluate(preset=>{const PM=window.PM;PM.pause();const quality=preset==='fixed64'?{preset:'custom',noiseThreshold:0,minSamples:64,maxSamples:64,timeLimitSeconds:0,maxBounces:8,caustics:true,denoise:true,motionBlurSamples:2}:preset;const edited=PM.Kernel.api('studio-perf').scene3d.renderQuality.set(quality);if(!edited.ok)throw new Error(edited.message);PM.Kernel.api('studio-perf').scene3d.setView('camera');const start=performance.now();PM.setTime(0);PM.invalidate('render');return start;},preset);
+    await page.waitForFunction(release=>(window.PM.Studio.diagnostics?.()??[]).some(j=>!j.slot&&j.version&&j.inputAt>=release&&j.native?.host?.tier==='refine'&&j.native.host.samples>0),release,{timeout:120000});
+    quality.refineViewer=await page.evaluate(release=>({seconds:(performance.now()-release)/1000,frames:window.PM.Studio.diagnostics(),longTasks:window.__studioPerf.tasks.filter(t=>t.at+t.ms>release)}),release);
     // Keep cold/warmup/idle palette and thumbnail work, even when interval()
     // resets its own task list. It still counts toward editor responsiveness.
     row.editingLongTasks=distribution(await page.evaluate(()=>{const p=window.__studioPerf;return p.sceneTasks.filter(t=>t.at+t.ms>p.sceneStarted).map(t=>t.ms);}));
-    await page.screenshot({path:path.join(config.evidence,`${name}-refine-editor.png`)});
-    row.refineMachine=measurementState(pid);if(!config.diagnostic)assert(row.refineMachine.quiet,'Another lane became active before Refine');
-    row.refine=await page.evaluate(async()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');PM.Studio.setPreview('quality');PM.agentFrameCapture=true;const start=performance.now();try{
-      await PM.prepareFrame(0,{studioTier:'refine',studioSamples:32,width:1920,height:1080,mblur:false});const canvas=PM.renderFrameTo(0,1920,1080,{mblur:false});const frames=PM.Studio.captureDiagnostics();PM.agentFrameCapture=false;PM.GL.render(0,{mblur:false});const seconds=(performance.now()-start)/1000,check=new OffscreenCanvas(64,36),ctx=check.getContext('2d');ctx.drawImage(canvas,0,0,64,36);const rgb=[...ctx.getImageData(0,0,64,36).data].filter((_,i)=>i%4!==3),pixelRange=Math.max(...rgb)-Math.min(...rgb);return {seconds,pixelRange,frames,presented:PM.Studio.diagnostics(),png:canvas.toDataURL('image/png')};
+    await page.screenshot({path:path.join(config.evidence,`${name}-${preset}-refine-editor.png`)});
+    quality.refineMachine=measurementState(pid);if(!config.diagnostic)assert(quality.refineMachine.quiet,'Another lane became active before Refine');
+    quality.refine=await page.evaluate(async()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');PM.Studio.setPreview('quality');PM.agentFrameCapture=true;const start=performance.now();try{
+      await PM.prepareFrame(0,{studioTier:'refine',studioSamples:window.PM.Kernel.api('studio-perf').scene3d.renderQuality.get().maxSamples,width:1920,height:1080,mblur:false});const canvas=PM.renderFrameTo(0,1920,1080,{mblur:false});const frames=PM.Studio.captureDiagnostics();PM.agentFrameCapture=false;PM.GL.render(0,{mblur:false});const seconds=(performance.now()-start)/1000,check=new OffscreenCanvas(64,36),ctx=check.getContext('2d');ctx.drawImage(canvas,0,0,64,36);const rgb=[...ctx.getImageData(0,0,64,36).data].filter((_,i)=>i%4!==3),pixelRange=Math.max(...rgb)-Math.min(...rgb);return {seconds,pixelRange,frames,presented:PM.Studio.diagnostics(),png:canvas.toDataURL('image/png')};
     }finally{PM.agentFrameCapture=false;}});
-    await writeFile(path.join(config.evidence,`${name}-refine.png`),Buffer.from(row.refine.png.split(',')[1],'base64'));delete row.refine.png;
-    assert(row.refine.pixelRange>8,'A visible nonblank corpus frame is required');
-    assert(row.refine.frames.length&&row.refine.frames.every(f=>f.backend==='native-studio'&&f.native?.host?.denoiser==='oidn'&&f.samples>=32&&f.width===1920&&f.height===1080),'Refine must be a native 1080p/32-sample OIDN image');
-    row.final=[];
-    row.finalMachineBefore=measurementState(pid);if(!config.diagnostic)assert(row.finalMachineBefore.quiet,'Another lane became active before Final');
+    await writeFile(path.join(config.evidence,`${name}-${preset}-refine.png`),Buffer.from(quality.refine.png.split(',')[1],'base64'));delete quality.refine.png;
+    assert(quality.refine.pixelRange>8,'A visible nonblank corpus frame is required');
+    assert(quality.refine.frames.length&&quality.refine.frames.every(f=>f.backend==='native-studio'&&f.native?.host?.tier==='refine'&&f.samples>0&&f.width===1920&&f.height===1080),'Refine must display the selected native 1080p quality image');
+    quality.final=[];
+    quality.finalMachineBefore=measurementState(pid);if(!config.diagnostic)assert(quality.finalMachineBefore.quiet,'Another lane became active before Final');
     await page.evaluate(()=>{window.PM.agentFrameCapture=true;});
     try{
     for(let i=0;i<(config.finalFrames?config.finalFrames+1:0);i++){
      const frame=await page.evaluate(async({i,mblur})=>{const PM=window.PM,start=performance.now();await PM.prepareFrame(i/60,{exporting:true,width:1920,height:1080,mblur,mbSamples:16});const canvas=PM.renderFrameTo(i/60,1920,1080,{exporting:true,mblur,mbSamples:16}),seconds=(performance.now()-start)/1000;return {seconds,status:PM.Studio.status(),frames:PM.Studio.captureDiagnostics(),...(i===0?{png:canvas.toDataURL('image/png')}:{})};},{i,mblur:row.scene.motionBlur});
-     if(frame.png){await writeFile(path.join(config.evidence,`${name}-final.png`),Buffer.from(frame.png.split(',')[1],'base64'));delete frame.png;}
-     assert.equal(frame.status.backend,'native-studio');assert(frame.frames.length&&frame.frames.every(f=>f.backend==='native-studio'&&f.width===1920&&f.height===1080&&f.native?.host?.tier==='final'&&f.native.host.denoiser==='oidn'));assert(frame.frames.reduce((n,f)=>n+f.samples,0)>=64);row.final.push(frame);await save();
+     if(frame.png){await writeFile(path.join(config.evidence,`${name}-${preset}-final.png`),Buffer.from(frame.png.split(',')[1],'base64'));delete frame.png;}
+     assert.equal(frame.status.backend,'native-studio');assert(frame.frames.length&&frame.frames.every(f=>f.backend==='native-studio'&&f.width===1920&&f.height===1080&&f.native?.host?.tier==='final'));assert(frame.frames.reduce((n,f)=>n+f.samples,0)>0);quality.final.push(frame);await save();
     }
     }finally{await page.evaluate(()=>{window.PM.agentFrameCapture=false;});}
-    row.finalSeconds=distribution(row.final.slice(1).map(f=>f.seconds));
-    row.finalMachineAfter=measurementState(pid);if(!config.diagnostic)assert(row.finalMachineAfter.quiet,'Another lane became active during Final');
-    await page.screenshot({path:path.join(config.evidence,`${name}-editor.png`)});
+    quality.finalSeconds=distribution(quality.final.slice(1).map(f=>f.seconds));
+    quality.finalMachineAfter=measurementState(pid);if(!config.diagnostic)assert(quality.finalMachineAfter.quiet,'Another lane became active during Final');
+    await page.screenshot({path:path.join(config.evidence,`${name}-${preset}-editor.png`)});
+    quality.policy=await page.evaluate(()=>window.PM.Kernel.api('studio-perf').scene3d.renderQuality.get());
+    Object.assign(row,quality);await save();console.log('quality',name,preset,JSON.stringify({viewerSeconds:quality.refineViewer.seconds,refineSeconds:quality.refine.seconds,finalSeconds:quality.finalSeconds}));
+    }
    }catch(error){row.error=String(error);report.errors.push(`${name}: ${error}`);console.error(row.error);await save();}
   }
   if(config.stressMinutes>0){
@@ -309,7 +330,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     report.stress.peakGpuMiB=Math.max(report.stress.peakGpuMiB??0,...hostStats.map(h=>h.peakGpuMiB??0));
     await page.evaluate(async()=>{const PM=window.PM;if(!await PM.Tabs.close(PM.proj.id))throw new Error('Stress project close failed');});
     await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows()[0],b=w.getBounds();w.setSize(b.width===1400?1380:1400,b.height);});
-    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.heap=await stressCdp.send('Runtime.getHeapUsage');sample.dom=await stressCdp.send('Memory.getDOMCounters');sample.editor=await page.evaluate(()=>({projects:window.PM.Projects.list().length,tabs:window.PM.Tabs.list().length,attachedNodes:document.querySelectorAll('*').length}));assert.equal(sample.editor.tabs,0,'Stress samples require closed project tabs');if(config.stressFixedProjects)assert.equal(sample.editor.projects,report.stress.projectCountStart,'Fixed-project stress must not grow the project catalog');sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');(report.stress.measurementStarted?report.stress.samples:report.stress.warmupSamples).push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB,projects:sample.editor.projects}));}
+    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.cycle=report.stress.cycles;sample.heap=await stressCdp.send('Runtime.getHeapUsage');sample.dom=await stressCdp.send('Memory.getDOMCounters');sample.editor=await page.evaluate(()=>({projects:window.PM.Projects.list().length,tabs:window.PM.Tabs.list().length,attachedNodes:document.querySelectorAll('*').length}));assert.equal(sample.editor.tabs,0,'Stress samples require closed project tabs');if(config.stressFixedProjects)assert.equal(sample.editor.projects,report.stress.projectCountStart,'Fixed-project stress must not grow the project catalog');sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');(report.stress.measurementStarted?report.stress.samples:report.stress.warmupSamples).push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB,projects:sample.editor.projects}));}
    }
    report.stress.totalElapsedMinutes=(Date.now()-report.stress.started)/60000;report.stress.elapsedMinutes=(Date.now()-report.stress.measurementStarted)/60000;report.stress.measuredCycles=report.stress.cycles-report.stress.warmupCycles;
    report.stress.trend=memoryTrend(report.stress.samples);
@@ -322,19 +343,19 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   report.inputLatencyMethod='Trusted pointer/time input to matching native image composed by the editor and completed WebGL2 GPU fence; asynchronous rAF polling adds up to one display interval; display scanout is not measured';
   report.sharedTextureTransfers=await app.evaluate(()=>globalThis.__perfTransfers);assert(report.sharedTextureTransfers>0,'Shared textures must reach the real editor');
   clearInterval(memoryTimer);await memoryPending;report.peakRssMiB=Math.max(0,...report.memory.map(s=>s.rssMiB));report.peakHostMiB=Math.max(0,...report.memory.map(s=>s.maxHostMiB));
-  const hosts=report.rows.flatMap(r=>[...(r.native?.jobs??[]),...(r.refine?.frames??[]),...(r.final??[]).flatMap(f=>f.frames)]).map(f=>f.native?.host).filter(Boolean);
+  const hosts=report.rows.flatMap(r=>[...(r.native?.jobs??[]),...(r.refine?.frames??[]),...(r.qualities??[]).flatMap(q=>q.final.flatMap(f=>f.frames))]).map(f=>f.native?.host).filter(Boolean);
   report.peakHostMiB=Math.max(report.peakHostMiB,report.stress?.peakHostMiB??0,...hosts.map(h=>h.peakRssMiB??0));
   report.peakGpuMiB=Math.max(0,report.stress?.peakGpuMiB??0,...report.memory.map(s=>s.gpuMiB??0),...hosts.map(h=>h.peakGpuMiB??0),...report.rows.flatMap(r=>r.runs.flatMap(run=>[run.drag.peakGpuMiB,run.playback.peakGpuMiB])));report.gpuMemory='Metal currentAllocatedSize high-water per host; overlaps unified RSS and is not added to it';
   report.swapGrowthMiB=swapMiB(safeCommand('/usr/sbin/sysctl',['vm.swapusage']))-swapMiB(initial.swap);
   report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
-  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]),complete=report.acceptanceEligible&&row.runs.length>=3&&row.runs.every(r=>r.warmupPresentations>=30)&&intervals.every(r=>r.seconds>=30);row.protocol={liveComplete:complete,finalWarmFramesComplete:row.finalSeconds?.count>=30};row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&complete&&intervals.every(r=>r.pass),input:!row.error&&complete&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&complete&&(row.editingLongTasks?.max??0)<=50&&intervals.every(r=>(r.longTasks.max??0)<=50)&&(row.coldLongTasks?.max??0)<=50&&(row.refineViewer?.longTasks??[]).every(t=>t.ms<=50),refine:limit?report.acceptanceEligible&&!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?report.acceptanceEligible&&!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
+  for(const row of report.rows){for(const q of row.qualities??[]){q.legacy64=q.preset==='fixed64';q.actualSamples=distribution(q.final.slice(1).flatMap(f=>f.frames.map(image=>image.samples)));}const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]),complete=report.acceptanceEligible&&row.runs.length>=3&&row.runs.every(r=>r.warmupPresentations>=30)&&intervals.every(r=>r.seconds>=30);row.protocol={liveComplete:complete,finalWarmFramesComplete:row.finalSeconds?.count>=30};row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&complete&&intervals.every(r=>r.pass),input:!row.error&&complete&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&complete&&(row.editingLongTasks?.max??0)<=50&&intervals.every(r=>(r.longTasks.max??0)<=50)&&(row.coldLongTasks?.max??0)<=50&&(row.refineViewer?.longTasks??[]).every(t=>t.ms<=50),refine:limit?report.acceptanceEligible&&!row.error&&row.refine?.frames?.every(f=>f.samples>=32&&f.native?.host?.denoiser==='oidn')&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?report.acceptanceEligible&&!row.error&&row.preset==='fixed64'&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
   await save();
  }finally{
   clearInterval(watchdog);
   clearInterval(memoryTimer);
   const hostPids=new Set((report.memory??[]).flatMap(s=>s.processes.filter(p=>p.name.endsWith('/pm-studio-host')).map(p=>p.pid)));
   if(app){await app.evaluate(async({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())await w.webContents.executeJavaScript('window.PM?.prepareToClose?.({flush:true})');}).catch(()=>{});const p=ownedProcess,timer=setTimeout(()=>p?.kill('SIGKILL'),6000);try{await app.close({timeout:10000});}catch{p?.kill('SIGKILL');}clearTimeout(timer);}
-  report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
+  for(let attempt=0;attempt<20;attempt++){report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)&&p.name.endsWith('/pm-studio-host')).map(p=>p.pid);if(!report.orphanedHostPids.length)break;await new Promise(resolve=>setTimeout(resolve,100));}if(report.gates&&report.stress)report.gates.stress=report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
  }
  console.log(`Evidence: ${path.join(config.evidence,'editor-results.json')}`);
  return report;

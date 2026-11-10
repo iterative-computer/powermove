@@ -10,6 +10,7 @@ import { unpackProjectFile } from './core/project-file';
 import * as fingerprints from './core/project-fingerprint';
 import * as serialization from './core/serialize-async';
 import { sha256Hex } from '../../../shared/sha256';
+import { decodeProjectContainer } from '../../../shared/project-container';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
@@ -1281,6 +1282,43 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('Two');
   PM.hist.undo();
   expect(PM.proj.name).toBe('One');
+});
+
+it('saves shared structural Undo records once and restores every Undo and Redo action', async () => {
+  const { PM } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.touch = vi.fn();
+  PM.WS.activate = vi.fn(); PM.replaceProject = (next: any) => { PM.proj = next; };
+  for (let index = 0; index < 24; index++) PM.hist.do(`Add shape ${index}`, () => {
+    PM.proj.layers.push({ id: `shape-${index}`, type: 'shape', p: {}, d: { note: 'unchanged artwork '.repeat(96) } });
+  });
+  PM.hist.undo(); PM.hist.undo();
+  const expandedHistory = JSON.stringify(PM.hist.export()).length;
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/History.pmv' }));
+  const bridge: any = { saveFile };
+  installBridgeForTests(bridge);
+  expect(await PM.saveProject()).toBe(true);
+  const data = saveFile.mock.calls[0]![0].data;
+  const encoded = decodeProjectContainer(data).document;
+  expect(encoded.history.format).toBe('powermove-history-dictionary');
+  expect(data.byteLength).toBeLessThan(expandedHistory / 4);
+  const saved = unpackProjectFile(data);
+  expect(saved.history).toEqual(PM.hist.export());
+  bridge.openProjectFile = async () => ({ ok: true, path: '/tmp/History.pmv', projectId: 'reopened', data });
+  await PM.openProject();
+  expect(PM.proj.layers).toHaveLength(22);
+  expect(PM.hist.list()).toHaveLength(24);
+  expect(PM.hist.redo()).toBe(true); expect(PM.hist.redo()).toBe(true);
+  const allLayers = structuredClone(PM.proj.layers);
+  for (let count = 23; count >= 0; count--) {
+    expect(PM.hist.undo()).toBe(true); expect(PM.proj.layers).toHaveLength(count);
+  }
+  expect(PM.hist.undo()).toBe(false);
+  for (let count = 1; count <= 24; count++) {
+    expect(PM.hist.redo()).toBe(true); expect(PM.proj.layers).toHaveLength(count);
+  }
+  expect(PM.proj.layers).toEqual(allLayers);
+  expect(PM.hist.redo()).toBe(false);
 });
 
 it.each(['failed', 'cancelled'])('resumes outgoing asset restoration after a %s native project open without clearing live media', async outcome => {

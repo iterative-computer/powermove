@@ -1,8 +1,31 @@
 import { describe, expect, it, vi } from 'vitest';
 import { packProjectFile, readProjectFileDocument, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
 import { sha256Hex } from '../../../../shared/sha256';
+import { packHistory } from '../../../../shared/history-memory';
 
 describe('portable project media', () => {
+  it.each(['bytes', 'blob', 'native document'] as const)('restores dictionary history and Undo-only media through %s', async mode => {
+    const asset = { id: 'deleted', name: 'Deleted source' }, layer = { id: 'model', d: { asset: 'deleted' } };
+    const history = { version: 1, index: 0, entries: [{ label: 'Delete model',
+      forward: [{ exists: true, path: ['layers'], value: [] }, { exists: false, path: ['assets', 'deleted'] }],
+      backward: [{ exists: true, path: ['layers'], value: [layer] }, { exists: true, path: ['assets', 'deleted'], value: asset }],
+    }] };
+    const document = { proj: { w: 320, h: 180, layers: [], assets: {} }, history: packHistory(history) };
+    const store = { get: vi.fn(async () => new Blob(['source bytes'])), put: vi.fn(async () => true) };
+    const bytes = await packProjectFile(document, store);
+    expect(store.get).toHaveBeenCalledWith(asset, expect.anything());
+    let reopened: any;
+    if (mode === 'native document') {
+      const source = new TextEncoder().encode(JSON.stringify(document));
+      reopened = await readProjectFileDocument({ offset: 0, length: source.length, sha256: sha256Hex(source) }, source.length,
+        async (offset, length) => source.slice(offset, offset + length));
+      reopened.containerMedia = [{ id: 'deleted', type: '', data: new Blob(['source bytes']) }];
+    } else reopened = mode === 'bytes' ? unpackProjectFile(bytes) : await unpackProjectFileBlob(new Blob([bytes]));
+    expect(reopened.history).toEqual(history);
+    await restoreProjectFileMedia(reopened, store);
+    expect(store.put).toHaveBeenCalledWith('deleted', expect.any(Blob), asset, undefined);
+  });
+
   it('keeps linked originals out of ordinary saves while portable exports include their full media', async () => {
     const snapshot = { proj: { assets: { clip: { id: 'clip', sourcePath: '/media/clip.mp4' }, paste: { id: 'paste' } } } };
     const store = { get: async (asset: any) => new Blob([asset.id]), put: vi.fn(),

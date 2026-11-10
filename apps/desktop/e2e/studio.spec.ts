@@ -191,14 +191,19 @@ test('Final denoises by its guides, keeps edges and renders the same frame the s
     PM.Studio.setDenoise(false); PM.Studio.setDenoise(true);
     const again = frame(0);
     PM.agentFrameCapture = false;
-    let same = true;
-    for (let i = 0; i < denoised.length; i++) if (denoised[i] !== again[i]) { same = false; break; }
+    let changedBytes = 0, maximumDelta = 0;
+    const firstDifferences: Array<{ byte: number; before: number; after: number }> = [];
+    for (let i = 0; i < denoised.length; i++) if (denoised[i] !== again[i]) {
+      changedBytes++; maximumDelta = Math.max(maximumDelta, Math.abs(denoised[i] - again[i]));
+      if (firstDifferences.length < 8) firstDifferences.push({ byte: i, before: denoised[i], after: again[i] });
+    }
+    const same = changedBytes === 0;
     // The backdrop stays exactly the backdrop where nothing is near it.
     const corner = [...denoised.subarray((10 * W + 10) * 4, (10 * W + 10) * 4 + 3)];
-    return { raw: grain(raw), denoised: grain(denoised), same, corner };
+    return { raw: grain(raw), denoised: grain(denoised), same, corner, differences: { changedBytes, maximumDelta, firstDifferences } };
   });
   expect(result.denoised).toBeLessThan(result.raw * 0.5);
-  expect(result.same).toBe(true);
+  expect(result.same, JSON.stringify(result.differences)).toBe(true);
   expect(result.corner).toEqual([246, 245, 248]);
   expect(session.diagnostics.pageErrors).toEqual([]);
   console.log(`grain ${result.raw.toFixed(2)} → ${result.denoised.toFixed(2)}; corner ${result.corner}`);
