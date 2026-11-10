@@ -356,10 +356,19 @@ fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
         let context=unsafe{studio_metalfx_create(raw,iw,ih,self.output_size.0,self.output_size.1)};
         drop(hal);
         if context.is_null(){return Err("MetalFX temporal denoised scaling is unavailable on this Mac".into());}
-        let inputs=self.inputs.iter().map(|texture|device.create_texture(&wgpu::TextureDescriptor{
+        let inputs:Vec<_>=self.inputs.iter().map(|texture|device.create_texture(&wgpu::TextureDescriptor{
             label:Some("MetalFX"),size:wgpu::Extent3d{width:iw,height:ih,depth_or_array_layers:1},
             mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:texture.format(),usage:texture.usage(),view_formats:&[],
         })).collect();
+        // Bind groups retain their textures. The distance pass must follow the
+        // new inputs too, rather than reading/writing the retired guide images.
+        self.distance_group=device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:Some("MetalFX specular distance"),layout:&self.distance_pipeline.get_bind_group_layout(0),
+            entries:&[
+                wgpu::BindGroupEntry{binding:0,resource:wgpu::BindingResource::TextureView(&inputs[5].create_view(&Default::default()))},
+                wgpu::BindGroupEntry{binding:1,resource:wgpu::BindingResource::TextureView(&inputs[8].create_view(&Default::default()))},
+            ],
+        });
         let previous=std::mem::replace(&mut self.context,context);
         unsafe{studio_metalfx_destroy(previous)};
         self.inputs=inputs;self.input_size=(iw,ih);self.valid=false;
@@ -373,6 +382,64 @@ impl Renderer {
         let hal=unsafe{self.device.as_hal::<wgpu::hal::api::Metal>()}?;
         let raw=(&**hal.raw_device() as *const _ as *mut c_void).cast();
         Some(unsafe{studio_metal_allocated_bytes(raw)})
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    #[test]
+    fn resized_specular_distance_reads_the_current_guide_textures() {
+        let Ok(renderer) = Renderer::new(64, 36) else { return };
+        if !renderer.metalfx_enabled { return; }
+        let mut fx = MetalFX::new(&renderer, 128, 72).unwrap();
+        let device = &renderer.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("specular distance resize fixture"),
+            source: wgpu::ShaderSource::Wgsl(r#"
+@group(0) @binding(0) var normal:texture_storage_2d<rgba16float,write>;
+@compute @workgroup_size(8,8)
+fn fill(@builtin(global_invocation_id) g:vec3u){
+ if(any(g.xy>=textureDimensions(normal))){return;}
+ textureStore(normal,vec2i(g.xy),vec4f(0.,1.,0.,7.));
+}"#.into()),
+        });
+        let fill = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None, layout: None, module: &module, entry_point: Some("fill"), compilation_options: Default::default(), cache: None,
+        });
+        for (width, height) in [(64u32, 36u32), (48, 27), (80, 45)] {
+            if fx.input_size != (width, height) { fx.resize_inputs(device, width, height).unwrap(); }
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None, layout: &fill.get_bind_group_layout(0), entries: &[wgpu::BindGroupEntry {
+                    binding: 0, resource: wgpu::BindingResource::TextureView(&fx.inputs[5].create_view(&Default::default())),
+                }],
+            });
+            let stride = (width * 4).div_ceil(256) * 256;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None, size: u64::from(stride) * u64::from(height), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&fill); pass.set_bind_group(0, &group, &[]); pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&fx.distance_pipeline); pass.set_bind_group(0, &fx.distance_group, &[]); pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture: &fx.inputs[8], mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(height) } },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            renderer.queue.submit([encoder.finish()]);
+            let slice = readback.slice(..); slice.map_async(wgpu::MapMode::Read, |_| {}); renderer.wait();
+            let bytes = slice.get_mapped_range().unwrap();
+            for row in bytes.chunks_exact(stride as usize) {
+                assert!(bytemuck::cast_slice::<u8, f32>(&row[..width as usize * 4]).iter().all(|v| *v == 7.), "specular distance lost after resize to {width}x{height}");
+            }
+            drop(bytes); readback.unmap();
+        }
     }
 }
 impl Renderer {
