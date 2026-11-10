@@ -56,21 +56,22 @@ pub(crate) fn bars(composition: Option<&str>) -> Vec<pm_panel_timeline::render::
 }
 
 impl Controller {
-    /// The selected layer's span in the open composition, or its work area.
+    /// The selected layer's span in the open composition (the part inside
+    /// it), or its work area.
     fn render_range(&self) -> Option<(f64, f64)> {
         let p = self.published.as_ref()?;
         let root = p.snapshot.root()?;
         let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())?;
         let number = |n: Option<&pm_model::Node>| n.and_then(|n| n.to_value().as_f64());
+        let duration = number(comp.get("dur")).unwrap_or(0.);
         if let Some(id) = &self.selected
             && let Some(layer) = pm_kernel::model::layers_of(comp)
                 .find(|l| l.get("id").and_then(crate::node_string) == Some(id.as_str()))
         {
             let from = number(layer.get("from")).unwrap_or(0.);
             let dur = number(layer.get("dur")).unwrap_or(0.);
-            return (dur > 0.).then_some((from, from + dur));
+            return within_composition(from, from + dur, duration);
         }
-        let duration = number(comp.get("dur")).unwrap_or(0.);
         let work = comp.get("work");
         let from = number(work.and_then(|w| w.at(0))).unwrap_or(0.);
         let to = number(work.and_then(|w| w.at(1))).unwrap_or(duration);
@@ -203,6 +204,14 @@ impl Controller {
     }
 }
 
+/// `[from, to)` cut to the composition's `[0, duration)`; `None` when no
+/// part of it is inside (a clip longer than the composition renders only the
+/// frames the composition shows).
+fn within_composition(from: f64, to: f64, duration: f64) -> Option<(f64, f64)> {
+    let (from, to) = (from.max(0.), to.min(duration));
+    (to > from).then_some((from, to))
+}
+
 /// The status line after Keep Rendered.
 fn keep_message(kept: pm_engine_service::render_cache::Kept) -> String {
     match (kept.changed, kept.already) {
@@ -287,6 +296,14 @@ fn follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selected_clip_renders_only_inside_the_composition() {
+        assert_eq!(within_composition(0., 20., 10.), Some((0., 10.)));
+        assert_eq!(within_composition(-2., 4., 10.), Some((0., 4.)));
+        assert_eq!(within_composition(12., 15., 10.), None);
+        assert_eq!(within_composition(3., 3., 10.), None);
+    }
 
     #[test]
     fn keeping_kept_frames_again_says_so() {
