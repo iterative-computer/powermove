@@ -117,6 +117,10 @@ fn report_activation() {
 /// Main-thread responsiveness: a foreground task asks for a 5 ms timer and
 /// reports how late it resumes. A late resume is time the UI thread could
 /// not paint or handle input.
+/// Live editor controllers, for the probe line: a closed window's editor
+/// must go (stability soak).
+pub static EDITORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn install_probe(cx: &mut gpui::App) {
     if !enabled() {
         return;
@@ -137,7 +141,8 @@ pub fn install_probe(cx: &mut gpui::App) {
                 line(serde_json::json!({"stall_ms":late}));
             }
             if reported.elapsed() >= Duration::from_secs(1) {
-                line(serde_json::json!({"probe_worst_ms":worst}));
+                line(serde_json::json!({"probe_worst_ms":worst,
+                    "editors":EDITORS.load(std::sync::atomic::Ordering::Relaxed)}));
                 worst = 0.;
                 reported = Instant::now();
             }

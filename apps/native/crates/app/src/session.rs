@@ -316,6 +316,7 @@ impl Controller {
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::diag::EDITORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pro_media = Arc::new(crate::pro_media::ProMedia::new(
             profile.clone(),
             crate::media::objects_dir(&profile),
@@ -2102,6 +2103,7 @@ pub(crate) fn stable_id(path: &std::path::Path) -> String {
 }
 impl Drop for Controller {
     fn drop(&mut self) {
+        crate::diag::EDITORS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(v) = &self.viewer {
             v.retire();
         }
