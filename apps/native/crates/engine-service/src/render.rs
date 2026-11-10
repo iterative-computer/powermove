@@ -37,6 +37,9 @@ pub struct FrameSpec {
     pub scale: f64,
     /// Playing frames: video waits for exact frames until here, then stands in.
     pub decode_deadline: Option<Instant>,
+    /// The exact picture is read (a capture): the final resampler, whatever
+    /// the moment and scale.
+    pub exact: bool,
 }
 impl FrameSpec {
     pub fn exact(time: Ticks, output: Output) -> Self {
@@ -46,6 +49,7 @@ impl FrameSpec {
             moment: Moment::Paused,
             scale: 1.,
             decode_deadline: None,
+            exact: true,
         }
     }
     fn render_size(&self) -> Size {
@@ -79,16 +83,23 @@ impl FrameSpec {
             MotionBlurKind::PreviewPaused
         });
         request.sampling = self.sampling();
+        #[cfg(test)]
+        SAMPLED
+            .lock()
+            .unwrap()
+            .push((self.exact, self.moment, self.scale, request.sampling));
         Ok(request)
     }
 
     /// Frames while playing, and a drag's reduced frames (a preview the
     /// final resampler redraws once the playhead settles), take the
     /// playback resampler (pm-render's rule for scrub frames); paused
-    /// frames and drags at full resolution, which nothing redraws, the
-    /// final one.
+    /// frames, drags at full resolution (which nothing redraws), and exact
+    /// reads such as captures, the final one.
     fn sampling(&self) -> pm_render::sampling::Sampling {
-        if self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.) {
+        if !self.exact
+            && (self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.))
+        {
             pm_render::sampling::Sampling::Playback
         } else {
             pm_render::sampling::Sampling::Final
@@ -868,6 +879,12 @@ impl Engine {
 /// Delays every completion handler (tests: Metal's completion queue running
 /// late under load).
 #[cfg(test)]
+/// Every viewer request's (exact, moment, scale, resampler), for tests.
+#[cfg(test)]
+pub(crate) static SAMPLED: std::sync::Mutex<
+    Vec<(bool, Moment, f64, pm_render::sampling::Sampling)>,
+> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -997,6 +1014,7 @@ mod sampling_tests {
         let spec = |moment, scale| FrameSpec {
             moment,
             scale,
+            exact: false,
             ..FrameSpec::exact(Ticks::new(0).unwrap(), output)
         };
         assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Playback);
@@ -1004,6 +1022,12 @@ mod sampling_tests {
         assert_eq!(spec(Moment::Scrub, 1.).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Paused, 0.5).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Paused, 1.).sampling(), Sampling::Final);
+        // A capture during a reduced drag reads the final picture.
+        let capture = FrameSpec {
+            exact: true,
+            ..spec(Moment::Scrub, 0.5)
+        };
+        assert_eq!(capture.sampling(), Sampling::Final);
     }
 }
 

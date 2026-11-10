@@ -2141,6 +2141,7 @@ impl Renderer {
                     blend_domain: color.blend_domain,
                     background: plan.background.clone(),
                     plan_size: (plan.width, plan.height),
+                    sampling: request.sampling,
                 };
                 crate::frame_prefix::render(
                     &mut exec,
