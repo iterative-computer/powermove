@@ -90,7 +90,7 @@ fn mix(n: usize, salt: u64) -> u64 {
     x ^ (x >> 29)
 }
 
-fn channel(out: &mut String, name: &str, value: f64, keys: usize, n: usize) {
+fn channel(out: &mut String, id: &str, name: &str, value: f64, keys: usize, n: usize) {
     let _ = write!(out, r#""{name}":{{"v":{value},"kf":["#);
     for k in 0..keys {
         if k > 0 {
@@ -100,13 +100,13 @@ fn channel(out: &mut String, name: &str, value: f64, keys: usize, n: usize) {
         let v = value + (mix(n * 31 + k, 7) % 200) as f64 - 100.0;
         let _ = write!(
             out,
-            r#"{{"t":{t},"v":{v},"i":"k{n}_{name}_{k}","outInterp":"bezier","outEase":{{"speed":0,"influence":33.3}},"inInterp":"bezier","inEase":{{"speed":0,"influence":33.3}},"autoBezier":false,"continuous":false}}"#
+            r#"{{"t":{t},"v":{v},"i":"k{id}_{name}_{k}","outInterp":"bezier","outEase":{{"speed":0,"influence":33.3}},"inInterp":"bezier","inEase":{{"speed":0,"influence":33.3}},"autoBezier":false,"continuous":false}}"#
         );
     }
     out.push_str(r#"],"expr":null}"#);
 }
 
-fn transform(out: &mut String, n: usize) {
+fn transform(out: &mut String, id: &str, n: usize) {
     const STATIC: [(&str, f64); 12] = [
         ("perspective", 50.0),
         ("position.z", 0.0),
@@ -143,7 +143,7 @@ fn transform(out: &mut String, n: usize) {
         } else {
             0
         };
-        channel(out, name, v, keys, n);
+        channel(out, id, name, v, keys, n);
     }
     out.push('}');
 }
@@ -157,7 +157,7 @@ fn common(out: &mut String, id: &str, kind: &str, n: usize, parent: Option<Strin
         r##"{{"id":"{id}","type":"{kind}","name":"{kind} {n}","from":{from},"dur":{dur},"on":true,"lock":false,"shy":false,"collapsed":true,"color":"#6C7BE8","blend":"normal","mblur":false,"parent":{parent},"transitionIn":null,"transitionOut":null,"masks":[],"locked_intent":{{}},"solo":false,"track":{track},"##,
         track = n % 12,
     );
-    transform(out, n);
+    transform(out, id, n);
 }
 
 fn layer(out: &mut String, id: &str, n: usize) {
