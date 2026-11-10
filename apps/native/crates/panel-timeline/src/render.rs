@@ -684,20 +684,23 @@ impl Scene {
     pub fn reanchor(&self, id: &str, offset: f64) -> Option<f64> {
         self.scroll_for(id).map(|y| (y + offset).max(0.))
     }
+    /// The rows on screen. Every scroll prepares a new frame, so rows past
+    /// the viewport would only cost time (a project with baked animation
+    /// puts tens of thousands of keys in them).
     fn range(&self, v: Viewport, t: &Tokens) -> Range<usize> {
         let height = (v.height - t.metrics.ruler as f64).max(0.);
         let first = self
             .tops
-            .partition_point(|y| *y < (v.scroll_y - height).max(0.))
+            .partition_point(|y| *y < v.scroll_y.max(0.))
             .saturating_sub(1)
             .min(self.total());
         let end = self
             .tops
-            .partition_point(|y| *y <= v.scroll_y + 2. * height)
+            .partition_point(|y| *y < v.scroll_y + height)
             .min(self.total());
         first..end
     }
-    /// One viewport of overscan on each side; time keys use binary search.
+    /// The rows on screen; time keys use binary search.
     pub fn prepare(&self, v: Viewport, t: &Tokens) -> Result<Frame, Error> {
         if !v.valid() {
             return Err(Error::InvalidGeometry);
