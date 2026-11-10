@@ -179,7 +179,9 @@ await writePmv4(path.join(out, 'current.pmv'), document,
 // main's Projects/takes (FileStore writes large records in the gzip
 // envelope), then the storage-upgrade checkpoint paused at its browser stage.
 P.Projects.put(P.proj);
-P.Projects.putState(P.proj.id, {history, workspace: ws, lastActiveAt: Date.UTC(2026, 10, 3)});
+P.Projects.putState(P.proj.id, {history, lastActiveAt: Date.UTC(2026, 10, 3)});
+// workspace.ts saveProjectWorkspace with a separate-history store.
+P.store.set(`projectWorkspace.${P.proj.id}`, ws);
 P.takes.save('Before review');
 // Hosts without separate history keep one projectState record (still read).
 P.store.separateHistory = false;
