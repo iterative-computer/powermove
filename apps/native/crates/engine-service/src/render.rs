@@ -1040,7 +1040,7 @@ mod lifetime_tests {
             .to_owned();
         let scene = Scene {
             doc: Arc::new(doc),
-            comp: comp.into(),
+            comp,
             media: Default::default(),
             content: 1,
         };
