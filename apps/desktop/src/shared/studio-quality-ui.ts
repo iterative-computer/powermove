@@ -21,8 +21,8 @@ export const STUDIO_QUALITY_FIELDS: ReadonlyArray<{
 }> = Object.freeze([
   { key: 'maxSamples', label: 'Max Samples', kind: 'num', min: 1, max: 4096, step: 1, help: 'The most light paths traced per pixel in each frame.' },
   { key: 'minSamples', label: 'Min Samples', kind: 'num', min: 1, max: 4096, step: 1, help: 'Paths traced before Studio checks whether a pixel is clean enough to stop.' },
-  { key: 'noiseThreshold', label: 'Noise Threshold', kind: 'num', min: 0, max: 1, step: 0.005, precision: 3, help: 'Stop a pixel once its noise is below this. Lower is cleaner and slower; 0 always traces Max Samples.' },
-  { key: 'timeLimitSeconds', label: 'Time per Frame', kind: 'num', min: 0, max: 3600, step: 0.5, unit: 's', precision: 1, help: 'The longest Studio traces one frame. 0 means no limit.' },
+  { key: 'noiseThreshold', label: 'Noise Limit', kind: 'num', min: 0, max: 1, step: 0.005, precision: 3, help: 'Stop a pixel once its noise is below this. Lower is cleaner and slower; 0 always traces Max Samples.' },
+  { key: 'timeLimitSeconds', label: 'Time Limit', kind: 'num', min: 0, max: 3600, step: 0.5, unit: 's', precision: 1, help: 'The longest Studio traces one frame. 0 means no limit.' },
   { key: 'maxBounces', label: 'Max Bounces', kind: 'num', min: 1, max: 32, step: 1, help: 'How many times light can bounce. More shows deeper glass and interiors.' },
   { key: 'caustics', label: 'Caustics', kind: 'toggle', help: 'Light focused through glass and off mirrors onto other surfaces.' },
   { key: 'denoise', label: 'Denoise', kind: 'toggle', help: 'Remove the remaining grain after tracing.' },

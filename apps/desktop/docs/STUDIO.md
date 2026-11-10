@@ -202,7 +202,7 @@ long a frame can take on this Mac.
 | **Preview** | Reviews and quick drafts to share. | about 2 s |
 | **Production** | Delivery; clean, with light focused through glass. The default. | about 3 s |
 | **Final** | Hero shots and stills. The cleanest and slowest. | about 20 s |
-| **Custom** | Your own settings, starting from the current preset. | your **Time per Frame** |
+| **Custom** | Your own settings, starting from the current preset. | your **Time Limit** |
 
 Times are upper limits: simple scenes finish sooner, and denoising adds a
 little. **Custom** reveals the settings:
@@ -211,8 +211,8 @@ little. **Custom** reveals the settings:
 |---|---|
 | **Max Samples** | The most light paths traced per pixel in each frame. |
 | **Min Samples** | Paths traced before Studio checks whether a pixel is clean enough to stop. |
-| **Noise Threshold** | Stop a pixel once its noise is below this. Lower is cleaner and slower; 0 always traces Max Samples. |
-| **Time per Frame** | The longest Studio traces one frame. 0 means no limit. |
+| **Noise Limit** | Stop a pixel once its noise is below this. Lower is cleaner and slower; 0 always traces Max Samples. |
+| **Time Limit** | The longest Studio traces one frame. 0 means no limit. |
 | **Max Bounces** | How many times light can bounce. More shows deeper glass and interiors. |
 | **Caustics** | Light focused through glass and off mirrors onto other surfaces. |
 | **Denoise** | Remove the remaining grain after tracing. |

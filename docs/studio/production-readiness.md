@@ -573,7 +573,7 @@ and finish the separate synchronous skinned-pose and physical-device-loss gates.
 | --- | --- | --- |
 | Native host / main IPC / preload / backend review | PASS for P1 scope | Lane P1 reviewed process ownership, framing/limits, Mach peers, managed references, renderer replay, file access and packaging; regression fixes below. GPU device-loss injection and large-scene/long-run stress remain open robustness gates. |
 | Scene schema, evaluator, compositor, Final/export, materials/lighting/environment, assets/import review | PARTIAL | P3 reviewed the engine/packed contract, WGSL finite math and traversal bounds, geometry/BVH extraction, GPU/worker ownership, scene edit/history/migration and model-import allocation boundaries; fixes and regressions at `4368b15db` and `46f2e9861` below. Existing seeded-scene/render tests stay green. This is not full compositor/Final visual or whole-system approval; measured main-thread stalls and the remaining acceptance gates still block shipping. |
-| UX review | PARTIAL (19 fixed, 4 open) | Lane UX walked every 3D flow as a first-time After Effects user in the dev app (native Studio backend, light and dark, background windows): import, extrusion, layer/group materials, every light type and light by pointing, camera/iris, World/sky/sun, Terrain → Scatter → Fog, 1/2/4 Views, Shots/exploded view, render passes, export, error and empty states, focus order and undo labels. Found 5 high, 11 medium and 7 low issues; fixed all high, 10 medium and 4 low (list in [Lane UX findings](#lane-ux-findings)). New flows are covered by [UX review tests](../../apps/desktop/e2e/studio-ux-review.spec.ts). Open: native Edit ▸ Undo doesn't name the action; finish swatches render near-black; corner notices sit over the Properties header; packaged-app and real-screen (native menu) review not repeated. |
+| UX review | PARTIAL (20 fixed, 3 open) | Lane UX walked every 3D flow as a first-time After Effects user in the dev app (native Studio backend, light and dark, background windows): import, extrusion, layer/group materials, every light type and light by pointing, camera/iris, World/sky/sun, Terrain → Scatter → Fog, 1/2/4 Views, Shots/exploded view, render passes, export, error and empty states, focus order and undo labels. Found 5 high, 11 medium and 7 low issues; fixed all high, 10 medium and 5 low (list in [Lane UX findings](#lane-ux-findings)). New flows are covered by [UX review tests](../../apps/desktop/e2e/studio-ux-review.spec.ts). Open: native Edit ▸ Undo doesn't name the action; corner notices sit over the Properties header; Blend Mode reads "normal"; packaged-app and real-screen (native menu) review not repeated. |
 | User docs complete | PARTIAL | Lane UX rewrote the top of [Studio](../../apps/desktop/docs/STUDIO.md) as a user guide naming every 3D feature as the app does: Add 3D Layer, import, extrusion, materials/finishes/maps, Material Options, lights and light by pointing, camera/iris, World, Terrain/Scatter/Fog, the viewer and views, Live/Refine/Final, Render Quality presets and Custom settings, Shots/exploded view, export and passes, and a what-went-wrong table. [3D guide](../../apps/desktop/docs/SCENE3D.md) points to it and uses the current viewer names. Still to check against a packaged build: environment creation walkthrough and supported font/texture lists. |
 | Agent docs and bundled API pack complete | OPEN | [native integration](native-host.md), [parity](parity.md), [environments](environments.md), [Cycles yardstick](cycles-yardstick.md), schema/operations and bundled API pack include every new action, units, limitations and reproducible commands. |
 
@@ -606,9 +606,15 @@ contradicts After Effects; **L** polish.
 | 18 | L | An empty composition offered no way into 3D. | Fixed: **3D Layer** beside Text/Shape/Solid/Null. |
 | 19 | L | Source read "box". | Fixed: primitive names (Cube). |
 | 20 | L | Sentence-case buttons (Drop to floor, New variation, Add sky, Exploded view, Set up studio). | Fixed: Title Case. |
-| 21 | L | Finish swatches render as near-black spheres; names only in tooltips. | Open |
+| 21 | L | Finish swatches rendered as near-black spheres. | Fixed: swatches render in a light-grey studio, so metals read as metal (black lacquer and rubber stay black). Names remain tooltips. |
 | 22 | L | Corner notices that wait for acknowledgement sit over the Properties header. | Open |
 | 23 | L | Blend Mode reads "normal" (lowercase) on 3D text. | Open (2D inspector) |
+
+Observed, not fixed (renderer): in a Terrain + Scatter + Fog scene in 4 Views,
+the Front and Right side panes never received a Live picture within ~10 s
+after merging Lane Q's quality changes (they did on `2cf37aeac`); simple scenes
+draw (the multi-view and UX e2e pass). The panes now say **Rendering…**
+rather than showing black silently.
 
 Checked and fine: missing textures say **Missing image/comp/layer** with
 guidance; Scatter's disabled menu row says what is missing; focus moves from
@@ -617,7 +623,7 @@ works with Undo and composition switches.
 
 **Render Quality UI.** Composition properties (nothing selected, 3D present):
 preset picker, plain description and "Up to about N s per frame"; Custom
-reveals Max/Min Samples, Noise Threshold, Time per Frame, Max Bounces,
+reveals Max/Min Samples, Noise Limit, Time Limit, Max Bounces,
 Caustics, Denoise and Blur Samples, each one Undo. Export ▸ Rendering ▸ **3D
 Render Quality**: Composition · *preset* (default) or a per-export override,
 never saved, with a whole-export estimate. Both read
