@@ -133,6 +133,7 @@ impl TimelineModel {
             .map(|i| (i, 0))
             .collect();
         let mut seen = HashSet::new();
+        let query = self.search.trim().to_lowercase();
         while let Some((i, depth)) = stack.pop() {
             if !seen.insert(i) {
                 continue;
@@ -140,6 +141,23 @@ impl TimelineModel {
             let layer = &self.index.layers[i];
             let disclosure = self.reveal.layers.get(&layer.id);
             let collapsed = disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed);
+            let group_closed = disclosure
+                .map(|d| d.group_collapsed)
+                .unwrap_or(layer.group_collapsed);
+            let kids = (!group_closed || !self.search.is_empty())
+                .then(|| children.get(&Some(layer.id.clone())))
+                .flatten();
+            // A closed layer with no search shows its row alone.
+            if collapsed && query.is_empty() {
+                self.rows.push(Row {
+                    id: RowId::Layer(layer.id.clone()),
+                    depth,
+                });
+                if let Some(kids) = kids {
+                    stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
+                }
+                continue;
+            }
             let mut properties = Vec::new();
             let has_scale = layer.channels.iter().any(|c| c.path == "scale.x")
                 && layer.channels.iter().any(|c| c.path == "scale.y");
@@ -195,7 +213,6 @@ impl TimelineModel {
                     );
                 }
             }
-            let query = self.search.trim().to_lowercase();
             let matching: Vec<_> = properties
                 .iter()
                 .filter(|path| {
@@ -231,12 +248,7 @@ impl TimelineModel {
                     }
                 }
             }
-            let group_closed = disclosure
-                .map(|d| d.group_collapsed)
-                .unwrap_or(layer.group_collapsed);
-            if (!group_closed || !self.search.is_empty())
-                && let Some(kids) = children.get(&Some(layer.id.clone()))
-            {
+            if let Some(kids) = kids {
                 stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
             }
         }

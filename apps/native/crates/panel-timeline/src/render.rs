@@ -212,7 +212,7 @@ pub enum Edge {
 pub enum RowContent {
     Layer {
         clip: Option<Clip>,
-        summary: Vec<Key>,
+        summary: std::sync::Arc<[Key]>,
     },
     Property {
         state: KeyState,
@@ -377,6 +377,11 @@ impl Scene {
                 })
                 .collect::<Vec<_>>()
         };
+        // Layers with a selected key: only their marks are copied to show it.
+        let marked: HashSet<&str> = selected_keys
+            .iter()
+            .filter_map(|id| model.index.key(id).map(|(l, _, _)| l.id.as_str()))
+            .collect();
         let mut summaries = HashMap::new();
         let rows = model
             .rows()
@@ -387,7 +392,28 @@ impl Scene {
                         let layer = model.index.layer(id).ok_or(Error::DuplicateId)?;
                         let summary = summaries
                             .entry(id.clone())
-                            .or_insert_with(|| keys(layer, layer.channels.iter().collect()))
+                            .or_insert_with(|| {
+                                let shared = layer.summary(|layer| {
+                                    keys(layer, layer.channels.iter().collect())
+                                        .into_iter()
+                                        .map(|k| Key {
+                                            selected: false,
+                                            ..k
+                                        })
+                                        .collect()
+                                });
+                                if marked.contains(id.as_str()) {
+                                    shared
+                                        .iter()
+                                        .map(|k| Key {
+                                            selected: selected_keys.contains(k.id.as_str()),
+                                            ..k.clone()
+                                        })
+                                        .collect()
+                                } else {
+                                    shared
+                                }
+                            })
                             .clone();
                         (
                             RowContent::Layer {
@@ -529,9 +555,20 @@ impl Scene {
             {
                 return Err(Error::DuplicateId);
             }
-            let (clips, keys): (Vec<&Clip>, &mut Vec<Key>) = match &mut row.content {
-                RowContent::Layer { clip, summary } => (clip.iter().collect(), summary),
-                RowContent::Property { keys, .. } => (vec![], keys),
+            let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
+            let (clips, keys): (Vec<&Clip>, &[Key]) = match &mut row.content {
+                RowContent::Layer { clip, summary } => {
+                    if !sorted(summary) {
+                        let mut keys = summary.to_vec();
+                        keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                        *summary = keys.into();
+                    }
+                    (clip.iter().collect(), summary)
+                }
+                RowContent::Property { keys, .. } => {
+                    keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                    (vec![], keys)
+                }
                 RowContent::Track { clips } => {
                     if clips.iter().any(|c| !valid_clip(c)) {
                         return Err(Error::InvalidTime);
@@ -544,7 +581,6 @@ impl Scene {
             if clips.iter().any(|c| !valid_clip(c)) || keys.iter().any(|k| !k.seconds.is_finite()) {
                 return Err(Error::InvalidTime);
             }
-            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
             tops.push(tops.last().unwrap() + row.height(t));
         }
         let control_times = rows

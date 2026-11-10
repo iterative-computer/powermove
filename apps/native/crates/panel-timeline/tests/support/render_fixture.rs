@@ -77,7 +77,7 @@ pub fn scene(t: &Tokens) -> Scene {
             &id,
             RowContent::Layer {
                 clip: Some(c),
-                summary: keys.clone(),
+                summary: keys.clone().into(),
             },
         );
         r.selected = id == "selected";
@@ -134,7 +134,7 @@ pub fn large_scene(count: usize, t: &Tokens) -> Scene {
                     &format!("layer-{i}"),
                     RowContent::Layer {
                         clip: Some(clip(&format!("clip-{i}"))),
-                        summary: vec![],
+                        summary: vec![].into(),
                     },
                 )
             })
@@ -154,7 +154,7 @@ pub fn scene_with(t: &Tokens, clip: Clip) -> Scene {
         &id,
         RowContent::Layer {
             clip: Some(clip),
-            summary: vec![],
+            summary: vec![].into(),
         },
     );
     Scene::new(vec![r], 12., 30., t).unwrap()

@@ -71,6 +71,24 @@ pub struct Layer {
     rev: u64,
     channel_at: HashMap<String, usize>,
     key_at: HashMap<String, (usize, usize)>,
+    /// The collapsed row's key marks, sorted, none selected: built once per
+    /// read of the layer and shared by every scene until the layer changes.
+    summary: std::sync::OnceLock<Arc<[crate::render::Key]>>,
+}
+impl Layer {
+    /// The collapsed row's key marks (see `summary`), made by `fill` once.
+    pub(crate) fn summary(
+        &self,
+        fill: impl FnOnce(&Layer) -> Vec<crate::render::Key>,
+    ) -> Arc<[crate::render::Key]> {
+        self.summary
+            .get_or_init(|| {
+                let mut keys = fill(self);
+                keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                keys.into()
+            })
+            .clone()
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Marker {
@@ -410,6 +428,7 @@ impl TimelineIndex {
             rev: layer.rev(),
             channel_at: HashMap::new(),
             key_at: HashMap::new(),
+            summary: Default::default(),
         };
         for (c, channel) in read.channels.iter().enumerate() {
             read.channel_at.insert(channel.path.clone(), c);

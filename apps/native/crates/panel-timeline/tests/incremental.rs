@@ -144,3 +144,80 @@ fn an_edit_reads_only_the_layers_it_touched() {
     .join()
     .unwrap();
 }
+
+struct Presenter;
+impl pm_panel_timeline::render::ModelPresenter for Presenter {
+    fn accessibility_label(&self, row: &pm_panel_timeline::RowId) -> String {
+        format!("{row:?}")
+    }
+    fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> pm_panel_timeline::render::Label {
+        pm_panel_timeline::render::Label::for_kind(&layer.kind)
+    }
+    fn media(&self, _: &pm_panel_timeline::Layer) -> pm_panel_timeline::render::Media {
+        pm_panel_timeline::render::Media::Ready
+    }
+    fn interpolation(
+        &self,
+        _: &pm_panel_timeline::Key,
+    ) -> pm_panel_timeline::render::Interpolation {
+        pm_panel_timeline::render::Interpolation::Linear
+    }
+}
+
+#[test]
+fn collapsed_rows_share_their_key_marks_until_a_key_of_theirs_is_selected() {
+    use pm_panel_timeline::render::{RowContent, Scene};
+    std::thread::spawn(|| {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel
+            .open(
+                "p",
+                OpenSource::Untitled(pm_kernel::synthetic::project(200)),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let mut client =
+            pm_panel_timeline::TimelineClient::new(kernel.clone(), "p", Caller::native()).unwrap();
+        let summary = |scene: &Scene, layer: &str| {
+            let row = scene.row(&pm_panel_timeline::v4::row_id(
+                &pm_panel_timeline::RowId::Layer(layer.into()),
+            ));
+            match &row.expect("layer row").content {
+                RowContent::Layer { summary, .. } => summary.clone(),
+                _ => panic!("layer row"),
+            }
+        };
+        let before = Scene::from_model(&client.model, &Presenter, &tokens, 0.).unwrap();
+        let key = client
+            .model
+            .index
+            .layer("L5")
+            .unwrap()
+            .channels
+            .iter()
+            .find(|c| !c.keys.is_empty())
+            .unwrap()
+            .keys[0]
+            .id
+            .clone();
+        kernel
+            .call_blocking(
+                "p",
+                Request::new(Caller::native(), SelectionCall::Keys(vec![key.clone()])),
+            )
+            .unwrap();
+        client.sync().unwrap();
+        let after = Scene::from_model(&client.model, &Presenter, &tokens, 0.).unwrap();
+        let marks = summary(&after, "L5");
+        assert!(marks.iter().any(|k| k.id == key && k.selected));
+        assert_eq!(marks.iter().filter(|k| k.selected).count(), 1);
+        assert!(!summary(&before, "L5").iter().any(|k| k.selected));
+        assert!(Arc::ptr_eq(&summary(&before, "L6"), &summary(&after, "L6")));
+        actor.shutdown();
+    })
+    .join()
+    .unwrap();
+}
