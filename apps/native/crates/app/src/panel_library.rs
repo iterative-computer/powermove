@@ -64,8 +64,12 @@ pub struct WorkspaceCard {
     pub active: bool,
 }
 
-/// What the library lists for editor `v`.
-fn cards(v: &Controller) -> (Vec<PanelCard>, Vec<WorkspaceCard>) {
+/// What the library lists for editor `v`; `shown` is its window's live
+/// layout (what's open, the workspace showing), else the stored record's.
+fn cards(
+    v: &Controller,
+    shown: Option<&pm_shell::layout::Layout>,
+) -> (Vec<PanelCard>, Vec<WorkspaceCard>) {
     let store = v.workspace_store();
     let record = store
         .project
@@ -87,12 +91,14 @@ fn cards(v: &Controller) -> (Vec<PanelCard>, Vec<WorkspaceCard>) {
         }
     }
     let from_store = |id: &str| v.extensions.stores.contains_key(id);
+    let stored = workspace::layout(&record);
+    let shown = shown.unwrap_or(&stored);
     let panels = panel_cards(
         &pm_shell::layout::Panels::new(contributed),
-        &workspace::layout(&record).open_panels(),
+        &shown.open_panels(),
         from_store,
     );
-    let active = workspace::record_id(&record).map(str::to_owned);
+    let active = Some(shown.workspace.clone());
     let workspaces = store
         .offered()
         .into_iter()
@@ -156,6 +162,8 @@ pub fn shown_workspaces(
 
 pub struct PanelLibrary {
     editor: WeakEntity<Controller>,
+    /// The editor's shell view: its live layout.
+    shell: Option<WeakEntity<pm_shell::view::Editor>>,
     page: Page,
     query: String,
     search: Option<Entity<pm_shell::text::TextField>>,
@@ -187,18 +195,26 @@ impl PanelLibrary {
             .flex()
             .flex_col()
             .gap(px(m.gap))
-            .min_w(px(m.thumbnail_min))
-            .flex_1()
+            .flex_none()
+            .w(px(m.thumbnail_min * 1.5))
             .p(px(m.gap))
             .rounded(px(m.control_radius))
             .bg(rgb(c.panel_secondary))
+            .child(div().truncate().child(card.title.clone()))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap(px(m.gap))
-                    .child(div().min_w_0().truncate().child(card.title.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(ty.reading))
+                            .text_color(rgb(c.secondary))
+                            .child(if card.open { "In Workspace" } else { "" }),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!("library-panel-{}-add", card.id)))
@@ -216,12 +232,6 @@ impl PanelLibrary {
                             .child(glyph)
                             .on_click(cx.listener(move |v, _, _, cx| v.send(command.clone(), cx))),
                     ),
-            )
-            .child(
-                div()
-                    .text_size(px(ty.reading))
-                    .text_color(rgb(c.secondary))
-                    .child(if card.open { "In Workspace" } else { "" }),
             )
             .into_any_element()
     }
@@ -244,8 +254,8 @@ impl PanelLibrary {
             .flex()
             .flex_col()
             .gap(px(m.gap))
-            .min_w(px(m.thumbnail_min))
-            .flex_1()
+            .flex_none()
+            .w(px(m.thumbnail_min * 1.5))
             .p(px(m.gap))
             .rounded(px(m.control_radius))
             .bg(rgb(c.panel_secondary))
@@ -282,7 +292,10 @@ impl Render for PanelLibrary {
         let (panels, workspaces) = self
             .editor
             .upgrade()
-            .map(|e| cards(e.read(cx)))
+            .map(|e| {
+                let shell = self.shell.as_ref().and_then(WeakEntity::upgrade);
+                cards(e.read(cx), shell.as_ref().map(|s| &s.read(cx).layout))
+            })
             .unwrap_or_default();
         let mut sidebar = div()
             .flex()
@@ -417,80 +430,91 @@ impl Render for PanelLibrary {
 
 impl Controller {
     /// Window ▸ Panel Library, for this editor; brought forward when open.
+    /// Opened after this update ends: the new window's first frame reads
+    /// this editor.
     pub fn open_panel_library(&mut self, cx: &mut Context<Self>) {
-        let me = cx.entity().downgrade();
-        if let Some(window) = cx.windows().into_iter().find(|w| {
-            w.downcast::<PanelLibrary>()
-                .and_then(|l| l.read(cx).ok())
-                .is_some_and(|l| l.editor == me)
-        }) {
-            let _ = window.update(cx, |_, w, _| w.activate());
-            return;
-        }
-        let t = pm_shell::tokens();
-        let (m, tokens) = (t.metrics, t.clone());
-        let background = if t.translucent() {
-            gpui::MacosWindowBackground::Transparent
-        } else {
-            gpui::MacosWindowBackground::Opaque
-        };
         let editor = cx.entity();
-        let _ = cx.open_window(
-            WindowOptions::new()
-                .macos_window_background(background)
-                .titlebar(Some(TitlebarOptions {
-                    title: Some(TITLE.into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }))
-                .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(m.toolbar), px(m.toolbar)),
-                    size(
-                        px(m.settings_width + m.settings_sidebar),
-                        px(m.settings_height),
-                    ),
-                )))),
-            |window, cx| {
-                if tokens.translucent() {
-                    pm_shell::window_backdrop(window, &tokens);
+        cx.defer(move |cx| open_library(editor, cx));
+    }
+}
+fn open_library(editor: Entity<Controller>, cx: &mut App) {
+    let me = editor.downgrade();
+    if let Some(window) = cx.windows().into_iter().find(|w| {
+        w.downcast::<PanelLibrary>()
+            .and_then(|l| l.read(cx).ok())
+            .is_some_and(|l| l.editor == me)
+    }) {
+        let _ = window.update(cx, |_, w, _| w.activate());
+        return;
+    }
+    let shell = editor.read(cx).shell.as_ref().and_then(WeakEntity::upgrade);
+    let t = pm_shell::tokens();
+    let (m, tokens) = (t.metrics, t.clone());
+    let background = if t.translucent() {
+        gpui::MacosWindowBackground::Transparent
+    } else {
+        gpui::MacosWindowBackground::Opaque
+    };
+    let _ = cx.open_window(
+        WindowOptions::new()
+            .macos_window_background(background)
+            .titlebar(Some(TitlebarOptions {
+                title: Some(TITLE.into()),
+                appears_transparent: true,
+                ..Default::default()
+            }))
+            .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                point(px(m.toolbar), px(m.toolbar)),
+                size(
+                    px(m.settings_width + m.settings_sidebar),
+                    px(m.settings_height),
+                ),
+            )))),
+        |window, cx| {
+            if tokens.translucent() {
+                pm_shell::window_backdrop(window, &tokens);
+            }
+            cx.new(|cx| {
+                // Follows the editor: panels, workspaces, what's open
+                // (the layout lives in the shell's editor view).
+                cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+                if let Some(shell) = &shell {
+                    cx.observe(shell, |_, _, cx| cx.notify()).detach();
                 }
-                cx.new(|cx| {
-                    // Follows the editor: panels, workspaces, what's open.
-                    cx.observe(&editor, |_, _, cx| cx.notify()).detach();
-                    let search = cx.new(|cx| {
-                        let mut field = pm_shell::text::TextField::new(
-                            pm_shell::text::TextKind::Primary,
-                            "Search the Panel Library",
-                            "",
-                            tokens.clone(),
-                            window,
-                            cx,
-                        );
-                        field.set_placeholder("Search");
-                        field
-                    });
-                    cx.subscribe(&search, |v: &mut PanelLibrary, _, event, cx| {
-                        use pm_shell::text::TextEvent;
-                        if let TextEvent::Changed(text)
-                        | TextEvent::Committed(text)
-                        | TextEvent::Submitted(text) = event
-                        {
-                            v.query = text.clone();
-                            cx.notify();
-                        }
-                    })
-                    .detach();
-                    PanelLibrary {
-                        editor: editor.downgrade(),
-                        page: Page::Panels(None),
-                        query: String::new(),
-                        search: Some(search),
-                        tokens,
+                let search = cx.new(|cx| {
+                    let mut field = pm_shell::text::TextField::new(
+                        pm_shell::text::TextKind::Primary,
+                        "Search the Panel Library",
+                        "",
+                        tokens.clone(),
+                        window,
+                        cx,
+                    );
+                    field.set_placeholder("Search");
+                    field
+                });
+                cx.subscribe(&search, |v: &mut PanelLibrary, _, event, cx| {
+                    use pm_shell::text::TextEvent;
+                    if let TextEvent::Changed(text)
+                    | TextEvent::Committed(text)
+                    | TextEvent::Submitted(text) = event
+                    {
+                        v.query = text.clone();
+                        cx.notify();
                     }
                 })
-            },
-        );
-    }
+                .detach();
+                PanelLibrary {
+                    editor: editor.downgrade(),
+                    shell: shell.as_ref().map(Entity::downgrade),
+                    page: Page::Panels(None),
+                    query: String::new(),
+                    search: Some(search),
+                    tokens,
+                }
+            })
+        },
+    );
 }
 
 #[cfg(test)]

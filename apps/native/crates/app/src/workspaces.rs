@@ -112,7 +112,8 @@ impl Controller {
 
 /// Window ▸ Panels ▸ Workspaces (S099): the workspaces, current one checked.
 /// Click activates; right-click a saved one to delete it (asked first);
-/// Save Workspace… and Edit Workspace JSON… act on the active one.
+/// Save Workspace… and Edit Workspace JSON… act on the active one; Panel
+/// Library… opens S101 for this window.
 pub fn panel(
     v: &mut Controller,
     id: &str,
@@ -244,6 +245,11 @@ fn render(
                     "workspaces-json",
                     "Edit Workspace JSON…",
                     "layout:edit",
+                ))
+                .child(button(
+                    "workspaces-library",
+                    "Panel Library…",
+                    "panelLibrary",
                 )),
         )
         .child(

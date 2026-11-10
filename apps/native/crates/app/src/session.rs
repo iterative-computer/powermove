@@ -86,6 +86,8 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    /// This window's shell view (its live layout).
+    pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
     pub cloud: crate::cloud_media::State,
     pub captions: crate::captions_panel::State,
@@ -178,6 +180,8 @@ pub struct Bridge(pub Entity<Controller>);
 impl pm_shell::integration::Integration for Bridge {
     fn observe(&self, cx: &mut gpui::Context<pm_shell::view::Editor>) {
         cx.observe(&self.0, |_, _, cx| cx.notify()).detach();
+        let shell = cx.weak_entity();
+        self.0.update(cx, |v, _| v.shell = Some(shell));
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
@@ -478,6 +482,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            shell: None,
             cloud: Default::default(),
             captions: Default::default(),
             shader: Default::default(),
