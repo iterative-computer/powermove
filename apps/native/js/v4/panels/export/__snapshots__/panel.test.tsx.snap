@@ -2804,6 +2804,8 @@ exports[`wire snapshot: selected video 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -2897,6 +2899,7 @@ exports[`wire snapshot: selected video 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -2929,6 +2932,9 @@ exports[`wire snapshot: selected video 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -5797,6 +5803,8 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -5890,6 +5898,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -5922,6 +5931,9 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -8787,6 +8799,8 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -8880,6 +8894,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -8912,6 +8927,9 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -11770,6 +11788,8 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -11863,6 +11883,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -11895,6 +11916,9 @@ exports[`wire snapshot: ProRes alpha 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -14388,6 +14412,8 @@ exports[`wire snapshot: PNG sequence 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -14481,6 +14507,7 @@ exports[`wire snapshot: PNG sequence 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -14513,6 +14540,9 @@ exports[`wire snapshot: PNG sequence 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -16471,6 +16501,8 @@ exports[`wire snapshot: still 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -16564,6 +16596,7 @@ exports[`wire snapshot: still 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -16596,6 +16629,9 @@ exports[`wire snapshot: still 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -17074,6 +17110,8 @@ exports[`wire snapshot: project 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -17167,6 +17205,7 @@ exports[`wire snapshot: project 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -17199,6 +17238,9 @@ exports[`wire snapshot: project 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -19687,6 +19729,8 @@ exports[`wire snapshot: no captions 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -19780,6 +19824,7 @@ exports[`wire snapshot: no captions 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -19812,6 +19857,9 @@ exports[`wire snapshot: no captions 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -22677,6 +22725,8 @@ exports[`wire snapshot: multiple captions 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -22770,6 +22820,7 @@ exports[`wire snapshot: multiple captions 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -22802,6 +22853,9 @@ exports[`wire snapshot: multiple captions 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -25930,6 +25984,8 @@ exports[`wire snapshot: custom size 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -26023,6 +26079,7 @@ exports[`wire snapshot: custom size 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -26055,6 +26112,9 @@ exports[`wire snapshot: custom size 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -29205,6 +29265,8 @@ exports[`wire snapshot: inline invalid size 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -29298,6 +29360,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -29330,6 +29393,9 @@ exports[`wire snapshot: inline invalid size 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -32198,6 +32264,8 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -32291,6 +32359,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -32323,6 +32392,9 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
@@ -36360,6 +36432,8 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                 "style": {
                   "display": "flex",
                   "flexDirection": "column",
+                  "flexGrow": 1,
+                  "flexShrink": 1,
                 },
               },
               "text": "",
@@ -36453,6 +36527,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 0,
                   "gap": {
                     "token": "metrics.gap",
                   },
@@ -36485,6 +36560,9 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
               },
               "display": "flex",
               "flexDirection": "row",
+              "gap": {
+                "token": "metrics.gap",
+              },
               "justifyContent": "space-between",
               "marginTop": {
                 "token": "metrics.gap",
