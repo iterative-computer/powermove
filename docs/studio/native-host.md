@@ -155,6 +155,83 @@ Scene replay into WebGPU produced verified pixels in **38–52 ms** in two runs.
 The same script verifies a populated → empty scene transition, including the
 change from hardware queries to portable guide traversal.
 
+<!-- lane-p5b-measurements:start -->
+### Row (c): P5b hardening
+
+The forty-cycle inspector reproduction retained **40/40** retired controls
+before P5b and **0/40** afterward. After GC, DOM counters changed from
+**4,087 → 36,286** before the repair to **4,087 → 4,566** afterward; listeners
+end at **1,004**, stable after cycle ten, rather than **2,284**. Paired terminal
+heaps contain 133 detached HTML elements after the fix versus 5,830 before.
+These are focused diagnostics, not the whole-editor 30-minute retention gate.
+The real-editor regression also requires collection of 100 disposed callbacks
+and twelve retired inspector controls while the editor remains open.
+
+The leak came from activation-long retention of disposed extension resources.
+The live-release registry now removes and clears each retired entry. Closed
+project document/history/state/journal caches also evict only after durable
+flush, with failure and newer-write guards. VideoFrame ownership is bounded
+across quality tiers, and long quality images no longer expire their active
+native session. Native completion wakes the next eligible composite; side
+panes follow display refresh and share the main pane's playback time.
+
+Cold-setup profiling found synchronous GPU thumbnail reads and repeated
+finish-sphere BVH builds. Thumbnail reads now use asynchronous GPU buffers;
+saved-project posters capture the displayed canvas at at most 320×320 without
+rendering a second composition. Finish swatches share geometry and yield to
+editing. Swatches map completed GPU buffers before CPU encoding, eliminating
+measured 80–110 ms waits on GPU-backed canvas PNG encoding. Responsive-edit
+checks include cold, warmup and idle work through the displayed Refine image. The integrated DN2 specular-distance pass rebinds its
+new guide textures after every adaptive resize; a shrinking/growing GPU-value
+regression reproduced and verifies that repair.
+
+The loaded million-triangle check observed no ≥50 ms background-preparation
+task, but its initial synchronous draw took 118 ms. A portable Final
+byte-equality check failed once and passed three immediate repeats plus the
+final full suite; its cause remains OPEN and the exact-pixel assertion remains unchanged.
+
+| Gate | Before (quiet P4 unless stated) | P5b evidence so far | Status |
+| --- | --- | --- | --- |
+| Disposed inspector controls retained after GC | 40 / 40 in the focused P5b reproduction | 0 / 40; callbacks and real controls collectible in the editor regression | PASS for the reproduced leak |
+| 30-minute retained memory | +59.8% over 1,152 measured cycles | Full quiet repeat pending | FAIL; acceptance not revalidated |
+| Input → completed image, p95 | Worst case 59.8 ms | Early loaded macro diagnostic: 60.9 ms drag / 86.1 ms playback; no quiet final-code result yet | FAIL; loaded diagnostic only |
+| Product playback | 47.4–59.4 fps; p95 17.2–33.4 ms | Early loaded macro diagnostic: 52.6 fps / p95 32.0 ms; final-code quiet repeat pending | FAIL; full matrix open |
+| Main-thread tasks | Cold setup 186 ms; stress 84 ms | Synchronous thumbnail/swatch waits removed; initial million-triangle draw still 118 ms under load | FAIL; quiet cold and stress repeats required |
+| Refine at 1080p | 1.40–3.16 s | Quiet final-code repeat pending | FAIL; acceptance not revalidated |
+| Final at 1080p | 1.72–4.81 s at 64 samples | DN2 quality floor preserved; no comparable quiet 30-frame measurement | FAIL; quality and protocol differ |
+
+The final short fixed-project diagnostic completed 40 cycles (15 warmup,
+25 measured) with both saved projects and Undo retained. Over 2.11 measured
+minutes, listeners stayed at 1,010; DOM counters were 4,812→4,840 and JS heap
+30.28→30.88 MiB. Closed-project RSS was 958.9→1,003.2 MiB (+4.62%; fitted
+slope +32.6 MiB/min, three checkpoints), so this short trace does **not** prove
+flat whole-app memory. Peak app RSS was 1,906.9 MiB, host 341.8 MiB; swap fell
+328.2 MiB and no host was orphaned. Its measured editing tasks reached 156 ms
+(p95 147 ms), so the main-thread gate also remains FAIL. DN2's editor tests
+were active throughout; these results are diagnostic, not acceptance. The
+strict 30-minute launch at 02:45 CST correctly refused that competing workload.
+
+The early macro diagnostic used Apple M5 / 16 GiB, macOS 27.3, Electron 44,
+AC power, Low Power Mode off and the 120 Hz internal display. It used ten-second
+intervals and one pair, before the final thumbnail/swatch repairs and DN2
+integration; another lane's Cargo/Electron work was active. It is not a
+like-for-like before/after acceptance comparison. Its drag p95 stages were
+input→patch 17.7 ms, patch→request 5.7 ms, queue 0 ms, upload 1.7 ms,
+IPC/host/surface 23.2 ms, ready→composite 7.6 ms and composite→GPU-fence
+observation 16.7 ms. Stage percentiles must not be added. The fence observation
+includes display-clock polling and does not measure physical scanout.
+
+**Production performance remains FAIL until the quiet acceptance protocol
+passes.** DN2's higher Final sample floor is preserved; actual native sample
+counts must accompany any new timing and cannot be labelled as an exact
+64-sample comparison with P4. See the P5b results in
+[production readiness](production-readiness.md#row-c-p5b-resource-and-responsiveness-repairs)
+for the current before/after gate results and combined checks. The combined
+code `63ec627c5` passes 115 Rust tests, 7,486 unit tests (7 skipped), Svelte
+checking (zero errors / one existing warning), and 72 non-film 3D editor cases
+(one opt-in local-project capture skipped).
+<!-- lane-p5b-measurements:end -->
+
 <!-- lane-p4-measurements:start -->
 ### Row (c): P4 measured editor performance
 

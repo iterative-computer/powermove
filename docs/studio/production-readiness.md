@@ -3,7 +3,7 @@
 **Decision: not ready to ship.** A green renderer demonstration is insufficient.
 Every unchecked gate below blocks a production-quality claim. No tag, release,
 notarization, upload or installation over an existing app is authorized by this
-checklist. Updated 2026-11-09 by Lanes P1/P2/P3/P4 (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
+checklist. Updated 2026-11-10 by Lanes P1/P2/P3/P4/P5b (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
 
 Status: **PASS** = reproduced against the stated build; **OPEN** = evidence still
 required; **FAIL** = attempted and failed; **PARTIAL** = narrower evidence only.
@@ -20,13 +20,13 @@ Unset `ELECTRON_RUN_AS_NODE`; set `CARGO_TARGET_DIR=$HOME/Developer/pm-target`.
 
 | Gate | Status | Evidence / required command |
 | --- | --- | --- |
-| All desktop unit tests | PASS | P4 full run: **7,449 passed, 7 skipped**, 732 files passed / 3 skipped (269.85 s), including the native ownership and phase-start coverage follow-ups at `22a19387e`. Includes P3/P4 engine-facing, history/migration, import, cancellation and lifecycle regressions. `npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
+| All desktop unit tests | PASS | P5b combined DN2/native hardening at code `f5741368c`: **7,486 passed, 7 skipped**, 737 files passed / 3 skipped (321.98 s). Includes extension-resource collection, durable cache eviction, native frame ownership, thumbnail readback, resize and camera-session regressions. `npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
 | Entire desktop e2e suite, including 2D/editor/media | PASS (24 skipped) | P2 at `2844ef8de`: **1,024 discovered; 1,000 passed, 0 failed, 24 skipped** (48.9 min). Completed with one worker, no filters and no retries, including all fourteen repaired cases, native environment assertions, both film exports and video persistence. `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. The 24 skipped cases remain unexecuted; optional fixtures/benchmarks and the separate acceptance gates below still need their own evidence. |
-| Non-film 3D editor regressions | PASS | P4 ownership follow-up `22a19387e`: **71 passed, zero skipped** (5.9 min), fresh native host, `ELECTRON_RUN_AS_NODE` unset, background mode, temporary user-data profile and UI screenshots outside Git. `npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`; see [parity reproduction](parity.md#reproduce-the-checks). Includes deterministic Final and shutter/motion-blur regressions. This is the 3D subset of the earlier P2 full desktop gate above; the entire desktop suite was not rerun after P4. |
+| Non-film 3D editor regressions | PASS, intermittent Final equality issue OPEN | P5b at code `63ec627c5`: **72 passed, 1 skipped** (9.4 min), rebuilt native host, `ELECTRON_RUN_AS_NODE` unset, background mode, temporary user-data profiles and UI screenshots outside Git. `npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`, with `PM_SHOT_DIR` pointing outside Git. The skipped DN2 capture requires an explicitly supplied local project. Includes native transport/poster, GC lifecycle, shutter/motion-blur and exact Final image checks. An earlier full run failed Final equality once; three immediate repeats and this final full run pass, without relaxing assertions. The entire 2D/editor/media suite was not rerun after P5b. |
 | Svelte and renderer types | PASS | 0 errors, 1 existing accessibility warning in `IconCropper.svelte`.  `npx svelte-check --tsconfig ./tsconfig.web.json` |
 | Main/preload types | PASS | Generate cloud bindings/types first: `bun run --cwd ../cloud types && bun run --cwd ../cloud types:emit`.  `npx tsc --noEmit -p tsconfig.node.json` |
-| Rust workspace, host and GPU tests | PASS with disk-guard retry | P4 at code `4709cb7be`: **105 tests passed** across 104 native/host/GPU tests and the optional 11-scene Cycles test. The Cargo invocation stopped only that optional test at its unchanged 8 GB disk guard; after pruning P4's own completed isolated compiler cache, the same compiled test binary passed all 11 scenes (49.34 s). Features `oidn,metalfx,yardstick`; exact command below. Includes reused-versus-fresh OIDN output, resize, cancellation and recovery. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
-| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P4's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans **1,234 commits at code `f32346be0`** with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
+| Rust workspace, host and GPU tests | PASS | P5b combined DN2/native hardening: **115 passed, zero failed or ignored**, `cargo test -p pm-studio -p pm-studio-host --features oidn,metalfx`, isolated target under `~/Developer/pm-target`. Includes all 11 bounded Cycles scenes as one test, reused-versus-fresh OIDN output, resize, specular-distance guide rebinding, cancellation and recovery. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
+| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P5b's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans **1,253 commits at code `63ec627c5`** with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
 
 ## Real packaged app
 
@@ -139,6 +139,122 @@ UI default.
 
 These are release acceptance targets, not current performance claims. A failed
 scene blocks the bar; report it individually and retain raw samples.
+
+<!-- lane-p5b-measurements:start -->
+### Row (c): P5b resource and responsiveness repairs
+
+**FAIL — production performance acceptance remains required.** The resource
+regressions below pass; they do not establish the 30-minute retention, latency,
+frame-rate or whole-editor main-thread gates. The P4 table below is the quiet
+baseline. Loaded-machine diagnostics are kept separate from acceptance.
+
+P5b reproduced the detached inspector leak in paired heap snapshots. An
+extension activation retained an array of every disposed subscription. A
+retired callback retained its component closure and detached inspector tree.
+The registry now keeps only live releases; disposing a handle removes its
+entry and clears its resource reference. Retaining the returned handle no
+longer retains the callback. Closed projects also evict their encoded document,
+Undo, state and journal payloads after a successful durable flush. Failed or
+newer writes stay resident; reopening reads the saved document lazily.
+
+| Focused leak proof, 40 real select/deselect cycles | Before P5b | After repair | Status |
+| --- | --- | --- | --- |
+| Retired inspector controls still alive after GC | 40 / 40 | 0 / 40 | PASS |
+| DOM counters, initial → closed-selection phase | 4,087 → 36,286 | 4,087 → 4,566 | PASS for this reproduction |
+| Listener counters, initial → final | 999 → 2,284 | 999 → 1,004, stable after cycle 10 | PASS for this reproduction |
+| Detached HTML elements in paired terminal heaps | 5,830 | 133 | Diagnostic; includes unrelated browser/UI retention |
+
+The real-editor regression retains 100 disposed subscription handles and
+selects/deselects twelve actual 3D inspector controls. All weak references must
+clear while the editor remains open. It failed with all 100 callbacks and all
+12 controls retained before the fix, and passes afterward. The forty-cycle
+snapshot comparison uses locators rather than retained automation element
+handles. Heap detection matches Chromium's native serialized element names
+and detachedness flag; snapshots were summarised and deleted outside Git.
+
+Other repairs remove the intermediate Canvas2D copy from native VideoFrame
+composition, keep one completed surface per layer across quality tiers, and
+close replaced, cancelled, buffered and late frames once. A newly completed
+main-view image can present on the next display tick within the same project
+frame. Every side pane polls on the display clock, rather than a 48 ms
+round-robin timer. Side cameras keep their initial framing during animation;
+all panes use the same quantised playback time. Camera pose notifications no
+longer trigger pane layout when arrangement and labels are unchanged.
+
+Adaptive Live resolution retains the renderer, acceleration structures and
+MetalFX guide/pack pipelines. Input textures and the specular-distance binding
+follow the new size. A GPU regression writes known guide values, shrinks and
+grows the target, then reads the distance texture back; it reproduced stale
+bindings after integration with DN2 and now passes. Slow quality images and
+long pauses no longer expire the currently requested native session.
+
+Cold-setup profiles identified synchronous thumbnail `readPixels`/`toBlob`
+work and repeated finish-sphere BVH builds. Composition thumbnails now use
+asynchronous GPU readback; saved-project thumbnails downsample the displayed
+canvas to at most 320×320 on the GPU, then wait for completion before encoding.
+Both paths release cancelled captures. Finish swatches share sphere geometry
+and run one at a time during idle turns, yielding to edits, playback and export.
+Swatches map their completed GPU buffer asynchronously before CPU encoding;
+profiling had found 80–110 ms tasks waiting for GPU-backed canvas PNG encoding.
+The responsiveness observer retains cold, warmup and idle tasks through the
+displayed Refine image, so interval resets cannot hide this work.
+
+DN2's integrated Final policy raises the sample floor. New timing reports must
+state actual native samples; a requested legacy value of 64 is no longer an
+exact 64-sample full-frame render. Do not compare it directly with P4's
+64-sample Final timings or lower the quality policy to pass a timing gate.
+
+The million-triangle check records no observed ≥50 ms task during background
+preparation, but its synchronous initial draw took 118 ms in the loaded full
+suite; Studio became ready 1,062 ms later. In the final suite, the initial draw
+was 1 ms and readiness 1,099 ms. DN2 activity varied during these functional
+runs; they do not establish quiet cold-setup acceptance or pass the
+whole-editor cold-setup gate. An intermittent portable Final byte-equality check failed
+once under load and passed three immediate repeats plus the final full suite.
+Its cause remains OPEN; no image-difference threshold or assertion was relaxed.
+
+| Gate | Before (quiet P4 unless stated) | P5b evidence so far | Status |
+| --- | --- | --- | --- |
+| Disposed inspector controls retained after GC | 40 / 40 in the focused P5b reproduction | 0 / 40; callbacks and real controls collectible in the editor regression | PASS for the reproduced leak |
+| 30-minute retained memory | +59.8% over 1,152 measured cycles | Full quiet repeat pending | FAIL; acceptance not revalidated |
+| Input → completed image, p95 | Worst case 59.8 ms | Early loaded macro diagnostic: 60.9 ms drag / 86.1 ms playback; no quiet final-code result yet | FAIL; loaded diagnostic only |
+| Product playback | 47.4–59.4 fps; p95 17.2–33.4 ms | Early loaded macro diagnostic: 52.6 fps / p95 32.0 ms; final-code quiet repeat pending | FAIL; full matrix open |
+| Main-thread tasks | Cold setup 186 ms; stress 84 ms | Synchronous thumbnail/swatch waits removed; initial million-triangle draw still 118 ms under load | FAIL; quiet cold and stress repeats required |
+| Refine at 1080p | 1.40–3.16 s | Quiet final-code repeat pending | FAIL; acceptance not revalidated |
+| Final at 1080p | 1.72–4.81 s at 64 samples | DN2 quality floor preserved; no comparable quiet 30-frame measurement | FAIL; quality and protocol differ |
+
+The final short fixed-project diagnostic completed 40 cycles (15 warmup,
+25 measured) with both saved projects and Undo retained. Over 2.11 measured
+minutes, listeners stayed at 1,010; DOM counters were 4,812→4,840 and JS heap
+30.28→30.88 MiB. Closed-project RSS was 958.9→1,003.2 MiB (+4.62%; fitted
+slope +32.6 MiB/min, three checkpoints), so this short trace does **not** prove
+flat whole-app memory. Peak app RSS was 1,906.9 MiB, host 341.8 MiB; swap fell
+328.2 MiB and no host was orphaned. Its measured editing tasks reached 156 ms
+(p95 147 ms), so the main-thread gate also remains FAIL. DN2's editor tests
+were active throughout; these results are diagnostic, not acceptance. The
+strict 30-minute launch at 02:45 CST correctly refused that competing workload.
+
+The early macro diagnostic used Apple M5 / 16 GiB, macOS 27.3, Electron 44,
+AC power, Low Power Mode off and the 120 Hz internal display. It used ten-second
+intervals and one pair, before the final thumbnail/swatch repairs and DN2
+integration; another lane's Cargo/Electron work was active. It is not a
+like-for-like before/after acceptance comparison. Its drag p95 stages were
+input→patch 17.7 ms, patch→request 5.7 ms, queue 0 ms, upload 1.7 ms,
+IPC/host/surface 23.2 ms, ready→composite 7.6 ms and composite→GPU-fence
+observation 16.7 ms. Stage percentiles must not be added. The fence observation
+includes display-clock polling and does not measure physical scanout.
+
+The combined check uses the built editor and locally rebuilt release host and
+surface addon, with no packaged build. Full Rust and unit checks pass; Svelte
+reports zero errors and the existing `IconCropper.svelte` warning. The full
+non-film editor subset passes 72 cases with one opt-in project capture skipped.
+The Live history regression waits for each completed camera frame, avoiding repeated
+reads of a still-current image. Runtime code is `63ec627c5`, release-host SHA-256
+`0b10a59c8ee03af7c69c5bd6d40949cd0da43f34db7bffa8c1b45f365843ca30`, surface-addon
+SHA-256 `2d700450e0a97b9c97151066a1f94f94d5e0695681fa387b04967e1e6ba80c10`.
+Quiet acceptance remains required; earlier loaded diagnostics cannot establish
+that PASS.
+<!-- lane-p5b-measurements:end -->
 
 <!-- lane-p4-measurements:start -->
 ### Row (c): P4 measured editor performance
