@@ -221,7 +221,7 @@ test('Timeline Materials group, Material Options rows and the used-as-material b
   const metallic = await point(r => r.key === 'mi.0.metallic', () => 148.5);
   await page.mouse.click(metallic.x, metallic.y);
   await expect.poll(() => page.evaluate((id: string) => (window as any).PM.L(id).d.data.object.sourceMaterialProperties?.[0]?.metallic?.kf?.length ?? 0, model)).toBe(1);
-  expect((await rows()).rows.find((r: any) => r.key === 'mi.0.metallic')?.virtual).toBe(false);
+  await expect.poll(async () => (await rows()).rows.find((r: any) => r.key === 'mi.0.metallic')?.virtual).toBe(false);
 
   // The Base Color pop-up opens the same picker.
   const popup = await point(r => r.key === 'material:0:color', s => s.valueX + 30);
