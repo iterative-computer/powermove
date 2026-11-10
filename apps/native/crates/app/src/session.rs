@@ -84,6 +84,8 @@ pub struct Controller {
     pub workspace_store: crate::workspaces::Cache,
     /// The Workspaces panel's last action, for its status line.
     pub workspaces_status: String,
+    /// The layer a generated select's open menu edits, bound when it opened.
+    pub(crate) generated_menu_layer: Option<String>,
     /// Cloud media offered and downloading in this window.
     pub cloud: crate::cloud_media::State,
     pub captions: crate::captions_panel::State,
@@ -475,6 +477,7 @@ impl Controller {
             mixer: Default::default(),
             workspace_store: Default::default(),
             workspaces_status: String::new(),
+            generated_menu_layer: None,
             cloud: Default::default(),
             captions: Default::default(),
             shader: Default::default(),

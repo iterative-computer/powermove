@@ -4,8 +4,10 @@
 //! properties, transform or layer fields (`$selection` is the first selected
 //! layer), or a local `stateKey` kept in the workspace record. Numbers, text
 //! and colours are typed in a small sheet, a select opens its options as a
-//! menu, toggles and buttons act on click. Each edit is one Undo step named
-//! for its control. A binding V2 can't write yet shows disabled with why.
+//! menu, toggles and buttons act on click. Each document edit is one Undo
+//! step named for its control; a `stateKey` edit is tool state, no Undo step
+//! (v1's `local` edit mode). A sheet or menu edits the layer its control
+//! targeted when it opened. A binding V2 can't write yet shows disabled with why.
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2_app_kit::NSAccessibility;
@@ -89,7 +91,10 @@ fn json_of(node: Option<&pm_model::doc::Node>) -> Value {
 }
 /// The open composition's node (`comps/<compId>`, else the root).
 fn root(v: &Controller) -> Option<&pm_model::doc::Node> {
-    let root = v.published.as_ref()?.snapshot.root()?;
+    root_of(v.published.as_ref()?)
+}
+fn root_of(p: &pm_kernel::Published) -> Option<&pm_model::doc::Node> {
+    let root = p.snapshot.root()?;
     let comp = root.get("compId").map(|n| json_of(Some(n)));
     comp.as_ref()
         .and_then(Value::as_str)
@@ -118,12 +123,23 @@ fn fill(v: &Controller) -> Value {
 /// The layer a control targets: `$selection` is the first selected one, any
 /// other target an id, else a name.
 fn layer(v: &Controller, target: &str) -> Option<(String, Value)> {
-    let p = v.published.as_ref()?;
-    let id = match target {
-        "$selection" | "selection" => p.selection.primary().map(str::to_owned),
+    find_layer(v.published.as_ref()?, target, None)
+}
+/// The layer a control targets in `p`. `bound` is the layer a sheet or menu
+/// bound when it opened: that layer, whatever is selected now. Otherwise
+/// `$selection` is the first selected layer, any other target an id, else
+/// a name.
+fn find_layer(
+    p: &pm_kernel::Published,
+    target: &str,
+    bound: Option<&str>,
+) -> Option<(String, Value)> {
+    let id = match (bound, target) {
+        (Some(id), _) => Some(id.to_owned()),
+        (None, "$selection" | "selection") => Some(p.selection.primary()?.to_owned()),
         _ => None,
     };
-    let layers = root(v)?.get("layers")?;
+    let layers = root_of(p)?.get("layers")?;
     let mut i = 0;
     while let Some(node) = layers.at(i) {
         i += 1;
@@ -246,6 +262,90 @@ fn set_fill(mut f: Value, key: &str, next: Value) -> Value {
     f
 }
 
+/// The edit of layer `id`'s `path` (`content.*`, `layer.*`, `properties.*`,
+/// `transform.*`) to `next`.
+fn layer_command(
+    id: String,
+    path: &str,
+    next: &Value,
+    time: f64,
+) -> Result<Option<pm_kernel::Command>, &'static str> {
+    use pm_kernel::commands::{layers::LayerPatch, properties::SetProperty};
+    let model = |v: &Value| pm_model::json::parse(&v.to_string()).ok();
+    if let Some(key) = path.strip_prefix("content.") {
+        let mut patch = pm_model::Map::new();
+        if let Some(v) = model(next) {
+            patch.insert(key, v);
+        }
+        return Ok(Some(
+            pm_kernel::ContentCommand::Set {
+                layer_id: id,
+                patch,
+                time,
+            }
+            .into(),
+        ));
+    }
+    if let Some(key) = path.strip_prefix("layer.") {
+        let mut patch = LayerPatch::default();
+        match key {
+            "visible" => patch.visible = next.as_bool(),
+            "locked" => patch.locked = next.as_bool(),
+            "name" => patch.name = next.as_str().map(str::to_owned),
+            "motionBlur" => patch.motion_blur = next.as_bool(),
+            "duration" => patch.duration = next.as_f64(),
+            "from" => patch.from = next.as_f64(),
+            _ => return Err("This control’s property isn’t available."),
+        }
+        return Ok(Some(
+            pm_kernel::LayerCommand::Set {
+                layer_id: id,
+                patch,
+            }
+            .into(),
+        ));
+    }
+    Ok(path
+        .strip_prefix("properties.")
+        .or_else(|| path.strip_prefix("transform."))
+        .and_then(|channel| {
+            let value = model(next)?;
+            let mut set = SetProperty::new(id, channel, value, time);
+            set.preserve_hand_edits = false;
+            Some(pm_kernel::PropertyCommand::Set(set).into())
+        }))
+}
+/// A `stateKey` edit: local tool state in the workspace record (v1's
+/// `section.state`). As v1's `local` edit mode, it never touches the
+/// document, so it is no Undo step.
+fn local_write(
+    store: &workspace::Store,
+    record: &Value,
+    si: usize,
+    key: &str,
+    next: Value,
+) -> Write {
+    let mut after = record.clone();
+    after["custom"][si]["state"][key] = next;
+    let own = store.project.as_ref().and_then(|p| workspace::record_id(p))
+        == workspace::record_id(record);
+    if own {
+        Write::Active {
+            before: store.project.clone().unwrap_or_default(),
+            after,
+        }
+    } else {
+        Write::Upsert(after)
+    }
+}
+/// The layer a sheet or menu for `control` edits, bound as it opens.
+fn bound_layer(v: &Controller, control: &Value) -> Option<String> {
+    match bind(control) {
+        Bind::Layer { target, .. } => layer(v, &target).map(|(id, _)| id),
+        _ => None,
+    }
+}
+
 impl Controller {
     /// Writes `next` through control `index` of generated panel `panel`.
     pub fn generated_set(
@@ -253,6 +353,18 @@ impl Controller {
         panel: &str,
         index: usize,
         next: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.generated_set_on(panel, index, next, None, cx);
+    }
+    /// `generated_set` for a sheet or menu: a layer control writes `bound`,
+    /// the layer it targeted when it opened.
+    fn generated_set_on(
+        &mut self,
+        panel: &str,
+        index: usize,
+        next: Value,
+        bound: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some((record, si, def)) = section(self, panel) else {
@@ -268,7 +380,7 @@ impl Controller {
         };
         let model = |v: &Value| pm_model::json::parse(&v.to_string()).ok();
         let time = self.time();
-        use pm_kernel::commands::{comps::CompPatch, layers::LayerPatch, properties::SetProperty};
+        use pm_kernel::commands::comps::CompPatch;
         let command: Option<pm_kernel::Command> = match bind(&control) {
             Bind::Fill(key) => {
                 let f = set_fill(fill(self), &key, next);
@@ -303,71 +415,21 @@ impl Controller {
                 )
             }
             Bind::Layer { target, path } => {
-                let Some((id, _)) = layer(self, &target) else {
+                let found = self
+                    .published
+                    .as_ref()
+                    .and_then(|p| find_layer(p, &target, bound.as_deref()));
+                let Some((id, _)) = found else {
                     return self.note("This control’s layer isn’t in the composition.".into(), cx);
                 };
-                if let Some(key) = path.strip_prefix("content.") {
-                    let mut patch = pm_model::Map::new();
-                    if let Some(v) = model(&next) {
-                        patch.insert(key, v);
-                    }
-                    Some(
-                        pm_kernel::ContentCommand::Set {
-                            layer_id: id,
-                            patch,
-                            time,
-                        }
-                        .into(),
-                    )
-                } else if let Some(key) = path.strip_prefix("layer.") {
-                    let mut patch = LayerPatch::default();
-                    match key {
-                        "visible" => patch.visible = next.as_bool(),
-                        "locked" => patch.locked = next.as_bool(),
-                        "name" => patch.name = next.as_str().map(str::to_owned),
-                        "motionBlur" => patch.motion_blur = next.as_bool(),
-                        "duration" => patch.duration = next.as_f64(),
-                        "from" => patch.from = next.as_f64(),
-                        _ => {
-                            return self
-                                .note("This control’s property isn’t available.".into(), cx);
-                        }
-                    }
-                    Some(
-                        pm_kernel::LayerCommand::Set {
-                            layer_id: id,
-                            patch,
-                        }
-                        .into(),
-                    )
-                } else if let Some(channel) = path
-                    .strip_prefix("properties.")
-                    .or_else(|| path.strip_prefix("transform."))
-                {
-                    model(&next).map(|value| {
-                        let mut set = SetProperty::new(id, channel, value, time);
-                        set.preserve_hand_edits = false;
-                        pm_kernel::PropertyCommand::Set(set).into()
-                    })
-                } else {
-                    None
+                match layer_command(id, &path, &next, time) {
+                    Ok(command) => command,
+                    Err(why) => return self.note(why.into(), cx),
                 }
             }
             Bind::Local(key) => {
-                // Local state lives in the workspace record (v1's section.state).
-                let mut after = record.clone();
-                after["custom"][si]["state"][key.as_str()] = next;
-                let store = self.workspace_store();
-                let own = store.project.as_ref().and_then(|p| workspace::record_id(p))
-                    == workspace::record_id(&record);
-                self.write_workspace(if own {
-                    Write::Active {
-                        before: store.project.clone().unwrap_or_default(),
-                        after,
-                    }
-                } else {
-                    Write::Upsert(after)
-                });
+                let write = local_write(&self.workspace_store(), &record, si, &key, next);
+                self.write_workspace(write);
                 return;
             }
             Bind::None(why) => return self.note(why.into(), cx),
@@ -439,6 +501,8 @@ impl Controller {
             return;
         };
         let control = def["controls"][index].clone();
+        // The layer it edits is the one targeted now, not when it's submitted.
+        let bound = bound_layer(self, &control);
         let label = control["label"].as_str().unwrap_or("Value").to_owned();
         let numeric = matches!(control["type"].as_str(), Some("slider" | "number"));
         let range = match (control["min"].as_f64(), control["max"].as_f64()) {
@@ -489,7 +553,9 @@ impl Controller {
             } else {
                 json!(text)
             };
-            let _ = this.update(cx, |v, cx| v.generated_set(&panel, index, next, cx));
+            let _ = this.update(cx, |v, cx| {
+                v.generated_set_on(&panel, index, next, bound, cx)
+            });
         })
         .detach();
     }
@@ -681,6 +747,8 @@ fn render(
                             .map_or_else(|| shown(&current), |(_, l)| l.clone());
                         row.child(field(eid, label.clone(), text, true).on_click(cx.listener(
                             move |v, e: &ClickEvent, _, _| {
+                                v.generated_menu_layer =
+                                    bound_layer(v, &control_at(v, &panel, index));
                                 let entries: Vec<_> = options
                                     .iter()
                                     .enumerate()
@@ -732,6 +800,10 @@ fn render(
     body.into_any_element()
 }
 
+/// Control `index` of generated panel `panel`.
+fn control_at(v: &Controller, panel: &str, index: usize) -> Value {
+    section(v, panel).map_or(Value::Null, |(_, _, def)| def["controls"][index].clone())
+}
 /// `generatedPick:<option>:<control>:<panel>` from a select's menu.
 pub fn pick(v: &mut Controller, command: &str, cx: &mut Context<Controller>) -> bool {
     let Some(rest) = command.strip_prefix("generatedPick:") else {
@@ -748,7 +820,8 @@ pub fn pick(v: &mut Controller, command: &str, cx: &mut Context<Controller>) -> 
         && let Some(option) = def["controls"][i]["options"].get(o)
     {
         let value = option_label(option).0;
-        v.generated_set(panel, i, value, cx);
+        let bound = v.generated_menu_layer.take();
+        v.generated_set_on(panel, i, value, bound, cx);
     }
     true
 }
@@ -756,8 +829,127 @@ pub fn pick(v: &mut Controller, command: &str, cx: &mut Context<Controller>) -> 
 #[cfg(test)]
 mod tests {
     // Not a glob: gpui's own `test` attribute would shadow the standard one.
-    use super::{Bind, bind, set_fill, workspace};
+    use super::{Bind, bind, find_layer, layer_command, local_write, set_fill, workspace};
+    use pm_kernel::{
+        Call, Caller, HistoryCall, KernelActor, KernelConfig, KernelHandle, OpenSource, Request,
+        SelectionCall, WorkspaceCall, WriteBody,
+    };
     use serde_json::{Value, json};
+
+    const PROJECT: &str = "generated";
+    fn open() -> (KernelActor, KernelHandle) {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(&crate::v4_view_tests::project_json(2)).unwrap();
+        kernel
+            .open(PROJECT, OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        (actor, kernel)
+    }
+    fn call(kernel: &KernelHandle, call: impl Into<Call>) -> pm_kernel::Reply {
+        kernel
+            .call(PROJECT, Request::new(Caller::native(), call.into()))
+            .wait()
+            .unwrap()
+            .unwrap()
+            .reply
+    }
+    fn select(kernel: &KernelHandle, id: &str) {
+        call(
+            kernel,
+            SelectionCall::Layers {
+                ids: vec![id.into()],
+                add: false,
+            },
+        );
+    }
+    fn opacity(kernel: &KernelHandle, id: &str) -> f64 {
+        let p = kernel.published(PROJECT).unwrap();
+        find_layer(&p, id, None).unwrap().1["p"]["opacity"]["v"]
+            .as_f64()
+            .unwrap()
+    }
+    fn set(kernel: &KernelHandle, id: String, value: f64) {
+        let command = layer_command(id, "properties.opacity", &json!(value), 0.)
+            .unwrap()
+            .unwrap();
+        call(
+            kernel,
+            Call::Transact {
+                label: Some("Opacity".into()),
+                expected_revision: None,
+                body: WriteBody::Commands(vec![command]),
+            },
+        );
+    }
+
+    #[test]
+    fn a_sheet_writes_the_layer_selected_when_it_opened() {
+        let (_actor, kernel) = open();
+        select(&kernel, "l0");
+        // The sheet opens on l0 (`bound_layer`)...
+        let p = kernel.published(PROJECT).unwrap();
+        let bound = find_layer(&p, "$selection", None).map(|(id, _)| id);
+        assert_eq!(bound.as_deref(), Some("l0"));
+        // ...the person selects l1 while it's open, then presses Set.
+        select(&kernel, "l1");
+        let p = kernel.published(PROJECT).unwrap();
+        let (id, _) = find_layer(&p, "$selection", bound.as_deref()).unwrap();
+        set(&kernel, id, 40.);
+        assert_eq!((opacity(&kernel, "l0"), opacity(&kernel, "l1")), (40., 100.));
+        // A layer deleted meanwhile is not silently swapped for another.
+        assert!(find_layer(&p, "$selection", Some("gone")).is_none());
+    }
+
+    #[test]
+    fn local_state_is_tool_state_no_undo_step_as_v1() {
+        let (_actor, kernel) = open();
+        let mut record = workspace::preset("gradient").unwrap();
+        record["custom"][0]["state"] = json!({});
+        let model = |v: &Value| pm_model::json::parse(&v.to_string()).unwrap();
+        let expected = kernel.published(PROJECT).unwrap().workspace.clone();
+        call(
+            &kernel,
+            WorkspaceCall::Replace {
+                expected,
+                next: model(&record),
+            },
+        );
+        set(&kernel, "l0".into(), 40.);
+        let store = workspace::Store {
+            records: vec![],
+            current: None,
+            default: None,
+            project: Some(record.clone()),
+            project_id: Some(PROJECT.into()),
+        };
+        // As the panel sends it for a window with a project.
+        let workspace::Write::Active { before, after } =
+            local_write(&store, &record, 0, "amount", json!(7))
+        else {
+            panic!("the project's own workspace is written in place");
+        };
+        call(
+            &kernel,
+            WorkspaceCall::Replace {
+                expected: model(&before),
+                next: model(&after),
+            },
+        );
+        let state = |k: &KernelHandle| {
+            let ws = &k.published(PROJECT).unwrap().workspace;
+            serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(ws)).unwrap()
+                ["custom"][0]["state"]["amount"]
+                .clone()
+        };
+        assert_eq!(state(&kernel), json!(7));
+        // Undo undoes the document edit; the tool setting stays.
+        call(&kernel, Call::History(HistoryCall::Undo));
+        assert_eq!(opacity(&kernel, "l0"), 100.);
+        assert_eq!(state(&kernel), json!(7));
+    }
 
     #[test]
     fn controls_bind_as_v1_source_bindings() {
