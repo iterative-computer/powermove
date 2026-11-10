@@ -389,7 +389,10 @@ mod tests {
         let (resolved, flags) = target_flags(&link).unwrap();
         assert_eq!(resolved, std::fs::canonicalize(&target).unwrap());
         assert_ne!(flags & UF_HIDDEN, 0, "the link's own flags were read");
-        assert!(target_flags(dir.path()).is_none(), "a folder is never a cloud file");
+        assert!(
+            target_flags(dir.path()).is_none(),
+            "a folder is never a cloud file"
+        );
     }
 
     #[test]

@@ -898,7 +898,10 @@ mod tests {
         let p = kernel.published(PROJECT).unwrap();
         let (id, _) = find_layer(&p, "$selection", bound.as_deref()).unwrap();
         set(&kernel, id, 40.);
-        assert_eq!((opacity(&kernel, "l0"), opacity(&kernel, "l1")), (40., 100.));
+        assert_eq!(
+            (opacity(&kernel, "l0"), opacity(&kernel, "l1")),
+            (40., 100.)
+        );
         // A layer deleted meanwhile is not silently swapped for another.
         assert!(find_layer(&p, "$selection", Some("gone")).is_none());
     }
