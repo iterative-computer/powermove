@@ -193,6 +193,18 @@ impl<'d> Scope<'_, 'd> {
 
     /// `local3D(PM, L, T)`.
     pub fn local3d(&mut self, layer: &'d Node, time: f64) -> JsResult<Mat4> {
+        let key = (crate::scope::address(layer), time.to_bits());
+        if let Some(m) = self.local_memo.as_ref().and_then(|m| m.local3d.get(&key)) {
+            return Ok(*m);
+        }
+        let m = self.local3d_unmemoized(layer, time)?;
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.local3d.insert(key, m);
+        }
+        Ok(m)
+    }
+
+    fn local3d_unmemoized(&mut self, layer: &'d Node, time: f64) -> JsResult<Mat4> {
         if !flag(layer, "threeD") {
             return Ok(lift(&self.local_matrix(layer, time)?));
         }
@@ -233,6 +245,13 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         parent: Option<Option<&'d Node>>,
     ) -> JsResult<Mat4> {
+        // Only the layer's own parent lookup is remembered.
+        let key = parent
+            .is_none()
+            .then(|| (crate::scope::address(layer), time.to_bits()));
+        if let Some(m) = key.and_then(|k| self.local_memo.as_ref()?.parent3d.get(&k).copied()) {
+            return Ok(m);
+        }
         let parent = match parent {
             Some(p) => p,
             None => self.parent_by_id(layer),
@@ -243,6 +262,9 @@ impl<'d> Scope<'_, 'd> {
         };
         walk.append_groups(self, layer, time)?;
         walk.append_parents(self, layer, parent, time)?;
+        if let (Some(k), Some(memo)) = (key, self.local_memo.as_mut()) {
+            memo.parent3d.insert(k, walk.matrix);
+        }
         Ok(walk.matrix)
     }
 

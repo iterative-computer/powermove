@@ -217,7 +217,76 @@ pub struct TextContext {
     /// The document edition whose text fonts were asked for ahead
     /// ([`TextContext::prefetch_fonts`]).
     prefetched: Option<u64>,
+    /// Each plain level 1 layer's last device plan, by node address:
+    /// reused while its inputs are equal.
+    level1_plans: std::collections::HashMap<usize, Level1Plan>,
 }
+
+/// A plain level 1 text layer's device plan and what it was made from:
+/// the scene is a function of these alone.
+struct Level1Plan {
+    content: Content,
+    matrix: [u64; 6],
+    target: (u32, u32),
+    generation: u64,
+    layout: Arc<Level1Layout>,
+    plan: Option<TextPlan>,
+    /// What painting the plan reported unsupported, reported again on reuse.
+    unsupported: Vec<String>,
+}
+
+/// A plain level 1 layer's lines: each line's glyph runs and pen origin.
+struct Level1Layout {
+    lines: Vec<(Vec<GlyphRun>, (f64, f64))>,
+    fill: Rgba,
+    /// What laying out reported unsupported (the fill color).
+    unsupported: Vec<String>,
+}
+
+/// A device plan's content key from what its scene is made of. Equal keys
+/// paint equal rasters, as [`scene_key`]'s do (a domain tag keeps the two
+/// apart).
+fn level1_key(
+    layout: &Level1Layout,
+    matrix: [u64; 6],
+    target: (u32, u32),
+    generation: u64,
+    crop: [u32; 4],
+) -> [u64; 2] {
+    let mut h = KeyBytes(Vec::with_capacity(1024));
+    (b"level1 layout", generation, target, crop, matrix).hash(&mut h);
+    for c in layout.fill {
+        c.to_bits().hash(&mut h);
+    }
+    for (runs, (x, y)) in &layout.lines {
+        (x.to_bits(), y.to_bits(), runs.len()).hash(&mut h);
+        for r in runs {
+            (r.face, r.size.to_bits()).hash(&mut h);
+            (r.synthetic_bold, r.synthetic_italic).hash(&mut h);
+            r.coords.len().hash(&mut h);
+            for (tag, value) in &r.coords {
+                (tag, value.to_bits()).hash(&mut h);
+            }
+            r.glyphs.len().hash(&mut h);
+            for g in &r.glyphs {
+                (g.id, g.x.to_bits(), g.y.to_bits()).hash(&mut h);
+            }
+        }
+    }
+    digest_key(&h.0)
+}
+
+fn digest_key(bytes: &[u8]) -> [u64; 2] {
+    let digest = blake3::hash(bytes);
+    let bytes = digest.as_bytes();
+    [
+        u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes")),
+        u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+    ]
+}
+
+/// Plans kept for reuse; past this the map starts over.
+const LEVEL1_PLANS: usize = 4096;
 
 impl Default for TextContext {
     fn default() -> Self {
@@ -230,6 +299,7 @@ impl Default for TextContext {
             captions_hidden: false,
             unsupported: Vec::new(),
             prefetched: None,
+            level1_plans: Default::default(),
         }
     }
 }
@@ -471,11 +541,24 @@ fn hex_to_rgba(hex: &str, opacity: f64) -> Option<Rgba> {
 }
 
 /// Hashes the scene into a 128-bit content key.
+/// Collects what a key hashes, for one blake3 pass (two SipHash passes
+/// over every glyph path element were 2% of a text-heavy frame).
+struct KeyBytes(Vec<u8>);
+
+impl Hasher for KeyBytes {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        unreachable!("read through blake3")
+    }
+}
+
 fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
-    let mut out = [0u64; 2];
-    for (i, o) in out.iter_mut().enumerate() {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (i as u64, generation, scene.width, scene.height, crop).hash(&mut h);
+    let mut h = KeyBytes(Vec::with_capacity(4096));
+    {
+        (generation, scene.width, scene.height, crop).hash(&mut h);
         for item in &scene.items {
             for c in item.color {
                 c.to_bits().hash(&mut h);
@@ -561,9 +644,20 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
                 }
             }
         }
-        *o = h.finish();
     }
-    out
+    digest_key(&h.0)
+}
+
+/// Whether a level 1 layer has character animators or styles (laid out
+/// glyph by glyph).
+fn level1_animated(layer: &Node) -> bool {
+    let stored = pm_eval::node::member(Some(layer), "d");
+    let has = |key: &str| {
+        pm_eval::node::member(stored, key)
+            .map(|n| pm_eval::node::get(n, b"length").truthy())
+            .unwrap_or(false)
+    };
+    has("animators") || has("styles")
 }
 
 impl TextContext {
@@ -663,8 +757,54 @@ impl TextContext {
             scope.text_raster(layer, time, fonts.measure())?
         };
         let m = world * Affine::translate((-raster.anchor_x, -raster.anchor_y));
-        let scene = self.text_scene_level1(scope, layer, time, m, target)?;
-        Ok(self.finish(scene))
+        if level1_animated(layer) {
+            let scene = self.text_scene_level1(scope, layer, time, m, target)?;
+            return Ok(self.finish(scene));
+        }
+        // A layer whose content stays is laid out once; one that also stays
+        // in place is not painted or keyed again either.
+        let d = scope.resolved_text_content(layer, time)?;
+        let id = std::ptr::from_ref(layer) as usize;
+        let matrix = m.as_coeffs().map(f64::to_bits);
+        let kept = self
+            .level1_plans
+            .get(&id)
+            .filter(|k| k.generation == self.generation && k.content == d);
+        if let Some(k) = kept.filter(|k| k.matrix == matrix && k.target == target) {
+            self.unsupported.extend_from_slice(&k.layout.unsupported);
+            self.unsupported.extend_from_slice(&k.unsupported);
+            return Ok(k.plan.clone());
+        }
+        let layout = match kept {
+            Some(k) => k.layout.clone(),
+            None => Arc::new(self.layout_level1(&d)),
+        };
+        self.unsupported.extend_from_slice(&layout.unsupported);
+        let reported = self.unsupported.len();
+        let scene = self.paint_level1(&layout, m, target);
+        // The scene is a function of the layout, matrix, target, and
+        // fonts: its key is made from those, not from every glyph path.
+        let plan = scene.ink().map(|crop| TextPlan {
+            key: level1_key(&layout, matrix, target, self.generation, crop),
+            scene: Arc::new(scene),
+            crop,
+        });
+        if self.level1_plans.len() >= LEVEL1_PLANS {
+            self.level1_plans.clear();
+        }
+        self.level1_plans.insert(
+            id,
+            Level1Plan {
+                content: d,
+                matrix,
+                target,
+                generation: self.generation,
+                layout,
+                plan: plan.clone(),
+                unsupported: self.unsupported[reported..].to_vec(),
+            },
+        );
+        Ok(plan)
     }
 
     fn text_scene_level1<'d>(
@@ -676,13 +816,7 @@ impl TextContext {
         target: (u32, u32),
     ) -> JsResult<TextScene> {
         let d = scope.resolved_text_content(layer, time)?;
-        let stored = pm_eval::node::member(Some(layer), "d");
-        let has = |key: &str| {
-            pm_eval::node::member(stored, key)
-                .map(|n| pm_eval::node::get(n, b"length").truthy())
-                .unwrap_or(false)
-        };
-        if has("animators") || has("styles") {
+        if level1_animated(layer) {
             let tc = text_content(&d);
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
             let layout = fonts.measure().glyph_layout(&tc);
@@ -733,39 +867,70 @@ impl TextContext {
                 return Ok(scene);
             }
         }
+        Ok(self.plain_scene_level1(&d, m, target))
+    }
+
+    /// A level 1 layer without animators or styles, laid out from its
+    /// resolved content `d` and painted through `m`.
+    fn plain_scene_level1(&mut self, d: &Content, m: Affine, target: (u32, u32)) -> TextScene {
+        let layout = self.layout_level1(d);
+        self.unsupported.extend_from_slice(&layout.unsupported);
+        self.paint_level1(&layout, m, target)
+    }
+
+    /// A plain level 1 layer's lines laid out from its resolved content:
+    /// everything its scene needs except the matrix and the target.
+    fn layout_level1(&mut self, d: &Content) -> Level1Layout {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
-        let g = text_geometry(&d, fonts.measure());
-        let tc = text_content(&d);
+        let g = text_geometry(d, fonts.measure());
+        let tc = text_content(d);
         let fill = {
-            let c = get(&d, "color");
+            let c = get(d, "color");
             if c.truthy() {
                 c.clone()
             } else {
                 JsValue::from("#fff")
             }
         };
-        let fill = fill_style(&fill, color::BLACK, &mut self.unsupported);
+        let mut unsupported = Vec::new();
+        let fill = fill_style(&fill, color::BLACK, &mut unsupported);
+        let lines = fonts
+            .line_runs(&tc)
+            .iter()
+            .enumerate()
+            .map(|(row, line)| {
+                // These f32 casts belong to Blink's layout-origin contract;
+                // glyph paths and the world transform stay in f64.
+                let runs = fonts.text_runs(&tc, &line.text, tc.tracking.unwrap_or(0.0));
+                let origin = (
+                    f64::from((f64::from(g.x as f32) + line.x) as f32),
+                    f64::from(((g.pad + row as f64 * tc.line_height()) + tc.size() * 0.82) as f32),
+                );
+                (runs, origin)
+            })
+            .collect();
+        Level1Layout {
+            lines,
+            fill,
+            unsupported,
+        }
+    }
+
+    /// `layout` painted through `m` into a `target`-sized scene.
+    fn paint_level1(&mut self, layout: &Level1Layout, m: Affine, target: (u32, u32)) -> TextScene {
         let mut scene = TextScene {
             width: target.0,
             height: target.1,
             items: Vec::new(),
         };
         let (mut painter, fonts, unsupported) = self.painter();
-        let lines = fonts.line_runs(&tc);
-        for (row, line) in lines.iter().enumerate() {
-            // These f32 casts belong to Blink's layout-origin contract;
-            // glyph paths and the world transform stay in f64.
-            let runs = fonts.text_runs(&tc, &line.text, tc.tracking.unwrap_or(0.0));
-            let origin = (
-                f64::from((f64::from(g.x as f32) + line.x) as f32),
-                f64::from(((g.pad + row as f64 * tc.line_height()) + tc.size() * 0.82) as f32),
-            );
-            let faces = run_faces(fonts, &runs, m);
-            let refs = run_refs(&runs, &faces);
-            painter.fill_text(&mut scene.items, &refs, origin, m, fill, 1.0, 0.0);
+        for (runs, origin) in &layout.lines {
+            let faces = run_faces(fonts, runs, m);
+            let refs = run_refs(runs, &faces);
+            painter.fill_text(&mut scene.items, &refs, *origin, m, layout.fill, 1.0, 0.0);
         }
         unsupported.append(&mut painter.unsupported);
-        Ok(scene)
+        scene
     }
 
     /// A `compat` level 2 text layer at output resolution: level 2 layout

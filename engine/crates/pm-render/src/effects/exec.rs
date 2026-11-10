@@ -975,6 +975,7 @@ impl<'c> Gpu<'c> {
                 label: Some("pm frame (after a fallback readback)"),
             }),
         );
+        self.effects.uniforms.flush(queue);
         queue.submit([done.finish()]);
         let mut pixels = Vec::with_capacity(textures.len());
         for t in textures {
@@ -1141,8 +1142,7 @@ impl<'c> Gpu<'c> {
         let mut buffer = |block: &pm_glsl::reflect::Block| {
             let bytes = GpuProgram::block_bytes(block, calls);
             let size = bytes.len() as u64;
-            let (b, at) = uniforms.take(device, size);
-            queue.write_buffer(&b, at, &bytes);
+            let (b, at) = uniforms.put(device, &bytes);
             (b, at, size)
         };
         let fragment_buffer = program.fragment_block.as_ref().map(&mut buffer);

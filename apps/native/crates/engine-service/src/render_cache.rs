@@ -177,6 +177,10 @@ struct State {
     indexed: Option<Instant>,
     fill: Fill,
     revision: u64,
+    /// The frame read last, and whether reads move backward (skimming or
+    /// scrubbing back): read-ahead follows the motion.
+    last_read: Option<i64>,
+    backward: bool,
 }
 
 struct Running {
@@ -661,20 +665,40 @@ impl DiskFrames {
     /// A frame on disk for `scene` at `time` that the reader has loaded, and
     /// the next frames asked of it. Never waits on disk.
     pub(crate) fn read(&self, scene: &Scene, time: Ticks) -> Option<(Size, Arc<Vec<u8>>)> {
-        let state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock().unwrap();
+        let state = &mut *state;
         let frames = state.frames.as_ref()?;
         if !frames.identity.scene_matches(scene) || frames.fingerprint.is_none() {
             return None;
         }
         let n = frames.index(time)?;
+        if let Some(last) = state.last_read.replace(n)
+            && last != n
+        {
+            state.backward = n < last;
+        }
         let size = frames.size;
-        let ahead: Vec<(i64, RenderKey)> = (n..(n + AHEAD).min(frames.count))
+        // The frame, then the next ones in the direction of motion.
+        let window = if state.backward {
+            (n - AHEAD + 1).max(0)..=n
+        } else {
+            n..=(n + AHEAD - 1).min(frames.count - 1)
+        };
+        let order: Vec<i64> = if state.backward {
+            window.clone().rev().collect()
+        } else {
+            window.clone().collect()
+        };
+        let ahead: Vec<(i64, RenderKey)> = order
+            .into_iter()
             .filter(|k| frames.present.contains(k))
             .filter_map(|k| Some((k, frames.key(k)?)))
             .collect();
         let (generation, cache) = (state.generation, state.cache.clone()?);
-        drop(state);
         let found = self.inner.reader.take(generation, n);
+        self.inner
+            .reader
+            .want(generation, *window.start(), *window.end());
         for (k, key) in ahead {
             self.inner.reader.ask(generation, k, key, &cache, size);
         }
@@ -835,6 +859,9 @@ type ReadId = (u64, i64);
 struct Ready {
     frames: VecDeque<(ReadId, Arc<Vec<u8>>)>,
     asked: HashSet<(u64, i64)>,
+    /// The frames the latest read wants (generation, first, last): asks
+    /// queued before a reversal or a jump are dropped, not read.
+    wanted: Option<(u64, i64, i64)>,
 }
 impl Reader {
     /// The thread holds only the ready list: dropping the cache's last
@@ -847,6 +874,20 @@ impl Reader {
             .name("pm-render-cache-read".into())
             .spawn(move || {
                 for ask in rx {
+                    let stale = {
+                        let mut ready = shared.lock().unwrap();
+                        let (generation, n) = ask.id;
+                        let stale = ready.wanted.is_some_and(|(g, first, last)| {
+                            g != generation || n < first || n > last
+                        });
+                        if stale {
+                            ready.asked.remove(&ask.id);
+                        }
+                        stale
+                    };
+                    if stale {
+                        continue;
+                    }
                     let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
                         crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
                     });
@@ -870,6 +911,9 @@ impl Reader {
             .iter()
             .find(|(id, _)| *id == (generation, n))
             .map(|(_, bytes)| bytes.clone())
+    }
+    fn want(&self, generation: u64, first: i64, last: i64) {
+        self.ready.lock().unwrap().wanted = Some((generation, first, last));
     }
     fn ask(&self, generation: u64, n: i64, key: RenderKey, cache: &Arc<RenderCache>, size: Size) {
         let id = (generation, n);
@@ -1173,6 +1217,43 @@ mod tests {
         assert_eq!(disk.delete_all().unwrap(), 1);
         assert!(disk.bars().bars.is_empty());
         assert!(read_eventually(&disk, &scene, time).is_none());
+    }
+
+    /// Reads ahead follow the direction of motion: skimming back reads the
+    /// frames before the skimmer, and asks left behind by a reversal are
+    /// dropped instead of read.
+    #[test]
+    fn read_ahead_follows_a_reversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, 1));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
+        let read_already = |n: i64| {
+            let generation = disk.inner.state.lock().unwrap().generation;
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(2) {
+                if disk.inner.reader.take(generation, n).is_some() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        };
+        // Forward from frame 20: 21 to 25 are read without being asked for.
+        read_eventually(&disk, &scene, times[10]).unwrap();
+        read_eventually(&disk, &scene, times[11]).unwrap();
+        assert!(read_already(25));
+        // Back from frame 35: 34 to 30 are read before the skimmer gets there.
+        read_eventually(&disk, &scene, times[25]).unwrap();
+        read_eventually(&disk, &scene, times[24]).unwrap();
+        assert!(read_already(30));
+        let wanted = disk.inner.reader.ready.lock().unwrap().wanted;
+        let generation = disk.inner.state.lock().unwrap().generation;
+        assert_eq!(wanted, Some((generation, 34 - AHEAD + 1, 34)));
     }
 
     /// The viewer's output tone and its override wrappers are part of the

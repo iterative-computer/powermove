@@ -702,48 +702,15 @@ impl History {
             return Err("history index is out of range".into());
         }
         let root_relative = map.get("paths").and_then(Value::as_str) != Some("composition");
+        // Entries parse and are measured on several threads (measuring
+        // serializes every patch: most of a large history's import, on the
+        // path to a project's first frame); records are made in order.
+        let parsed = pm_model::parallel::map(entries.len(), |i| {
+            import_entry(&entries[i], root_relative, open_comp)
+        });
         let mut history = History::new();
-        for entry in entries {
-            let e = entry
-                .as_object()
-                .ok_or("a history entry is not an object")?;
-            let label = e
-                .get("label")
-                .and_then(Value::as_str)
-                .ok_or("a history entry has no label")?
-                .to_owned();
-            let operations = |side: &str| -> Result<Vec<Op>, String> {
-                e.get(side)
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| format!("a history entry has no {side} list"))?
-                    .iter()
-                    .map(|p| {
-                        let op = Op::from_value(p)
-                            .map_err(|_| format!("a {side} patch is malformed"))?;
-                        if valid_path(op.path()) {
-                            Ok(op)
-                        } else {
-                            Err(format!("a {side} patch has an invalid path"))
-                        }
-                    })
-                    .collect()
-            };
-            let (mut forward, mut backward) = (operations("forward")?, operations("backward")?);
-            if root_relative {
-                let leaves = |ops: &[Op]| {
-                    ops.iter()
-                        .map(|op| match op {
-                            Op::Leaf(patch) => Ok(patch.clone()),
-                            _ => Err("a history entry needs its composition paths"),
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                };
-                let (f, b) =
-                    canonicalize_patches(&leaves(&forward)?, &leaves(&backward)?, open_comp);
-                forward = f.into_iter().map(Op::Leaf).collect();
-                backward = b.into_iter().map(Op::Leaf).collect();
-            }
-            let bytes = ops_bytes(&forward) + ops_bytes(&backward);
+        for entry in parsed {
+            let (label, forward, backward, bytes) = entry?;
             history.entries.push(HistoryRecord {
                 id: next_token(),
                 label,
@@ -767,6 +734,55 @@ impl History {
         history.trim();
         Ok(history)
     }
+}
+
+/// One saved history entry: its label, forward and backward operations
+/// (canonicalized against `open_comp` when saved before compositions), and
+/// their bytes.
+fn import_entry(
+    entry: &Value,
+    root_relative: bool,
+    open_comp: Option<&str>,
+) -> Result<(String, Vec<Op>, Vec<Op>, usize), String> {
+    let e = entry
+        .as_object()
+        .ok_or("a history entry is not an object")?;
+    let label = e
+        .get("label")
+        .and_then(Value::as_str)
+        .ok_or("a history entry has no label")?
+        .to_owned();
+    let operations = |side: &str| -> Result<Vec<Op>, String> {
+        e.get(side)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("a history entry has no {side} list"))?
+            .iter()
+            .map(|p| {
+                let op = Op::from_value(p).map_err(|_| format!("a {side} patch is malformed"))?;
+                if valid_path(op.path()) {
+                    Ok(op)
+                } else {
+                    Err(format!("a {side} patch has an invalid path"))
+                }
+            })
+            .collect()
+    };
+    let (mut forward, mut backward) = (operations("forward")?, operations("backward")?);
+    if root_relative {
+        let leaves = |ops: &[Op]| {
+            ops.iter()
+                .map(|op| match op {
+                    Op::Leaf(patch) => Ok(patch.clone()),
+                    _ => Err("a history entry needs its composition paths"),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let (f, b) = canonicalize_patches(&leaves(&forward)?, &leaves(&backward)?, open_comp);
+        forward = f.into_iter().map(Op::Leaf).collect();
+        backward = b.into_iter().map(Op::Leaf).collect();
+    }
+    let bytes = ops_bytes(&forward) + ops_bytes(&backward);
+    Ok((label, forward, backward, bytes))
 }
 
 impl HistorySnapshot {
@@ -961,6 +977,41 @@ mod tests {
         assert_eq!(
             pm_model::json::to_canonical_string(&h.snapshot().to_saved()),
             text
+        );
+    }
+
+    /// Entries parse on several threads but become records in their saved
+    /// order, and a refusal names the first bad entry, as one by one.
+    #[test]
+    fn many_entries_import_in_order_and_refuse_at_the_first_bad_one() {
+        let entry = |i: usize| {
+            format!(
+                r#"{{"backward":[{{"exists":true,"path":["comps","C1","layers",0,"name"],"value":"a{i}"}}],"forward":[{{"exists":true,"path":["comps","C1","layers",0,"name"],"value":"b{i}"}}],"label":"Step {i}"}}"#
+            )
+        };
+        let entries: Vec<String> = (0..64).map(entry).collect();
+        let text = format!(
+            r#"{{"entries":[{}],"index":63,"paths":"composition","version":1}}"#,
+            entries.join(",")
+        );
+        let h = History::from_saved(&parse(&text).unwrap(), Some("C1")).unwrap();
+        let labels: Vec<String> = (0..64).map(|i| format!("Step {i}")).collect();
+        assert_eq!(h.labels(), labels);
+        assert!(h.records().windows(2).all(|w| w[0].id < w[1].id));
+        assert_eq!(
+            pm_model::json::to_canonical_string(&h.snapshot().to_saved()),
+            text
+        );
+        let mut bad = entries.clone();
+        bad[40] = r#"{"label":"x","forward":[{"path":[1.5],"exists":true}],"backward":[]}"#.into();
+        bad[50] = r#"{"label":3,"forward":[],"backward":[]}"#.into();
+        let text = format!(
+            r#"{{"entries":[{}],"index":63,"paths":"composition","version":1}}"#,
+            bad.join(",")
+        );
+        assert_eq!(
+            History::import(&parse(&text).unwrap(), Some("C1")).unwrap_err(),
+            "a forward patch has an invalid path"
         );
     }
 

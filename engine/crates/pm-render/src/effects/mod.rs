@@ -91,8 +91,9 @@ pub struct Effects {
     cache: Arc<pm_glsl::Cache>,
     context: String,
     pub watchdog: Watchdog,
-    /// Legacy programs' uniform blocks, a frame's ranges of shared chunks
-    /// (a buffer per pass per frame before).
+    /// The frame's uniforms (draw quads and legacy programs' blocks), its
+    /// ranges of shared chunks (a buffer per pass per frame before); here
+    /// so the effect runner's mid-frame submit can flush them.
     pub(crate) uniforms: crate::exec::UniformPool,
     /// Effects and transitions only the fallback runner draws
     /// ([`fallback`]).

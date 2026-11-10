@@ -55,6 +55,7 @@ pub mod space25d;
 pub mod stills;
 pub mod text;
 pub mod three;
+mod upload;
 pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};

@@ -1581,7 +1581,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
-                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
@@ -1951,6 +1951,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     decode_deadline: playing.then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
                     }),
+                    exact: capture,
                 },
                 budget_ms: budget * 1000.,
                 layer: v.config.layer.clone(),
@@ -2932,6 +2933,44 @@ mod worker_tests {
 
     /// A slow project's drag draws reduced; the stopped frame is drawn again
     /// exact, as a picture of its own.
+    /// A capture taken during a reduced drag (explicit Half quality, a
+    /// scrub) reads the final resampler's pixels, not the drag preview's.
+    #[test]
+    fn a_capture_during_a_reduced_drag_takes_the_final_resampler() {
+        use pm_render::sampling::Sampling;
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-drag-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Half).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let captured_in_drag = || {
+            crate::render::SAMPLED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(exact, moment, scale, _)| {
+                    *exact && *moment == Moment::Scrub && *scale < 1.
+                })
+                .map(|(.., sampling)| *sampling)
+                .collect::<Vec<_>>()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut second = 1;
+        while captured_in_drag().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no capture landed in a drag"
+            );
+            v.scrub(Ticks::from_whole_seconds(second % 3)).unwrap();
+            v.capture_next().unwrap();
+            drawn(&v);
+            second += 1;
+        }
+        assert!(captured_in_drag().iter().all(|s| *s == Sampling::Final));
+        v.retire();
+    }
+
     #[test]
     fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
         let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();

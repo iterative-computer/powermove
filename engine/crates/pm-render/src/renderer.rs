@@ -446,7 +446,6 @@ pub struct Renderer {
     pipelines: Pipelines,
     media: MediaCache,
     pool: TargetPool,
-    uniforms: crate::exec::UniformPool,
     scene3d: Scene3dRenderer,
     /// The 3D pass's planning options (mesh definitions; the view override
     /// comes with each request).
@@ -524,7 +523,6 @@ impl Renderer {
             pipelines,
             media,
             pool: TargetPool::new(),
-            uniforms: crate::exec::UniformPool::default(),
             scene3d: Scene3dRenderer::default(),
             options3d: crate::scene3d::Options3d::default(),
             vector: crate::vector::cache::VectorCache::new(),
@@ -950,6 +948,7 @@ impl Renderer {
             let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
             f(&mut gpu)
         };
+        self.effects.uniforms.flush(&self.queue);
         self.queue.submit([encoder.finish()]);
         for t in taken {
             self.pool.give(t);
@@ -2083,7 +2082,6 @@ impl Renderer {
         self.effects.fallback.fatal = None;
         self.effects.fallback.blocked = false;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
-            self.uniforms.reset();
             self.effects.uniforms.reset();
             self.binds.begin_frame();
             self.text_gpu.begin_frame();
@@ -2092,7 +2090,6 @@ impl Renderer {
                 device: &self.device,
                 queue: &self.queue,
                 pipelines: &self.pipelines,
-                uniforms: &mut self.uniforms,
                 binds: &mut self.binds,
                 media: &mut self.media,
                 pool: &mut self.pool,
@@ -2144,6 +2141,7 @@ impl Renderer {
                     blend_domain: color.blend_domain,
                     background: plan.background.clone(),
                     plan_size: (plan.width, plan.height),
+                    sampling: request.sampling,
                 };
                 crate::frame_prefix::render(
                     &mut exec,
@@ -2232,6 +2230,7 @@ impl Renderer {
         if let Some(copy) = copy {
             copy.record(&mut encoder, &target.texture);
         }
+        self.effects.uniforms.flush(&self.queue);
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
         self.binds.end_frame();

@@ -812,3 +812,61 @@ fn a_still_changed_on_disk_is_not_kept() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A frame drawn with the playback resampler (a scrub preview) never seeds
+/// the kept bottom of a final frame (a capture, the settled picture), and
+/// the other way round; frames of one resampler still share it.
+#[test]
+fn a_preview_frame_never_seeds_a_final_one() {
+    use pm_render::sampling::Sampling;
+    let fixtures = support::repo_root().join("engine/fixtures");
+    let paths = Paths::new(vec![
+        fixtures.join("still-alpha.png"),
+        fixtures.join("still-red.png"),
+    ]);
+    let mut renderer = Renderer::headless().expect("a Metal device");
+    renderer.set_draw_reuse(true);
+    let mut doc = Document::new(Some(document()), 1);
+    let time = Ticks::new(TICKS_PER_SECOND).unwrap();
+    // A drag of a solid without parent or group (`s4`): the draws below it
+    // stay, a kept bottom (kept on a run's second frame, drawn from on its
+    // third).
+    let mut x = 0.0;
+    let mut prefix_frames = |sampling: Sampling| {
+        x += 37.0;
+        let path = at("C", 8, &["p", "position.x", "v"]);
+        doc.apply(&[Patch::set(path, Value::Number(x))]).unwrap();
+        let mut request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
+        request.sampling = sampling;
+        renderer.render(&doc, "C", time, &request, &paths).unwrap();
+        renderer.draw_reuse_stats().prefix_frames
+    };
+    // Frames drawn from a kept bottom, per frame of a three-frame run.
+    let mut seen = 0;
+    let mut run = |sampling| {
+        [0; 3].map(|_| {
+            let now = prefix_frames(sampling);
+            let drawn_from = now - seen;
+            seen = now;
+            drawn_from
+        })
+    };
+    assert_eq!(run(Sampling::Playback), [0, 0, 1]);
+    // A capture after a drag: nothing kept by the previews is drawn from.
+    assert_eq!(run(Sampling::Final), [0, 0, 1]);
+    assert_eq!(run(Sampling::Playback), [0, 0, 1]);
+    // And its pixels are a fresh renderer's final frame, bit for bit.
+    let mut request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);
+    request.sampling = Sampling::Final;
+    let captured = renderer.render(&doc, "C", time, &request, &paths).unwrap();
+    let mut fresh = Renderer::headless().expect("a Metal device");
+    let reference = fresh.render(&doc, "C", time, &request, &paths).unwrap();
+    let (a, b) = (
+        renderer.read_rgba(&captured).unwrap(),
+        fresh.read_rgba(&reference).unwrap(),
+    );
+    assert!(
+        a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+        "a capture after previews differs from a fresh final frame"
+    );
+}

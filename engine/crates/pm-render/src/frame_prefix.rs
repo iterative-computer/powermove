@@ -42,6 +42,8 @@ pub(crate) struct PrefixKey {
     pub blend_domain: pm_protocol::color::BlendDomain,
     pub background: Background,
     pub plan_size: (u32, u32),
+    /// A preview (playback-resampled) frame's pixels never seed a final one.
+    pub sampling: crate::sampling::Sampling,
 }
 
 /// A copy of the target after the first draws of a frame, with those draws

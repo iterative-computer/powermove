@@ -46,9 +46,16 @@ pub struct Scope<'a, 'd> {
 pub(crate) struct LocalMemo<'d> {
     local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
     ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
+    /// `local3D` and `parent3D` (its own parent lookup), by node and time:
+    /// depth ordering and each plane matrix walk the same group and parent
+    /// chains.
+    pub(crate) local3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) parent3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
 }
 
-fn address(layer: &Node) -> usize {
+pub(crate) fn address(layer: &Node) -> usize {
     std::ptr::from_ref(layer) as usize
 }
 

@@ -216,6 +216,12 @@ fn main() {
     }
     linear_overlap_and_colr_source(&mut gpu, &mut failures);
     linear_project_text_source(&mut gpu, &mut failures);
+    let fresh = || {
+        let mut r = Renderer::headless().expect("a Metal device");
+        r.set_text_fonts(Some(fonts()));
+        r
+    };
+    level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
     half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
     for f in &failures {
@@ -575,6 +581,68 @@ fn linear_overlap_and_colr_source(renderer: &mut pm_render::Renderer, failures: 
 /// project's linear working domain; a second display decode changes them by
 /// far more than one code value.
 #[cfg(target_os = "macos")]
+/// A still level 1 text layer's device plan is made once and reused while
+/// its content, world matrix, and target stay; an edit (a new document
+/// whose node may sit at the same address) or a move makes a new one, the
+/// same plan a renderer that never saw the old one makes.
+fn level1_plans_are_reused_until_their_inputs_change(
+    renderer: &mut pm_render::Renderer,
+    fresh: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use pm_protocol::common::Size;
+    use pm_render::plan::{Content, Source};
+    use serde_json::json;
+
+    let doc = |text: &str, x: f64| {
+        let l = support::doc::layer(
+            "l",
+            "text",
+            json!({"text": text, "font": "SF Pro Display", "size": 40,
+                "weight": 600, "color": "#303030", "align": "left"}),
+            x,
+            48.0,
+            3.0,
+        );
+        let v = support::doc::project(160, 96, 3.0, support::doc::no_fill(), vec![l]);
+        pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1)
+    };
+    let request = pm_render::RenderRequest::sized(Size::new(160, 96), Precision::Float32);
+    let resolver = pm_render::MapResolver::default();
+    let text_of = |r: &mut pm_render::Renderer, d: &pm_model::Document, t: f64| {
+        let (plan, plan_failures) = r
+            .plan(d, "Ptest-root", support::ticks(t), &request, &resolver)
+            .unwrap();
+        assert!(plan_failures.is_empty(), "{plan_failures:?}");
+        plan.draws
+            .iter()
+            .find_map(|draw| match &draw.content {
+                Content::Texture {
+                    source: Source::Text(text),
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a text draw")
+    };
+    let one = doc("One", 80.0);
+    let first = text_of(renderer, &one, 0.0);
+    let later = text_of(renderer, &one, 1.0);
+    if !std::sync::Arc::ptr_eq(&first.scene, &later.scene) {
+        failures.push("a still text layer was laid out again".into());
+    }
+    for (name, edited) in [("edited", doc("Two", 80.0)), ("moved", doc("One", 64.0))] {
+        let made = text_of(renderer, &edited, 0.0);
+        let expected = text_of(fresh, &edited, 0.0);
+        if made.key != expected.key || made.key == first.key {
+            failures.push(format!(
+                "{name}: text kept a plan its inputs no longer make"
+            ));
+        }
+    }
+}
+
 fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
     use pm_protocol::color::{Precision, WorkingEncoding};
     use pm_protocol::common::Size;

@@ -734,16 +734,22 @@ impl VectorCache {
     /// Evicts least recently used entries until at most `bytes` and
     /// `entries` stay; the current frame's entries stay unless `all`.
     fn evict(&mut self, bytes: u64, entries: usize, all: bool) {
-        while self.bytes > bytes || self.entries.len() > entries {
-            let Some(k) = self
-                .entries
-                .iter()
-                .filter(|(_, e)| all || e.frame != self.frame)
-                .min_by_key(|(k, e)| (e.used, **k))
-                .map(|(k, _)| *k)
-            else {
+        if self.bytes <= bytes && self.entries.len() <= entries {
+            return;
+        }
+        // One least-recently-used order for the whole eviction, not a scan
+        // of every entry per entry evicted.
+        let mut order: Vec<(u64, ([u8; 32], u8))> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| all || e.frame != self.frame)
+            .map(|(k, e)| (e.used, *k))
+            .collect();
+        order.sort_unstable();
+        for (_, k) in order {
+            if self.bytes <= bytes && self.entries.len() <= entries {
                 break;
-            };
+            }
             // Dropping the texture is safe while recorded commands still
             // use it: wgpu keeps it alive until they complete.
             if let Some(e) = self.entries.remove(&k) {
@@ -954,13 +960,20 @@ impl VectorCache {
         bytes: u64,
     ) -> wgpu::TextureView {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.evict(
-            self.max_bytes
-                .saturating_sub(bytes)
-                .saturating_sub(self.scene_scratch_bytes()),
-            self.max_entries.saturating_sub(1),
-            false,
-        );
+        let bytes_room = self
+            .max_bytes
+            .saturating_sub(bytes)
+            .saturating_sub(self.scene_scratch_bytes());
+        let entries_room = self.max_entries.saturating_sub(1);
+        if self.bytes > bytes_room || self.entries.len() > entries_room {
+            // Animated content inserts every frame: evicting a sixteenth
+            // below the bound lets one LRU pass serve the next inserts.
+            self.evict(
+                bytes_room - bytes_room / 16,
+                entries_room - entries_room / 16,
+                false,
+            );
+        }
         self.bytes += bytes;
         self.entries.insert(
             key,
@@ -1280,6 +1293,53 @@ mod scene_pool_tests {
     use super::*;
     use pm_vector::kurbo::{Affine, BezPath};
     use pm_vector::render::scene::{CoverageItem, FillRule, ItemStyle};
+
+    /// Inserts past the entry bound evict the least recently used entries
+    /// a batch at a time: the bound holds, the newest stay, and one LRU
+    /// pass serves several inserts.
+    #[test]
+    fn inserts_past_the_bound_evict_the_oldest_in_batches() {
+        let gpu = pm_gpu::Gpu::new("vector cache eviction test").unwrap();
+        let mut cache = VectorCache::new();
+        cache.set_budget(u64::MAX / 2, 64);
+        let texture = || {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let mut passes = 0;
+        for i in 0..640u32 {
+            cache.begin_frame();
+            cache.tick += 1;
+            let before = cache.len();
+            let mut key = [0u8; 32];
+            key[..4].copy_from_slice(&i.to_le_bytes());
+            cache.insert((key, 0), texture(), 4);
+            assert!(cache.len() <= 64, "the bound holds");
+            if cache.len() < before {
+                passes += 1;
+            }
+        }
+        assert!(passes <= 640 / 3, "{passes} eviction passes");
+        let newest = |i: u32| {
+            let mut key = [0u8; 32];
+            key[..4].copy_from_slice(&i.to_le_bytes());
+            cache.entries.contains_key(&(key, 0))
+        };
+        assert!(newest(639) && newest(600), "the newest stay");
+        assert!(!newest(0) && !newest(500), "the oldest go");
+    }
 
     fn scene(x: f64, y: f64, size: f64) -> CoverageScene {
         let mut path = BezPath::new();
