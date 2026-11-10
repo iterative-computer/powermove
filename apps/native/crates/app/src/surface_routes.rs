@@ -135,7 +135,7 @@ impl Controller {
                 })
                 .await;
             if let Err(error) = done {
-                let _ = cx.update(|_| {
+                cx.update(|_| {
                     let rx = Alert::new(
                         format!("{name} couldn’t be deleted."),
                         error,
