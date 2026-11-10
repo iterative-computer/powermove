@@ -23,8 +23,9 @@ use pm_runtime_v8::*;
 use pm_store_host::adapter::StoreSession;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
-    path::PathBuf,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fs,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
@@ -58,6 +59,44 @@ const SYNC_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(3);
 const MAX_DEFERRED: usize = 4096;
 const TIME_MOVED: u8 = 1;
 const PLAY_MOVED: u8 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    Present,
+    /// Its parent directory lists and it isn't there.
+    Gone,
+    /// It can't be checked: the parent is missing or unreadable (an
+    /// unmounted volume, a permission or I/O error).
+    Unreachable,
+}
+fn folder_presence(folder: &Path) -> Presence {
+    match fs::symlink_metadata(folder) {
+        Ok(_) => return Presence::Present,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Presence::Unreachable;
+        }
+        Err(_) => {}
+    }
+    let (Some(parent), Some(name)) = (folder.parent(), folder.file_name()) else {
+        return Presence::Unreachable;
+    };
+    let Ok(listing) = fs::read_dir(parent) else {
+        return Presence::Unreachable;
+    };
+    let mut listed = false;
+    for entry in listing {
+        match entry {
+            Ok(entry) if entry.file_name() == name => listed = true,
+            Ok(_) => {}
+            Err(_) => return Presence::Unreachable,
+        }
+    }
+    if listed {
+        Presence::Unreachable
+    } else {
+        Presence::Gone
+    }
+}
 
 /// Every running host's inbox; a closed one drops out on the next send.
 static HOSTS: Mutex<Vec<Sender<Input>>> = Mutex::new(Vec::new());
@@ -573,6 +612,7 @@ impl ExtensionHost {
             router: None,
             records: vec![],
             folders: BTreeMap::new(),
+            vanishing: BTreeSet::new(),
             canvases: BTreeMap::new(),
             dom_waiting: VecDeque::new(),
             deferred: VecDeque::new(),
@@ -898,6 +938,9 @@ struct Owner {
     /// Where each discovered extension's folder is (recorded in its entry, so
     /// an entry whose folder vanished outside Powermove can be forgotten).
     folders: BTreeMap<String, PathBuf>,
+    /// Entries whose folder the last check found positively gone; a second
+    /// check in a row forgets them (a volume briefly away never removes one).
+    vanishing: BTreeSet<String>,
     canvases: BTreeMap<(u64, String), u64>,
     /// Batches taken from the realm that the page queue has no room for yet.
     dom_waiting: VecDeque<Value>,
@@ -928,6 +971,8 @@ impl Owner {
                     if stamp != self.disk {
                         self.disk = stamp;
                         self.rescan();
+                    } else if !self.vanishing.is_empty() {
+                        self.forget_vanished();
                     }
                     continue;
                 }
@@ -1554,7 +1599,7 @@ impl Owner {
         });
     }
     /// Settings and MCP read extensions from kernel state, as they do built-ins.
-    fn publish_entries(&self) {
+    fn publish_entries(&mut self) {
         let _ = update_state::<String>(&self.config.kernel, |state| {
             let ops: Vec<StateOp> = self
                 .records
@@ -1594,28 +1639,77 @@ impl Owner {
         FIRST_ENTRIES.store(false, Ordering::Release);
         self.forget_vanished();
     }
-    /// An installed extension whose recorded folder is gone and that no root
-    /// still provides was deleted outside Powermove: its entry goes, so
-    /// Settings never lists a ghost. Archived entries (Delete…) stay.
-    fn forget_vanished(&self) {
+    /// An installed extension whose recorded folder is positively gone (its
+    /// parent lists, the folder isn't in it) on two checks in a row, and that
+    /// no root still provides, was deleted outside Powermove: its entry goes,
+    /// so Settings never lists a ghost. A folder that can't be reached (an
+    /// unmounted volume, a read error) keeps its entry, marked unavailable.
+    /// Archived entries (Delete…) stay.
+    fn forget_vanished(&mut self) {
+        let state = self.config.kernel.state();
+        let mut gone = BTreeSet::new();
+        let mut unreachable = BTreeSet::new();
+        for e in state.extensions.values() {
+            if !e.installed || self.folders.contains_key(&e.id) {
+                continue;
+            }
+            let record = e.source.get("hostRecord");
+            if record
+                .and_then(|r| r.get("archived"))
+                .and_then(pm_model::Value::as_bool)
+                == Some(true)
+            {
+                continue;
+            }
+            let Some(folder) = record
+                .and_then(|r| r.get("folder"))
+                .and_then(pm_model::Value::as_str)
+            else {
+                continue;
+            };
+            match folder_presence(Path::new(folder)) {
+                Presence::Gone => {
+                    gone.insert(e.id.clone());
+                }
+                Presence::Unreachable => {
+                    unreachable.insert(e.id.clone());
+                }
+                Presence::Present => {}
+            }
+        }
+        let forget: BTreeSet<String> = gone.intersection(&self.vanishing).cloned().collect();
+        self.vanishing = gone.difference(&forget).cloned().collect();
+        let vanishing = &self.vanishing;
         let _ = update_state::<String>(&self.config.kernel, |state| {
-            let ops: Vec<StateOp> = state
-                .extensions
-                .values()
-                .filter(|e| e.installed && !self.folders.contains_key(&e.id))
-                .filter(|e| {
-                    let record = e.source.get("hostRecord");
-                    record
-                        .and_then(|r| r.get("archived"))
-                        .and_then(pm_model::Value::as_bool)
-                        != Some(true)
-                        && record
-                            .and_then(|r| r.get("folder"))
-                            .and_then(pm_model::Value::as_str)
-                            .is_some_and(|f| !std::path::Path::new(f).exists())
-                })
-                .map(|e| StateOp::RemoveExtension { id: e.id.clone() })
+            let mut ops: Vec<StateOp> = forget
+                .iter()
+                .filter(|id| state.extensions.contains_key(*id))
+                .map(|id| StateOp::RemoveExtension { id: id.clone() })
                 .collect();
+            // Unavailable while its folder can't be reached or is about to be
+            // forgotten; publish_entries clears the mark when it comes back.
+            for e in state.extensions.values() {
+                let mark = unreachable.contains(&e.id) || vanishing.contains(&e.id);
+                let marked = e
+                    .source
+                    .get("hostRecord")
+                    .and_then(|r| r.get("unavailable"))
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true);
+                if !mark || marked || forget.contains(&e.id) {
+                    continue;
+                }
+                let mut entry = e.clone();
+                if let Some(record) = entry
+                    .source
+                    .as_object_mut()
+                    .and_then(|s| s.get_mut("hostRecord"))
+                    .and_then(pm_model::Value::as_object_mut)
+                {
+                    record.insert("unavailable", pm_model::Value::Bool(true));
+                }
+                ops.push(StateOp::Extension(entry));
+            }
             Ok((!ops.is_empty()).then_some(ops))
         });
     }
@@ -1778,7 +1872,7 @@ impl Owner {
             p.store_batches.retain(|(store, _), _| *store != id);
         });
     }
-    fn publish_records(&self) {
+    fn publish_records(&mut self) {
         let records: BTreeMap<_, _> = self
             .records
             .iter()
@@ -2370,10 +2464,96 @@ mod tests {
         });
         fs::remove_dir_all(extensions.join("ghost-mod")).unwrap();
         rescan_all();
+        // One check is not enough: it shows unavailable until the next one.
+        fixture.until("the first check", |_| {
+            entry("ghost-mod").is_none_or(|e| unavailable(&e))
+        });
+        assert!(entry("ghost-mod").is_some(), "forgotten on a single check");
         fixture.until("the ghost entry is forgotten", |_| {
             entry("ghost-mod").is_none()
         });
-        assert!(entry("kept-mod").is_some());
+        assert!(entry("kept-mod").is_some_and(|e| !unavailable(&e)));
+    }
+    fn unavailable(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+        entry
+            .source
+            .get("hostRecord")
+            .and_then(|r| r.get("unavailable"))
+            .and_then(pm_model::Value::as_bool)
+            == Some(true)
+    }
+    #[test]
+    fn an_extension_on_an_unmounted_volume_keeps_its_entry_and_preference() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "away-mod",
+            &[(
+                "index.ts",
+                "export default function activate(api: any): void {}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let entry = |id: &str| fixture.kernel.state().extensions.get(id).cloned();
+        fixture.until("its entry with its folder", |_| {
+            entry("away-mod").is_some_and(|e| {
+                e.source
+                    .get("hostRecord")
+                    .and_then(|r| r.get("folder"))
+                    .is_some()
+            })
+        });
+        let mut off = entry("away-mod").unwrap();
+        off.enabled = false;
+        fixture
+            .kernel
+            .state_transaction(pm_kernel::state::StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(off)],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        // The volume goes away: the folder's parent can't be listed.
+        let unmounted = extensions.with_file_name("unmounted");
+        fs::rename(&extensions, &unmounted).unwrap();
+        for _ in 0..3 {
+            rescan_all();
+            fixture.until("a check", |_| {
+                entry("away-mod").is_none_or(|e| unavailable(&e))
+            });
+            thread::sleep(Duration::from_millis(200));
+        }
+        thread::sleep(DISK_POLL + Duration::from_millis(500));
+        let kept = entry("away-mod").expect("an unreachable folder never removes its entry");
+        assert!(unavailable(&kept) && !kept.enabled);
+        // It comes back: available again, still off.
+        fs::rename(&unmounted, &extensions).unwrap();
+        rescan_all();
+        fixture.until("available again", |_| {
+            entry("away-mod").is_some_and(|e| !unavailable(&e) && !e.enabled)
+        });
+    }
+    #[test]
+    fn a_folder_is_gone_only_when_its_parent_lists_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("extensions");
+        fs::create_dir_all(parent.join("here")).unwrap();
+        assert_eq!(folder_presence(&parent.join("here")), Presence::Present);
+        assert_eq!(folder_presence(&parent.join("gone")), Presence::Gone);
+        assert_eq!(
+            folder_presence(&root.path().join("no-volume/extensions/x")),
+            Presence::Unreachable
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.path().join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let presence = folder_presence(&locked.join("x"));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(presence, Presence::Unreachable);
     }
     #[test]
     fn discovered_typescript_and_svelte_extensions_contribute_and_edit_the_live_project() {

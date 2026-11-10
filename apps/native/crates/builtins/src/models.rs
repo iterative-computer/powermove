@@ -625,8 +625,18 @@ impl Backend {
                     .and_then(|h| h.get("stopped"))
                     .and_then(pm_model::Value::as_bool)
                     == Some(true);
+                // Its folder can't be reached (an unmounted volume): kept, said so.
+                let about = if host
+                    .and_then(|h| h.get("unavailable"))
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true)
+                {
+                    "Unavailable: its folder can't be reached.".to_owned()
+                } else {
+                    text("about").unwrap_or_default()
+                };
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
-                    "enabled":e.enabled && !stopped,"about":text("about").unwrap_or_default(),"includes":includes,
+                    "enabled":e.enabled && !stopped,"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
