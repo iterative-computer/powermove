@@ -129,7 +129,8 @@ export class SettingsModel {
   private searchEpoch = 0;
   private alive = true;
   private viewportFirst = 0;
-  private viewportCount = 0;
+  /** Rows shown before the host reports its first viewport (one screenful). */
+  private viewportCount = 40;
   private filtered: readonly Extension[] = [];
   constructor(
     readonly host: HostClient,

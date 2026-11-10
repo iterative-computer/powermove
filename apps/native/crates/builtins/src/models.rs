@@ -591,6 +591,7 @@ impl Backend {
         let extensions = state
             .extensions
             .values()
+            .filter(|e| !archived(e))
             .map(|e| {
                 let can_archive = mods.iter().any(|m| {
                     m.id == e.id
@@ -1547,6 +1548,7 @@ pub(crate) fn mod_records(
     let entries = state
         .extensions
         .values()
+        .filter(|e| !archived(e))
         .map(|e| {
             let host = e
                 .source
@@ -1563,4 +1565,13 @@ pub(crate) fn mod_records(
         revision: state.revision,
         entries,
     }
+}
+/// Deleted from Settings: the folder is in the archive, its values are kept.
+fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+    entry
+        .source
+        .get("hostRecord")
+        .and_then(|r| r.get("archived"))
+        .and_then(pm_model::Value::as_bool)
+        == Some(true)
 }

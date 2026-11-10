@@ -3213,6 +3213,16 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
             ops: vec![
                 entry("com.example.glow", true),
                 entry("builtin.panel", false),
+                pm_kernel::state::StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    id: "com.example.gone".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Gone","archived":true}}"#,
+                    )
+                    .unwrap(),
+                }),
             ],
         })
         .wait()
@@ -3234,6 +3244,14 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
             .unwrap()
             .clone()
     };
+    // Deleted ones stay in the kernel (their values) but leave the list.
+    assert!(
+        !publication["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "com.example.gone")
+    );
     assert_eq!(listed("com.example.glow")["canArchive"], true);
     assert_eq!(listed("builtin.panel")["canArchive"], false);
     let revision = publication["revision"].clone();

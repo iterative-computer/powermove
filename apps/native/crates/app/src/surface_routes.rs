@@ -128,6 +128,7 @@ impl Controller {
                 .background_spawn(async move {
                     let result = pm_compat_runner::store_install::archive(&kernel, &profile, &id);
                     if result.is_ok() {
+                        mark_archived(&kernel, &id);
                         pm_compat_runner::host::rescan_all();
                     }
                     result.map_err(|e| e.to_string())
@@ -408,4 +409,28 @@ fn apply_composition(
         .ok_or(DialogError::Stale)?
         .map_err(|e| DialogError::Kernel(format!("{e:?}")))?;
     Ok(new_id.map(|id| (id, document)))
+}
+
+/// The kernel keeps an archived extension's entry (its saved values live
+/// there); `archived` keeps it out of Settings until a reinstall republishes
+/// a fresh host record.
+fn mark_archived(kernel: &pm_kernel::KernelHandle, id: &str) {
+    let Some(mut entry) = kernel.state().extensions.get(id).cloned() else {
+        return;
+    };
+    if let Some(source) = entry.source.as_object_mut() {
+        let mut record = source
+            .get("hostRecord")
+            .and_then(pm_model::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        record.insert("archived", pm_model::Value::Bool(true));
+        source.insert("hostRecord", pm_model::Value::Object(record));
+    }
+    let _ = kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Extension(entry)],
+        })
+        .wait();
 }
