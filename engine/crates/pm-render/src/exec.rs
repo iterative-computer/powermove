@@ -72,16 +72,33 @@ impl Resolved {
 /// chunk is the next power of two of the pass that needed it, so a frame
 /// never allocates more than one buffer per pass did (creating a buffer per
 /// pass per frame was 8% of a viewer frame at 500 layers, docs/engine/perf.md).
-/// `queue.write_buffer` lands before the next submission's commands, after
-/// the earlier submissions that read the same bytes.
+/// Passes write into each chunk's copy here; [`UniformPool::flush`] sends a
+/// chunk's new bytes in one queue write (wgpu-core makes a staging buffer
+/// per write), before the submission that reads them and after the earlier
+/// ones that read the same bytes.
 #[derive(Default)]
 pub(crate) struct UniformPool {
     chunks: Vec<UniformChunk>,
 }
 
+#[cfg(not(test))]
+const UNIFORM_POOL_USAGE: wgpu::BufferUsages =
+    wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST);
+/// Tests read the chunks back.
+#[cfg(test)]
+const UNIFORM_POOL_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::UNIFORM
+    .union(wgpu::BufferUsages::COPY_DST)
+    .union(wgpu::BufferUsages::COPY_SRC);
+
 struct UniformChunk {
     buffer: wgpu::Buffer,
     used: u64,
+    /// The chunk's bytes as this frame's passes wrote them.
+    bytes: Vec<u8>,
+    /// `bytes[..flushed]` has been sent this frame.
+    flushed: u64,
+    /// The end of the last write (`used` rounds up past it).
+    written: u64,
 }
 
 impl UniformPool {
@@ -91,32 +108,55 @@ impl UniformPool {
         self.chunks.retain(|chunk| chunk.used > 0);
         for chunk in &mut self.chunks {
             chunk.used = 0;
+            chunk.flushed = 0;
+            chunk.written = 0;
         }
     }
 
-    /// `size` bytes of this frame's uniforms: a chunk and the range's start.
-    pub(crate) fn take(&mut self, device: &wgpu::Device, size: u64) -> (wgpu::Buffer, u64) {
+    /// Places `data` in this frame's uniforms: a chunk and the range's
+    /// start. It reaches the GPU at the next [`UniformPool::flush`].
+    pub(crate) fn put(&mut self, device: &wgpu::Device, data: &[u8]) -> (wgpu::Buffer, u64) {
+        let size = data.len() as u64;
         let span = size.next_multiple_of(UNIFORM_STRIDE);
-        if let Some(chunk) = self
+        let at = self
             .chunks
-            .iter_mut()
-            .find(|chunk| chunk.used + size <= chunk.buffer.size())
-        {
-            let at = chunk.used;
-            chunk.used += span;
-            return (chunk.buffer.clone(), at);
+            .iter()
+            .position(|chunk| chunk.used + size <= chunk.buffer.size());
+        let index = at.unwrap_or_else(|| {
+            let capacity = size.next_power_of_two().max(UNIFORM_STRIDE);
+            self.chunks.push(UniformChunk {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pm quads"),
+                    size: capacity,
+                    usage: UNIFORM_POOL_USAGE,
+                    mapped_at_creation: false,
+                }),
+                used: 0,
+                bytes: vec![0; capacity as usize],
+                flushed: 0,
+                written: 0,
+            });
+            self.chunks.len() - 1
+        });
+        let chunk = &mut self.chunks[index];
+        let base = chunk.used;
+        chunk.bytes[base as usize..(base + size) as usize].copy_from_slice(data);
+        chunk.used = (base + span).min(chunk.buffer.size());
+        chunk.written = base + size;
+        (chunk.buffer.clone(), base)
+    }
+
+    /// Sends what passes wrote since the last flush, one write per chunk.
+    /// Called before every submission of the frame's encoder.
+    pub(crate) fn flush(&mut self, queue: &wgpu::Queue) {
+        for chunk in &mut self.chunks {
+            let end = chunk.written.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+            if end > chunk.flushed {
+                let range = chunk.flushed as usize..end as usize;
+                queue.write_buffer(&chunk.buffer, chunk.flushed, &chunk.bytes[range]);
+                chunk.flushed = end;
+            }
         }
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm quads"),
-            size: size.next_power_of_two().max(UNIFORM_STRIDE),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.chunks.push(UniformChunk {
-            buffer: buffer.clone(),
-            used: span,
-        });
-        (buffer, 0)
     }
 }
 
@@ -124,7 +164,6 @@ pub(crate) struct Exec<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     pub pipelines: &'a Pipelines,
-    pub uniforms: &'a mut UniformPool,
     /// Bind groups kept across frames (`crate::binds`).
     pub binds: &'a mut crate::binds::BindCache,
     pub media: &'a mut MediaCache,
@@ -928,8 +967,7 @@ impl Exec<'_> {
                 data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
             }
         }
-        let (buffer, base) = self.uniforms.take(self.device, data.len() as u64);
-        self.queue.write_buffer(&buffer, base, &data);
+        let (buffer, base) = self.effects.uniforms.put(self.device, &data);
         let base = base as u32;
         let quad_bind = self
             .pipelines
@@ -1233,11 +1271,9 @@ impl Exec<'_> {
             color: [0.0; 4],
             scene: [0.0; 4],
         };
-        let (buffer, base) = self.uniforms.take(self.device, UNIFORM_STRIDE);
         // The flip entries never read the scene-output fields.
-        self.queue.write_buffer(
-            &buffer,
-            base,
+        let (buffer, base) = self.effects.uniforms.put(
+            self.device,
             &bytes_of(&u)[..std::mem::offset_of!(QuadUniform, scene)],
         );
         let quad = self.binds.quads(
@@ -1272,5 +1308,56 @@ impl Exec<'_> {
         pass.set_bind_group(0, &quad, &[base as u32]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod uniform_pool_tests {
+    use super::*;
+
+    fn read(gpu: &pm_gpu::Gpu, buffer: &wgpu::Buffer, at: u64, len: u64) -> Vec<u8> {
+        let back = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: len,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, at, &back, 0, len);
+        gpu.queue.submit([encoder.finish()]);
+        back.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let bytes = back.slice(..).get_mapped_range().unwrap().to_vec();
+        bytes
+    }
+
+    #[test]
+    fn uniforms_reach_the_gpu_at_each_flush_and_a_frame_reuses_its_chunk() {
+        let gpu = pm_gpu::Gpu::new("uniform pool test").unwrap();
+        let mut pool = UniformPool::default();
+        let mut buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 4,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        for frame in 0..3u8 {
+            pool.reset();
+            // 600 bytes take a 1024-byte chunk with room after them.
+            let (a, at_a) = pool.put(&gpu.device, &[frame + 1; 600]);
+            // A mid-frame submit flushes what the frame has drawn so far.
+            pool.flush(&gpu.queue);
+            assert_eq!(read(&gpu, &a, at_a, 600), vec![frame + 1; 600]);
+            let (b, at_b) = pool.put(&gpu.device, &[frame + 100; 32]);
+            assert_eq!(b, a, "passes share the frame's chunk");
+            assert_eq!(at_b, at_a + 600u64.next_multiple_of(UNIFORM_STRIDE));
+            pool.flush(&gpu.queue);
+            assert_eq!(read(&gpu, &b, at_b, 32), vec![frame + 100; 32]);
+            assert_eq!(read(&gpu, &a, at_a, 600), vec![frame + 1; 600]);
+            if frame > 0 {
+                assert_eq!(a, buffer, "the next frame reuses the chunk");
+            }
+            buffer = a;
+        }
     }
 }
