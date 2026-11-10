@@ -111,6 +111,14 @@ pub struct Controller {
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
+    /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
+    pub home: bool,
+    /// Home was drawn last frame (it refreshes and takes focus as it appears).
+    pub(crate) home_visible: bool,
+    /// A restored window is checking whether its project reopens.
+    pub(crate) reopening: bool,
+    /// Wakes the playback loop, which places the playhead layers.
+    pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
     pub rate: pm_time::Rate,
     pub duration: f64,
@@ -215,7 +223,6 @@ impl pm_shell::integration::Integration for Bridge {
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
             panels::opening(v, id, bounds)
-                .or_else(|| panels::library(v, id, bounds, cx))
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
@@ -228,6 +235,9 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::generated_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
+    }
+    fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        self.0.update(cx, |v, cx| v.home_element(w, cx))
     }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
@@ -513,6 +523,10 @@ impl Controller {
             path: None,
             recent: vec![],
             library: None,
+            home: false,
+            home_visible: false,
+            reopening: false,
+            playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
             duration: 1.,
@@ -593,8 +607,16 @@ impl Controller {
                 .find(|row| row.id == project)?;
             Some((row.id, row.name))
         });
+        // Home waits for the answer, so a project that reopens never
+        // flashes Home first.
+        self.reopening = true;
         cx.spawn(async move |this, cx| {
-            if let Some((id, name)) = found.await {
+            let found = found.await;
+            let _ = this.update(cx, |v, cx| {
+                v.reopening = false;
+                cx.notify();
+            });
+            if let Some((id, name)) = found {
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
                         v.open_named(
@@ -1120,15 +1142,6 @@ impl Controller {
     }
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open(SessionSource::File(path), cx);
-    }
-    pub fn open_library(&mut self, id: String, cx: &mut Context<Self>) {
-        self.open(
-            SessionSource::Library {
-                profile: self.profile.clone(),
-                project: id,
-            },
-            cx,
-        );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
         self.open_named(source, None, cx);
@@ -1786,6 +1799,16 @@ impl Controller {
         }
         // Edit menu items reach a focused text field before the document.
         if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {
+            return true;
+        }
+        // Escape on Home clears its search, then returns to the project (v1).
+        if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.home_visible {
+            match self.library.clone() {
+                Some(library) if !library.read(cx).controller.query.text.is_empty() => {
+                    library.update(cx, |v, cx| v.clear_search(cx));
+                }
+                _ => self.hide_home(cx),
+            }
             return true;
         }
         if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {

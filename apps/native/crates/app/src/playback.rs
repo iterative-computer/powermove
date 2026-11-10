@@ -128,6 +128,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         }
     }
     let (tx, rx) = async_channel::bounded(1);
+    // Home placing or lifting its cover moves the playhead without a tick.
+    let wake = tx.clone();
+    entity.update(cx, |v, _| v.playback_wake = Some(wake));
     let ticks = Rc::new(RefCell::new(None));
     let pending = ticks.clone();
     let tick_tx = tx.clone();
@@ -188,7 +191,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         loop {
             if rx.recv().await.is_err() { break; }
             if weak.update(cx, |v,cx| {
-                let Some(viewer)=&v.viewer else{link.set_paused(true); *current.borrow_mut()=None; return};
+                let Some(viewer)=&v.viewer else{
+                    link.set_paused(true); *current.borrow_mut()=None;
+                    // A closed project (Home stays in the window) leaves no playhead.
+                    unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];}
+                    return
+                };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
                 if new_viewer {
                     *current.borrow_mut() = Some(viewer.clone()); binding.sync();

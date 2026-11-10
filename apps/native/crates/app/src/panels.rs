@@ -32,45 +32,6 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
     )
 }
 
-pub fn library(
-    v: &mut Controller,
-    id: &str,
-    bounds: Rect,
-    cx: &mut Context<Controller>,
-) -> Option<AnyElement> {
-    if id != "assets" || v.session.is_some() {
-        return None;
-    }
-    let t = v.host.borrow().tokens.clone();
-    let mut body = div()
-        .id("project-library")
-        .h(px((bounds.h - t.metrics.header).max(0.)))
-        .w_full()
-        .p(px(t.metrics.inset))
-        .flex()
-        .flex_col()
-        .overflow_y_scroll();
-    for (index, (id, name)) in v.recent.clone().into_iter().enumerate() {
-        body = body.child(
-            div()
-                .id(index)
-                .role(Role::Button)
-                .aria_label(name.clone())
-                .tab_index(0)
-                .h(px(t.metrics.row))
-                .child(name)
-                .on_click(cx.listener(move |v, _, _, cx| v.open_library(id.clone(), cx))),
-        );
-    }
-    if v.recent.is_empty() {
-        body = body.justify_center().child(pm_shell::view::empty_state(
-            &t,
-            "No Recent Projects",
-            "Choose File ▸ Open… to open a project.",
-        ));
-    }
-    Some(body.into_any_element())
-}
 impl Controller {
     pub fn playing(&self) -> bool {
         self.viewer.as_ref().is_some_and(|v| {

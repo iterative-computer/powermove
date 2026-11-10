@@ -20,7 +20,13 @@ impl Controller {
     pub fn surface_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
         match name {
             "newProject" => self.new_project(cx),
-            "projects" | "openRecent" => self.show_project_library(cx),
+            "openRecent" => self.show_home(cx),
+            // The toolbar's Home and ⌘P (v1's `ProjectsScreen.toggle`): Home,
+            // or the project behind it.
+            "home" | "projects" if self.home_shown() && self.session.is_some() => {
+                self.hide_home(cx)
+            }
+            "home" | "projects" => self.show_home(cx),
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
@@ -161,52 +167,136 @@ impl Controller {
             .flatten()
             .unwrap_or_else(|| self.host.borrow().window.clone())
     }
-    fn library(&mut self, cx: &mut Context<Self>) -> Option<Entity<ProjectLibrary>> {
+    pub(crate) fn library(&mut self, cx: &mut Context<Self>) -> Option<Entity<ProjectLibrary>> {
         if let Some(library) = &self.library {
             return Some(library.clone());
         }
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
+                // Open in New Window, or a project opened from Home while this
+                // window shows one: a window of its own, as a tab of this one.
                 Outbound::Opened {
                     reply,
                     name,
                     file,
-                    new_window: true,
-                } => crate::entry::open_in_new_window(
-                    crate::entry::Pending::Adopt { reply, name, file },
-                    cx,
-                ),
+                    new_window,
+                } if new_window || v.session.is_some() || v.opening => {
+                    let pending = crate::entry::Pending::Adopt { reply, name, file };
+                    if new_window {
+                        crate::entry::open_in_new_window(pending, cx);
+                    } else {
+                        let leader = v.shell_window_id(cx);
+                        crate::entry::open_in_new_tab(pending, leader, cx);
+                        v.hide_home(cx);
+                    }
+                }
                 Outbound::Opened {
                     reply, name, file, ..
-                } => v.adopt_reply(*reply, name, file, cx),
-                Outbound::FocusProject(id) => v.focus_project(&id, cx),
-                Outbound::Message(text) => {
-                    v.message = text;
-                    cx.notify();
+                } => {
+                    v.home = false;
+                    v.adopt_reply(*reply, name, file, cx)
                 }
+                Outbound::FocusProject(id) => {
+                    if v.session.as_ref().is_some_and(|s| s.project == id) {
+                        v.hide_home(cx);
+                    } else {
+                        v.focus_project(&id, cx);
+                    }
+                }
+                Outbound::HideHome => v.hide_home(cx),
+                Outbound::Command(name) => v.host.borrow().send_command(name, vec![]),
             });
         });
         let tokens = self.host.borrow().tokens.clone();
         let (port, rx) = match ProjectLibrary::port(self.kernel.clone(), self.profile.clone()) {
             Ok(port) => port,
             Err(error) => {
-                self.message = format!("Project Library is unavailable: {error}");
+                self.message = format!("Your projects can’t be shown: {error}");
                 return None;
             }
         };
         let editor = Some(self.host.borrow().window.clone());
-        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, editor, cx));
+        let kernel = self.kernel.clone();
+        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, editor, kernel, cx));
         self.library = Some(library.clone());
         Some(library)
     }
-    fn show_project_library(&mut self, cx: &mut Context<Self>) {
+    /// File ▸ Projects… and the toolbar's Home: Home in this window, over
+    /// the project it shows (which stays open), with fresh rows.
+    pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
+        self.home = true;
         if let Some(library) = self.library(cx) {
             library.update(cx, |v, cx| {
-                let _ = v.controller.show();
+                let _ = v.controller.refresh();
                 v.pump(cx);
             });
         }
+        cx.notify();
+    }
+    /// Back to the project behind Home; a window without one keeps Home.
+    pub(crate) fn hide_home(&mut self, cx: &mut Context<Self>) {
+        self.home = false;
+        cx.notify();
+    }
+    /// Home shows when asked for, and whenever the window has no project and
+    /// isn't opening one (launch with nothing to reopen, the last project
+    /// closed).
+    pub(crate) fn home_shown(&self) -> bool {
+        self.home
+            || (self.session.is_none()
+                && !self.opening
+                && !self.reopening
+                && self.opening_name.is_none()
+                && !self.recovery_pending)
+    }
+    /// The shell window id of this editor (for joining its tab group).
+    fn shell_window_id(&self, cx: &App) -> u64 {
+        self.shell
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map_or(0, |s| s.read(cx).window_id)
+    }
+    /// Home for the shell to draw in place of the docks, or `None`.
+    pub(crate) fn home_element(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let shown = self.home_shown();
+        let appeared = shown && !self.home_visible;
+        if shown != self.home_visible
+            && let Some(wake) = &self.playback_wake
+        {
+            let _ = wake.try_send(());
+        }
+        self.home_visible = shown;
+        self.host.borrow().set_home(shown);
+        if !shown {
+            return None;
+        }
+        // The timeline's playhead layers follow its place: none under Home.
+        self.builtins.timeline_place = None;
+        let library = self.library(cx)?;
+        let active = self.session.as_ref().map(|s| s.project.clone());
+        library.update(cx, |v, cx| {
+            v.active = active;
+            if appeared {
+                let _ = v.controller.refresh();
+                v.pump(cx);
+            }
+        });
+        if appeared {
+            let focus = library.read(cx).focus_handle();
+            window.focus(&focus, cx);
+            // A window with no project is Home (its tab's name too).
+            if self.session.is_none() {
+                self.host
+                    .borrow()
+                    .set_document_metadata("Home", "", false, None);
+            }
+        }
+        Some(library.into_any_element())
     }
     fn new_project(&mut self, cx: &mut Context<Self>) {
         let current = current_format(self.published.as_deref());

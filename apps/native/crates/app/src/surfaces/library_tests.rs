@@ -29,6 +29,7 @@ fn row(id: &str, name: &str, trashed: bool) -> Row {
         id: id.into(),
         name: name.into(),
         modified_ms: Some(42),
+        deleted_ms: None,
         trashed,
         file: None,
         edited: false,
@@ -78,7 +79,7 @@ fn load(controller: &mut LibraryController<Port>, snapshot: Snapshot) {
 fn ready() -> LibraryController<Port> {
     let mut c = LibraryController::new(Port::default());
     c.query.section = Section::All;
-    c.show().unwrap();
+    c.refresh().unwrap();
     load(&mut c, sample());
     c
 }
@@ -108,14 +109,16 @@ fn format() -> Format {
 }
 
 #[test]
-fn all_empty_states_and_quoted_search_copy() {
+fn all_empty_states_use_v1_home_copy() {
     assert_eq!(
         empty_state(&Query::default()),
         EmptyState {
-            title: "No Projects",
-            symbol: "square.grid.2x2",
-            detail: "Projects you create appear here.".into(),
-            action: Some("New Project")
+            title: "No projects yet",
+            symbol: "folder",
+            detail:
+                "Projects keep the composition, layers, reusable sections and exports together."
+                    .into(),
+            action: Some("Create a project")
         }
     );
     assert_eq!(
@@ -124,9 +127,11 @@ fn all_empty_states_and_quoted_search_copy() {
             ..Default::default()
         }),
         EmptyState {
-            title: "No Deleted Projects",
+            title: "Trash is empty",
             symbol: "trash",
-            detail: "Projects you move to the Trash appear here.".into(),
+            detail:
+                "Projects moved to Trash stay here until you restore or permanently delete them."
+                    .into(),
             action: None
         }
     );
@@ -136,9 +141,9 @@ fn all_empty_states_and_quoted_search_copy() {
             ..Default::default()
         }),
         EmptyState {
-            title: "No Results",
+            title: "No matching projects",
             symbol: "magnifyingglass",
-            detail: "No projects match “Launch”.".into(),
+            detail: "Try a different name.".into(),
             action: None
         }
     );
@@ -147,7 +152,7 @@ fn all_empty_states_and_quoted_search_copy() {
 #[test]
 fn loading_then_storage_retry_is_available() {
     let mut c = LibraryController::new(Port::default());
-    c.show().unwrap();
+    c.refresh().unwrap();
     assert_eq!(c.content(), Content::Loading);
     let serial = c.port.sent[0].serial;
     complete(
@@ -213,7 +218,7 @@ fn context_menus_match_spec_and_file_backing_controls_reveal() {
             Some("Rename…"),
             Some("Duplicate"),
             None,
-            Some("Move to Trash")
+            Some("Move to Trash…")
         ]
     );
     r.file = Some(std::env::temp_dir().join("Film.pmv"));
@@ -221,7 +226,7 @@ fn context_menus_match_spec_and_file_backing_controls_reveal() {
     r.trashed = true;
     assert_eq!(
         labels(&r),
-        vec![Some("Put Back"), None, Some("Delete Immediately…")]
+        vec![Some("Restore"), None, Some("Delete Forever…")]
     );
 }
 
@@ -277,12 +282,12 @@ fn delete_is_critical_archival_copy_and_cancel_is_default() {
     let mut c = ready();
     c.menu("c", MenuAction::DeleteImmediately).unwrap();
     let (serial, prompt) = alert(&mut c);
-    assert_eq!(prompt.message, "Delete “Unused” immediately?");
+    assert_eq!(prompt.message, "Delete “Unused” forever?");
     assert_eq!(
         prompt.informative,
-        "The project is archived in Powermove’s storage and can’t be opened from the Library again."
+        "The project is archived in Powermove’s storage and can’t be opened from Home again."
     );
-    assert_eq!(prompt.labels(), ["Cancel", "Delete"]);
+    assert_eq!(prompt.labels(), ["Cancel", "Delete Forever"]);
     assert!(prompt.buttons[0].default);
     assert_eq!(prompt.buttons[0].key, Key::Escape);
     assert!(prompt.buttons[1].destructive && !prompt.buttons[0].destructive);
@@ -539,7 +544,7 @@ fn disconnected_service_and_unsupported_operations_are_not_successes() {
         refuse: true,
         ..Default::default()
     });
-    assert!(c.show().is_err());
+    assert!(c.refresh().is_err());
     assert!(matches!(c.content(), Content::Unavailable { .. }));
     let mut c = ready();
     c.menu("c", MenuAction::DeleteImmediately).unwrap();
@@ -977,10 +982,10 @@ fn trash_requires_confirmation() {
     let count = c.port.sent.len();
     c.menu("a", MenuAction::Trash).unwrap();
     let (serial, prompt) = alert(&mut c);
-    assert_eq!(prompt.message, "Move “Launch Film” to the Trash?");
+    assert_eq!(prompt.message, "Move “Launch Film” to Trash?");
     assert_eq!(
         prompt.informative,
-        "You can put it back from Recently Deleted."
+        "You can restore this project from Trash."
     );
     assert_eq!(prompt.labels(), ["Move to Trash", "Cancel"]);
     assert!(prompt.buttons[0].default);
@@ -994,16 +999,74 @@ fn trash_requires_confirmation() {
     );
 }
 #[test]
-fn card_facts_omit_missing_values_and_zero_dimensions() {
+fn card_facts_read_as_v1_date_file_and_size() {
+    const MIN: i64 = 60_000;
+    let now = 1_000 * MIN;
     let mut r = row("a", "Launch Film", false);
-    assert_eq!(r.facts("Yesterday"), Some("Yesterday · 1920×1080".into()));
-    r.modified_ms = None;
-    assert_eq!(r.facts(""), Some("1920×1080".into()));
+    r.modified_ms = Some(now - 3 * MIN);
+    assert_eq!(r.facts(now), "Edited 3 min ago · 1920×1080");
+    r.file = Some(std::path::PathBuf::from("/tmp/Launch Film.pmv"));
+    assert_eq!(
+        r.facts(now),
+        "Edited 3 min ago · Launch Film.pmv · 1920×1080"
+    );
+    r.edited = true;
+    assert_eq!(
+        r.facts(now),
+        "Edited 3 min ago · Unsaved changes · Launch Film.pmv · 1920×1080"
+    );
     r.summary.as_mut().unwrap().width = Some(0);
-    assert_eq!(r.facts(""), None);
-    r.modified_ms = Some(42);
-    r.summary = None;
-    assert_eq!(r.facts("Yesterday"), Some("Yesterday".into()));
+    r.file = None;
+    r.modified_ms = Some(now - 1_000);
+    assert_eq!(r.facts(now), "Edited just now");
+    r.trashed = true;
+    r.deleted_ms = Some(now - 2 * 86_400_000);
+    assert_eq!(r.facts(now), "Deleted 2 d ago");
+    // Past a week, the date (v1 shipped en-US `toLocaleDateString`).
+    assert_eq!(
+        ago(Some(1_767_225_600_000), 1_767_225_600_000 + 30 * 86_400_000),
+        "1/1/2026"
+    );
+    assert_eq!(ago(Some(now - 5 * 3_600_000), now), "5 h ago");
+}
+#[test]
+fn sort_by_name_ignores_case_and_recent_puts_newest_first() {
+    let mut a = row("a", "beta", false);
+    a.modified_ms = Some(1);
+    let mut b = row("b", "Alpha", false);
+    b.modified_ms = Some(2);
+    let snapshot = Snapshot {
+        rows: vec![a, b],
+        recents: ["a".into(), "b".into()].into(),
+    };
+    let names = |sort| {
+        Query {
+            section: Section::All,
+            sort,
+            ..Default::default()
+        }
+        .apply(&snapshot)
+        .into_iter()
+        .map(|r| r.name)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(names(Sort::Recent), ["Alpha", "beta"]);
+    assert_eq!(names(Sort::Name), ["Alpha", "beta"]);
+    let mut c = snapshot.clone();
+    c.rows[1].modified_ms = Some(0);
+    let recent: Vec<_> = Query {
+        section: Section::All,
+        ..Default::default()
+    }
+    .apply(&c)
+    .into_iter()
+    .map(|r| r.name)
+    .collect();
+    assert_eq!(recent, ["beta", "Alpha"]);
+    assert_eq!(Sort::from_key(Sort::Name.key()), Sort::Name);
+    assert_eq!(Section::from_key("trash"), Section::Deleted);
+    assert_eq!(Section::from_key("projects"), Section::Recents);
+    assert_eq!(Layout::from_key("list"), Layout::List);
 }
 #[test]
 fn open_in_new_window_asks_for_a_window_of_its_own() {

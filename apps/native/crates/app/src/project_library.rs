@@ -1,8 +1,10 @@
-//! S017 Project Library and S018/S019 sheets over `LibraryController`. The worker
-//! owns all kernel and file work; this view renders its presentation and turns
-//! host effects into windows, sheets and alerts. Decision: one quiet list of names
-//! with facts. The grid's thumbnail slot was never specified, and pro lists read
-//! by name, so the native collection scaffold is gone.
+//! Home (v1.2.0's Projects screen, `legacy/ui/projects.ts`) over
+//! `LibraryController`, drawn inside the editor window in place of its docks.
+//! The worker owns all kernel and file work; this view renders its
+//! presentation and turns host effects into sheets and alerts on the editor
+//! window. Sidebar: search, Recents and Trash with counts, Store, the account
+//! at the foot. Main: the section with its count, grid/list, sort, Open… and
+//! New Project; cards and rows read name, Active/Open tag and v1's facts line.
 use crate::{
     library_surface::{
         appkit::new_project_sheet,
@@ -18,7 +20,7 @@ use pm_design::Tokens;
 use pm_kernel::{KernelHandle, session::ShellReply};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
-/// What the library needs from whichever editor is in front.
+/// What Home needs from the editor window it is drawn in.
 #[derive(Debug)]
 pub enum Outbound {
     Opened {
@@ -27,9 +29,12 @@ pub enum Outbound {
         file: Option<std::path::PathBuf>,
         new_window: bool,
     },
-    /// The project is open: bring forward the window that shows it.
+    /// The project is open: show it (this window) or bring its window forward.
     FocusProject(String),
-    Message(String),
+    /// Escape, or the project this window shows was opened again.
+    HideHome,
+    /// A menu command this window runs (Open…, New Project, Store, sign-in).
+    Command(&'static str),
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
 pub struct ProjectLibrary {
@@ -38,14 +43,23 @@ pub struct ProjectLibrary {
     tokens: Tokens,
     focus: FocusHandle,
     sheet: Rc<RefCell<Option<OpenSheet>>>,
-    window: Option<WindowHandle<ProjectLibrary>>,
-    /// Hover washes on sidebar sections, rows and buttons.
+    /// Hover washes on sidebar rows, cards and buttons.
     motion: pm_shell::motion::Motion<u64>,
-    /// The library's own AppKit window, which its sheets attach to.
-    ns_window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
-    /// The editor window that owns this library: its sheets attach here while
-    /// the library window is closed, whether or not the app is active.
+    /// The editor window Home is drawn in: its sheets and alerts attach here.
     editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+    /// v1's `projectsView`.
+    pub layout: Layout,
+    search: Option<Entity<pm_shell::text::TextField>>,
+    /// The project this window shows (its card reads Active).
+    pub active: Option<String>,
+    /// Cards per grid row at the last layout, for arrow keys.
+    columns: usize,
+    /// A failure Home reports in its header (the editor's status line is
+    /// hidden under Home), until the next action.
+    notice: Option<String>,
+    /// v1's Home settings (`projectsSection`, `projectsSort`, `projectsView`)
+    /// are written through the kernel, the only writer.
+    kernel: KernelHandle,
 }
 impl ProjectLibrary {
     /// The worker and its wake channel, started before the view exists.
@@ -69,6 +83,7 @@ impl ProjectLibrary {
         tokens: Tokens,
         sink: Sink,
         editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+        kernel: KernelHandle,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -79,34 +94,69 @@ impl ProjectLibrary {
             }
         })
         .detach();
+        let setting = |key: &str| {
+            kernel
+                .state()
+                .settings
+                .get(key)
+                .and_then(pm_model::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_default()
+        };
+        let mut controller = LibraryController::new(port);
+        controller.query.section = Section::from_key(&setting("projectsSection"));
+        controller.query.sort = Sort::from_key(&setting("projectsSort"));
+        let layout = Layout::from_key(&setting("projectsView"));
         Self {
-            controller: LibraryController::new(port),
+            controller,
             sink,
             tokens,
             focus: cx.focus_handle(),
             sheet: Rc::default(),
-            window: None,
             motion: Default::default(),
-            ns_window: None,
             editor,
+            layout,
+            search: None,
+            active: None,
+            columns: 1,
+            notice: None,
+            kernel,
         }
+    }
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
     /// Takes finished work and turns the controller's effects into platform calls.
     pub fn pump(&mut self, cx: &mut Context<Self>) {
+        let busy = self.controller.busy();
         self.controller.poll();
+        // A change made here shows in every other window's Home too, as
+        // v1's `projects:open` repainted them.
+        if busy && !self.controller.busy() {
+            let me = cx.entity_id();
+            cx.defer(move |cx| {
+                for editor in crate::entry::editors(cx) {
+                    let library = editor.read(cx).library.clone();
+                    if let Some(library) = library.filter(|l| l.entity_id() != me) {
+                        library.update(cx, |v, cx| {
+                            let _ = v.controller.refresh();
+                            v.pump(cx);
+                        });
+                    }
+                }
+            });
+        }
+        if self.controller.opening().is_some() {
+            self.notice = None;
+        }
         for effect in self.controller.take_effects() {
             self.effect(effect, cx);
         }
         cx.notify();
     }
-    /// Sheets attach to the library window while it's open, else to the
-    /// editor window that asked (whether or not the app is active; the key
-    /// window may be Settings or none at all).
-    fn parent(&self, cx: &App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
-        let _ = cx;
-        if let Some(window) = self.ns_window.clone().filter(|w| w.isVisible()) {
-            return Some(window);
-        }
+    /// Sheets and alerts attach to the editor window Home is drawn in,
+    /// whether or not the app is active.
+    fn parent(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         if let Some(window) = self.editor.clone() {
             return Some(window);
         }
@@ -115,7 +165,6 @@ impl ProjectLibrary {
     }
     fn effect(&mut self, effect: HostEffect, cx: &mut Context<Self>) {
         match effect {
-            HostEffect::ShowLibrary => self.show_window(cx),
             HostEffect::ShowNewProject => self.show_new_project(cx),
             HostEffect::CloseNewProject => {
                 if let Some(sheet) = self.sheet.borrow_mut().take() {
@@ -124,7 +173,7 @@ impl ProjectLibrary {
             }
             HostEffect::Rename { id } => self.show_rename(id, cx),
             HostEffect::Alert { serial, alert, .. } => {
-                let Some(window) = self.parent(cx) else {
+                let Some(window) = self.parent() else {
                     return;
                 };
                 let rx = alert.sheet(&window);
@@ -159,7 +208,7 @@ impl ProjectLibrary {
             }
             HostEffect::FocusProject(id) => (self.sink)(Outbound::FocusProject(id), cx),
             HostEffect::Announce(text) => {
-                if let Some(window) = self.parent(cx) {
+                if let Some(window) = self.parent() {
                     crate::v4_native::announce(&window, &text);
                 }
             }
@@ -167,7 +216,7 @@ impl ProjectLibrary {
         }
     }
     fn show_new_project(&mut self, cx: &mut Context<Self>) {
-        let (Some(form), Some(window)) = (self.controller.form.clone(), self.parent(cx)) else {
+        let (Some(form), Some(window)) = (self.controller.form.clone(), self.parent()) else {
             return;
         };
         let mtm = objc2::MainThreadMarker::new().unwrap();
@@ -249,10 +298,7 @@ impl ProjectLibrary {
             "create" => {
                 drop(sheet);
                 if self.controller.create().is_err() {
-                    (self.sink)(
-                        Outbound::Message("The project couldn’t be created.".into()),
-                        cx,
-                    );
+                    self.notice = Some("The project couldn’t be created.".into());
                 }
                 self.pump(cx);
                 false
@@ -262,7 +308,7 @@ impl ProjectLibrary {
     }
     fn show_rename(&mut self, id: String, cx: &mut Context<Self>) {
         use crate::dialogs::{DialogId, Field, NativePiece, Surface, WindowId};
-        let (Some(draft), Some(window)) = (self.controller.rename.clone(), self.parent(cx)) else {
+        let (Some(draft), Some(window)) = (self.controller.rename.clone(), self.parent()) else {
             return;
         };
         let surface = Surface::sheet(
@@ -306,71 +352,57 @@ impl ProjectLibrary {
         })
         .detach();
     }
-    fn show_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.window
-            && handle.update(cx, |_, w, _| w.activate()).is_ok()
-        {
-            return;
-        }
-        self.ns_window = None;
-        let this = cx.entity();
-        let m = self.tokens.metrics;
-        let translucent = self.tokens.translucent();
-        let tokens = self.tokens.clone();
-        let focus = self.focus.clone();
-        // The window's root is this entity, which is being updated now: open
-        // it once the update ends (opening inside it panicked on File ▸ Projects…).
-        cx.defer(move |cx| {
-            let root = this.clone();
-            // A Mac library window: full-size content under a transparent
-            // title bar, the sidebar on the behind-window blur.
-            let background = if translucent {
-                gpui::MacosWindowBackground::Transparent
-            } else {
-                gpui::MacosWindowBackground::Opaque
-            };
-            let tokens = tokens.clone();
-            let handle = cx.open_window(
-                WindowOptions::new()
-                    .macos_window_background(background)
-                    .titlebar(Some(TitlebarOptions {
-                        title: Some(TITLE.into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }))
-                    .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                        point(px(m.toolbar), px(m.toolbar)),
-                        size(px(m.settings_width), px(m.settings_height)),
-                    )))),
-                move |window, cx| {
-                    if tokens.translucent() {
-                        pm_shell::window_backdrop(window, &tokens);
-                    }
-                    window.focus(&focus, cx);
-                    root
-                },
-            );
-            this.update(cx, |v, _| v.window = handle.ok());
-        });
-    }
     fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
         let mut query = self.controller.query.clone();
         query.section = section;
+        self.persist("projectsSection", section.key());
         let _ = self.controller.set_query(query);
         self.pump(cx);
     }
+    fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        let mut query = self.controller.query.clone();
+        query.sort = sort;
+        self.persist("projectsSort", sort.key());
+        let _ = self.controller.set_query(query);
+        self.pump(cx);
+    }
+    fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.layout = layout;
+        self.persist("projectsView", layout.key());
+        cx.notify();
+    }
     fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if text == self.controller.query.text {
+            return;
+        }
         let mut query = self.controller.query.clone();
         query.text = text;
         let _ = self.controller.set_query(query);
         self.pump(cx);
     }
+    /// One of v1's Home settings, through the kernel (off the main thread).
+    fn persist(&self, key: &str, value: &str) {
+        drop(
+            self.kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![pm_kernel::state::StateOp::Setting {
+                        key: key.into(),
+                        value: Some(pm_model::Value::String(value.into())),
+                    }],
+                }),
+        );
+    }
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let plain = !event.keystroke.modifiers.platform && !event.keystroke.modifiers.control;
-        match key {
-            "up" => self.controller.move_selection(-1),
-            "down" => self.controller.move_selection(1),
+        let columns = match self.layout {
+            Layout::Grid => self.columns.max(1) as isize,
+            Layout::List => 1,
+        };
+        match event.keystroke.key.as_str() {
+            "up" => self.controller.move_selection(-columns),
+            "down" => self.controller.move_selection(columns),
+            "left" if columns > 1 => self.controller.move_selection(-1),
+            "right" if columns > 1 => self.controller.move_selection(1),
             "enter" => {
                 if let Some(id) = self.controller.selected.clone() {
                     let _ = self
@@ -378,32 +410,35 @@ impl ProjectLibrary {
                         .double_click(&id, event.keystroke.modifiers.alt);
                 }
             }
-            "backspace" if plain => {
-                let mut text = self.controller.query.text.clone();
-                text.pop();
-                self.set_text(text, cx);
-            }
             "escape" if !self.controller.query.text.is_empty() => {
-                self.set_text(String::new(), cx);
+                self.clear_search(cx);
             }
-            _ if plain => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    let next = format!("{}{text}", self.controller.query.text);
-                    self.set_text(next, cx);
-                }
-            }
-            _ => {}
+            // v1: Escape leaves Home for the project behind it.
+            "escape" => (self.sink)(Outbound::HideHome, cx),
+            _ => return,
         }
+        cx.stop_propagation();
         self.pump(cx);
+    }
+    pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(field) = &self.search {
+            field.update(cx, |f, cx| f.set_value("", cx));
+        }
+        self.set_text(String::new(), cx);
     }
     fn row_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.controller.rows.iter().find(|r| r.id == id) else {
             return;
         };
         let actions = context_menu(row);
+        let this_window = self.active.as_deref() == Some(id.as_str());
         let options: Vec<_> = actions
             .iter()
             .map(|action| match action {
+                // v1: the project this window shows is already open here.
+                Some(MenuAction::Open) if this_window => {
+                    serde_json::json!({"label": MenuAction::Open.label(), "disabled": true})
+                }
                 Some(action) => serde_json::json!({"label": action.label()}),
                 None => serde_json::json!({"separator": true}),
             })
@@ -416,6 +451,38 @@ impl ProjectLibrary {
                     let _ = v.controller.menu(&id, action);
                     v.pump(cx);
                 });
+            }
+        });
+    }
+    fn sort_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.controller.query.sort;
+        let sorts = [Sort::Recent, Sort::Name];
+        let options: Vec<_> = sorts
+            .iter()
+            .map(|s| serde_json::json!({"label": s.label(), "checked": *s == current}))
+            .collect();
+        let this = cx.entity();
+        crate::v4_native::menu(window, &options, cx, move |index, cx| {
+            if let Some(sort) = index.and_then(|i| sorts.get(i).copied()) {
+                this.update(cx, |v, cx| v.set_sort(sort, cx));
+            }
+        });
+    }
+    /// v1's account row: Sign in, or your account's menu.
+    fn account_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items: [(&str, &'static str); 3] = [
+            ("Your Library", "store"),
+            ("Account Settings…", "settings"),
+            ("Sign Out", "cloudSignOut"),
+        ];
+        let options: Vec<_> = items
+            .iter()
+            .map(|(label, _)| serde_json::json!({ "label": label }))
+            .collect();
+        let sink = self.sink.clone();
+        crate::v4_native::menu(window, &options, cx, move |index, cx| {
+            if let Some((_, command)) = index.and_then(|i| items.get(i)) {
+                sink(Outbound::Command(command), cx);
             }
         });
     }
@@ -449,292 +516,669 @@ fn key(name: &str) -> u64 {
     h.finish()
 }
 impl ProjectLibrary {
-    fn new_project(&mut self, cx: &mut Context<Self>) {
-        let _ = self.controller.refresh();
-        let _ = self
-            .controller
-            .begin_new(String::new(), None, &default_format());
-        self.pump(cx);
-    }
-    /// A quiet row: neutral wash on hover (spring), a stronger wash when selected.
-    fn row(&self, name: &str, selected: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A hover wash (spring) over any control; `selected` is the neutral on state.
+    fn wash(
+        &self,
+        d: Stateful<Div>,
+        name: &str,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = &self.tokens;
         let k = key(name);
-        let wash = self.motion.hovers.amount(k);
-        let alpha = (t.translucency.hover * wash * 255.).round() as u32;
-        div()
-            .id(SharedString::from(name.to_owned()))
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(px(t.metrics.row))
-            .px(px(t.metrics.gap + t.metrics.inner_radius))
-            .rounded(px(t.metrics.control_radius))
-            .text_size(px(t.typography.title))
-            .text_color(rgb(if selected {
-                t.colors.text
-            } else {
-                t.colors.secondary
-            }))
-            // An ink wash reads on the sidebar's blurred ground and the panel alike.
-            .when(selected, |d| {
-                d.bg(rgba(
-                    t.colors.text << 8 | (t.translucency.selected * 255.).round() as u32,
-                ))
-            })
+        let amount = self.motion.hovers.amount(k);
+        let alpha = (t.translucency.hover * amount * 255.).round() as u32;
+        let radius = t.metrics.control_radius;
+        d.relative()
+            .when(selected, |d| d.bg(rgb(t.colors.fill_strong)))
             .when(!selected && alpha > 0, |d| {
                 d.child(
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded(px(t.metrics.control_radius))
+                        .rounded(px(radius))
                         .bg(rgba(t.colors.text << 8 | alpha)),
                 )
             })
-            .aria_selected(selected)
             .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 let tokens = v.tokens.clone();
                 v.motion.hovers.hover(k, *hovered, &tokens);
                 cx.notify();
             }))
     }
-    /// The one prominent button: accent fill, white title, hover lightens.
-    fn primary_button(&self, label: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A sidebar row: (symbol, label), trailing count.
+    fn nav_row(
+        &self,
+        id: &'static str,
+        (symbol, label): (&str, String),
+        count: Option<usize>,
+        selected: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = &self.tokens;
-        let k = key(label);
-        let wash = self.motion.hovers.amount(k);
-        let alpha = (t.translucency.selected * wash * 255.).round() as u32;
-        div()
-            .id(label)
-            .relative()
+        let (c, m) = (&t.colors, &t.metrics);
+        let row = div()
+            .id(id)
+            .debug_selector(|| id.into())
             .flex()
             .flex_none()
             .items_center()
-            .h(px(t.metrics.control))
-            .px(px(t.metrics.inset))
-            .rounded(px(t.metrics.control_radius))
-            .bg(rgb(t.colors.accent))
-            .text_color(rgb(0xffffff))
+            .gap(px(m.gap))
+            .h(px(m.row))
+            .px(px(m.gap))
+            .rounded(px(m.control_radius))
+            .text_color(rgb(if selected { c.text } else { c.secondary }))
+            .role(Role::Button)
+            .aria_selected(selected)
+            .aria_label(match count {
+                Some(n) => format!("{label}, {n}"),
+                None => label.clone(),
+            })
+            .child(pm_shell::symbol::symbol(
+                symbol,
+                m.symbol_inline,
+                pm_shell::symbol::Weight::Regular,
+                if selected { c.text } else { c.muted },
+                window,
+            ))
+            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+            .children(count.map(|n| {
+                div()
+                    .flex_none()
+                    .text_size(px(t.typography.label))
+                    .text_color(rgb(c.muted))
+                    .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                    .child(n.to_string())
+            }));
+        self.wash(row, id, selected, cx)
+    }
+    /// A quiet push button (`field` ground); `primary` is the window's one
+    /// accent action.
+    fn button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        symbol: Option<&str>,
+        primary: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let ink = if primary { c.selected_text } else { c.text };
+        // A pop-up's chevron trails its title; an action's symbol leads.
+        let trailing = symbol.is_some_and(|s| s.starts_with("chevron"));
+        let glyph = symbol.map(|s| {
+            pm_shell::symbol::symbol(
+                s,
+                m.symbol_inline,
+                pm_shell::symbol::Weight::Medium,
+                if trailing { c.muted } else { ink },
+                window,
+            )
+        });
+        let (lead, trail) = if trailing {
+            (None, glyph)
+        } else {
+            (glyph, None)
+        };
+        let d = div()
+            .id(id)
+            .debug_selector(|| id.into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(m.border * 4.))
+            .h(px(m.control))
+            .px(px(m.inset))
+            .rounded(px(m.control_radius))
+            .bg(rgb(if primary { c.accent } else { c.field }))
+            .text_color(rgb(ink))
             .font_weight(FontWeight(t.typography.medium_weight))
+            .role(Role::Button)
+            .aria_label(label)
+            .children(lead)
+            .child(label)
+            .children(trail);
+        self.wash(d, id, false, cx)
+    }
+    /// One icon segment of the grid/list toggle.
+    fn segment(
+        &self,
+        layout: Layout,
+        symbol: &str,
+        label: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let on = self.layout == layout;
+        let d = div()
+            .id(label)
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(m.control))
+            .rounded(px(m.control_radius))
+            .role(Role::Button)
+            .aria_label(label)
+            .aria_selected(on)
+            .child(pm_shell::symbol::symbol(
+                symbol,
+                m.symbol_inline,
+                pm_shell::symbol::Weight::Regular,
+                if on { c.text } else { c.muted },
+                window,
+            ))
+            .on_click(cx.listener(move |v, _, _, cx| v.set_layout(layout, cx)));
+        self.wash(d, label, on, cx)
+    }
+    /// Click selects; double-click (or Return) opens, ⌥ in a new window;
+    /// right-click selects and shows the row's menu.
+    fn interactive(&self, d: Stateful<Div>, id: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        d.on_click({
+            let id = id.to_owned();
+            cx.listener(move |v, event: &ClickEvent, window, cx| {
+                window.focus(&v.focus, cx);
+                let _ = v.controller.select(&id);
+                if event.click_count() >= 2 {
+                    let _ = v.controller.double_click(&id, event.modifiers().alt);
+                }
+                v.pump(cx);
+            })
+        })
+        .on_mouse_down(MouseButton::Right, {
+            let id = id.to_owned();
+            cx.listener(move |v, _, window, cx| {
+                let _ = v.controller.select(&id);
+                v.row_menu(id.clone(), window, cx);
+            })
+        })
+    }
+    /// v1's tag beside the name: Active (this window) or Open (elsewhere).
+    fn tag(&self, row: &Row) -> Option<&'static str> {
+        if row.trashed {
+            None
+        } else if self.active.as_deref() == Some(row.id.as_str()) {
+            Some("Active")
+        } else if row.open {
+            Some("Open")
+        } else {
+            None
+        }
+    }
+    fn card(&self, row: &Row, width: f32, now: i64, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = &self.tokens;
+        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+        let selected = self.controller.selected.as_ref() == Some(&row.id);
+        let facts = row.facts(now);
+        let tag = self.tag(row);
+        let k = key(&format!("card-{}", row.id));
+        let wash = self.motion.hovers.amount(k);
+        let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+        let dims = row.dimensions().map(|(w, h)| format!("{w}×{h}"));
+        // No image: the frame shows the canvas size instead of a blank slab.
+        let thumb = div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(width))
+            .h(px(width * 9. / 16.))
+            .rounded(px(m.control_radius))
+            .bg(rgb(c.field))
+            .border(px(if selected { m.border * 2. } else { m.border }))
+            .border_color(rgb(if selected { c.secondary } else { c.hairline }))
+            .text_size(px(ty.label))
+            .text_color(rgb(c.muted))
+            .children(dims)
             .when(alpha > 0, |d| {
                 d.child(
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded(px(t.metrics.control_radius))
-                        .bg(rgba(0xffffff00 | alpha)),
+                        .rounded(px(m.control_radius))
+                        .bg(rgba(c.text << 8 | alpha)),
                 )
+            });
+        let card = div()
+            .id(SharedString::from(format!("project-{}", row.id)))
+            .debug_selector(|| format!("project-{}", row.id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(width))
+            .gap(px(m.gap))
+            .role(Role::ListItem)
+            .aria_selected(selected)
+            .aria_label(match tag {
+                Some(tag) => format!("{}, {tag}, {facts}", row.name),
+                None => format!("{}, {facts}", row.name),
             })
-            .role(Role::Button)
-            .aria_label(label)
-            .child(label)
+            .child(thumb)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px(px(m.border * 2.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(m.gap))
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .font_weight(FontWeight(ty.medium_weight))
+                                    .child(row.name.clone()),
+                            )
+                            .children(tag.map(|tag| {
+                                div()
+                                    .flex_none()
+                                    .text_size(px(ty.label))
+                                    .text_color(rgb(c.muted))
+                                    .child(tag)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(ty.label))
+                            .text_color(rgb(c.muted))
+                            .child(facts),
+                    ),
+            )
             .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 let tokens = v.tokens.clone();
                 v.motion.hovers.hover(k, *hovered, &tokens);
                 cx.notify();
-            }))
-            .on_click(cx.listener(|v, _, _, cx| v.new_project(cx)))
+            }));
+        self.interactive(card, &row.id, cx)
+    }
+    fn list_row(&self, row: &Row, now: i64, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = &self.tokens;
+        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+        let selected = self.controller.selected.as_ref() == Some(&row.id);
+        let facts = row.facts(now);
+        let tag = self.tag(row);
+        let d = div()
+            .id(SharedString::from(format!("project-{}", row.id)))
+            .debug_selector(|| format!("project-{}", row.id))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(m.inset))
+            .h(px(m.row))
+            .px(px(m.gap))
+            .rounded(px(m.control_radius))
+            .role(Role::ListItem)
+            .aria_selected(selected)
+            .aria_label(match tag {
+                Some(tag) => format!("{}, {tag}, {facts}", row.name),
+                None => format!("{}, {facts}", row.name),
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .items_center()
+                    .gap(px(m.gap))
+                    .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
+                    .children(tag.map(|tag| {
+                        div()
+                            .flex_none()
+                            .text_size(px(ty.label))
+                            .text_color(rgb(c.muted))
+                            .child(tag)
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(ty.label))
+                    .text_color(rgb(c.muted))
+                    .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                    .child(facts),
+            );
+        let d = self.wash(d, &format!("row-{}", row.id), selected, cx);
+        self.interactive(d, &row.id, cx)
     }
 }
 impl Render for ProjectLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
-        if self.ns_window.is_none() {
-            self.ns_window = crate::platform::ns_window(window);
-        }
         let t = self.tokens.clone();
-        let (c, m) = (&t.colors, &t.metrics);
+        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+        if self.search.is_none() && pm_shell::text::available(window) {
+            let tokens = t.clone();
+            let search = cx.new(|cx| {
+                let mut field = pm_shell::text::TextField::new(
+                    pm_shell::text::TextKind::Primary,
+                    "Search projects",
+                    &self.controller.query.text,
+                    tokens,
+                    window,
+                    cx,
+                );
+                field.set_placeholder("Search projects");
+                field
+            });
+            cx.subscribe(&search, |v: &mut Self, _, event, cx| {
+                use pm_shell::text::TextEvent;
+                if let TextEvent::Changed(text)
+                | TextEvent::Committed(text)
+                | TextEvent::Submitted(text) = event
+                {
+                    v.set_text(text.clone(), cx);
+                }
+            })
+            .detach();
+            self.search = Some(search);
+        }
+        let section = self.controller.query.section;
+        let live = self
+            .controller
+            .snapshot
+            .rows
+            .iter()
+            .filter(|r| !r.trashed)
+            .count();
+        let trash = self.controller.snapshot.rows.len() - live;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
         let (ground, ground_alpha) = t.ground();
-        let (line, line_alpha) = t.line();
-        // Source list (language §9): the sidebar sits on the window ground
-        // and starts below the traffic lights; rows are `row` high.
-        let mut sidebar = div()
-            .id("library-sections")
+        // Sidebar (v1): search, Recents and Trash with counts, Store, then
+        // the account at the foot.
+        let account = crate::cloud::fact(cx);
+        let identity = account
+            .get("identity")
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| account.get("signedIn") == Some(&serde_json::Value::Bool(true)))
+            .map(str::to_owned);
+        let sidebar = div()
+            .id("home-sidebar")
             .flex()
             .flex_col()
             .flex_none()
             .gap(px(m.border))
             .w(px(m.settings_sidebar))
             .h_full()
-            .pt(px(m.toolbar))
-            .px(px(m.gap))
+            .p(px(m.gap))
             .bg(pm_shell::view::tint(ground, ground_alpha))
-            .border_r(px(m.border))
-            .border_color(pm_shell::view::tint(line, line_alpha))
-            .role(Role::List)
-            .aria_label("Library sections");
-        let mut heading = "";
-        for (section, label) in [
-            (Section::Recents, "Recents"),
-            (Section::All, "All Projects"),
-            (Section::Deleted, "Recently Deleted"),
-        ] {
-            let selected = self.controller.query.section == section;
-            if selected {
-                heading = label;
-            }
-            sidebar = sidebar.child(
-                self.row(label, selected, cx)
-                    .debug_selector(|| format!("section-{label}"))
-                    .role(Role::ListItem)
-                    .aria_label(label)
-                    .child(label)
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_section(section, cx))),
-            );
-        }
-        let mut list = div()
-            .id("library-list")
-            .flex_1()
+            .role(Role::Group)
+            .aria_label("Home")
+            .children(self.search.clone().map(|f| div().mb(px(m.gap)).child(f)))
+            .child(
+                self.nav_row(
+                    "home-recents",
+                    ("clock", "Recents".into()),
+                    Some(live.min(12)),
+                    section != Section::Deleted,
+                    window,
+                    cx,
+                )
+                .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Recents, cx))),
+            )
+            .child(
+                self.nav_row(
+                    "home-trash",
+                    ("trash", "Trash".into()),
+                    Some(trash),
+                    section == Section::Deleted,
+                    window,
+                    cx,
+                )
+                .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Deleted, cx))),
+            )
+            .child(div().h(px(m.gap)))
+            .child(
+                self.nav_row(
+                    "home-store",
+                    ("basket", "Store".into()),
+                    None,
+                    false,
+                    window,
+                    cx,
+                )
+                .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
+            )
+            .child(div().flex_1())
+            .child(match identity {
+                Some(name) => self
+                    .nav_row(
+                        "home-account",
+                        ("person.crop.circle", name),
+                        None,
+                        false,
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|v, _, window, cx| v.account_menu(window, cx))),
+                None => self
+                    .nav_row(
+                        "home-account",
+                        ("person.crop.circle", "Sign in".into()),
+                        None,
+                        false,
+                        window,
+                        cx,
+                    )
+                    .on_click(
+                        cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("cloudSignIn"), cx)),
+                    ),
+            });
+        // Header (v1): section and count, grid/list, sort, Open…, New Project.
+        let shown = self.controller.rows.len();
+        let count = format!(
+            "{shown} {}",
+            if shown == 1 { "project" } else { "projects" }
+        );
+        let sort = self.controller.query.sort;
+        let opening = self
+            .controller
+            .opening()
+            .map(|name| format!("Opening “{name}”…"))
+            .or_else(|| self.notice.clone());
+        let header = div()
             .flex()
-            .flex_col()
-            .gap(px(m.border))
-            .overflow_y_scroll()
-            .px(px(m.gap))
-            .pb(px(m.gap))
-            .role(Role::List)
-            .aria_label(heading);
-        if !self.controller.query.text.is_empty() {
-            list = list.child(
+            .flex_none()
+            .items_center()
+            .gap(px(m.gap))
+            .h(px(m.toolbar))
+            .px(px(m.inset + m.gap))
+            .child(
                 div()
-                    .debug_selector(|| "library-search".into())
-                    .p(px(m.gap))
-                    .text_color(rgb(c.secondary))
-                    .child(self.controller.query.text.clone()),
-            );
-        }
-        let mut empty = None;
-        match self.controller.content() {
-            Content::Empty(state) => empty = Some(state),
-            Content::Unavailable { message, .. } => {
-                list = list.child(
-                    div()
-                        .p(px(m.inset))
-                        .text_color(rgb(c.secondary))
-                        .child(message),
-                );
-            }
-            _ => {}
-        }
-        for row in &self.controller.rows {
-            let id = row.id.clone();
-            let selected = self.controller.selected.as_ref() == Some(&row.id);
-            let facts = row.facts("").unwrap_or_default();
-            list = list.child(
-                self.row(&format!("project-{}", row.id), selected, cx)
-                    .debug_selector(|| format!("project-{id}", id = id.clone()))
-                    .justify_between()
-                    .gap(px(m.inset))
-                    .text_color(rgb(c.text))
-                    .role(Role::ListItem)
-                    .aria_label(format!("{}, {facts}", row.name))
-                    .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
+                    .id("home-heading")
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .items_baseline()
+                    .gap(px(m.gap))
+                    .role(Role::Heading)
+                    .aria_label(format!("{}, {count}", section.title()))
                     .child(
                         div()
-                            .flex_none()
-                            .text_size(px(t.typography.label))
-                            .text_color(rgb(c.muted))
-                            .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
-                            .child(facts),
+                            .text_size(px(ty.heading))
+                            .font_weight(FontWeight(ty.semibold_weight))
+                            .child(section.title()),
                     )
-                    .on_click({
-                        let id = id.clone();
-                        cx.listener(move |v, event: &ClickEvent, _, cx| {
-                            let _ = v.controller.select(&id);
-                            if event.click_count() >= 2 {
-                                // ⌥-double-click is Open in New Window.
-                                let option = event.modifiers().alt;
-                                let _ = v.controller.double_click(&id, option);
-                            }
-                            v.pump(cx);
-                        })
-                    })
-                    .on_mouse_down(MouseButton::Right, {
-                        let id = id.clone();
-                        cx.listener(move |v, _, window, cx| {
-                            let _ = v.controller.select(&id);
-                            v.row_menu(id.clone(), window, cx);
-                        })
-                    }),
+                    .child(
+                        div()
+                            .text_size(px(ty.label))
+                            .text_color(rgb(c.muted))
+                            .child(count),
+                    )
+                    // A real project can take seconds to read: say so here
+                    // until it shows in the window.
+                    .children(opening.map(|name| {
+                        div()
+                            .id("home-status")
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(ty.label))
+                            .text_color(rgb(c.secondary))
+                            .role(Role::Status)
+                            .aria_label(name.clone())
+                            .child(name)
+                    })),
+            )
+            .child(
+                div()
+                    .id("home-layout")
+                    .flex()
+                    .flex_none()
+                    .gap(px(m.border * 2.))
+                    .role(Role::Group)
+                    .aria_label("Project layout")
+                    .child(self.segment(Layout::Grid, "square.grid.2x2", "Grid view", window, cx))
+                    .child(self.segment(Layout::List, "list.bullet", "List view", window, cx)),
+            )
+            .child(
+                self.button(
+                    "home-sort",
+                    sort.label(),
+                    Some("chevron.down"),
+                    false,
+                    window,
+                    cx,
+                )
+                .aria_label(format!("Sort projects: {}", sort.label()))
+                .on_click(cx.listener(|v, _, window, cx| v.sort_menu(window, cx))),
+            )
+            .child(
+                self.button("home-open", "Open…", None, false, window, cx)
+                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("open"), cx))),
+            )
+            .child(
+                self.button("home-new", "New Project", Some("plus"), true, window, cx)
+                    .on_click(
+                        cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("newProject"), cx)),
+                    ),
             );
-        }
-        // An empty section says so in the middle of the content, with its
-        // one action (New Project) as the prominent button.
-        let empty = empty.map(|state| {
-            div()
-                .id("library-empty")
+        // Body: cards or rows; an empty section says so with v1's copy.
+        let width = f32::from(window.viewport_size().width)
+            - m.settings_sidebar
+            - m.gap * 2.
+            - (m.inset + m.gap) * 2.;
+        let card = m.thumbnail_min * 2.;
+        self.columns = (((width + m.inset) / (card + m.inset)).floor() as usize).max(1);
+        let body: AnyElement = match self.controller.content() {
+            Content::Loading => div().flex_1().into_any_element(),
+            Content::Unavailable { message, action } => div()
                 .flex_1()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
                 .gap(px(m.gap))
-                .pb(px(m.toolbar))
+                .text_color(rgb(c.secondary))
+                .child(message)
+                .child(
+                    self.button("home-retry", action, None, false, window, cx)
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            let _ = v.controller.refresh();
+                            v.pump(cx);
+                        })),
+                )
+                .into_any_element(),
+            Content::Empty(state) => div()
+                .id("home-empty")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(m.toolbar * 1.5))
+                .gap(px(m.gap))
                 .role(Role::Group)
                 .aria_label(state.title)
                 .child(pm_shell::symbol::symbol(
                     state.symbol,
-                    m.symbol_toolbar * 2.,
+                    m.symbol_toolbar,
                     pm_shell::symbol::Weight::Regular,
                     c.muted,
                     window,
                 ))
                 .child(
                     div()
-                        .text_size(px(t.typography.heading))
-                        .font_weight(FontWeight(t.typography.semibold_weight))
+                        .font_weight(FontWeight(ty.semibold_weight))
                         .child(state.title),
                 )
                 .child(
                     div()
-                        .text_size(px(t.typography.reading))
+                        .max_w(px(m.sheet_width))
+                        .text_center()
+                        .text_size(px(ty.reading))
                         .text_color(rgb(c.muted))
                         .child(state.detail.clone()),
                 )
                 .when_some(state.action, |d, action| {
-                    d.child(div().mt(px(m.gap)).child(self.primary_button(action, cx)))
+                    d.child(
+                        self.button("home-create", action, Some("plus"), false, window, cx)
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                (v.sink)(Outbound::Command("newProject"), cx)
+                            })),
+                    )
                 })
-        });
-        let has_rows = !self.controller.rows.is_empty();
-        // The content column is solid: the section name sits in the title
-        // band, level with the traffic lights, New Project trailing.
+                .into_any_element(),
+            Content::Projects => {
+                let rows = self.controller.rows.clone();
+                let list = div()
+                    .id("home-projects")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px(px(m.inset + m.gap))
+                    .pb(px(m.inset))
+                    .role(Role::List)
+                    .aria_label(section.title());
+                match self.layout {
+                    Layout::Grid => list
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(m.inset))
+                                .children(rows.iter().map(|row| self.card(row, card, now, cx))),
+                        )
+                        .into_any_element(),
+                    Layout::List => list
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(m.border))
+                                .children(rows.iter().map(|row| self.list_row(row, now, cx))),
+                        )
+                        .into_any_element(),
+                }
+            }
+        };
+        let (edge, edge_alpha) = t.edge();
         let content = div()
             .flex_1()
             .min_w(px(0.))
-            .h_full()
+            .m(px(m.gap))
+            .ml(px(0.))
             .flex()
             .flex_col()
+            .rounded(px(m.panel_radius))
             .bg(rgb(c.panel))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .h(px(m.toolbar))
-                    .px(px(m.inset + m.gap))
-                    .child(
-                        div()
-                            .id("library-heading")
-                            .text_size(px(t.typography.heading))
-                            .font_weight(FontWeight(t.typography.semibold_weight))
-                            .role(Role::Heading)
-                            .aria_label(heading)
-                            .child(heading),
-                    )
-                    .when(has_rows, |d| {
-                        d.child(self.primary_button("New Project", cx))
-                    }),
-            )
-            .child(match empty {
-                Some(empty) => empty.into_any_element(),
-                None => list.into_any_element(),
-            });
+            .border(px(m.border))
+            .border_color(pm_shell::view::tint(edge, edge_alpha))
+            .overflow_hidden()
+            .child(header)
+            .child(body);
         div()
+            .id("home")
+            .debug_selector(|| "home".into())
             .size_full()
             .flex()
             .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
+            .text_size(px(ty.body))
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))

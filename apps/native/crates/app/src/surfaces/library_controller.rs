@@ -58,8 +58,6 @@ pub struct RenameDraft {
 }
 #[derive(Clone, Debug)]
 pub enum HostEffect {
-    /// Host must maintain one autosaved, standard titled library window.
-    ShowLibrary,
     Rename {
         id: String,
     },
@@ -147,10 +145,6 @@ impl<P: LibraryPort> LibraryController<P> {
             .checked_add(1)
             .expect("library request serial exhausted");
         self.serial
-    }
-    pub fn show(&mut self) -> Result<(), Failure> {
-        self.effects.push_back(HostEffect::ShowLibrary);
-        self.refresh()
     }
     pub fn refresh(&mut self) -> Result<(), Failure> {
         let serial = self.serial();
@@ -364,6 +358,22 @@ impl<P: LibraryPort> LibraryController<P> {
             });
         }
         result
+    }
+    /// A rename, duplicate, trash, restore, delete, create or open is in flight.
+    pub fn busy(&self) -> bool {
+        self.mutation.is_some()
+    }
+    /// The project an Open in flight is reading (Home says so meanwhile).
+    pub fn opening(&self) -> Option<&str> {
+        match &self.mutation.as_ref()?.command {
+            Command::Open(id) => self
+                .snapshot
+                .rows
+                .iter()
+                .find(|r| &r.id == id)
+                .map(|r| r.name.as_str()),
+            _ => None,
+        }
     }
     fn send(&mut self, command: Command) -> Result<(), Failure> {
         if self.mutation.is_some() {

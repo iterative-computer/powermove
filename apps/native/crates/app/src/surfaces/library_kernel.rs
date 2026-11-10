@@ -280,6 +280,11 @@ impl KernelLibrary {
                 .and_then(Value::as_f64)
                 .filter(|n| n.is_finite() && *n >= i64::MIN as f64 && *n < i64::MAX as f64)
                 .map(|n| n as i64),
+            deleted_ms: raw
+                .get("deletedAt")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= i64::MIN as f64 && *n < i64::MAX as f64)
+                .map(|n| n as i64),
             summary: Some(Summary {
                 thumbnail: raw.get("thumb").and_then(Value::as_str).map(str::to_owned),
                 duration_seconds: number(&raw, "dur"),
@@ -324,6 +329,15 @@ impl KernelLibrary {
                 summary.fps = number(&v, "fps").or(summary.fps);
                 summary.duration_seconds = number(&v, "dur").or(summary.duration_seconds);
             }
+        }
+        // A backing file inside the profile (a duplicate's recovery copy) is
+        // the library's own, not a file the person saved: not shown, not revealed.
+        if row
+            .file
+            .as_ref()
+            .is_some_and(|f| f.starts_with(&self.profile))
+        {
+            row.file = None;
         }
         Ok(row)
     }

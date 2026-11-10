@@ -67,14 +67,17 @@ fn open<'a>(
             log.borrow_mut().push(match outbound {
                 Outbound::Opened { name, .. } => format!("opened {name}"),
                 Outbound::FocusProject(id) => format!("focus {id}"),
-                Outbound::Message(text) => text,
+                Outbound::HideHome => "hide home".into(),
+                Outbound::Command(name) => format!("command {name}"),
             })
         })
     };
     let (port, rx) = ProjectLibrary::port(fixture.actor.handle(), fixture.profile.clone()).unwrap();
     let tokens = Tokens::new(Scheme::Light, Accessibility::default());
-    let (view, cx) =
-        cx.add_window_view(move |_, cx| ProjectLibrary::new(port, rx, tokens, sink, None, cx));
+    let kernel = fixture.actor.handle();
+    let (view, cx) = cx.add_window_view(move |_, cx| {
+        ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx)
+    });
     cx.update(|window, cx| {
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
@@ -115,16 +118,55 @@ fn names(view: &Entity<ProjectLibrary>, cx: &mut VisualTestContext) -> Vec<Strin
 }
 
 #[::core::prelude::v1::test]
-fn lists_the_library_and_filters_as_you_type() {
+fn lists_the_library_filters_by_search_and_escape_clears_then_leaves() {
     let fixture = fixture();
     let mut cx = TestAppContext::single();
-    let (view, cx, _) = open(&mut cx, &fixture);
+    let (view, cx, log) = open(&mut cx, &fixture);
     assert_eq!(names(&view, cx).len(), 2);
-    cx.simulate_input("sec");
+    // The search field is AppKit's; what it reports drives the same query.
+    view.update(cx, |v, cx| v.set_text("sec".into(), cx));
     settle(&view, cx, |v| v.controller.rows.len() == 1);
     assert_eq!(names(&view, cx), ["Second Film"]);
     cx.simulate_keystrokes("escape");
     settle(&view, cx, |v| v.controller.rows.len() == 2);
+    assert!(log.borrow().is_empty());
+    // With no search, Escape goes back to the project behind Home (v1).
+    cx.simulate_keystrokes("escape");
+    assert_eq!(*log.borrow(), ["hide home"]);
+}
+#[::core::prelude::v1::test]
+fn header_buttons_run_the_window_commands_and_sort_reorders() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    for (id, command) in [
+        ("home-open", "command open"),
+        ("home-new", "command newProject"),
+        ("home-store", "command store"),
+        ("home-account", "command cloudSignIn"),
+    ] {
+        let bounds = cx.debug_bounds(id).expect("control on screen");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(log.borrow().last().map(String::as_str), Some(command));
+    }
+    let by_name = |v: &ProjectLibrary| {
+        let names: Vec<_> = v.controller.rows.iter().map(|r| r.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        names.len() == 2 && names == sorted
+    };
+    view.update(cx, |v, cx| v.set_sort(Sort::Name, cx));
+    settle(&view, cx, by_name);
+    assert_eq!(names(&view, cx), ["First Film", "Second Film"]);
+    // The choice is v1's `projectsSort`, written through the kernel.
+    let start = Instant::now();
+    while fixture.actor.handle().state().settings.get("projectsSort")
+        != Some(&pm_model::Value::String("name".into()))
+    {
+        assert!(start.elapsed() < Duration::from_secs(10), "never stored");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 #[::core::prelude::v1::test]
 fn a_click_selects_and_return_opens_through_the_kernel() {
@@ -174,9 +216,7 @@ fn sections_switch_and_an_empty_trash_says_so() {
     let fixture = fixture();
     let mut cx = TestAppContext::single();
     let (view, cx, _) = open(&mut cx, &fixture);
-    let bounds = cx
-        .debug_bounds("section-Recently Deleted")
-        .expect("section on screen");
+    let bounds = cx.debug_bounds("home-trash").expect("section on screen");
     cx.simulate_click(bounds.center(), Modifiers::default());
     settle(&view, cx, |v| v.controller.rows.is_empty());
     assert!(view.read_with(cx, |v, _| matches!(

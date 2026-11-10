@@ -613,6 +613,9 @@ impl Controller {
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         let kernel = self.kernel.clone();
         let session = self.session.clone();
+        // A discarded close has already released its session; its project
+        // is still published here until the close finishes.
+        let had_project = session.is_some() || self.published.is_some();
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         cx.spawn(async move |this, cx| {
             let result = async {
@@ -659,6 +662,18 @@ impl Controller {
                     if intent == Intent::Quit {
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
+                    } else if had_project && crate::entry::editors(cx).len() <= 1 {
+                        // v1: closing the last project shows Home; the
+                        // window stays, its session forgets the project.
+                        v.mcp.closing.store(false, Ordering::Release);
+                        v.close_pending = false;
+                        v.closing_note = None;
+                        v.home = false;
+                        v.message = "No project".into();
+                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+                            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
+                        }
+                        cx.notify();
                     } else if let Some(handle) = v.close_window {
                         v.mcp.closing.store(false, Ordering::Release);
                         cx.defer(move |cx| {

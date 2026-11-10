@@ -84,8 +84,7 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
     drain(cx);
 }
 
-/// `<project name>/<context-menu label>`, percent-encoded, on the first
-/// editor with a Project Library.
+/// `<project name>/<context-menu label>`, percent-encoded, on Home.
 #[cfg(debug_assertions)]
 fn review_library_row(rest: &str, cx: &mut App) {
     let decode = |s: &str| {
@@ -97,12 +96,15 @@ fn review_library_row(rest: &str, cx: &mut App) {
     let Some((name, label)) = rest.split_once('/').map(|(n, l)| (decode(n), decode(l))) else {
         return;
     };
-    let editors = cx.default_global::<Entries>().editors.clone();
-    for (editor, _) in editors {
-        if let Some(library) = editor.upgrade().and_then(|e| e.read(cx).library.clone()) {
-            library.update(cx, |v, cx| v.review_row_menu(&name, &label, cx));
-            return;
-        }
+    // The window showing Home, else any window with one.
+    let editors = editors(cx);
+    let target = editors
+        .iter()
+        .find(|e| e.read(cx).home_visible)
+        .or(editors.first())
+        .and_then(|e| e.read(cx).library.clone());
+    if let Some(library) = target {
+        library.update(cx, |v, cx| v.review_row_menu(&name, &label, cx));
     }
 }
 
@@ -208,6 +210,15 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
         .push_back(pending);
     // Not inside the caller's entity update: the factory updates new entities.
     cx.defer(pm_shell::open_editor);
+}
+
+/// A project opened from Home in a window that shows one: a new window,
+/// joined to that window's tabs (v1 opened it as a tab of the window).
+pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
+    cx.default_global::<Entries>()
+        .next_window
+        .push_back(pending);
+    cx.defer(move |cx| pm_shell::open_editor_tab(cx, leader));
 }
 
 fn drain(cx: &mut App) {
