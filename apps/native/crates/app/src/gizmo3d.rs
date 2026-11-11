@@ -87,6 +87,10 @@ pub struct State {
     pub free: Option<View>,
     /// Handles follow the object's own axes (UI state `studioAxes`).
     pub object_axes: bool,
+    /// The Light panel's kind to add and whether Add is armed (UI state
+    /// `studioLightKind`, `studioLightAdd`).
+    pub light_kind: String,
+    pub light_add: bool,
     /// The handle under the pointer, drawn in text colour (§5).
     pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
@@ -784,10 +788,23 @@ impl GizmoSurface {
         let hit = At { point, normal };
         let viewer = eye.pose.position;
         let time = self.host.time(cx);
+        // Add armed adds even with a light selected; otherwise the selected
+        // light is aimed.
         let light = scene
             .items
             .iter()
-            .find(|i| i.role == Role::Light && self.studio.selected.contains(&i.id) && !i.locked);
+            .find(|i| i.role == Role::Light && self.studio.selected.contains(&i.id) && !i.locked)
+            .filter(|_| !self.studio.light_add);
+        let kind = match self.studio.light_kind.as_str() {
+            k @ ("spot" | "point" | "sun") => k,
+            _ => "area",
+        };
+        let name = match kind {
+            "spot" => "Spotlight",
+            "point" => "Bulb",
+            "sun" => "Sun",
+            _ => "Softbox",
+        };
         let comp = None;
         // A mirror placement can land under the ground (a side face seen from
         // above); a light there lights nothing, so it stays above the floor.
@@ -821,12 +838,26 @@ impl GizmoSurface {
             let p = place(p);
             let id = pm_kernel::new_id("L");
             let size = ((distance * 0.6) * 10.).round() / 10.;
+            let mut light = serde_json::json!({"type":kind,"p":{
+                "x":p[0],"y":p[1],"z":p[2],
+                "targetX":(hit.point[0]*100.).round()/100.,"targetY":(hit.point[1]*100.).round()/100.,"targetZ":(hit.point[2]*100.).round()/100.}});
+            if kind == "area" {
+                light["p"]["width"] = serde_json::json!(size);
+                light["p"]["height"] = serde_json::json!(((size * 0.62) * 10.).round() / 10.);
+                light["p"]["intensity"] = serde_json::json!(6);
+            }
+            if self.studio.light_add {
+                // Add is one click.
+                self.studio_ui("studioLightAdd", "off", cx);
+            }
             (
-                "Add Softbox",
-                serde_json::json!({"operation":"add_light","id":id,"name":"Softbox","light":{"type":"area","p":{
-                    "x":p[0],"y":p[1],"z":p[2],
-                    "targetX":(hit.point[0]*100.).round()/100.,"targetY":(hit.point[1]*100.).round()/100.,"targetZ":(hit.point[2]*100.).round()/100.,
-                    "width":size,"height":((size*0.62)*10.).round()/10.,"intensity":6}}}),
+                match kind {
+                    "spot" => "Add Spotlight",
+                    "point" => "Add Bulb",
+                    "sun" => "Add Sun",
+                    _ => "Add Softbox",
+                },
+                serde_json::json!({"operation":"add_light","id":id,"name":name,"light":light}),
                 Some(id),
             )
         };

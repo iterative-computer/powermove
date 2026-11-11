@@ -613,14 +613,17 @@ impl GizmoSurface {
                         ui("studioTool"),
                         ui("studioLook"),
                         ui("studioAxes"),
+                        (ui("studioLightKind"), ui("studioLightAdd")),
                     ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look, axes) =
-                        read.unwrap_or((vec![], None, vec![], None, None, None));
+                    let (poses, scene, selected, tool, look, axes, (kind, add)) =
+                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None)));
                     s.studio.object_axes = axes.as_deref() == Some("object");
+                    s.studio.light_kind = kind.unwrap_or_default();
+                    s.studio.light_add = add.as_deref() == Some("on");
                     s.poses = Arc::new(poses);
                     let had = s.studio.scene.is_some();
                     let free_look = look.as_deref() == Some("free");

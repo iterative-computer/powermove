@@ -33,6 +33,7 @@ impl Session {
         let mut normalized = request.clone();
         match request.get("element").and_then(Value::as_str) {
             Some("viewer.quality") | Some("viewer.studio.menu") | Some("viewer.studio.views") => {}
+            Some(s) if s.starts_with("viewer.studio.light") => {}
             Some("viewer.zoom") => {
                 let (element, argument) = match request.get("argument") {
                     Some(Value::String(s)) if s == "fit" => ("viewer.fit", Value::Null),

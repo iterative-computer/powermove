@@ -44,6 +44,25 @@ pub mod properties {
     ) -> Result<(String, Vec<Command>)> {
         view::commands(p, time, id, arg)
     }
+    /// The Light panel (3d-studio.md §6) for the selection: the light's name,
+    /// kind and rows, or the hint when no light is selected or Add is armed.
+    pub fn light_panel(p: &Published, time: f64, kind: &str, add: bool) -> Result<Value> {
+        let kind = match kind {
+            "spot" => "spot",
+            "point" => "point",
+            "sun" => "sun",
+            _ => "area",
+        };
+        crate::light::projection(
+            p,
+            time,
+            &crate::light::Settings {
+                aim: "reflect",
+                add,
+                kind,
+            },
+        )
+    }
     /// `Screen`'s options: None, then the project's compositions, those that
     /// would play inside themselves disabled.
     pub fn screens(p: &Published, layer: &str) -> Result<Vec<Value>> {

@@ -319,6 +319,21 @@ impl ViewModel {
                     .ok_or(Error::Invalid("studio menu"))?;
                 studio_action(group, value)?
             }
+            // Light panel sliders: `viewer.studio.light.brightness` and so on.
+            element if element.starts_with("viewer.studio.light.") => {
+                let key = &element["viewer.studio.light.".len()..];
+                if !matches!(key, "brightness" | "size" | "distance" | "spread") {
+                    return Err(Error::Invalid("light adjustment"));
+                }
+                let n = argument
+                    .as_f64()
+                    .filter(|n| n.is_finite())
+                    .ok_or(Error::Invalid("light value"))?;
+                Action::Host(HostAction::Command {
+                    id: "studio.light".into(),
+                    args: vec![Value::from(key), Value::from(n)],
+                })
+            }
             element if element.starts_with("viewer.studio.") => studio_action(
                 &element["viewer.studio.".len()..],
                 argument.as_str().ok_or(Error::Invalid("studio argument"))?,
@@ -785,6 +800,11 @@ fn studio_action(group: &str, value: &str) -> Result<Action, Error> {
         "look" => Action::StudioUi("studioLook", one(value, &["camera", "free"])?),
         "axes" => Action::StudioUi("studioAxes", one(value, &["scene", "object"])?),
         "views" => Action::StudioUi("studioViews", one(value, &["1", "2", "4"])?),
+        "lightKind" => Action::StudioUi(
+            "studioLightKind",
+            one(value, &["area", "spot", "point", "sun"])?,
+        ),
+        "lightAdd" => Action::StudioUi("studioLightAdd", one(value, &["on", "off"])?),
         "frame" => Action::Host(HostAction::Command {
             id: "studio.frame".into(),
             args: vec![],

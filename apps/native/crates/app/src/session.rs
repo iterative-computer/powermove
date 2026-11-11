@@ -1851,6 +1851,34 @@ impl Controller {
             return true;
         }
         match cmd.name.as_str() {
+            // The Light panel's sliders: one Undo per pull ("Light Brightness").
+            "studio.light" => {
+                let Some(p) = self.published.clone() else {
+                    return true;
+                };
+                let key = cmd.args.first().and_then(|a| a.as_str()).unwrap_or("");
+                let value = cmd.args.get(1).cloned().unwrap_or_default();
+                match pm_panel_studio3d::properties::command(
+                    &p,
+                    self.time(),
+                    &format!("light.adjust.{key}"),
+                    value,
+                ) {
+                    Ok((label, commands)) => self.run_layer_plan(
+                        crate::layer_commands::Plan {
+                            label,
+                            commands,
+                            select: None,
+                        },
+                        cx,
+                    ),
+                    Err(e) => {
+                        self.message = e.to_string();
+                        cx.notify();
+                    }
+                }
+                return true;
+            }
             // View ▸ 3D: the viewer's 3D group as menu items.
             "studio.view" => {
                 let arg = |i: usize| {

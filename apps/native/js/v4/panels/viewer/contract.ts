@@ -25,6 +25,24 @@ export interface ViewerModel {
     views?: "1" | "2" | "4";
     /** The viewer is narrower than the 3D group: show one pull-down. */
     compact?: boolean;
+    /** The Light tool's panel (3d-studio.md §6), while Light is the tool. */
+    light?: {
+      settings: { aim: string; add: boolean; kind: string };
+      hint?: string;
+      name?: string;
+      kind?: string;
+      locked?: boolean;
+      rows: {
+        id: string;
+        label: string;
+        value: number;
+        min: number;
+        max: number;
+        log: boolean;
+        tooltip: string;
+      }[];
+    };
+    lightKind?: string;
   } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */

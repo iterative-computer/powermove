@@ -438,6 +438,24 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
+        // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
+        let mut model = model;
+        if model["studio"]["tool"] == "light" {
+            let ui = |k: &str| {
+                p.ui_state
+                    .viewer
+                    .get(k)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let kind = ui("studioLightKind").unwrap_or_else(|| "area".into());
+            let add = ui("studioLightAdd").as_deref() == Some("on");
+            let time = self.native.facts["time"].as_f64().unwrap_or(0.);
+            if let Ok(light) = pm_panel_studio3d::properties::light_panel(&p, time, &kind, add) {
+                model["studio"]["light"] = light;
+                model["studio"]["lightKind"] = json!(kind);
+            }
+        }
         Ok(
             json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
         )
