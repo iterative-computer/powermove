@@ -164,7 +164,8 @@ impl CpuRasterizer {
         let bounds = clipmask.as_ref().unwrap_or(&shape);
         for y in bounds.y..bounds.y + bounds.h {
             for x in bounds.x..bounds.x + bounds.w {
-                let s = shape.get(x, y);
+                let s =
+                    pm_text::render::smoothing::apply(d.curve, f64::from(shape.get(x, y))) as f32;
                 let c = clipmask.as_ref().map_or(s, |m| m.get(x, y));
                 if c == 0. {
                     continue;

@@ -1587,18 +1587,18 @@ const QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 /// GPU time one submission may take within [`QUIET`] of viewer activity
 /// (half a 60 Hz frame): a scrub or play that resumes waits behind at most
 /// this, or one indivisible unit (Metal cannot preempt a submission).
-const BAND_BUDGET_US: f64 = 8_000.;
+pub(crate) const BAND_BUDGET_US: f64 = 8_000.;
 
 /// What a job's submissions measured: per unit, and per whole frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct Costs {
+pub(crate) struct Costs {
     /// Units in a whole frame (the most a frame's first admission asked).
-    frame_units: u32,
-    whole_us: Option<f64>,
+    pub(crate) frame_units: u32,
+    pub(crate) whole_us: Option<f64>,
     unit_us: Option<f64>,
     /// Bands cost about a whole frame (a precomp or a multi-pass effect
     /// renders whole for any region): splitting buys no latency.
-    indivisible: bool,
+    pub(crate) indivisible: bool,
     /// One unit already costs the budget: [`SCALING_UNITS`] units were
     /// asked once, to see whether cost grows with the band at all.
     tested: bool,
@@ -1607,7 +1607,7 @@ struct Costs {
 /// band means bands cost a frame each.
 const SCALING_UNITS: u32 = 4;
 impl Costs {
-    fn record(&mut self, units: u32, us: f64) {
+    pub(crate) fn record(&mut self, units: u32, us: f64) {
         if units == 0 || !us.is_finite() {
             return;
         }
@@ -1625,7 +1625,7 @@ impl Costs {
     /// frame when bands cost a whole frame anyway. Where one unit already
     /// costs the budget and no whole frame was measured (background work
     /// never gets one), a few units are asked once to find out.
-    fn bounded(&mut self, remaining: u32) -> u32 {
+    pub(crate) fn bounded(&mut self, remaining: u32) -> u32 {
         if self.indivisible {
             return remaining;
         }

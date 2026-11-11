@@ -395,6 +395,7 @@ mod tests {
             outlines: &mut outlines,
             bitmaps: &mut bitmaps,
             unsupported: Vec::new(),
+            smoothing: Default::default(),
         };
         let glyphs = [crate::compat::PlacedGlyph {
             id: glyph,

@@ -38,6 +38,10 @@ fn main() {
         |r| r.generation(),
     ));
     let mut renderer = Renderer::headless().unwrap();
+    // The exact rasterizer is what this gate holds to its reference.
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Exact);
     renderer.set_text_fonts(Some(Box::new(pm_render::text::served::ServedFonts::new(
         server,
         Arc::new(pm_render::text::served::NoSeeds),
@@ -426,6 +430,10 @@ fn level1_projection_regression() {
     const W: usize = 640;
     const H: usize = 360;
     let mut renderer = Renderer::headless().unwrap();
+    // The exact rasterizer is what this gate holds to its reference.
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Exact);
     renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
         pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
         None,
@@ -1225,6 +1233,7 @@ fn compare_exact(
         outlines: &mut outlines,
         bitmaps: &mut bitmaps,
         unsupported: Vec::new(),
+        smoothing: Default::default(),
     };
     let base = Affine::translate((frame.offset.x + 100.0, frame.offset.y + 80.0));
     let mut visible = false;

@@ -103,8 +103,23 @@ scratch, one texture per chunk.
 
 **TEXT-RASTER-1:** exact outline coverage replaces the previous CoreText
 smoothing fit, CoreGraphics masks, Skia preblend tables and distance-field
-band. Removing that raster darkening is an explicit renderer decision;
-it does not alter font selection, layout or synthetic-bold amount.
+band. It does not alter font selection, layout or synthetic-bold amount.
+
+**TEXT-SMOOTH-1 (2026-11-11, the owner's bar: text looks as it always
+has):** frames draw text with today's weight by default, on top of exact
+coverage (`pm_text::render::smoothing`, `TextWeight::Smoothed`): level 1
+text and captions as Canvas2D drew them on macOS, level 2 as CoreText with
+font smoothing. Glyph fills grow by a per-size outline dilation (round
+joins) with the ink moved up by its vertical part, coverage goes through
+`1 − (1 − c)^e` (one exponent for white paint, one for black, mixed by the
+paint's luma) in the paint pass, and Canvas2D places axis-aligned glyphs on
+Skia's quarter-pixel grid. Stroke passes, bitmap and COLR glyphs are not
+smoothed. `TextWeight::Exact` keeps plain coverage; the raster gates below
+judge that mode against their independent reference, and `text_weight`
+judges the default against today's measured stems
+(`tools/visual-parity/text-weight-probe.mjs`): mean 0.096 px from today
+where exact coverage is 0.479 px. Extensions' canvas text (`pm-recorder`)
+draws with the same Canvas2D weight under the same gate.
 
 ## Paint and blend domain
 

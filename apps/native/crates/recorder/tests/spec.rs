@@ -829,6 +829,8 @@ fn pm_text_width_and_metrics_come_from_fixture_font() {
 #[test]
 fn fill_text_uses_canvas_baseline_not_editor_text_layout() {
     let mut c = canvas(8, 10);
+    // Anchoring at plain coverage (today's weight: `text_weight`).
+    c.set_text_smoothing(Smoothing::Exact);
     c.set_font("10px 'Recorder Test'").unwrap();
     let mut engine = TextEngine::new(TestFonts::new());
     c.fill_text(&[65], 0., 7., None, &mut engine).unwrap();
@@ -854,6 +856,8 @@ fn text_align_and_direction_change_anchor_but_not_measurement_width() {
 #[test]
 fn text_center_top_baseline_and_max_width_condense_glyphs() {
     let mut c = canvas(12, 10);
+    // Anchoring at plain coverage (today's weight: `text_weight`).
+    c.set_text_smoothing(Smoothing::Exact);
     c.set_font("10px serif").unwrap();
     c.set_text_align(TextAlign::Center);
     c.set_text_baseline(TextBaseline::Top);
@@ -871,7 +875,7 @@ fn text_normalizes_ascii_whitespace_and_does_not_wrap() {
     let a = engine.layout(&font, &[65, 10, 65], Direction::Ltr).unwrap();
     let b = engine.layout(&font, &[65, 32, 65], Direction::Ltr).unwrap();
     near(a.width, 15.);
-    assert_eq!(a.path, b.path);
+    assert_eq!(a.path(|o| o), b.path(|o| o));
 }
 #[test]
 fn empty_text_has_zero_ink_and_advance() {

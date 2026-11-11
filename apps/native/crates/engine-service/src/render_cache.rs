@@ -2061,6 +2061,38 @@ mod tests {
         read_eventually(&disk, scene, time).expect("rendered frame")
     }
 
+    /// A stored frame is a delivery: an effect whose extension isn't
+    /// installed refuses the fill and nothing is stored (the viewer draws it
+    /// bypassed live; a stored frame without it would play back silently).
+    #[test]
+    fn a_fill_refuses_an_effect_whose_extension_is_not_installed() {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] = serde_json::json!([
+            {"id":"e1","type":"acme.glow","on":true,"p":{}}
+        ]);
+        let scene = scene_from(&project.to_string());
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pm-engine-service");
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
+            .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert!(bars.error.is_some(), "{bars:?}");
+        let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        assert!(disk.read(&scene, time).is_none(), "nothing stored");
+    }
+
     /// Frame 30 filled through the real child, as stored (RGBA32F values).
     fn filled_values(scene: &Scene) -> Vec<f32> {
         let dir = tempfile::tempdir().unwrap();

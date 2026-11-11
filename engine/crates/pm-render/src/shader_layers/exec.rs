@@ -502,8 +502,11 @@ impl crate::exec::Exec<'_> {
                 Ok(_) => Ok(()),
                 Err(f) => {
                     // Later plans route it to the runner (or, without one,
-                    // to `Feature::ShaderFallback`).
-                    super::translate::mark_failed(*key, f.clone());
+                    // to `Feature::ShaderFallback`); a busy, crashed or
+                    // timed-out compiler only fails this attempt.
+                    if !f.stage.retryable() {
+                        super::translate::mark_failed(*key, f.clone());
+                    }
                     Err((f, code.to_string(), "shader layer".to_owned()))
                 }
             },

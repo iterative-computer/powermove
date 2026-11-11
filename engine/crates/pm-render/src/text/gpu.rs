@@ -1551,6 +1551,8 @@ impl TextGpu {
             match &item.content {
                 ItemContent::Coverage { .. } => {
                     let a = item.color[3] * item.opacity;
+                    // The smoothing's coverage curve (`params.y`, `inv1.zw`).
+                    let [weight, light, dark] = item.curve;
                     let rgb = pm_color::linear::color_to_working(
                         [item.color[0], item.color[1], item.color[2]],
                         working,
@@ -1580,14 +1582,19 @@ impl TextGpu {
                                     (px - whole[0]) as f32,
                                     (py - whole[1]) as f32,
                                 ],
-                                [3.0, 0.0, tw, th],
+                                [3.0, weight, tw, th],
                                 [
                                     (source.meta.base + source.meta.table) as f32,
                                     (source.meta.base + source.meta.list) as f32,
                                     source.meta.row_start as f32,
                                     source.meta.width as f32,
                                 ],
-                                [source.meta.rows as f32, source.meta.base as f32, 0.0, 0.0],
+                                [
+                                    source.meta.rows as f32,
+                                    source.meta.base as f32,
+                                    light,
+                                    dark,
+                                ],
                             )
                         } else {
                             (
@@ -1599,9 +1606,9 @@ impl TextGpu {
                                     0.0,
                                     0.0,
                                 ],
-                                [0.0, 0.0, tw, th],
+                                [0.0, weight, tw, th],
                                 [0.0; 4],
-                                [0.0; 4],
+                                [0.0, 0.0, light, dark],
                             )
                         };
                         out.push(Draw {

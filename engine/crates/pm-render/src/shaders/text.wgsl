@@ -62,16 +62,31 @@ fn direct_area(pixel: vec2<f32>) -> f32 {
     return clamp(abs(area), 0.0, 1.0);
 }
 
+// The smoothing's coverage curve (TEXT-SMOOTH-1, pm-text `smoothing`):
+// `1 - (1 - c)^e` for white and for black paint, mixed by `params.y`;
+// exponents of 1 leave coverage exact.
+fn weighted(c: f32) -> f32 {
+    let light = it.inv1.z;
+    let dark = it.inv1.w;
+    if (light == 1.0 && dark == 1.0) {
+        return c;
+    }
+    let rest = 1.0 - c;
+    let l = 1.0 - pow(rest, light);
+    let d = 1.0 - pow(rest, dark);
+    return d + (l - d) * it.params.y;
+}
+
 fn paint_outline(pos: vec4<f32>) -> vec4<f32> {
     let kind = it.params.x;
     if (kind < 0.5) {
         let t = vec2<i32>(floor(pos.xy) + it.map.xy);
         let coverage = textureLoad(src, t, 0);
         let c = clamp(coverage.r, 0.0, 1.0);
-        return it.color * c;
+        return it.color * weighted(c);
     }
     if (kind > 2.5) {
-        return it.color * direct_area(floor(pos.xy));
+        return it.color * weighted(direct_area(floor(pos.xy)));
     }
     let t = vec2<i32>(floor(pos.xy) + it.map.xy);
     return textureLoad(src, t, 0);

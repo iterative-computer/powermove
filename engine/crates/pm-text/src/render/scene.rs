@@ -995,6 +995,8 @@ pub struct Item {
     pub blur: f64,
     /// Conservative pre-blur device-space ink box.
     pub bounds: Rect,
+    /// The paint pass's coverage curve (`smoothing::Weight::curve`).
+    pub curve: [f32; 3],
 }
 
 impl Item {
@@ -1055,6 +1057,8 @@ pub struct Painter<'a> {
     pub outlines: &'a mut Outlines,
     pub bitmaps: &'a mut Bitmaps,
     pub unsupported: Vec<String>,
+    /// How heavy glyph fills draw (TEXT-SMOOTH-1).
+    pub smoothing: super::smoothing::Smoothing,
 }
 
 fn skew(run: &Run<'_>) -> f64 {
@@ -1102,6 +1106,14 @@ impl Painter<'_> {
         let residual = device_residual(m, scale);
         for run in runs {
             let device_size = f64::from(run.size) * scale;
+            // Fills take the smoothing's weight; strokes are plain paths.
+            let weight = if stroke.is_none() {
+                self.smoothing.at(device_size)
+            } else {
+                super::smoothing::Weight::EXACT
+            };
+            let smooth = (weight.expand_x / scale, weight.expand_y / scale);
+            let curve = weight.curve(color);
             let style = GlyphStyle {
                 size: run.size,
                 synthetic_bold: if run.synthetic_bold {
@@ -1110,8 +1122,9 @@ impl Painter<'_> {
                 } else {
                     (0.0, 0.0)
                 },
+                smooth,
                 skew: skew(run),
-                expand_tolerance: if run.synthetic_bold {
+                expand_tolerance: if run.synthetic_bold || !weight.is_exact() {
                     local_coverage_tolerance(
                         m * Affine::skew(skew(run), 0.0),
                         device_coverage_tolerance(device_size),
@@ -1120,6 +1133,9 @@ impl Painter<'_> {
                     0.0
                 },
             };
+            // Smoothing grows glyphs upward: the ink moves up by its
+            // vertical expansion, turning with the glyph.
+            let lift = weight.dy / scale;
             for glyph in run.glyphs {
                 let glyph_origin = m * kurbo::Point::new(origin.0 + glyph.x, origin.1 + glyph.y);
                 let bitmap_size = run.bitmap_size.unwrap_or(device_size as f32);
@@ -1139,6 +1155,7 @@ impl Painter<'_> {
                         color,
                         opacity,
                         blur,
+                        curve: super::smoothing::IDENTITY,
                     });
                     continue;
                 }
@@ -1171,6 +1188,7 @@ impl Painter<'_> {
                                 color,
                                 opacity,
                                 blur,
+                                curve: super::smoothing::IDENTITY,
                             });
                         }
                         Ok(None) => {}
@@ -1181,7 +1199,15 @@ impl Painter<'_> {
                 let Some(outline) = self.outlines.get(run.face, run.coords, glyph.id, style) else {
                     continue;
                 };
-                let transform = m * Affine::translate((origin.0 + glyph.x, origin.1 + glyph.y));
+                let mut transform =
+                    m * Affine::translate((origin.0 + glyph.x, origin.1 + glyph.y + lift));
+                // Skia's subpixel grid applies to axis-aligned text only.
+                let [ma, mb, mc, md, _, _] = m.as_coeffs();
+                if weight.snap && mb == 0.0 && mc == 0.0 && ma > 0.0 && md > 0.0 {
+                    let at = transform * kurbo::Point::ZERO;
+                    let (x, y) = weight.place(at.x, at.y);
+                    transform = Affine::translate((x - at.x, y - at.y)) * transform;
+                }
                 let path_style = if let Some(width) = stroke {
                     PathStyle::Stroke(
                         Stroke::new(width)
@@ -1207,6 +1233,7 @@ impl Painter<'_> {
                     opacity,
                     blur,
                     bounds: b,
+                    curve,
                 });
             }
         }
@@ -1260,6 +1287,7 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
         opacity,
         blur: 0.0,
         bounds,
+        curve: super::smoothing::IDENTITY,
     })
 }
 
