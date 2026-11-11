@@ -6,7 +6,7 @@ import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import { nativeSceneBridge, nativeTransformValues } from './native-transform';
 import { parent3D,world3D } from '../../legacy/core/space-3d';
 import { themeColor } from './theme';
-import { getActivePart, onActivePartChange, partNode, partOffsetsForLocal, partPath, partsRoot } from './model-parts';
+import { getActivePart, getSelectedParts, onActivePartChange, partNode, partOffsetsForLocal, partPath, partsRoot } from './model-parts';
 import { sceneCommands } from './operations';
 import type { SceneRuntime } from './runtime';
 
@@ -141,7 +141,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
   // so even a failed control constructor leaves no callbacks on the canvas.
   const controls=new TransformControls(camera as THREE.PerspectiveCamera);
   controls.domElement=canvas;
-  const outlines=new Map<string,THREE.BoxHelper>();
+  const outlines=new Map<string,THREE.BoxHelper|THREE.Box3Helper>();
   const cleanup:(()=>void)[]=[];
   let offState=()=>{},frame=0;
   try {
@@ -177,6 +177,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       parentInverse:parentWorld.invert(),position:node.getWorldPosition(new THREE.Vector3()),target:null,orientation:new THREE.Vector3(),order:'XYZ'};
   }
   function resolveTargets(runtimeWorld:SceneRuntime|null):Target[] {
+    if(ids.length===1 && getSelectedParts(PM,ids[0]!).length>1)return [];
     const part=partTarget(runtimeWorld);if(part)return [part];
     const out:Target[]=[],active=activeCamera();
     for(const id of ids) {
@@ -252,8 +253,10 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       const object=key?partNode(partsRoot(world?.objects.get(id)),key) ?? world?.objects.get(id):world?.objects.get(id);if(!object||(layer3DRole(layer(id))!=='object' && !isExtrudedLayer(layer(id))))continue;
       wanted.add(id);
       let outline=outlines.get(id);
-      if(!outline){outline=new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}
-      else{outline.setFromObject(object);(outline.material as THREE.LineBasicMaterial).color.copy(accent);}
+      const groupBounds=object.userData.partBounds as THREE.Box3|undefined;
+      if(outline && !!groupBounds!==(outline instanceof THREE.Box3Helper)){outline.removeFromParent();outline.dispose();outlines.delete(id);outline=undefined;}
+      if(!outline){outline=groupBounds?new THREE.Box3Helper(groupBounds.clone(),accent):new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}
+      else{if(outline instanceof THREE.Box3Helper)outline.box.copy(groupBounds!);else outline.setFromObject(object);(outline.material as THREE.LineBasicMaterial).color.copy(accent);}
     }
     for(const [id,outline] of outlines)if(!wanted.has(id)){outline.removeFromParent();outline.dispose();outlines.delete(id);}
   }

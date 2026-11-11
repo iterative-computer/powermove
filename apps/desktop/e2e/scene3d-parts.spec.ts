@@ -86,3 +86,60 @@ test('a model part is picked by double-click, moved by the gizmo, keyframed and 
   await page.evaluate(() => (window as any).PM.selectLayers([]));
   await expect.poll(() => call('getActivePart', model)).toBe(null);
 });
+
+test('groups selected model parts, animates the group, renames and reopens it',async({session},info)=>{
+  test.setTimeout(120_000);await session.openEditor();const page=session.page;
+  const id=await page.evaluate(async(bytes:number[])=>{
+    const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel?.();PM.replaceProject(PM.mkProject({w:640,h:360,dur:3,fps:30}));
+    const api=PM.Kernel.api('part-groups-e2e').scene3d;api.edit({operation:'add_camera',camera:{p:{x:0,y:0,z:3.2}}});
+    const result=await PM.cmd('3d.import-obj',new File([new Uint8Array(bytes)],'Console.glb',{type:'model/gltf-binary'}));if(!result.ok)throw new Error(result.message);
+    const id=PM.proj.layers.find((layer:any)=>layer.d?.data?.object).id;PM.selectLayers([id]);PM.invalidate();return id;
+  },[...partsGlb()]);
+  const section=page.locator('[data-parts-section]'),groupButton=page.getByRole('button',{name:'Group selected parts',exact:true});
+  await section.locator('[data-part-key="0_1"]').click();
+  await section.locator('[data-part-key="0_2"]').click({modifiers:['Meta']});
+  await expect(section.locator('[role="treeitem"][aria-selected="true"]')).toHaveCount(2);
+  await expect(groupButton).toBeEnabled();await page.keyboard.press('Meta+g');
+  const key=await page.evaluate(id=>(window as any).PM.Kernel.api('part-groups-e2e').scene3d.getActivePart(id),id);
+  expect(key).toMatch(/^group_/);await expect(section.locator(`[data-part-editor="${key}"]`)).toBeVisible();
+  const name=section.getByRole('textbox',{name:'Name',exact:true});await name.fill('Controllers');await name.press('Enter');
+  await expect(section.locator(`[data-part-key="${key}"] .part-name`)).toHaveText('Controllers');
+  const handle=await page.evaluate(()=>{
+    const viewer=(window as any).PM.Kernel.services.get('viewer'),rect=document.querySelector('#stage')!.getBoundingClientRect();
+    for(let y=rect.top+5;y<rect.bottom-5;y+=3)for(let x=rect.left+5;x<rect.right-5;x+=3)
+      if(viewer.sceneGizmo.hover(x,y)&&(document.querySelector('[data-scene-gizmo]') as HTMLElement).dataset.gizmoAxis==='X')return{x,y};
+    throw new Error('No X handle for the part group');
+  });
+  await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.x+90,handle.y,{steps:8});await page.mouse.up();
+  expect(await page.evaluate(({id,key})=>(window as any).PM.Kernel.api('part-groups-e2e').scene3d.getPart(id,key).values.x,{id,key})).toBeGreaterThan(.01);
+  expect(await page.evaluate(id=>(window as any).PM.L(id).p['position.x'].v,id)).toBe(0);
+  await page.evaluate(()=>(window as any).PM.hist.undo());
+  await section.locator('[data-part-property="x,y,z"] .stopwatch').click();
+  await page.evaluate(()=>{const PM=(window as any).PM;PM.setTime(1);PM.invalidate();});
+  const x=section.locator('[data-part-field="x"] input');await x.click();await x.fill('.5');await x.press('Enter');
+  const values=await page.evaluate(({id,key})=>{const api=(window as any).PM.Kernel.api('part-groups-e2e').scene3d;return [api.getPart(id,key,0).values.x,api.getPart(id,key,.5).values.x,api.getPart(id,key,1).values.x];},{id,key});
+  expect(values).toEqual([0,.25,.5]);
+  await expect(section.getByRole('button',{name:'Ungroup',exact:true})).toBeDisabled();
+  for(const theme of ['light','dark']){
+    await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);
+    await section.screenshot({path:info.outputPath(`part-groups-${theme}.png`)});
+    expect(await page.locator('#panel-inspector').evaluate(el=>{
+      const panel=el.getBoundingClientRect();return [...el.querySelectorAll('[data-parts-section] input')].every(field=>{const r=field.getBoundingClientRect();return r.left>=panel.left-1 && r.right<=panel.right+1;});
+    })).toBe(true);
+  }
+  const filePath=session.userData+'/part-groups.pmv';
+  await session.app.evaluate(({dialog},filePath)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath});dialog.showOpenDialog=async()=>({canceled:false,filePaths:[filePath]});},filePath);
+  await page.evaluate(async()=>{const PM=(window as any).PM;if(!await PM.saveProject())throw new Error('Save failed');await PM.openProject();});
+  await page.waitForFunction(id=>{const PM=(window as any).PM;return !!PM.assets.get(PM.L(id)?.d?.data?.object?.source.assetId)?.object3d;},id);
+  await page.evaluate(({id,key})=>{const PM=(window as any).PM;PM.selectLayers([id]);PM.Kernel.api('part-groups-e2e').scene3d.setActivePart(id,key);},{id,key});
+  await expect(section.locator(`[data-part-key="${key}"] .part-name`)).toHaveText('Controllers');
+  expect(await page.evaluate(({id,key})=>(window as any).PM.Kernel.api('part-groups-e2e').scene3d.getPart(id,key,1).values.x,{id,key})).toBe(.5);
+  await section.locator('.part-reset').filter({hasText:'Reset'}).click();
+  await expect(section.locator(`[data-part-key="${key}"]`)).toBeVisible();
+  await x.click();await x.fill('.2');await x.press('Enter');
+  await section.getByRole('button',{name:'Ungroup',exact:true}).click();
+  await expect(section.locator(`[data-part-key="${key}"]`)).toHaveCount(0);
+  await page.evaluate(()=>(window as any).PM.hist.undo());
+  await expect(section.locator(`[data-part-key="${key}"]`)).toBeVisible();
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

@@ -144,7 +144,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
       material:{...node.material,p:values(layer,node.material.p,'m')},
       materialProperties:values(layer,node.materialProperties,'mi'),
       sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)])),
-      parts:Object.fromEntries(Object.entries<any>(node.parts || {}).map(([key,part])=>[key,{name:part.name,p:values(layer,part.p,`pt.${key}`)}]))};
+      parts:Object.fromEntries(Object.entries<any>(node.parts || {}).map(([key,part])=>[key,{...part,p:values(layer,part.p,`pt.${key}`)}]))};
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);

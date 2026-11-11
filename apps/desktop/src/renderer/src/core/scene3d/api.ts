@@ -1,3 +1,4 @@
+import {activeCameraLayer} from './camera-navigation';
 import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
 import { createMaterialThumbnails } from './material-thumbnails';
@@ -14,9 +15,9 @@ import { prepareModelImport } from './import-bundle';
 import { compositionScene,layer3DRole,isModelGroup } from './layers';
 import { editScene } from './operations';
 import { viewportCamera } from './viewport';
-import { PART_DEFAULTS, PART_FIELDS, getActivePart, listLayerParts, onActivePartChange, partKeyOf, partPath, partsRoot, pruneActiveParts, setActivePart, type PartValues } from './model-parts';
+import { PART_DEFAULTS, PART_FIELDS, getActivePart, getSelectedParts, setSelectedParts, listLayerParts, onActivePartChange, partKeyOf, partPath, partsRoot, pruneActiveParts, setActivePart, type PartValues } from './model-parts';
 import type { Scene3DAPI } from '../../kernel/api';
-import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
+import {getNavigationVariant,setNavigationVariant,navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
 export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:materials',payload:any)=>void):Scene3DAPI {
   let navigation:SceneNavigation|null=null;
@@ -28,6 +29,11 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
   const changed=()=>{
     const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.group,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.d?.extrusion,l.threeD,l.type])]);
     if(signature===materialSignature)return;materialSignature=signature;
+    for(const id of PM.sel?.layers || []){
+      const selected=getSelectedParts(PM,id);if(!selected.length)continue;
+      const groups=PM.L?.(id)?.d?.data?.object?.parts || {};
+      setSelectedParts(PM,id,selected.filter(key=>!key.startsWith('group_') || !!groups[key]?.members));
+    }
     emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object || extrusionEligible(l)).map((l:any)=>l.id) || []});
     for(const listener of materialListeners)listener();
   };
@@ -74,8 +80,9 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     lightViewerGuides:(layerId,time,rect,view)=>lightViewerGuides(PM,layerId,time,rect,view),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
-    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>setNavigationMode(PM,mode),
+    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{navigation?.cancel();if(mode!=='select'&&getViewportMode(PM)==='camera'&&!activeCameraLayer(PM))setViewportMode(PM,'editor');setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
+    getNavigationVariant:tool=>getNavigationVariant(PM,tool),setNavigationVariant:(tool,variant)=>{navigation?.cancel();setNavigationVariant(PM,tool,variant);},
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
     describe(){return compositionScene(PM,PM.time);},
@@ -84,6 +91,20 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     setPart:(layerId,key,patch,meta)=>editScene(PM,{operation:'set_part',target:layerId,part:key,patch},{origin:'interface',label:'Edit model part',...meta}),
     getActivePart:layerId=>getActivePart(PM,layerId),
     setActivePart:(layerId,key)=>setActivePart(PM,layerId,key),
+    getSelectedParts:layerId=>getSelectedParts(PM,layerId),
+    setSelectedParts:(layerId,keys)=>setSelectedParts(PM,layerId,keys),
+    groupParts(layerId,keys,name){
+      const previous=new Set(listLayerParts(PM,PM.L(layerId)).map(part=>part.key));
+      const result=editScene(PM,{operation:'group_parts',target:layerId,parts:[...keys],...(name?{name}:{})},{origin:'inspector',label:'Group model parts'});
+      if(result.ok){const group=listLayerParts(PM,PM.L(layerId)).find(part=>!previous.has(part.key));if(group)setActivePart(PM,layerId,group.key);}
+      return result;
+    },
+    ungroupParts(layerId,key){
+      const members=PM.L(layerId)?.d?.data?.object?.parts?.[key]?.members || [];
+      const result=editScene(PM,{operation:'ungroup_parts',target:layerId,part:key},{origin:'inspector',label:'Ungroup model parts'});
+      if(result.ok)setSelectedParts(PM,layerId,members);return result;
+    },
+    renamePartGroup:(layerId,key,name)=>editScene(PM,{operation:'rename_part_group',target:layerId,part:key,name},{origin:'inspector',label:'Rename part group'}),
     onActivePartChange:listener=>({dispose:onActivePartChange(PM,listener)}),
     pickPart(layerId,x,y){
       const layer=PM.L?.(layerId);if(layer3DRole(layer)!=='object')return null;
@@ -94,8 +115,9 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       const root=partsRoot(object),key=partKeyOf(root,hit.object);if(!key)return null;
       // Like a group in a design tool: the first double-click takes the outer
       // part, the next one goes a level deeper toward what was clicked.
-      const parts=listLayerParts(PM,layer),chain=key.split('_').map((_,i,all)=>all.slice(0,i+1).join('_')).filter(k=>parts.some(p=>p.key===k));
-      let start=0;while(start<chain.length-1 && parts.filter(p=>p.parent===(start?chain[start-1]:null)).length===1)start++;
+      const parts=listLayerParts(PM,layer),chain:string[]=[];
+      for(let part=parts.find(part=>part.key===key);part;part=parts.find(candidate=>candidate.key===part!.parent))chain.unshift(part.key);
+      let start=0;while(start<chain.length-1 && !parts.find(part=>part.key===chain[start])?.group && parts.filter(p=>p.parent===(start?chain[start-1]:null)).length===1)start++;
       const current=getActivePart(PM,layerId),at=current?chain.indexOf(current):-1;
       return chain[at>=0?Math.min(chain.length-1,at+1):start] ?? null;
     },

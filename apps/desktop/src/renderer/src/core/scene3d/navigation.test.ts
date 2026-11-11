@@ -1,6 +1,6 @@
 import {describe,expect,it} from 'vitest';
 import * as THREE from 'three';
-import {orbitView,panView,dollyView,frameView,frameComposition} from './navigation';
+import {orbitAround,dollyAt,cursorPivot,getNavigationVariant,setNavigationVariant,orbitView,panView,dollyView,frameView,frameComposition} from './navigation';
 import {viewportPose,viewportCamera,getViewportMode,setViewportMode,applyViewportPose} from './viewport';
 import {compositionRuntime} from './service';
 import {editScene} from './operations';
@@ -28,6 +28,37 @@ describe('3D viewport navigation',()=>{
     const ortho=new THREE.OrthographicCamera(-3,3,3,-3,.01,1000),next=dollyView(start,-100,ortho);
     expect(next.zoom).toBeGreaterThan(1);expect(next.position).toEqual(start.position);
     expect(dollyView(start,-100000,c).position.z).toBeGreaterThanOrEqual(.05);
+  });
+  it('orbits about an off-centre hit without changing the view on a click',()=>{
+    const start=pose(),pivot=new THREE.Vector3(1,0,0),idle=orbitAround(start,pivot,0,0),next=orbitAround(start,pivot,90,30);
+    expect(idle.position.distanceTo(start.position)).toBeLessThan(1e-10);expect(idle.target.distanceTo(start.target)).toBeLessThan(1e-10);
+    expect(next.position.distanceTo(pivot)).toBeCloseTo(start.position.distanceTo(pivot));
+    expect(next.position.distanceTo(next.target)).toBeCloseTo(6);
+    expect(next.target.distanceTo(pivot)).toBeCloseTo(start.target.distanceTo(pivot));
+  });
+  it('uses a mesh hit or the POI plane for an empty cursor, and pans at its depth',()=>{
+    const c=camera(),start=pose(),hit=new THREE.Vector3(1,2,3);
+    expect(cursorPivot(c,start.target,.5,.5,hit)).toEqual(hit);
+    const fallback=cursorPivot(c,start.target,.5,.5);expect(fallback.z).toBeCloseTo(0);expect(fallback.x).toBeGreaterThan(0);
+    const near=panView(start,50,0,c,600,new THREE.Vector3(0,0,3)),far=panView(start,50,0,c,600);
+    expect(near.position.x).toBeCloseTo(far.position.x/2);
+  });
+  it('keeps the clicked pixel fixed during perspective and orthographic dollies',()=>{
+    const pivot=new THREE.Vector3(1,1,0),start=pose();
+    for(const c of [camera(),new THREE.OrthographicCamera(-3,3,3,-3,.01,1000)]){
+      c.position.copy(start.position);c.lookAt(start.target);c.updateMatrixWorld();c.updateProjectionMatrix();
+      const before=pivot.clone().project(c),next=dollyAt(start,pivot,-80,c);
+      c.position.copy(next.position);c.zoom=next.zoom;c.lookAt(next.target);c.updateProjectionMatrix();c.updateMatrixWorld();
+      const after=pivot.clone().project(c);expect(after.x).toBeCloseTo(before.x);expect(after.y).toBeCloseTo(before.y);
+      expect(next.position.clone().sub(next.target).toArray()).toEqual([0,0,6]);
+    }
+    const c=camera(),out=dollyAt(start,pivot,80,c,true);
+    expect(out.position.x).toBe(0);expect(dollyAt(start,pivot,80,c).position.x).toBeLessThan(0);
+  });
+  it('remembers variants separately and rejects unsupported tool combinations',()=>{
+    const PM={};expect(getNavigationVariant(PM,'orbit')).toBe('cursor');expect(getNavigationVariant(PM,'dolly')).toBe('towards-cursor');
+    setNavigationVariant(PM,'orbit','scene');expect(getNavigationVariant(PM,'orbit')).toBe('scene');expect(getNavigationVariant(PM,'pan')).toBe('cursor');
+    expect(()=>setNavigationVariant(PM,'pan','scene')).toThrow();
   });
   it('frames every corner in wide and tall perspective views',()=>{
     const box=new THREE.Box3(new THREE.Vector3(-3,-1,-1),new THREE.Vector3(3,1,1));

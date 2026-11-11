@@ -51,7 +51,7 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
     const PM=(window as any).PM,api=PM.Kernel.api('navigation-proof');
     api.scene3d.edit({operation:'add_camera',camera:{p:{x:0,y:0,z:6}}});
     api.scene3d.edit({operation:'add_object',object:{id:'model',source:{primitive:'box',parameters:{width:1.6,depth:.6}},p:{x:.7},material:{p:{color:'#FF7733'}}}});
-    PM.proj.layers.find((l:any)=>l.d?.definition==='powermove.3d.camera').lock=true;PM.autokey=true;PM.selectLayers(['model']);PM.invalidate();
+    PM.proj.layers.find((l:any)=>l.d?.definition==='powermove.3d.camera').lock=true;PM.autokey=true;PM.selectLayers(['model']);api.scene3d.setView('editor');PM.invalidate();
     return {layers:JSON.stringify(PM.proj.layers),count:PM.hist.list().length,
       pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};
   });

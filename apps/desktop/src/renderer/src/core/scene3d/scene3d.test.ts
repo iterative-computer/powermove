@@ -9,6 +9,8 @@ import { editScene } from './operations';
 import { startTransform,constrainTransform,typeTransform,transformAmount,transformComponents } from './modal-transform';
 import { makePM } from '../../legacy/__tests__/make-pm';
 import { world3D,parent3D,planeMatrix } from '../../legacy/core/space-3d';
+import { makeScene3DAPI } from './api';
+import { PARTS_ROOT_FLAG, partNode, partsRoot } from './model-parts';
 
 function editor() {
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
@@ -18,6 +20,35 @@ function editor() {
 }
 
 describe('individual 3D layers and guarded edits',()=>{
+  it('groups, renames, edits and ungroups imported parts with undo and saved child animation',()=>{
+    const PM=editor(),source=new THREE.Group(),file=new THREE.Group();file.userData[PARTS_ROOT_FLAG]=true;
+    for(const [i,name] of ['Left','Right','Other'].entries()){const mesh=new THREE.Mesh(new THREE.BoxGeometry(.2,.2,.2));mesh.name=name;mesh.userData.name=name;mesh.position.x=i-1;file.add(mesh);}
+    source.add(file);PM.assets.map.set('asset',{object3d:source,animations:[new THREE.AnimationClip('Motion',2,[new THREE.VectorKeyframeTrack('Right.position',[0,2],[0,0,0,0,.4,0])])]});PM.assets.get=(id:string)=>PM.assets.map.get(id);
+    expect(editScene(PM,{operation:'add_object',object:{id:'model',source:{assetId:'asset'}}}).ok).toBe(true);
+    const api=makeScene3DAPI(PM,()=>{});
+    expect(api.setPart('model','0',{y:{v:0,kf:[{t:0,v:0},{t:1,v:.3}],expr:null}}).ok).toBe(true);
+    const childAnimation=JSON.stringify(PM.L('model').d.data.object.parts['0'].p.y);
+    const snapshot=()=>{
+      const root=compositionRuntime(PM,.5).objects.get('model')!;root.updateWorldMatrix(true,true);
+      return ['0','1','2'].map(key=>partNode(partsRoot(root),key)!.getWorldPosition(new THREE.Vector3()).toArray());
+    };
+    const before=snapshot();PM.time=.5;
+    expect(api.groupParts('model',['0','1'],'Controllers').ok).toBe(true);
+    const key=api.getActivePart('model')!;expect(key).toMatch(/^group_/);expect(snapshot()).toEqual(before);
+    expect(api.listParts('model').filter(part=>part.parent===key).map(part=>part.key)).toEqual(['0','1']);
+    expect(api.renamePartGroup('model',key,'Pair').ok).toBe(true);
+    expect(api.listParts('model').find(part=>part.key===key)?.name).toBe('Pair');
+    expect(api.setPart('model',key,{x:.4,rz:30,scale:120}).ok).toBe(true);
+    const transformed=snapshot();expect(transformed[0]).not.toEqual(before[0]);expect(transformed[2]).toEqual(before[2]);
+    expect(JSON.stringify(PM.L('model').d.data.object.parts['0'].p.y)).toBe(childAnimation);
+    expect(api.ungroupParts('model',key).ok).toBe(true);
+    const after=snapshot();after.forEach((point,i)=>point.forEach((v,axis)=>expect(v).toBeCloseTo(transformed[i]![axis]!,7)));
+    PM.hist.undo();expect(api.listParts('model').some(part=>part.key===key)).toBe(true);
+    PM.hist.redo();expect(api.listParts('model').some(part=>part.key===key)).toBe(false);
+    PM.proj=PM.deserialize(PM.serialize());PM.touch();const reopened=snapshot();
+    reopened.forEach((point,i)=>point.forEach((v,axis)=>expect(v).toBeCloseTo(after[i]![axis]!,7)));
+    PM.L('model').lock=true;expect(api.groupParts('model',['0','1']).ok).toBe(false);
+  });
   it.each(['model','camera'])('keeps switched-off artwork affine when parented to a %s',parent=>{
     const PM=editor();
     editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});

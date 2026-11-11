@@ -271,7 +271,7 @@ export class SceneRuntime {
       restoreParts(object);
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
       const parts=(node as any).parts as Record<string,{p:any}>|undefined;
-      if(parts && Object.keys(parts).length)applyParts(object,Object.fromEntries(Object.entries(parts).map(([key,part])=>[key,values(part.p,`o.${node.id}.pt.${key}`)])));
+      applyParts(object,parts?Object.fromEntries(Object.entries(parts).map(([key,part])=>[key,values(part.p,`o.${node.id}.pt.${key}`)])):{},parts as any);
     }
     let nativeVertices=0;
     for(const sample of extrusions){
@@ -482,7 +482,7 @@ export class SceneRuntime {
     return this.pickHit(x,y,ids,camera)?.id ?? null;
   }
   /** The nearest visible mesh under a normalized device point, and its layer. */
-  pickHit(x:number,y:number,ids?:Set<string>,camera=this.camera): {id:string;object:THREE.Object3D}|null {
+  pickHit(x:number,y:number,ids?:Set<string>,camera=this.camera): {id:string;object:THREE.Object3D;point:THREE.Vector3}|null {
     this.scene.updateMatrixWorld(true);camera.updateMatrixWorld(true);
     const ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(x,y),camera);
     for (const hit of ray.intersectObjects([...this.objects.values()],true)) {
@@ -491,7 +491,7 @@ export class SceneRuntime {
         if(materials && (Array.isArray(materials)?materials:[materials]).every(m=>m.opacity<=0))continue;
         let visible=true,parent:THREE.Object3D|null=hit.object;
         while(parent){if(!parent.visible)visible=false;parent=parent.parent;}
-        if (visible) return {id:hit.object.userData.sceneId,object:hit.object};
+        if (visible) return {id:hit.object.userData.sceneId,object:hit.object,point:hit.point};
       }
     }
     return null;

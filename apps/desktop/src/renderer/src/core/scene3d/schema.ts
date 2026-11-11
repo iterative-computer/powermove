@@ -2,7 +2,7 @@ import { validateExtrusionChannel } from './extrusion-data';
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
 import { MATERIAL_SLOTS, objectMapSets, mapImageId } from './material-maps';
-import { PART_KEY, PART_PATH } from './model-parts';
+import { GROUP_PART_KEY, PART_KEY, PART_PATH } from './model-parts';
 
 /** The scene is project data, never executable code or a live Three.js object. */
 export const SCENE3D_DEFINITION = 'powermove.3d.scene';
@@ -68,7 +68,10 @@ export const intrinsicPropertiesSchema = z.object({
 export const partTransformSchema = p({ x:[num(),0], y:[num(),0], z:[num(),0],
   rx:[num(-360_000,360_000),0], ry:[num(-360_000,360_000),0], rz:[num(-360_000,360_000),0],
   scale:[num(0,10000),100], visible:[z.boolean(),true] });
-export const partSchema = z.object({ name: z.string().min(1).max(160).default('Part'), p: partTransformSchema.default({} as any) }).strict();
+export const partSchema = z.object({ name: z.string().min(1).max(160).default('Part'), p: partTransformSchema.default({} as any),
+  members: z.array(z.string().regex(PART_KEY)).min(1).max(4096).optional(), parent: z.string().regex(PART_KEY).nullable().optional(),
+  pivot: z.tuple([num(),num(),num()]).optional(), matrix: z.array(num(-1e12,1e12)).length(16).optional()
+}).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
@@ -124,6 +127,23 @@ export function parseScene(raw: unknown): Scene3D {
   }
   const byId = new Map(scene.objects.map(o => [o.id,o]));
   for (const object of scene.objects) {
+    const owners = new Map<string,string>();
+    for (const [key, part] of Object.entries(object.parts)) {
+      if (GROUP_PART_KEY.test(key) !== !!part.members || part.members && !part.pivot) throw new Error('Invalid model part group');
+      for (const member of part.members || []) {
+        if (owners.has(member) || member === key || GROUP_PART_KEY.test(member) && !object.parts[member]?.members) throw new Error('Invalid model part group membership');
+        owners.set(member,key);
+      }
+    }
+    for (const [key, part] of Object.entries(object.parts)) if (part.members) {
+      const seen = new Set([key]); let parent = owners.get(key) ?? part.parent;
+      while (parent) {
+        if (seen.has(parent)) throw new Error('Model part groups contain a cycle'); seen.add(parent);
+        if(seen.size>64)throw new Error('Model part groups are too deeply nested');
+        if (GROUP_PART_KEY.test(parent) && !object.parts[parent]?.members) throw new Error('Missing model part group parent');
+        parent = owners.get(parent) ?? object.parts[parent]?.parent;
+      }
+    }
     const chain = new Set([object.id]);
     let parent = object.parent;
     while (parent) {
