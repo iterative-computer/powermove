@@ -560,6 +560,28 @@ impl CompatStore {
         }
         self.dispatch(answers, fresh);
     }
+    /// Needs asked ahead of the picture that will want them (a paused
+    /// picture's refinement): sent as [`CompatStore::request`] sends them
+    /// when no batch is in flight, else queued behind the needs already
+    /// waiting, never in their place, so the picture on screen is answered
+    /// first.
+    pub(crate) fn request_behind(&self, needs: Vec<CompatNeed>) {
+        let mut answers = self.answers.lock().unwrap();
+        let fresh = answers.fresh(needs);
+        if fresh.is_empty() {
+            return;
+        }
+        if !answers.free() {
+            let waiting: HashSet<_> = answers.queued.iter().map(need_key).collect();
+            answers.queued.extend(
+                fresh
+                    .into_iter()
+                    .filter(|n| !waiting.contains(&need_key(n))),
+            );
+            return;
+        }
+        self.dispatch(answers, fresh);
+    }
     /// Playback's look-ahead at the playhead `now` (ticks, playing at
     /// `speed`): whether to ask now, how far ahead the answers will land (the
     /// realm's measured time for a batch) and how many frames the batch
@@ -1018,6 +1040,36 @@ mod tests {
         assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
         store.request(vec![need("x")]);
         assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
+    }
+    /// Needs asked ahead (a refinement's) wait behind the visible picture's
+    /// while a batch runs: the next batch sends the visible ones first.
+    #[test]
+    fn needs_asked_ahead_never_displace_the_visible_pictures() {
+        let store = CompatStore::default();
+        let batches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let log = batches.clone();
+        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
+            log.lock()
+                .unwrap()
+                .push(needs.iter().map(|n| n.layer.as_str().to_owned()).collect())
+        })));
+        store.set_state(true, 7, 1);
+        store.request(vec![need("running")]);
+        // While that batch runs: the visible picture's need, then a
+        // refinement's asked ahead.
+        store.request(vec![need("visible")]);
+        store.request_behind(vec![need("ahead")]);
+        store.answer_all(7, 1, vec![(need("running"), draw(255))]);
+        assert_eq!(
+            batches.lock().unwrap().last().unwrap(),
+            &vec!["visible".to_owned(), "ahead".to_owned()]
+        );
+        // With nothing in flight, asked ahead goes at once.
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        store.set_state(true, 7, 1);
+        store.request_behind(vec![need("ahead")]);
+        assert_eq!(*asked.lock().unwrap(), vec![(1, 1)]);
     }
     #[test]
     fn a_failed_override_fails_its_layer_without_asking_again() {

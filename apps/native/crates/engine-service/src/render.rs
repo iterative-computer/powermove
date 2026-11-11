@@ -1001,6 +1001,11 @@ impl Engine {
         let Some(failures) = drawn? else {
             return Ok(false);
         };
+        // As for any frame: a render that met a font failure is not kept,
+        // and fonts are installed afresh before the next.
+        if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
+            return Err(FontsPending(error).into());
+        }
         // A stand-in is not the exact picture: the frame draws it itself.
         if late.is_empty() {
             self.cache.push_back(CachedFrame {
@@ -1310,6 +1315,54 @@ mod lifetime_tests {
         assert_eq!(engine.font_generation(), Some(1));
         broker.set_generation(2);
         assert_eq!(engine.font_generation(), Some(2));
+    }
+    /// A refinement whose render met a font failure is not cached: it
+    /// fails as a frame does (transient, fonts installed afresh) and the
+    /// next one is kept.
+    #[test]
+    fn a_refinement_that_met_a_font_failure_is_not_cached() {
+        let mut engine = Engine::new(Gpu::new("refine-fonts-test").unwrap()).unwrap();
+        let broker = pm_text::host::FontBroker::new();
+        engine.set_fonts(pm_render::text::host::RenderFonts::new(broker));
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        engine
+            .fonts
+            .as_ref()
+            .unwrap()
+            .health
+            .fail("the font host went away".into());
+        let mut costs = crate::jobs::Costs::default();
+        let error = engine
+            .refine(&scene, spec, &mut costs, &|| false)
+            .unwrap_err();
+        assert!(transient(&error), "{error}");
+        assert!(engine.cache.is_empty());
+        let mut costs = crate::jobs::Costs::default();
+        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
+        assert_eq!(engine.cache.len(), 1);
     }
     #[test]
     fn delayed_metal_completion_retains_the_actual_source_texture() {

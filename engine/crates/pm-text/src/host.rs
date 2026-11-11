@@ -273,7 +273,8 @@ impl FontHealth {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    fn fail(&self, why: String) {
+    /// Records a failure (the first since the last take is kept).
+    pub fn fail(&self, why: String) {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(why);
