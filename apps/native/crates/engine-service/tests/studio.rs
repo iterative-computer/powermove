@@ -2235,3 +2235,69 @@ fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_
     assert!(quality.denoise && quality.caustics);
     assert_eq!(doc.to_value(), before);
 }
+
+fn extrusion_test_fonts()->Box<dyn pm_render::text::TextFonts>{
+    use pm_text::font::*;
+    struct Face(FaceInfo);
+    impl FontResolver for Face{
+        fn face(&self,_:FaceId)->&FaceInfo{&self.0}
+        fn family(&mut self,_:&str,_:&FontDesc)->Option<FaceId>{Some(0)}
+        fn standard(&mut self,_:&FontDesc)->Option<FaceId>{Some(0)}
+        fn fallback_for_char(&mut self,_:&FontDesc,_:u32,_:FaceId,_:bool)->Option<FaceId>{None}
+        fn last_resort(&mut self,_:&FontDesc)->Option<FaceId>{Some(0)}
+        fn variable_face(&mut self,_:&str)->Option<FaceId>{Some(0)}
+    }
+    let data=FontBytes::new(include_bytes!("../../../../../engine/crates/pm-text/tests/fixtures/Geist-Variable.ttf").to_vec());
+    let facts=FaceFacts::of(data.as_slice(),0);
+    let face=FaceInfo{data,index:0,blob:"Geist".into(),coords:vec![],synthetic_bold:false,synthetic_italic:false,custom:true,web:None,synthesized_hyphens:[None;2],postscript_name:"Geist".into(),typeface_key:"Geist".into(),fallback_key:None,facts};
+    Box::new(pm_eval::text_measure::CompatMeasure::new(Face(face)))
+}
+#[test]
+fn text_extrusion_reaches_native_geometry_four_surfaces_and_the_compositor(){
+    use studio::SceneSource;
+    let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
+    let comp=&mut project["comps"]["test"];
+    comp["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="mirror");
+    let mut data=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":10,"bevelDepth":2,"bevelStyle":"convex"}})).unwrap();
+    for (i,surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate(){data["surfaces"][surface]=json!({"maps":{},"properties":{"color":"#FF0000","emissionColor":"#FF0000","emissionIntensity":1,"roughness":0.2+i as f64*0.1}});}
+    data=pm_scene3d::extrusion::parse(&data).unwrap();
+    comp["layers"].as_array_mut().unwrap().push(json!({"id":"title","name":"Title","type":"text","on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":32,"kf":[]},"position.y":{"v":32,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"text":"O","font":"Geist","size":30,"color":"#0000FF","extrusion":data}}));
+    let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
+    let source=studio::DocumentSource::new(doc.clone(),Default::default()).with_text_fonts(extrusion_test_fonts());
+    let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
+    let scene=source.scene(&req).unwrap();
+    assert!(source.layer_failures(&req).unwrap().is_empty(),"{:?}",source.layer_failures(&req).unwrap());
+    let title=scene.instances.iter().find(|i|i.layer=="title").expect("extruded glyph");
+    assert_eq!(title.material_palette.as_ref().unwrap().len(),4);
+    for index in 0..4 {assert!(title.mesh.triangle_materials.contains(&index),"surface {index}");}
+    assert!(title.mesh.positions.iter().any(|p|p.z==-10.));
+    let again=source.scene(&req).unwrap();let other=again.instances.iter().find(|i|i.layer=="title").unwrap();
+    assert!(Arc::ptr_eq(&title.mesh,&other.mesh));assert!(Arc::ptr_eq(title.attributes.as_ref().unwrap(),other.attributes.as_ref().unwrap()));
+    let mut renderer=Renderer::headless().unwrap();renderer.set_text_fonts(Some(extrusion_test_fonts()));
+    renderer.set_studio_source(Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(source)))),pm_render::scene3d::provider::Settings{revision:doc.revision(),..Default::default()});
+    let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+    assert!(frame.failures.is_empty(),"{:?}",frame.failures);
+    let pixels=renderer.read_rgba(&frame).unwrap();let red=pixels.chunks_exact(4).filter(|p|p[0]>0.1 && p[0]>p[2]*2. && p[3]>0.5).count();
+    assert!(red>30,"the extruded surface must render red, rather than the flat blue paint ({red} pixels)");
+}
+
+#[test]
+fn shape_extrusion_and_empty_text_use_the_shared_native_scene(){
+    use studio::SceneSource;
+    for empty in [false,true]{
+        let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
+        let comp=&mut project["comps"]["test"];comp["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="mirror");
+        let mut content=if empty{json!({"text":" ","font":"Geist","size":30,"color":"#FFFFFF"})}else{json!({"shape":"rect","w":24,"h":20,"radius":0,"smoothing":0,"stroke":2,"strokeColor":"#00FF00","color":"#0000FF"})};
+        content["extrusion"]=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":8,"bevelStyle":"angular","bevelDepth":1},"surfaces":{"front":{"properties":{"emissionColor":"#FF0000","emissionIntensity":1}}}})).unwrap();
+        comp["layers"].as_array_mut().unwrap().push(json!({"id":"art","name":"Art","type":if empty{"text"}else{"shape"},"on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":32,"kf":[]},"position.y":{"v":32,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":content}));
+        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
+        let source=studio::DocumentSource::new(doc.clone(),Default::default()).with_text_fonts(extrusion_test_fonts());
+        let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
+        let scene=source.scene(&req).unwrap();assert!(source.layer_failures(&req).unwrap().is_empty(),"{:?}",source.layer_failures(&req).unwrap());
+        assert_eq!(scene.instances.is_empty(),empty);
+        let mut renderer=Renderer::headless().unwrap();renderer.set_text_fonts(Some(extrusion_test_fonts()));renderer.set_studio_source(Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(source)))),pm_render::scene3d::provider::Settings{revision:doc.revision(),..Default::default()});
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();assert!(frame.failures.is_empty(),"{:?}",frame.failures);
+        let pixels=renderer.read_rgba(&frame).unwrap();
+        if empty{assert!(pixels.chunks_exact(4).all(|p|p[3]<0.001));}else{assert!(pixels.chunks_exact(4).filter(|p|p[0]>0.1 && p[3]>0.5).count()>30);}
+    }
+}

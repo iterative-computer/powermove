@@ -227,7 +227,7 @@ fn apply(
     // Content structural updates precede channel writes so a material-map edit
     // cannot restore the previous material channels later in the same plan.
     actions.sort_by_key(|a| {
-        if matches!(a, Action::Data { .. } | Action::StagedData { .. }) {
+        if matches!(a, Action::Data { .. } | Action::StagedData { .. } | Action::Extrusion { .. }) {
             0
         } else {
             1
@@ -235,6 +235,22 @@ fn apply(
     });
     for action in actions {
         match action {
+            Action::Extrusion { id, data, enable_three_d } => {
+                guard(cx, &id, "3d")?;
+                let (loc, mut layer)=cx.layer_mut_checked(&id)?;
+                let before=layer.clone();
+                let content=values::obj(&mut layer).get_mut("d").ok_or_else(||invalid("Missing layer content"))?;
+                values::obj(content).insert("extrusion",pm_scene3d::to_model(&data));
+                if cx.origin().is_generated() {
+                    for (name,path) in all(&before) {
+                        if properties::locked_intent(&before,&name) && channels::get(&before,&path)!=channels::get(&layer,&path) {
+                            return Err(CommandError::PreservedHandEdit {layer_id:id.clone(),channel:name});
+                        }
+                    }
+                }
+                normalize_key_ids(&mut layer);cx.put_layer(&loc,layer)?;
+                if enable_three_d { LayerCommand::Set {layer_id:id,patch:LayerPatch{three_d:Some(true),..Default::default()}}.plan(cx)?; }
+            }
             Action::RenderQuality { quality } => {
                 let quality = pm_scene3d::quality::validate(quality).map_err(invalid)?;
                 let mut path = cx.comp_path(comp);
@@ -406,6 +422,13 @@ fn fresh_keys(v: &mut Value, replace: bool) {
     }
 }
 pub(crate) fn path(layer: &Value, channel: &str) -> Option<Vec<Step>> {
+    let parts:Vec<_>=channel.split('.').collect();
+    let extrusion=match parts.as_slice() {
+        ["geo",field]=>Some(vec![key("d"),key("extrusion"),key("p"),key(field)]),
+        ["ms",surface,field] if pm_scene3d::extrusion::SURFACES.contains(surface)=>Some(vec![key("d"),key("extrusion"),key("surfaces"),key(surface),key("properties"),key(field)]),
+        _=>None,
+    };
+    if let Some(path)=extrusion {return channels::get(layer,&path).is_some().then_some(path);}
     let def = layer.get("d")?.get("definition")?.as_str()?;
     let (prefix, key_name) = channel.split_once('.')?;
     let parts: Vec<_> = channel.split('.').collect();
@@ -481,6 +504,11 @@ pub(crate) fn path(layer: &Value, channel: &str) -> Option<Vec<Step>> {
 }
 pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
     let mut out = vec![];
+    if layer.get("d").and_then(|d|d.get("extrusion")).is_some() && let Ok(json)=pm_scene3d::from_model(layer) {
+        for (name,_) in pm_scene3d::extrusion::channels(&json) {
+            if let Some(p)=path(layer,&name){out.push((name,p));}
+        }
+    }
     for prefix in ["m", "light", "camera", "environment"] {
         let base = match prefix {
             "m" => vec![
@@ -529,7 +557,7 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
 /// 3D object, light and camera layers do. Read on the tree, so a transaction's
 /// validation never copies the other layers of a large composition.
 pub(crate) fn is_scene3d_layer(layer: &pm_model::Node) -> bool {
-    matches!(
+    layer.get("d").and_then(|d|d.get("extrusion")).is_some() || matches!(
         layer
             .get("d")
             .and_then(|d| d.get("definition"))
@@ -539,6 +567,11 @@ pub(crate) fn is_scene3d_layer(layer: &pm_model::Node) -> bool {
 }
 
 pub(crate) fn validate_layer(layer: &Value) -> Result<(), CommandError> {
+    if let Some(data)=layer.get("d").and_then(|d|d.get("extrusion")) {
+        let json=pm_scene3d::from_model(layer).map_err(invalid)?;
+        if !pm_scene3d::extrusion::eligible(&json){return Err(invalid("Only text and shape layers support extrusion"));}
+        pm_scene3d::extrusion::parse(&pm_scene3d::from_model(data).map_err(invalid)?).map_err(invalid)?;
+    }
     let definition = layer
         .get("d")
         .and_then(|d| d.get("definition"))

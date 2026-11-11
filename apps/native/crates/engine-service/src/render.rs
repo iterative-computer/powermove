@@ -166,7 +166,7 @@ pub struct Engine {
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64, String, crate::studio::Preview)>,
+    studio_content: Option<(usize, u64, String, crate::studio::Preview, Option<u64>)>,
     studio_preview: crate::studio::Preview,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
@@ -470,6 +470,7 @@ impl Engine {
             scene.content,
             scene.comp.clone(),
             self.studio_preview,
+            self.fonts.as_ref().map(|f|f.generation()),
         );
         if self.studio_content.as_ref() != Some(&key) {
             // A bad contribution draws nothing and is reported; frames carry on.
@@ -491,7 +492,7 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
             #[cfg(feature = "kernel")]
-            crate::studio::attach_with_preview(
+            crate::studio::attach_with_preview_fonts(
                 &mut self.renderer,
                 scene.doc.clone(),
                 scene.media.as_ref(),
@@ -503,6 +504,7 @@ impl Engine {
                     height: 1,
                 },
                 self.studio_preview,
+                self.fonts.as_ref(),
             )
             .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines

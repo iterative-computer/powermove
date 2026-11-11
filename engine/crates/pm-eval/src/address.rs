@@ -440,6 +440,11 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
     let data = node::member(d, "data");
     let modeling = node::member(d, "modeling");
     let mut out = Vec::new();
+    let extrusion=node::member(d,"extrusion");
+    collect_kf(&mut out,node::member(extrusion,"p"),&s("geo"),&js("Geometry Options"));
+    for surface in ["front","bevel","side","back"] {
+        collect_kf(&mut out,node::member(node::member(node::member(extrusion,"surfaces"),surface),"properties"),&s(&format!("ms.{surface}")),&js("Surface Material"));
+    }
     if role.is_none() && !node::truthy(modeling) {
         return Ok(out);
     }
@@ -599,6 +604,8 @@ pub fn is_scene_key(key: &[u8]) -> bool {
         b"shader.",
         b"slots.",
         b"model.",
+        b"geo.",
+        b"ms.",
     ]
     .iter()
     .any(|p| key.starts_with(p))

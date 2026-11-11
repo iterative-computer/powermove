@@ -157,5 +157,6 @@ pub fn properties(l: &Value) -> Vec<(String, Value)> {
             .into_iter()
             .map(|(path, prop)| (path, prop.clone())),
     );
+    out.extend(pm_scene3d::extrusion::channels(l).into_iter().map(|(path,prop)|(path,prop.clone())));
     out
 }

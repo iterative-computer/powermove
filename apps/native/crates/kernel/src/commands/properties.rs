@@ -200,7 +200,7 @@ pub(crate) fn resolve(
     // The 3D source preserves hand-authored channels for every generated
     // origin, including expressions and full keyframe replacements.
     if cx.origin().is_generated()
-        && layer
+        && (layer.get("d").and_then(|d|d.get("extrusion")).is_some() || layer
             .get("d")
             .and_then(|d| d.get("definition"))
             .and_then(Value::as_str)
@@ -211,7 +211,7 @@ pub(crate) fn resolve(
                     pm_scene3d::schema::CAMERA,
                 ]
                 .contains(&d)
-            })
+            }))
         && (locked_intent(&layer, &key) || locked_intent(&layer, "3d"))
     {
         return Err(CommandError::PreservedHandEdit {

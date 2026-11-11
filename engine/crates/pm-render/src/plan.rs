@@ -1387,6 +1387,15 @@ fn native_content_quad<'d>(
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
+    if let Some(settings)=b.options3d.studio {
+        let extrusion=node::member(node::member(Some(layer),"d"),"extrusion");
+        if matches!(ty.as_str(),"text"|"shape") && node::truthy(node::member(Some(layer),"threeD")) && node::truthy(node::member(extrusion,"enabled")) {
+            return Ok(Some(Quad::Screen{source:Source::Object3d(Box::new(Object3dPlan{
+                layer:js::layer_id(layer),scene:std::sync::Arc::new(crate::scene3d::Scene3d::empty(width,height)),
+                kind:crate::scene3d::Render3d::Studio{request:crate::scene3d::provider::SceneRequest{composition:comp_id.clone(),revision:settings.revision,ticks:crate::compat::ticks_of(time).get(),width,height},settings,final_output:b.options3d.studio_final,shutter_samples:b.studio_shutters},
+            }))}));
+        }
+    }
     if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
         return Ok(quad);
     }

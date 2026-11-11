@@ -39,7 +39,12 @@ remaining noise/performance work in this order: (1) viewer surface picking,
 (2) per-layer failure isolation, (3) persisted/undoable text extrusion and
 Front/Bevel/Side/Back materials, (4) layer/group/composition material capture,
 (5) one/two/four views with per-view camera and tier, (6) Studio backdrop,
-(7) framed, grounded import placement. This lane adds no visual controls.
+(7) framed, grounded import placement. Round two (`1107d800a`) confirmed
+picking and failure isolation in the app. Immediately after import placement:
+fix Quality fog making the foreground black, the shadow catcher's black void
+(possibly shared with the Studio backdrop), and Fast terrain rendering darker
+than Quality. Then resume noise/edges and the approved native performance gates.
+This lane adds no visual controls.
 
 ## Capability audit
 
@@ -83,10 +88,10 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Parent/group transforms, anchors, opacity and solo | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Per-layer and group 3D switches | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | 2D solids/images/video/text/shapes/precomps in 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Flat text/shapes remain flat until extrusion enabled | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Text outlines, font loading/fallback and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Shape extrusion, compound paths and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Animated extrusion depth/bevel and quality | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Flat text/shapes remain flat until extrusion enabled | Native opt-in routing checked; disabled artwork retains its existing renderer | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Text outlines, font loading/fallback and holes | Native broker/full-face outlines, four surfaces and counters checked; image-only glyphs report errors | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Shape extrusion, compound paths and holes | Native compound fill rules and expanded strokes; stroked caps subtract fill overlap | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Animated extrusion depth/bevel and quality | Native geometry channels evaluated; kernel/keyframe/expression paths registered | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
 | Angular/concave/convex bevels, inner hole bevel depth | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front/Bevel/Side/Back independent materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | PBR color/roughness/metalness/emission/opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -1134,3 +1139,56 @@ recovery after replacing the document. **35 native scene/export** and **28
 native Studio** tests pass (two manual diagnostics ignored); the app builds in
 **53.62 s**. Existing Refine, imports, physical maps, World/fog, terrain/scatter,
 source replacement, picking and export regressions remain green.
+
+### UI dependency 3: native text and shape extrusion
+
+The native document retains the pinned Electron `layer.d.extrusion` version-one
+contract. Absent settings read as disabled without changing old projects.
+`set_extrusion { target, patch }` accepts `enabled`, `depth`, `bevelStyle`
+(`none`, `angular`, `concave`, `convex`), `bevelDepth`, `holeBevelDepth` and
+geometry `quality` (`draft`, `standard`, `high`). Enabling also sets the ordinary
+layer's `threeD` switch in the same kernel transaction. Disabling preserves that
+switch, as the source contract does. Geometry quality is separate from render
+quality.
+
+Front, Bevel, Side and Back have sparse independent properties and maps.
+`set_surface_material_properties` (alias `set_material_properties`) accepts
+`target`, `surface` or `materialIndex` 0–3, and `patch`: `color`, `opacity`,
+`roughness`, `metallic`, `emissionColor`, `emissionIntensity`, `ambientResponse`.
+Null clears an override and restores inheritance. `set_surface_material_map`
+(alias `set_material_map`) takes the same surface address plus `slot` and `map`;
+null removes it. Durable images render now; live layer/group/composition maps
+remain dependent on item 4. Color and Emissive are the live-source slots.
+
+All channel writes cross ordinary kernel property/keyframe/expression handling:
+`geo.KEY` and `ms.SURFACE.KEY`. Whole-content staging, the 3D switch and channel
+writes share one Undo entry. Save/reopen retains both authoring data and history.
+The MCP catalog exposes these operations and `get_3d_scene` returns the
+`extrusions` data, extrusion layer records and channel paths. UI reads
+`pm_scene3d::extrusion::{parse,channels,SURFACES}` plus those ordinary channels,
+and calls `Scene3dCommand::Apply`/`edit_3d`; no panel or control was designed.
+
+`pm-geom3d::extrusion` ports compound caps/counters, four material groups,
+continuous cap/perimeter/depth UVs, angular/concave/convex bevel profiles and
+hole bevel scaling. It rejects invalid coordinates and enforces the 500,000
+vertex budget during generation. The native adapter caches geometry separately
+from world transforms and material values, and bounds retained outline geometry.
+
+Text uses the existing native render-thread font broker and the same full-face
+outline painter as flat text, including its font selection, variations, style
+ranges and character layout. Anchored glyph coordinates pass through the
+source's six-unit composition bridge and full native `world3D` transform.
+Bitmap/image-only glyphs report a layer error because they have no vector
+outline. Shapes reuse native editable-path/primitive fills and strokes; compound
+fill rules survive, and stroked areas are subtracted from fill caps before
+extrusion. The native compositor receives the path-traced layer, rather than a
+second flat copy. Empty artwork receives a transparent compositor answer.
+
+Validation so far: **29 kernel tests**, **11 MCP tests**, the engine's compound
+hole/four-surface regression and the native glyph/compositor regression pass.
+The last regression checks all four material groups, geometry/attribute reuse,
+real extrusion depth and authored red emission replacing flat blue paint.
+The full **37 native scene/export tests pass in 40.76 s**, including shape
+fill/stroke extrusion, empty text, per-layer isolation, picking and existing
+material/environment/import regressions. The final native app build passes in
+**31.29 s**. Evidence stays outside Git in the lane's extrusion test/build logs.

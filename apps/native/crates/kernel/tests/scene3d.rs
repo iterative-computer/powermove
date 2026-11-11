@@ -986,3 +986,31 @@ fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
     assert_eq!(s.revision(), revision);
     assert_eq!(project(&s), after);
 }
+
+#[test]
+fn extrusion_surfaces_channels_undo_and_pmv_roundtrip() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"title","name":"Title","type":"text","on":true,"from":0,"dur":10,"p":{},"d":{"text":"Studio","font":"Arial","fontSize":60,"color":"#E8E2CF"}}]})));
+    let flat=project(&s);
+    apply(&mut s,json!({"operation":"set_extrusion","target":"title","patch":{"enabled":true,"depth":30,"bevelStyle":"convex","bevelDepth":4}}));
+    let extruded=project(&s);
+    assert_eq!(layer(&s,"title")["threeD"],true);
+    assert_eq!(layer(&s,"title")["d"]["extrusion"]["p"]["depth"]["v"],30);
+    s.undo().unwrap();assert_eq!(project(&s),flat);s.redo().unwrap();assert_eq!(project(&s),extruded);
+    for (i,surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate() {
+        apply(&mut s,json!({"operation":"set_surface_material_properties","target":"title","materialIndex":i,"patch":{"color":"#FFFFFF","roughness":0.25,"metallic":0.8}}));
+        apply(&mut s,json!({"operation":"set_surface_material_map","target":"title","surface":surface,"slot":"normal","map":"paint"}));
+        s.execute(PropertyCommand::Set(SetProperty::new("title",format!("ms.{surface}.roughness"),0.7,0.)).into(),Origin::Mcp).unwrap();
+        assert_eq!(layer(&s,"title")["d"]["extrusion"]["surfaces"][surface]["properties"]["roughness"]["v"],0.7);
+    }
+    let authored=project(&s);
+    assert!(s.execute(command(json!({"operation":"set_extrusion","target":"title","patch":{"depth":-1}})),Origin::Mcp).is_err());
+    assert!(s.execute(command(json!({"operation":"set_material_map","target":"title","slot":"normal","map":{"layerId":"title"}})),Origin::Mcp).is_err());
+    assert_eq!(project(&s),authored);
+    let mut dir=common::TempDir::new("extrusion");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("text.pmv");
+    common::save_as(&mut s,&path).unwrap();
+    let mut reopened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());
+    assert_eq!(project(&reopened),authored);reopened.undo().unwrap();reopened.redo().unwrap();assert_eq!(project(&reopened),authored);
+    apply(&mut reopened,json!({"operation":"set_material_properties","target":"title","surface":"back","patch":{"roughness":null}}));
+    assert!(layer(&reopened,"title")["d"]["extrusion"]["surfaces"]["back"]["properties"].get("roughness").is_none());
+    reopened.undo().unwrap();assert_eq!(project(&reopened),authored);
+}

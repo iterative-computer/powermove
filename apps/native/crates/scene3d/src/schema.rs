@@ -249,6 +249,19 @@ fn fields(group: &str) -> Vec<Field> {
             n("emissionIntensity", 0., 100., 1.),
             n("ambientResponse", 0., 100., 1.),
         ],
+        "extrusion" => vec![
+            n("depth", 0., 10000., 0.),
+            enumeration("bevelStyle", &["none", "angular", "concave", "convex"], "none"),
+            n("bevelDepth", 0., 1000., 2.),
+            n("holeBevelDepth", 0., 100., 100.),
+            enumeration("quality", &["draft", "standard", "high"], "standard"),
+        ],
+        "surface" => vec![
+            color("color", "#E8E2CF"), n("opacity", 0., 100., 100.),
+            n("roughness", 0., 1., 0.4), n("metallic", 0., 1., 0.),
+            color("emissionColor", "#000000"), n("emissionIntensity", 0., 100., 0.),
+            n("ambientResponse", 0., 100., 100.),
+        ],
         "part" => vec![
             basic("x", 0.),
             basic("y", 0.),
@@ -357,7 +370,9 @@ pub fn properties(group: &str, raw: Option<&Value>) -> Result<Value> {
         if group == "camera" && f.name.starts_with("iris") && raw.get(f.name).is_none() {
             continue;
         }
-        out[f.name] = normalize_channel(raw.get(f.name).cloned().unwrap_or(f.default), f.kind)?;
+        let mut value=raw.get(f.name).cloned().unwrap_or(f.default);
+        if matches!(group,"extrusion"|"surface") && value.is_object() && value.get("kf").is_none(){value["kf"]=json!([]);}
+        out[f.name] = normalize_channel(value, f.kind)?;
     }
     Ok(out)
 }
@@ -845,7 +860,8 @@ pub fn layer_data(r: Role, raw: Value) -> Result<Value> {
     }
 }
 /// Validate an authored channel without losing keyframe metadata.
-pub fn validate_channel(group: &str, key: &str, v: Value) -> Result<Value> {
+pub fn validate_channel(group: &str, key: &str, mut v: Value) -> Result<Value> {
+    if matches!(group,"extrusion"|"surface") && v.is_object() && v.get("kf").is_none(){v["kf"]=json!([]);}
     let f = fields(group)
         .into_iter()
         .find(|f| f.name == key)

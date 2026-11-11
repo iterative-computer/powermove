@@ -552,6 +552,16 @@ pub fn validate_composition(comp: &Value) -> Result<()> {
         }
         Ok(())
     }
+    for layer in layers {
+        if layer["d"].get("extrusion").is_some() {
+            let data=crate::extrusion::parse(&layer["d"]["extrusion"])?;
+            for surface in crate::extrusion::SURFACES {
+                if let Some(maps)=data["surfaces"][surface]["maps"].as_object() {
+                    for source in maps.values() {check_source(source,layer["id"].as_str().unwrap_or(""),comp,layers)?;}
+                }
+            }
+        }
+    }
     for (layer, o) in objects {
         let id = layer["id"].as_str().unwrap_or("");
         check_source(&o["world"]["source"], id, comp, layers)?;

@@ -283,3 +283,18 @@ fn sparse_material_commands_and_channels_are_agent_reachable() {
         );
     }
 }
+
+#[test]
+fn extrusion_commands_and_surface_channels_are_exposed_to_agents(){
+    let f=Fixture::new();let mut s=f.session();
+    ok(s.call("apply_commands",json!({"commands":[{"type":"add_layer","id":"title","layerType":"text","content":{"text":"Studio","size":60}}]})));
+    ok(s.call("edit_3d",json!({"operation":"set_extrusion","target":"title","patch":{"enabled":true,"depth":25,"bevelStyle":"convex"}})));
+    ok(s.call("edit_3d",json!({"operation":"set_surface_material_properties","target":"title","surface":"bevel","patch":{"metallic":0.8,"color":"#FFFFFF"}})));
+    ok(s.call("edit_3d",json!({"operation":"set_surface_material_map","target":"title","materialIndex":2,"slot":"color","map":"paint"})));
+    ok(s.call("apply_commands",json!({"commands":[{"type":"set_property","target":"title","path":"ms.bevel.metallic","value":0.6}]})));
+    let read=ok(s.call("get_3d_scene",json!({"target":"title"})));
+    assert_eq!(read["layers"][0]["role"],"extrusion");
+    assert_eq!(read["scene"]["extrusions"][0]["extrusion"]["p"]["depth"]["v"],25);
+    assert_eq!(read["scene"]["extrusions"][0]["extrusion"]["surfaces"]["side"]["maps"]["color"],"paint");
+    assert!(read["channels"].as_array().unwrap().iter().any(|c|c["path"]=="ms.bevel.metallic" && c["value"]==0.6));
+}

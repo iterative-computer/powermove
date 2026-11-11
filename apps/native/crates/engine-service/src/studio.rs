@@ -75,8 +75,12 @@ pub fn attach_with_preview(
     request: &SceneRequest,
     preview: Preview,
 ) -> Result<(), String> {
+    attach_with_preview_fonts(renderer,doc,media,request,preview,None)
+}
+#[cfg(feature="kernel")]
+pub fn attach_with_preview_fonts(renderer:&mut pm_render::Renderer,doc:std::sync::Arc<pm_model::Document>,media:&pm_export::render::MediaPaths,request:&SceneRequest,preview:Preview,fonts:Option<&pm_render::text::host::RenderFonts>)->Result<(),String>{
     use pm_studio3d_engine::compositor::Source;
-    let source = DocumentSource::new(doc, media.clone());
+    let source = DocumentSource::new(doc, media.clone()).with_native_fonts(fonts);
     let tier = match preview {
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },
@@ -90,6 +94,11 @@ pub fn attach_with_preview(
     Ok(())
 }
 
+#[cfg(feature="kernel")]
+pub fn attach_with_fonts(renderer:&mut pm_render::Renderer,doc:std::sync::Arc<pm_model::Document>,media:&pm_export::render::MediaPaths,fonts:&pm_render::text::host::RenderFonts){
+    attach_source(renderer,DocumentSource::new(doc,media.clone()).with_native_fonts(Some(fonts)),Tier::QualityLive);
+}
+
 /// Native export command hook. Overrides affect this frozen job only.
 #[cfg(feature = "kernel")]
 pub fn attach_with_quality(
@@ -99,8 +108,11 @@ pub fn attach_with_quality(
     composition: &str,
     quality: serde_json::Value,
 ) -> Result<(), String> {
-    let source =
-        DocumentSource::new(doc, media.clone()).with_quality_override(composition, quality)?;
+    attach_with_quality_fonts(renderer,doc,media,composition,quality,None)
+}
+#[cfg(feature="kernel")]
+pub fn attach_with_quality_fonts(renderer:&mut pm_render::Renderer,doc:std::sync::Arc<pm_model::Document>,media:&pm_export::render::MediaPaths,composition:&str,quality:serde_json::Value,fonts:Option<&pm_render::text::host::RenderFonts>)->Result<(),String>{
+    let source = DocumentSource::new(doc, media.clone()).with_native_fonts(fonts).with_quality_override(composition, quality)?;
     attach_source(renderer, source, Tier::QualityLive);
     Ok(())
 }

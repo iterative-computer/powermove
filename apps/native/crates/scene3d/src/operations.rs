@@ -13,6 +13,7 @@ pub enum Action {
         id: String,
         data: Value,
     },
+    Extrusion { id: String, data: Value, enable_three_d: bool },
     RenderQuality {
         quality: Value,
     },
@@ -194,6 +195,9 @@ pub fn plan(
     let operation = args["operation"]
         .as_str()
         .ok_or_else(|| Error("Missing 3D operation".into()))?;
+    if crate::extrusion::OPERATIONS.contains(&operation) {
+        return crate::extrusion::plan(comp, args, selection);
+    }
     if [
         "set_world",
         "add_fog",

@@ -15,6 +15,8 @@ use std::{
 
 #[path = "environment.rs"]
 mod environment;
+#[path = "extrusion.rs"]
+mod extrusion;
 #[path = "geometry.rs"]
 mod geometry;
 #[path = "imported.rs"]
@@ -29,6 +31,8 @@ mod material_policy;
 mod scatter;
 
 pub struct DocumentSource {
+    text: Mutex<pm_render::text::TextContext>,
+    extruded: Mutex<Vec<(String,Arc<pm_scene3d::extrusion::Extrusion>)>>,
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
     meshes: Mutex<HashMap<String, Arc<Mesh>>>,
@@ -68,6 +72,8 @@ impl DocumentSource {
     }
     pub fn new(document: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) -> Self {
         Self {
+            text: Mutex::default(),
+            extruded: Mutex::default(),
             snapshot: pm_kernel::Snapshot {
                 doc_id: 0,
                 revision: document.revision(),
@@ -85,6 +91,12 @@ impl DocumentSource {
             scatter_placements: Mutex::default(),
             failures: Mutex::default(),
         }
+    }
+    pub fn with_text_fonts(self, fonts:Box<dyn pm_render::text::TextFonts>) -> Self {
+        self.text.lock().expect("new text context").set_fonts(Some(fonts));self
+    }
+    pub fn with_native_fonts(self, fonts:Option<&pm_render::text::host::RenderFonts>) -> Self {
+        if let Some(fonts)=fonts {self.with_text_fonts(Box::new(pm_render::text::host::EngineFonts::new(&fonts.broker,&fonts.health)))}else{self}
     }
     /// Resolve one export's override without editing the saved composition.
     pub fn with_quality_override(
@@ -351,7 +363,8 @@ impl SceneSource for DocumentSource {
         request: &SceneRequest,
     ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
         let failures=self.layer_failures(request)?;
-        Ok(self.resolve(request)?.scene["objects"]
+        let resolved=self.resolve(request)?;
+        let mut layers:Vec<_>=resolved.scene["objects"]
             .as_array()
             .ok_or("Missing Studio objects")?
             .iter()
@@ -365,7 +378,13 @@ impl SceneSource for DocumentSource {
                     && val(&o["world"]["p"]["visible"]) != false
                     && o["world"]["mode"] != "none",
             })
-            .collect())
+            .collect();
+        for layer in resolved.scene["extrusions"].as_array().into_iter().flatten(){
+            if layer["threeD"]==true && layer["extrusion"]["enabled"]==true && !failures.iter().any(|f|layer["id"]==f.layer){
+                layers.push(pm_studio3d_engine::extract::AuxiliaryLayer{id:layer["id"].as_str().ok_or("Extrusion has no ID")?.into(),include_void:false});
+            }
+        }
+        Ok(layers)
     }
     fn final_quality(
         &self,
@@ -738,6 +757,7 @@ impl SceneSource for DocumentSource {
         }
         scatter::apply(self, &r, &scene, &mut instances, &request.composition, &mut failures)?;
         material_policy::apply(&r, &mut instances, &mut scene, &mut materials)?;
+        self.add_extrusions(request,&mut scene,&mut instances,&mut materials,&mut map_layers,&mut map_indices,&mut failures)?;
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for instance in &instances {
             let (a, z) = instance.mesh.bounds();
