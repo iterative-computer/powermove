@@ -1450,15 +1450,30 @@ fn fill_cache(
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }
-        cache.put(&frame.key, bytes).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::StorageFull {
-                anyhow::anyhow!(DISK_FULL)
-            } else if e.to_string().contains("quota") {
-                anyhow::anyhow!(LIMIT_FULL)
-            } else {
-                anyhow::Error::from(e)
-            }
-        })
+        cache
+            .put(&frame.key, bytes)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::StorageFull {
+                    anyhow::anyhow!(DISK_FULL)
+                } else if e.to_string().contains("quota") {
+                    anyhow::anyhow!(LIMIT_FULL)
+                } else {
+                    anyhow::Error::from(e)
+                }
+            })
+            .inspect(|()| {
+                // Which file holds which time (diagnostics only).
+                if let Some(path) = &diagnostics
+                    && let Ok(file) = frame.key.digest()
+                {
+                    let line = serde_json::json!({"stored": frame.ticks, "file": file});
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .and_then(|mut f| writeln!(f, "{line}"));
+                }
+            })
     };
     let frames = &fill.frames;
     let total = frames.len().max(1) as f64;
