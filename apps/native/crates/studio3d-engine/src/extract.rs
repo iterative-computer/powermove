@@ -113,6 +113,7 @@ impl Transform {
     }
 }
 
+#[derive(Clone)]
 pub struct MeshInstance {
     pub layer: String,
     /// Geometry is immutable; the same Arc reuses its BLAS after motion.

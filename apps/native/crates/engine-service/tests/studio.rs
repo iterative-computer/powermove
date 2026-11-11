@@ -1207,3 +1207,120 @@ fn retained_height_assets_cache_decodes_and_invalidate_geometry_on_replacement()
     ));
     assert!((second.instances[0].mesh.positions[0].y - expected * 0.5).abs() < 1e-6);
 }
+
+fn scatter_document(nature: bool, density: f64, camera_z: f64) -> Arc<pm_model::Document> {
+    let old = environment_geometry_document(
+        json!({"source":{"primitive":"plane"},"terrain":{"p":{"width":4,"depth":4,"resolution":2,"amplitude":0}}}),
+        json!({"position.y":1}),
+    );
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    let comp = &project["comps"]["test"];
+    let source = pm_scene3d::service::new_layer(comp, "prototype", "Prototype", pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":if nature {json!({"nature":"conifer","seed":41})} else {json!({"primitive":"sphere","parameters":{"radius":0.1,"segments":12}})},"material":{"p":{"color":"#FF0000","emissive":"#FF0000"}}}}),
+        json!({"position.x":1000}), false, None, 0.).unwrap();
+    let scatter = pm_scene3d::service::new_layer(comp, "scatter", "Scatter", pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"prototype","surface":"terrain","p":{"count":100,"density":density,"seed":41,"scaleMin":1,"scaleMax":1,"rotationMin":0,"rotationMax":0}}}}),
+        json!({}), true, None, 0.).unwrap();
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    for layer in layers.iter_mut() {
+        if layer["id"] == "terrain" {
+            layer["on"] = json!(false);
+        }
+        if layer["id"] == "camera" {
+            layer["p"]["position.z"]["v"] = json!(camera_z);
+        }
+    }
+    layers.extend([source, scatter]);
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+#[test]
+fn scatter_hidden_resources_produce_repeatable_shared_world_instances() {
+    let doc = scatter_document(false, 1., 5.);
+    let input = environment_input(doc.clone());
+    assert_eq!(input.instances.len(), 100);
+    assert!(input.instances.iter().all(|i| i.layer == "scatter"
+        && (i.world.0[13] - 1.).abs() < 1e-6
+        && i.world.0[12].abs() <= 2.
+        && i.world.0[14].abs() <= 2.));
+    assert!(
+        input
+            .instances
+            .iter()
+            .all(|i| Arc::ptr_eq(&i.mesh, &input.instances[0].mesh))
+    );
+    let second = environment_input(doc.clone());
+    assert!(
+        input
+            .instances
+            .iter()
+            .zip(&second.instances)
+            .all(|(a, b)| a.world.0 == b.world.0)
+    );
+    let mut extractor = pm_studio3d_engine::extract::Extractor::default();
+    let extracted = extractor.extract(&input).unwrap();
+    assert_eq!(extractor.builds, 1);
+    assert_eq!(
+        extracted.prepared.tris.len(),
+        input.instances[0].mesh.indices.len()
+    );
+    assert_eq!(extracted.layers, ["scatter"]);
+    let mut renderer = Renderer::headless().unwrap();
+    let pixels = draw(&mut renderer, doc);
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0. && p[3] > 0.)
+            .count()
+            > 5
+    );
+}
+#[test]
+fn scatter_nature_lod_changes_geometry_without_rerolling_placements() {
+    let near = environment_input(scatter_document(true, 1., 5.));
+    let far = environment_input(scatter_document(true, 1., 10000.));
+    assert_eq!(near.instances.len(), 100);
+    assert_eq!(far.instances.len(), 100);
+    assert!(
+        near.instances
+            .iter()
+            .zip(&far.instances)
+            .all(|(a, b)| a.world.0 == b.world.0)
+    );
+    assert!(far.instances[0].mesh.indices.len() < near.instances[0].mesh.indices.len());
+    let mut extractor = pm_studio3d_engine::extract::Extractor::default();
+    extractor.extract(&far).unwrap();
+    assert_eq!(extractor.builds, 1, "100 trees share one resident far LOD");
+}
+#[test]
+fn empty_scatter_is_transparent_in_final_and_live() {
+    let doc = scatter_document(false, 0., 5.);
+    assert!(environment_input(doc.clone()).instances.is_empty());
+    let mut renderer = Renderer::headless().unwrap();
+    assert!(
+        draw(&mut renderer, doc.clone())
+            .chunks_exact(4)
+            .all(|p| p[3] == 0.)
+    );
+    let mut live = request();
+    live.export = false;
+    live.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &live,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .all(|p| p[3] == 0.)
+    );
+}

@@ -38,8 +38,8 @@ resolved/denoised image across per-layer compositor targets. Viewer, headless
 capture and windowless export use the same native seam. The newer document
 contract and quality bridge are integrated after their targeted checks and the
 GPUI binary build passed. World sky/HDRI/atmosphere, transformed fog, terrain
-regions/erosion and all six nature species now render. Scatter still needs
-translation and reports an explicit unsupported error.
+regions/erosion, all six nature species and seeded surface scatter now render.
+Hidden prototypes and distance LOD retain shared geometry.
 
 ## Main capability inventory
 
@@ -153,7 +153,8 @@ Sky/sun/HDRI and atmosphere, fog volumes, terrain regions/thermal erosion,
 seeded scatter/instances, procedural plants/grass/rocks and distance LOD exist
 in the pinned engine. Native authoring, channels, actor operations, readback, persistence and inverse
 patches now exist. World/HDRI/fog and terrain/nature have native renderer
-translation; scatter, hidden prototypes and live source capture remain gaps.
+translation, including scatter/hidden prototypes/LOD. Live source capture remains
+a gap.
 The kernel is the only document writer.
 
 ## Ordered plan
@@ -472,7 +473,7 @@ summary metrics and comparison PNGs remain outside Git.
 
 The port remains incomplete. World sky/atmosphere/fog translation is now implemented (see the next checkpoint).
 Terrain/nature translation is now implemented (see the later checkpoint).
-Scatter and sparse material/part renderer translation remain unfinished. Live environment capture
+Sparse material/part renderer translation remains unfinished. Live environment capture
 and full cross-composition source-cycle analysis remain pending. Remaining gates include
 material source capture, extended imported maps, iris/orthographic transport,
 quality shutter samples and automatic idle Refine, complete Electron scene
@@ -584,8 +585,43 @@ and Final. The GPUI app builds. No panel/layout changes were made.
 | Regions, blend and natural ground | Shared palettes; native translated | Region records/channels | Stored | Stored edits reversible | `edit_3d`; region material/range records → `update_terrain` |
 | Detail, erosion and adaptive density | Shared generator; native translated | Terrain channels | Stored | Stored edits reversible | `edit_3d`; terrain p → ordinary property writes or `update_terrain` |
 | Six seeded nature prototypes | Shared geometry; standalone native translated | Object `source.nature`/`seed` | Stored | Stored edits reversible | `edit_3d`; source data → `add_object`, `update_object` |
-| Scatter, shared instances and LOD | Shared engine present; native pending | Model/surface references/channels | Stored | Stored edits reversible | `edit_3d`; `add_scatter`, `update_scatter` |
+| Scatter, shared instances and LOD | Shared engine; native translated | Model/surface references/channels | Stored | Stored edits reversible | `edit_3d`; `add_scatter`, `update_scatter` |
 
 Layer/composition height captures remain explicit unsupported errors. Whole
 Electron-project parity and the native environment performance gates remain
 unverified; the small tests establish transport and state behavior only.
+
+
+### Seeded surface scatter and hidden prototypes
+
+The hidden-source loss was reproduced: assembly omitted the two hidden resources
+created by `add_scatter`. Native assembly now retains active scatters' model and
+surface resources within their time ranges, marks them non-visible in evaluated
+state and leaves the saved switches unchanged. Geometry is prepared before
+visible instances are selected. The shared generator samples the evaluated
+world-space triangles, including terrain and imported/posed resource parts.
+Density, seed, scale/rotation, height and slope limits use the pinned generator.
+The prototype's root translation is removed while its rotation, scale and part
+offsets remain. Instances belong to the scatter timeline layer.
+
+Up to four placement sets / 64 MiB are cached by exact settings and immutable
+surface identity/world matrices. Camera motion changes conifer/broadleaf/birch/
+bush/grass/rock LOD without rerolling placements. Three meshes are shared per
+nature source; repeated instances reuse both palettes and BLAS geometry. Zero
+accepted placements produce transparent Live/Final compositor outputs.
+
+Checks: **18 document**, **3 scene service**, **2 source-contract**, **21 import**,
+**17 navigation/light**, **8 schema unit** and **22 renderer-adapter** tests pass.
+The new native checks verify 100 placements from hidden resources, the translated
+surface's elevation, deterministic world matrices, one uploaded prototype,
+near/far nature LOD with identical placement matrices and transparent empty
+scatter in Live/Final. The native scene/export set has 18 checks; 17 passed
+in the full run and the remaining placement check passed after correcting its
+exact-float test comparison to a 1e-6 tolerance. The GPUI app builds.
+
+Designer hooks remain `edit_3d` → `add_scatter` / `update_scatter`, model/surface
+layer IDs, scatter channels and nature source/seed. No controls were added.
+Arbitrary parented layer subtrees as prototypes/surfaces, scatter-specific
+material-option overrides and environment-aware picking/bounds still need
+parity checks; imported resource parts are included. Performance with large
+forests and native presented fps remain unmeasured.

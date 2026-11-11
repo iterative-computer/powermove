@@ -98,6 +98,30 @@ impl Evaluator for StaticEvaluator {
         Ok(l["on"] != false && t >= from && t < from + l["dur"].as_f64().unwrap_or(f64::INFINITY))
     }
 }
+/// Active scatters retain hidden model/surface resources. Resource evaluation
+/// ignores their visibility switch, while preserving the source's time range.
+fn scatter_sources(
+    layers: &[Value],
+    time: f64,
+    ev: &mut impl Evaluator,
+) -> Result<std::collections::HashSet<String>> {
+    let mut ids = std::collections::HashSet::new();
+    for l in layers {
+        let scatter = &l["d"]["data"]["object"]["scatter"];
+        if schema::role(l) == Some(Role::Object) && scatter.is_object() && ev.active(l, time)? {
+            for key in ["model", "surface"] {
+                if let Some(id) = scatter[key].as_str() {
+                    ids.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+fn source_in_range(l: &Value, time: f64) -> bool {
+    let from = l["from"].as_f64().unwrap_or(0.);
+    time >= from && time < from + l["dur"].as_f64().unwrap_or(f64::INFINITY)
+}
 pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<Value> {
     if !time.is_finite() {
         return fail("Invalid composition time");
@@ -109,11 +133,17 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
     let layers = comp["layers"]
         .as_array()
         .ok_or_else(|| Error("Composition has no layers".into()))?;
+    let sources = scatter_sources(layers, time, ev)?;
     for l in layers {
         let Some(role) = schema::role(l) else {
             continue;
         };
-        if !ev.active(l, time)? {
+        let visible = ev.active(l, time)?;
+        if !visible
+            && !(role == Role::Object
+                && sources.contains(l["id"].as_str().unwrap_or(""))
+                && source_in_range(l, time))
+        {
             continue;
         }
         let data = schema::layer_data(role, l["d"]["data"].clone())?;
@@ -161,6 +191,9 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
                 o["name"] = l["name"].clone();
                 o["parent"] = l["parent"].clone();
                 o["p"] = trans;
+                if !visible {
+                    o["p"]["visible"] = json!(false);
+                }
                 o["material"]["p"] = eval_p(&o["material"]["p"], "m")?;
                 for kind in crate::contract::GROUPS {
                     if o.get(*kind).is_some() {
@@ -683,14 +716,19 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         camera_position: None,
         camera_up: None,
     };
-    for l in comp["layers"]
+    let layers = comp["layers"]
         .as_array()
-        .ok_or_else(|| Error("No composition layers".into()))?
-    {
+        .ok_or_else(|| Error("No composition layers".into()))?;
+    let sources = scatter_sources(layers, time, ev)?;
+    for l in layers {
         let Some(role) = schema::role(l) else {
             continue;
         };
-        if !ev.active(l, time)? {
+        if !ev.active(l, time)?
+            && !(role == Role::Object
+                && sources.contains(l["id"].as_str().unwrap_or(""))
+                && source_in_range(l, time))
+        {
             continue;
         }
         let id = l["id"]

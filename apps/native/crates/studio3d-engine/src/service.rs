@@ -151,9 +151,18 @@ impl StudioService {
             .enumerate()
             .map(|(index, id)| (id.clone(), index as u32, false))
             .collect();
+        let mut auxiliary_ids = std::collections::HashSet::new();
         for layer in auxiliary {
-            if layer.id.is_empty() || outputs.iter().any(|(id, _, _)| *id == layer.id) {
+            if layer.id.is_empty() || !auxiliary_ids.insert(layer.id.clone()) {
                 return Err("Duplicate or empty Studio output layer".into());
+            }
+            // An empty procedural layer still owes the compositor a transparent
+            // answer. When it has geometry, its ordinary mask already owns it.
+            if outputs.iter().any(|(id, _, _)| *id == layer.id) {
+                if layer.include_void {
+                    return Err("Surface layer cannot own the World output".into());
+                }
+                continue;
             }
             outputs.push((layer.id, extracted.layers.len() as u32, layer.include_void));
         }

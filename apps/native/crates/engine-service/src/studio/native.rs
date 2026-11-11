@@ -17,6 +17,8 @@ use std::{
 mod environment;
 #[path = "geometry.rs"]
 mod geometry;
+#[path = "scatter.rs"]
+mod scatter;
 
 pub struct DocumentSource {
     snapshot: pm_kernel::Snapshot,
@@ -27,6 +29,7 @@ pub struct DocumentSource {
     quality_override: Option<(String, Value)>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
+    scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -65,6 +68,7 @@ impl DocumentSource {
             quality_override: None,
             environment_maps: Mutex::default(),
             height_maps: Mutex::default(),
+            scatter_placements: Mutex::default(),
         }
     }
     /// Resolve one export's override without editing the saved composition.
@@ -330,7 +334,9 @@ impl SceneSource for DocumentSource {
             .as_array()
             .ok_or("Missing Studio objects")?
             .iter()
-            .filter(|o| o.get("world").is_some() || o.get("fog").is_some())
+            .filter(|o| {
+                o.get("world").is_some() || o.get("fog").is_some() || o.get("scatter").is_some()
+            })
             .map(|o| pm_studio3d_engine::extract::AuxiliaryLayer {
                 id: o["id"].as_str().unwrap().into(),
                 include_void: o.get("world").is_some()
@@ -432,7 +438,7 @@ impl SceneSource for DocumentSource {
                 continue;
             }
             if object.get("scatter").is_some() {
-                return Err("Studio scatter document adapter is not connected yet".into());
+                continue;
             }
             if [
                 "materialProperties",
@@ -451,9 +457,7 @@ impl SceneSource for DocumentSource {
                     "Studio sparse material/part document adapter is not connected yet".into(),
                 );
             }
-            if val(&object["p"]["visible"]) == false {
-                continue;
-            }
+
             if object["material"]["maps"]
                 .as_object()
                 .is_some_and(|m| m.values().any(|v| !v.is_null()))
@@ -594,6 +598,7 @@ impl SceneSource for DocumentSource {
                 });
             }
         }
+        scatter::apply(self, &r, &scene, &mut instances)?;
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for instance in &instances {
             let (a, z) = instance.mesh.bounds();
