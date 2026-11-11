@@ -1366,3 +1366,29 @@ rig, camera framing, one-step Undo/Redo, PMV reopen/history, locked camera,
 no-studio imports and pre-bounds archive recovery. **8 native scene unit tests**
 and **46 native Metal scene/export tests** pass (the latter **11.14 s**).
 The app build passes in **22.38 s**.
+
+### Round-two engine finding — Quality fog blackening
+
+Reproduced a dense white volume lit only by the existing legacy ambient
+environment: with a foreground surface, mean centre RGB was **0.00011** in
+Refine and **0.00047** in Final, versus **0.74362** in Live. The full transport
+sampled direct HDRI/sky light at scattering events but omitted the legacy
+hemisphere. It also suppresses environment escape after a scattering event
+because direct sampling owns that contribution, so those paths became black.
+The engine now phase-samples that hemisphere when no environment map exists.
+Mapped environments keep their existing importance sampling.
+
+Native composition now gives uncovered volume radiance one healthy output
+owner even when the backdrop and sky are transparent. This also makes fog-only
+compositions render without inventing a proxy plane. Camera visibility of the
+sky does not disable independent Fog layers; disabling the Fog layer still
+removes it. These are render fixes with no authored state or UI changes.
+
+The same 64×64 reproduction now measures Refine **0.58551**, Final **0.62373**
+with a foreground surface, and **0.58229 / 0.62345** without one. This is a
+regression for missing illumination, not a claim of Cycles fog matching.
+**47 native scene/export checks** pass in **11.27 s**; the focused volume test
+also passes with Metal RT disabled (**0.97 s**). **29 native Studio checks**
+and **51 engine unit checks** pass, and all **11 Cycles yardstick tolerances**
+pass using the existing validated references. The native app build passes in
+**21.04 s**.

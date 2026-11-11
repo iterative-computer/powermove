@@ -512,6 +512,25 @@ impl SceneSource for DocumentSource {
                 }
             }
         }
+        // Uncovered volumetric radiance still needs a compositor output when
+        // the sky and studio backdrop are transparent, including fog-only sets.
+        if !layers.iter().any(|layer| layer.include_void) {
+            for layer in layers.iter_mut().rev() {
+                let owner = resolved.scene["objects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|o| o["id"] == layer.id);
+                if owner.is_some_and(|o| {
+                    val(&o["p"]["visible"]) != false
+                        && (n(&o["fog"]["p"], "density", 0.) > 0.
+                            || n(&o["world"]["p"], "fogDensity", 0.) > 0.)
+                }) {
+                    layer.include_void = true;
+                    break;
+                }
+            }
+        }
         Ok(layers)
     }
     fn final_quality(
@@ -1081,7 +1100,10 @@ impl SceneSource for DocumentSource {
                 (rgb & 255) as f32 / 255.,
             )
         });
-        let backdrop_owner = if background.is_some() {
+        let backdrop_owner = if background.is_some()
+            || scene.world.atmosphere.density > 0.
+            || !scene.world.volumes.is_empty()
+        {
             let visible: std::collections::HashSet<_> = instances
                 .iter()
                 .filter(|i| i.primary_visible)

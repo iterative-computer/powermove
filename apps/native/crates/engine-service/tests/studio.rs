@@ -1450,7 +1450,7 @@ fn world_and_transformed_fog_reach_transport_without_proxy_surfaces() {
 }
 
 #[test]
-fn world_alone_renders_a_sky_and_hidden_world_is_transparent() {
+fn world_alone_renders_a_sky_and_hiding_the_sky_preserves_fog() {
     let mut renderer = Renderer::headless().unwrap();
     let visible = draw(&mut renderer, environment_document(true, false));
     assert!(
@@ -1486,10 +1486,21 @@ fn world_alone_renders_a_sky_and_hidden_world_is_transparent() {
             > 4000,
         "Live must present the World background through its GPU surface too"
     );
-    let hidden = draw(&mut renderer, environment_document(false, false));
+    // World.visible hides the sky from the camera; it does not disable the
+    // independent Fog layer or the environment lighting that illuminates it.
+    let fog = draw(&mut renderer, environment_document(false, false));
+    assert!(fog.chunks_exact(4).any(|p| p[3] > 0.001 && p[0] > 0.001));
+    let mut project =
+        pm_scene3d::from_model(&environment_document(false, false).to_value().unwrap()).unwrap();
+    for layer in project["comps"]["test"]["layers"].as_array_mut().unwrap() {
+        if layer["id"] == "fog" {
+            layer["on"] = json!(false);
+        }
+    }
+    let hidden = draw(&mut renderer, project_document(&project));
     assert!(
         hidden.chunks_exact(4).all(|p| p[3] == 0.),
-        "camera-hidden World and Fog layers draw no planes"
+        "a camera-hidden sky with its Fog layer disabled is transparent"
     );
 }
 
@@ -3270,4 +3281,82 @@ fn studio_backdrop_and_shadow_catcher_reach_every_native_tier() {
         }
         assert_eq!(doc.to_value(), before);
     }
+}
+
+#[test]
+fn legacy_ambient_fog_keeps_a_visible_native_volume_and_foreground() {
+    let mut valid = true;
+    for surface in [false, true] {
+        let old = document(false, 100.);
+        let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+        let comp = &mut project["comps"]["test"];
+        comp["studioQuality"]=pm_scene3d::quality::resolve(&pm_scene3d::quality::preset("production").unwrap(),&json!({"minSamples":128,"maxSamples":128,"noiseThreshold":0,"denoise":false,"caustics":false})).unwrap();
+        let fog=pm_scene3d::service::new_layer(comp,"fog","Fog",pm_scene3d::schema::Role::Object,json!({"object":{"source":{"primitive":"plane"},"fog":{"p":{"width":8,"height":8,"depth":8,"density":1.,"color":"#FFFFFF"}}}}),json!({}),true,None,0.).unwrap();
+        let layers = comp["layers"].as_array_mut().unwrap();
+        for layer in layers.iter_mut() {
+            if layer["id"] == "camera" {
+                layer["d"]["data"]["environment"]["p"]["ambient"]["v"] = json!(1.);
+            }
+            if layer["id"] == "mirror" {
+                layer["on"] = json!(surface);
+                layer["d"]["data"]["object"]["material"]["p"]["metalness"]["v"] = json!(0);
+                layer["d"]["data"]["object"]["material"]["p"]["roughness"]["v"] = json!(0.7);
+            }
+        }
+        layers.push(fog);
+        let doc = project_document(&project);
+        let mut renderer = Renderer::headless().unwrap();
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        for tier in [
+            studio::Preview::Live,
+            studio::Preview::Refine,
+            studio::Preview::Final,
+        ] {
+            studio::attach_with_preview(
+                &mut renderer,
+                doc.clone(),
+                &Default::default(),
+                &req,
+                tier,
+            )
+            .unwrap();
+            let mut r = request();
+            r.export = false;
+            r.output_kind = OutputKind::Preview;
+            let frame = renderer
+                .render(
+                    &doc,
+                    "test",
+                    Ticks::ZERO,
+                    &r,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let p = renderer.read_rgba(&frame).unwrap();
+            let center: Vec<_> = (20..44)
+                .flat_map(|y| (20..44).map(move |x| (y * 64 + x) * 4))
+                .collect();
+            let rgb = center
+                .iter()
+                .map(|i| p[*i] + p[*i + 1] + p[*i + 2])
+                .sum::<f32>()
+                / (center.len() * 3) as f32;
+            let alpha = center.iter().map(|i| p[*i + 3]).sum::<f32>() / center.len() as f32;
+            eprintln!(
+                "FOG_NATIVE surface={surface} tier={tier:?} mean_rgb={rgb:.5} alpha={alpha:.5}"
+            );
+            valid &= rgb > 0.1 && alpha > 0.1;
+        }
+    }
+    assert!(
+        valid,
+        "fog must retain lit volume radiance in every native tier"
+    );
 }
