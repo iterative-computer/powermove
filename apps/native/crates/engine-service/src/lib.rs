@@ -2284,7 +2284,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
-            engine.maintain_memory();
+            if engine.maintain_memory() {
+                for r in runtime.values() {
+                    if let Some(audio) = &r.transport.audio {
+                        audio.send(audio::AudioCtl::MemoryPressure);
+                    }
+                }
+            }
             let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }

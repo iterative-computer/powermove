@@ -1046,6 +1046,8 @@ pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
 pub struct MediaCache {
     pool: FramePool,
     service: Arc<DecodeService>,
+    lease: Mutex<MediaLease>,
+    idle_media: bool,
     background: Option<prewarm::BackgroundPrepare>,
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
@@ -1076,6 +1078,8 @@ pub struct MediaCache {
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
     source_seen: BTreeMap<PathBuf, std::time::Instant>,
     frames: BTreeMap<FrameKey, (Target, u64)>,
+    frame_epoch: u64,
+    frame_seen: BTreeMap<PathBuf, u64>,
     next_texture_revision: u64,
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
@@ -1113,6 +1117,11 @@ impl MediaCache {
             viewer: ViewerDecode::new(service.clone()),
             source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
             service,
+            lease: Mutex::new(MediaLease {
+                frame_cache: DEFAULT_FRAME_CACHE,
+                decoders: 32 << 20,
+            }),
+            idle_media: false,
             background: None,
             scrub: false,
             playback: None,
@@ -1125,6 +1134,8 @@ impl MediaCache {
             sources: BTreeMap::new(),
             source_seen: BTreeMap::new(),
             frames: BTreeMap::new(),
+            frame_epoch: 0,
+            frame_seen: BTreeMap::new(),
             next_texture_revision: 0,
             interpretations: BTreeMap::new(),
             deinterlacer: None,
@@ -1310,6 +1321,7 @@ impl MediaCache {
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
+        self.frame_seen.insert(path.to_path_buf(), self.frame_epoch);
         self.source_seen
             .insert(path.to_path_buf(), std::time::Instant::now());
         self.drain_prepared();
@@ -1819,12 +1831,48 @@ impl MediaCache {
     /// and idle decoders close past `lease.decoders`. Returns what the
     /// service holds afterwards.
     pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+        *self.lease.lock().unwrap() = lease;
         self.service.apply_lease(lease)
     }
 
     /// What the decode service holds (frame cache, decoders, sessions).
     pub fn media_usage(&self) -> MediaUsage {
         self.service.usage()
+    }
+
+    pub(crate) fn begin_frame(&mut self) {
+        if self.idle_media {
+            self.service.apply_lease(*self.lease.lock().unwrap());
+            self.idle_media = false;
+        }
+        self.frame_epoch = self.frame_epoch.wrapping_add(1);
+        let frame = self.frame_epoch;
+        self.frames.retain(|key, _| {
+            self.frame_seen
+                .get(&key.path)
+                .is_some_and(|seen| frame.wrapping_sub(*seen) <= 30)
+        });
+        self.frame_seen
+            .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
+        self.recount();
+    }
+
+    /// Queue-owned GPU references remain valid; this only drops cache handles.
+    pub fn release_idle_frames(&mut self) {
+        self.frames.clear();
+        self.retired_frames.clear();
+        self.free_frames.clear();
+        self.frame_seen.clear();
+        self.viewer.release(None);
+        self.source_viewer.release(None);
+        self.service.release(None, None);
+        self.service.apply_lease(MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        });
+        self.idle_media = true;
+        self.service.pool().trim(0);
+        self.recount();
     }
 
     /// Plans and their two-second look-ahead touch wanted sources. Close
@@ -1856,6 +1904,9 @@ impl MediaCache {
         self.free_frames.append(&mut self.retired_frames);
         let excess = self.free_frames.len().saturating_sub(2);
         self.free_frames.drain(..excess);
+        while self.free_frames.iter().map(Target::bytes).sum::<u64>() > 16 << 20 {
+            self.free_frames.pop();
+        }
         self.recount();
     }
 }

@@ -249,13 +249,19 @@ impl Engine {
 
     pub fn release_idle_memory(&mut self) {
         self.renderer.release_idle_targets();
+        self.renderer.release_idle_media();
+        self.cache.clear();
+        self.pool.retain(|surface| Arc::strong_count(surface) > 1);
+        self.offscreen = None;
         self.idle_released = true;
     }
 
-    pub fn maintain_memory(&mut self) {
+    pub fn maintain_memory(&mut self) -> bool {
         if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
             self.release_idle_memory();
+            return true;
         }
+        false
     }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
@@ -392,8 +398,8 @@ impl Engine {
             renderer,
             metal,
             pipeline,
-            pool: Vec::with_capacity(11),
-            cache: VecDeque::with_capacity(8),
+            pool: Vec::with_capacity(4),
+            cache: VecDeque::with_capacity(4),
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
@@ -670,12 +676,25 @@ impl Engine {
             found
         } else {
             let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-            let capacity = ((128 * 1024 * 1024 / bytes).clamp(1, 8)) as usize;
+            let capacity = ((48 * 1024 * 1024 / bytes).clamp(1, 4)) as usize;
             while self.cache.len() >= capacity {
                 self.cache.pop_front();
             }
             self.pool
                 .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+            // At most three submitted consumers plus the next producer.
+            // Evict cached frames to make room before allocating another surface.
+            while self.pool.len() >= 4
+                && !self
+                    .pool
+                    .iter()
+                    .any(|s| s.size == size && Arc::strong_count(s) == 1)
+                && !self.cache.is_empty()
+            {
+                self.cache.pop_front();
+                self.pool
+                    .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+            }
             let free = self
                 .pool
                 .iter()
@@ -684,7 +703,7 @@ impl Engine {
             let surface = match free {
                 Some(s) => s,
                 None => {
-                    anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                    anyhow::ensure!(self.pool.len() < 4, "bounded source pool exhausted");
                     let s = Arc::new(ExportedSurface::create(
                         &self.gpu.device,
                         &SurfaceRequest {

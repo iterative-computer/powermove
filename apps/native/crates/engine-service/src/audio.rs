@@ -124,7 +124,7 @@ impl Drop for SimDevice {
 }
 
 /// Decoded audio kept per viewer.
-const SOURCE_BUDGET: usize = 128 * 1024 * 1024;
+const SOURCE_BUDGET: usize = 24 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
 
 // The audio control thread is ordinary-priority. Keep these clock reads and

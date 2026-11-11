@@ -1521,6 +1521,11 @@ impl Renderer {
         before - self.pool.bytes()
     }
 
+    pub fn release_idle_media(&mut self) {
+        self.media.release_idle_frames();
+        self.binds.clear();
+    }
+
     /// Native SVG fallback diagnostic for the most recently resolved SVG.
     /// The reason names the unsupported feature or resource/device limit;
     /// it never requires an editor window or host raster request.
@@ -2063,6 +2068,7 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.pool.begin_frame();
+        self.media.begin_frame();
         self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();
