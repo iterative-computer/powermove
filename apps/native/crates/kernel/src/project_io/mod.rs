@@ -295,7 +295,7 @@ pub struct Envelope {
     pub version: Option<Value>,
     /// `history` exactly as read. Written back unchanged when it could not be
     /// imported and this session recorded no undo step.
-    pub history: Option<Value>,
+    pub history: Option<crate::history::CompactJson>,
     /// `ws` (the workspace snapshot), kept verbatim.
     pub workspace: Option<Value>,
     /// Every other member, kept verbatim (a newer app's fields survive).
@@ -623,9 +623,18 @@ pub(crate) fn from_container(
     normalize_compositions(&mut project);
     let canonical = canonical_project(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
-    let history = raw_history
-        .as_ref()
-        .and_then(|h| History::from_saved(h, open_comp.as_deref()));
+    let (retained_history, history) = pm_model::parallel::join(
+        || {
+            raw_history
+                .as_ref()
+                .map(crate::history::CompactJson::history)
+        },
+        || {
+            raw_history
+                .as_ref()
+                .and_then(|h| History::from_saved(h, open_comp.as_deref()))
+        },
+    );
     Ok(OpenedProject {
         file: ProjectFile {
             path,
@@ -634,7 +643,7 @@ pub(crate) fn from_container(
             envelope: Envelope {
                 container_index: container.index,
                 version: version_member,
-                history: raw_history,
+                history: retained_history,
                 workspace,
                 extra: fields,
                 wrapped,

@@ -33,7 +33,7 @@ pub(crate) fn hydrate(root: &Node, history: &crate::History, media: &mut MediaTa
     }
     for record in history.records() {
         for op in record.forward.iter().chain(record.inverse.iter()) {
-            history_assets(op, &mut wanted);
+            history_assets(&op, &mut wanted);
         }
     }
     let mut proxy_only = None;
