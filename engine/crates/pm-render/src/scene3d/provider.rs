@@ -1,21 +1,61 @@
-//! Typed Studio seam. Full-scene transport is shared by all layer outputs;
-//! masking, effects, opacity and blending remain ordinary compositor passes.
+//! Worker-owned GPU backend seam. Native document evaluation and Studio
+//! integration live outside the renderer; the compositor owns ordinary blending.
 use pm_gpu::TargetPool;
-use pm_studio::{
-    extract::{SceneRequest, SceneSource},
-    service::{Denoise, RenderedScene, StudioService, Tier},
-};
 use std::sync::Arc;
 
-pub trait Source: SceneSource {
-    /// Authored camera/environment quality; immutable for this request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneRequest {
+    pub composition: String,
+    pub revision: u64,
+    pub ticks: i64,
+    pub width: u32,
+    pub height: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Denoise {
+    None,
+    Guided,
+    Oidn,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    Fast,
+    QualityLive,
+    QualityRefine {
+        samples: u32,
+    },
+    Final {
+        samples: u32,
+        salt: u32,
+        denoise: Denoise,
+    },
+}
+/// A frozen document/resources source. Creation and rendering run on a worker.
+pub trait Source: Send + Sync + std::any::Any {
     fn final_samples(&self, request: &SceneRequest) -> Result<u32, String>;
-    fn splat_layers(
+    fn create(
         &self,
-        _request: &SceneRequest,
-    ) -> Result<Vec<pm_studio::splats::Layer>, String> {
-        Ok(vec![])
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Result<Box<dyn Backend>, String>;
+}
+pub trait Backend: Send {
+    /// Retain GPU resources when a new immutable document source replaces one.
+    fn update_source(&mut self, _source: &dyn std::any::Any) -> bool {
+        false
     }
+    fn begin_frame(&mut self);
+    fn counters(&self) -> Counters;
+    /// Premultiplied display-sRGB pixels in compositor (bottom-up) row order.
+    fn render(
+        &mut self,
+        layer: &str,
+        request: &SceneRequest,
+        tier: Tier,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<wgpu::Texture, String>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
@@ -44,51 +84,34 @@ pub struct Counters {
 }
 pub(crate) struct Pass {
     source: Arc<dyn Source>,
-    service: Option<StudioService>,
-    cached: Option<(Tier, RenderedScene)>,
-    traces: u64,
-    splats: Option<pm_studio::splats::Rasterizer>,
-    splat_cache: Option<(SceneRequest, Vec<pm_studio::splats::Layer>)>,
+    backend: Option<Box<dyn Backend>>,
 }
 impl Pass {
     pub fn new(source: Arc<dyn Source>) -> Self {
         Self {
             source,
-            service: None,
-            cached: None,
-            traces: 0,
-            splats: None,
-            splat_cache: None,
+            backend: None,
         }
     }
     pub fn replace_source(&mut self, source: Arc<dyn Source>) {
+        if self
+            .backend
+            .as_mut()
+            .is_some_and(|b| !b.update_source(source.as_ref()))
+        {
+            self.backend = None;
+        }
         self.source = source;
-        self.cached = None;
-        self.splat_cache = None;
     }
     pub fn begin_frame(&mut self) {
-        if self
-            .cached
-            .as_ref()
-            .is_some_and(|(tier, _)| matches!(tier, Tier::QualityRefine { .. }))
-        {
-            self.cached = None;
+        if let Some(backend) = &mut self.backend {
+            backend.begin_frame();
         }
     }
     pub fn counters(&self) -> Counters {
-        Counters {
-            samples: self.cached.as_ref().map_or(0, |(_, scene)| scene.samples),
-            traces: self.traces,
-            geometry_uploads: self
-                .service
-                .as_ref()
-                .map_or(0, StudioService::geometry_uploads),
-            scene_updates: self
-                .service
-                .as_ref()
-                .map_or(0, StudioService::scene_updates),
-            blas_builds: self.service.as_ref().map_or(0, StudioService::blas_builds),
-        }
+        self.backend
+            .as_ref()
+            .map_or_else(Counters::default, |b| b.counters())
     }
     #[allow(clippy::too_many_arguments)]
     pub fn render(
@@ -103,37 +126,6 @@ impl Pass {
         final_output: bool,
         shutters: u32,
     ) -> Result<super::Rendered3d, super::Error3d> {
-        if self
-            .splat_cache
-            .as_ref()
-            .is_none_or(|(key, _)| key != request)
-        {
-            self.splat_cache = Some((request.clone(), self.source.splat_layers(request)?));
-        }
-        if let Some(splat) = self
-            .splat_cache
-            .as_ref()
-            .unwrap()
-            .1
-            .iter()
-            .find(|s| s.id == layer)
-        {
-            let color = pool.take(
-                device,
-                request.width,
-                request.height,
-                wgpu::TextureFormat::Rgba8Unorm,
-                pm_gpu::target::working_usage(),
-            );
-            self.splats
-                .get_or_insert_with(|| pm_studio::splats::Rasterizer::new(device))
-                .record(device, queue, encoder, splat, &color.texture)?;
-            return Ok(super::Rendered3d {
-                color,
-                depth: None,
-                color_space: super::OutputColor3d::Encoded,
-            });
-        }
         let tier = if final_output {
             let samples = self.source.final_samples(request)?;
             if samples == 0 {
@@ -149,39 +141,24 @@ impl Pass {
         } else {
             settings.preview
         };
-        if self.service.is_none() {
-            self.service = Some(StudioService::with_device(
+        if self.backend.is_none() {
+            self.backend = Some(self.source.create(
                 device.clone(),
                 queue.clone(),
                 request.width,
                 request.height,
             )?);
         }
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|(t, s)| *t != tier || s.request != *request)
-        {
-            let rendered = self.service.as_mut().unwrap().render_bottom_up(
-                self.source.as_ref(),
-                request.clone(),
-                tier,
-            )?;
-            self.cached = Some((tier, rendered));
-            self.traces += 1;
-        }
-        let scene = &self.cached.as_ref().unwrap().1;
-        let texture = &scene
-            .layers
-            .iter()
-            .find(|l| l.layer == layer)
-            .ok_or_else(|| format!("Studio did not produce layer {layer}"))?
-            .texture;
+        let texture = self
+            .backend
+            .as_mut()
+            .unwrap()
+            .render(layer, request, tier, encoder)?;
         let color = pool.take(
             device,
             texture.width(),
             texture.height(),
-            wgpu::TextureFormat::Rgba8Unorm,
+            texture.format(),
             pm_gpu::target::working_usage(),
         );
         encoder.copy_texture_to_texture(

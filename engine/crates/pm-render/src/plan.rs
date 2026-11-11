@@ -1772,7 +1772,7 @@ fn native_content_quad<'d>(
                                 width, height,
                             )),
                             kind: crate::scene3d::Render3d::Studio {
-                                request: pm_studio::extract::SceneRequest {
+                                request: crate::scene3d::provider::SceneRequest {
                                     composition: comp_id.clone(),
                                     revision: settings.revision,
                                     ticks: crate::compat::ticks_of(time).get(),

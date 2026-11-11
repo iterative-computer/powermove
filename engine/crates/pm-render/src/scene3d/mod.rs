@@ -90,7 +90,7 @@ impl Default for Options3d {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Render3d {
     Studio {
-        request: pm_studio::extract::SceneRequest,
+        request: crate::scene3d::provider::SceneRequest,
         settings: provider::Settings,
         final_output: bool,
         shutter_samples: u32,
