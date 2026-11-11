@@ -637,7 +637,8 @@
   /* Parameter rows: 22px in, a 13px stopwatch (or its empty slot), the
      label, and a 110px field on the right. */
   .effects-section .fx-params :global(.row.split) {
-    height: 32px;
+    height: auto;
+    min-height: 32px;
     margin: 0;
     padding: 0 6px 0 22px;
     gap: 8px;
@@ -653,7 +654,9 @@
   .effects-section .fx-params :global(.row.split:not(:has(> .stopwatch)) > .k) { width: auto; padding-left: 20px; }
   .effects-section .fx-params :global(.row.split > .stopwatch) { width: 13px; height: 24px; background: none; }
   .effects-section .fx-params :global(.row.split > .stopwatch svg) { width: 13px; height: 13px; }
-  .effects-section .fx-params :global(.row.split > .vwrap) { flex: 0 0 110px; width: 110px; height: 24px; }
+  /* Point pads and visual fields grow beyond a single input line. Keep the
+     value wrapper intrinsic so those controls remain inside their own row. */
+  .effects-section .fx-params :global(.row.split > .vwrap) { flex: 0 0 110px; width: 110px; height: auto; min-height: 24px; }
   .effects-section .fx-params :global(.row.split > .vwrap:has(.checkbox-field)) { justify-content: flex-start; }
   .effects-section .fx-params :global(.row.split :is(.num, .sel, .color-field, .pm-select)) { height: 24px; border-radius: 6px; background: var(--bg-field); font-size: 12px; line-height: 24px; }
   .effects-section .fx-params :global(.row.split .pm-select) { font-family: var(--f-ui); color: var(--tx-value); }
