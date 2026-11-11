@@ -1391,6 +1391,29 @@ fn resume(v: &mut View, now: f64) {
     }
 }
 
+/// An autorelease pool for one pass of a long-lived thread's loop, popped when
+/// the pass ends however it ends (`continue`, `break`).
+struct LoopPool(*mut std::ffi::c_void);
+impl LoopPool {
+    fn push() -> Self {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+        }
+        // SAFETY: paired with the pop in Drop, on this thread, in LIFO order
+        // (pools pushed during the pass are popped within it).
+        Self(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for LoopPool {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+        }
+        // SAFETY: the token from `push` on this thread.
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -1425,6 +1448,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     let mut played_since_idle = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
+        // Objects Metal and Core Animation autorelease on this thread outside
+        // a frame's own pool (a finished flight returning its drawable to the
+        // layer, device lookups after a rebuild) are drained every pass. This
+        // thread's implicit pool is never drained: it kept every closed
+        // project's viewer layer, and with it the layer's drawable pool.
+        let _pool = LoopPool::push();
         #[cfg(test)]
         if shared
             .lose_device
@@ -2741,6 +2770,50 @@ mod worker_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(completed(), settled, "a paused viewer stays idle");
         assert_eq!(v.status().no_drawable, 0);
+    }
+
+    /// A closed project's viewer layer is freed with its drawables: nothing
+    /// the engine thread autoreleased while returning drawables keeps it.
+    #[test]
+    fn a_retired_viewers_layer_is_released() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-release-test").unwrap()).unwrap();
+        let weak = objc2::rc::autoreleasepool(|_| {
+            let layer = metal::MetalLayer::new();
+            layer.set_device(&service.metal_device());
+            layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            layer.set_framebuffer_only(false);
+            layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+            // This thread has no run loop to commit the implicit transaction
+            // those property changes opened (it retains the layer).
+            // SAFETY: a class method with no arguments.
+            unsafe {
+                let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+            }
+            // SAFETY: a live CAMetalLayer; the Retained takes its own reference.
+            let object = unsafe {
+                objc2::rc::Retained::retain(
+                    foreign_types::ForeignType::as_ptr(&layer).cast::<objc2::runtime::AnyObject>(),
+                )
+            }
+            .unwrap();
+            let weak = objc2::rc::Weak::from_retained(&object);
+            let v = shapes_viewer(&service, Some(layer));
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.retire();
+            weak
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while objc2::rc::autoreleasepool(|_| weak.load().is_some()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retired viewer's layer is still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
