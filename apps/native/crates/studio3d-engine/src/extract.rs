@@ -122,6 +122,8 @@ pub struct MeshInstance {
     /// Local face-material IDs map through this palette. None retains the
     /// engine's absolute scene-material IDs; empty face data uses `material`.
     pub material_palette: Option<Arc<Vec<usize>>>,
+    /// Shadow-only objects remain in transport while primary camera rays skip them.
+    pub primary_visible: bool,
     pub world: Transform,
 }
 
@@ -363,7 +365,7 @@ impl Extractor {
             hi = hi.max(z);
             boxes.push([a, z, a]);
             rows[4][3] = ((id + 1) * 2) as f32;
-            rows[5][3] = 0.;
+            rows[5][3] = f32::from(!instance.primary_visible);
             transforms.push(rows);
             if let Some(&(root, geometry_index, triangle_offset)) = uploaded.get(&binding) {
                 placement_inputs.push((geometry_index, triangle_offset, instance.world));

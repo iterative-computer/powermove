@@ -59,6 +59,7 @@ impl SceneSource for Source {
                     mesh: self.mesh.clone(),
                     material: 0,
                     material_palette: None,
+                    primary_visible: true,
                     world,
                 }
             })
@@ -392,6 +393,7 @@ fn changing_instance_capacity_reallocates_gpu_buffers_safely() {
                     mesh: self.source.mesh.clone(),
                     material: 0,
                     material_palette: None,
+                    primary_visible: true,
                     world: Transform::default(),
                 });
             }

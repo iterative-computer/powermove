@@ -621,7 +621,31 @@ exact-float test comparison to a 1e-6 tolerance. The GPUI app builds.
 
 Designer hooks remain `edit_3d` → `add_scatter` / `update_scatter`, model/surface
 layer IDs, scatter channels and nature source/seed. No controls were added.
-Arbitrary parented layer subtrees as prototypes/surfaces, scatter-specific
-material-option overrides and environment-aware picking/bounds still need
-parity checks; imported resource parts are included. Performance with large
+Arbitrary parented layer subtrees as prototypes/surfaces and environment-aware
+picking/bounds still need parity checks; imported resource parts are included. Performance with large
 forests and native presented fps remain unmeasured.
+
+
+### Material options and primary visibility
+
+Native render bindings now carry Casts Shadows (off/on/only), Accepts Shadows,
+Accepts Lights and Appears in Reflections to the pinned shader flags. Shadow-only
+instances remain in transport and their primary-camera visibility bit is set.
+Unlit materials emit their own base color and retain base-map alpha. Imported
+Basic materials use that same unlit path; imported and authored double-sided
+flags reach their material records. The previously ignored material-option flags
+were reproduced before the fix.
+
+Bindings are specific to the timeline owner. Scatter inherits its prototype's
+options unless its own options override them; instances share the resulting
+material records/palettes. Ordinary unchanged materials retain their original
+bindings. This adds no geometry copies or UI controls. Commands/state remain
+`update_object`, `update_scatter`, materialOptions channels and ordinary kernel
+property writes, with existing persistence/Undo behavior.
+
+All **22 native scene/export** and **22 adapter** checks pass. Pixel checks cover
+unlit red with no lights, an off-camera emitter excluded from reflections and
+transparent primary output for shadow-only geometry. A 100-tree scatter shares
+its overridden palette and material records. Sparse intrinsic/source-material
+properties and extended maps remain separate unfinished adapters. Performance
+and distribution acceptance are unchanged.

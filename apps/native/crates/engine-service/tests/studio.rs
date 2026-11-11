@@ -1324,3 +1324,123 @@ fn empty_scatter_is_transparent_in_final_and_live() {
             .all(|p| p[3] == 0.)
     );
 }
+
+fn material_option_document(options: Value) -> Arc<pm_model::Document> {
+    let old = document(false, 100.);
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    let object = &mut project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap()["d"]["data"]["object"];
+    object["material"]["p"]["color"]["v"] = json!("#FF0000");
+    object["materialOptions"] = json!({"p":options});
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+#[test]
+fn material_options_drive_unlit_shadow_and_reflection_shader_policy() {
+    let doc = material_option_document(
+        json!({"acceptsLights":false,"acceptsShadows":false,"castsShadows":"off","appearsInReflections":false}),
+    );
+    let input = environment_input(doc.clone());
+    let material = &input.materials.as_ref().unwrap()[input.instances[0].material];
+    assert_eq!(material.policy[1] as u32 & 43, 40);
+    assert_eq!(material.emit[..3], [1., 0., 0.]);
+    let mut renderer = Renderer::headless().unwrap();
+    let pixels = draw(&mut renderer, doc);
+    let visible: Vec<_> = pixels.chunks_exact(4).filter(|p| p[3] > 0.9).collect();
+    eprintln!(
+        "unlit visible {} sample {:?}",
+        visible.len(),
+        visible.first()
+    );
+    assert!(
+        visible
+            .iter()
+            .filter(|p| p[0] > 0.1 && p[0] > 4. * p[1] && p[0] > 4. * p[2])
+            .count()
+            > 100
+    );
+}
+
+#[test]
+fn shadow_only_objects_keep_transport_geometry_and_hide_from_primary_rays() {
+    let doc = material_option_document(json!({"castsShadows":"only","acceptsLights":false}));
+    let input = environment_input(doc.clone());
+    assert!(!input.instances[0].primary_visible);
+    let extracted = pm_studio3d_engine::extract::Extractor::default()
+        .extract(&input)
+        .unwrap();
+    let base = extracted.prepared.lights.len() * 4;
+    assert_eq!(extracted.prepared.sdata[base + 5][3], 1.);
+    assert_eq!(
+        extracted.prepared.materials[input.instances[0].material].policy[1] as u32 & 1,
+        1
+    );
+    assert!(!extracted.prepared.tris.is_empty());
+    let mut renderer = Renderer::headless().unwrap();
+    assert!(draw(&mut renderer, doc).chunks_exact(4).all(|p| p[3] == 0.));
+}
+#[test]
+fn reflection_visibility_excludes_an_off_camera_emitter() {
+    let old = document(true, 100.);
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    let card = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "card")
+        .unwrap();
+    card["d"]["data"]["object"]["materialOptions"] = json!({"p":{"appearsInReflections":false}});
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let mut renderer = Renderer::headless().unwrap();
+    assert!(
+        draw(&mut renderer, old)
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0.08)
+            .count()
+            > 100
+    );
+    assert!(
+        draw(&mut renderer, doc)
+            .chunks_exact(4)
+            .all(|p| p[0] == 0. && p[1] == 0. && p[2] == 0.)
+    );
+}
+#[test]
+fn scatter_material_options_bind_per_owner_and_preserve_shared_palettes() {
+    let old = scatter_document(true, 1., 5.);
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    let scatter = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "scatter")
+        .unwrap();
+    scatter["d"]["data"]["object"]["materialOptions"] =
+        json!({"p":{"castsShadows":"only","acceptsLights":false,"acceptsShadows":false}});
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let input = environment_input(doc);
+    let first = &input.instances[0];
+    assert!(input.instances.iter().all(|i| !i.primary_visible
+        && i.material == first.material
+        && Arc::ptr_eq(
+            i.material_palette.as_ref().unwrap(),
+            first.material_palette.as_ref().unwrap()
+        )));
+    assert_eq!(
+        input.materials.as_ref().unwrap()[first.material].policy[1] as u32 & 11,
+        9
+    );
+    assert!(
+        input.materials.as_ref().unwrap().len() <= 5,
+        "100 trees share material records"
+    );
+}

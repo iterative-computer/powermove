@@ -17,6 +17,8 @@ use std::{
 mod environment;
 #[path = "geometry.rs"]
 mod geometry;
+#[path = "material_policy.rs"]
+mod material_policy;
 #[path = "scatter.rs"]
 mod scatter;
 
@@ -508,6 +510,7 @@ impl SceneSource for DocumentSource {
                     mesh,
                     material: first,
                     material_palette: Some(indices),
+                    primary_visible: true,
                     world: Transform(world.map(|v| v as f32)),
                 });
             } else if let Some(asset) = object["source"]["assetId"].as_str() {
@@ -528,6 +531,12 @@ impl SceneSource for DocumentSource {
                     gpu.extra[2] =
                         source_material.map_or(n(p, "opacity", 1.), |m| m.opacity as f32);
                     if let Some(material) = source_material {
+                        if material.kind == pm_scene3d::render::gltf::MaterialType::Basic {
+                            gpu.policy[1] = (gpu.policy[1] as u32 | 8) as f32;
+                        }
+                        if !material.double_sided {
+                            gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                        }
                         for (slot, map) in [
                             material.map.as_ref(),
                             material.emissive_map.as_ref(),
@@ -555,15 +564,6 @@ impl SceneSource for DocumentSource {
                                     map_indices.insert(key, index);
                                     index
                                 };
-                                // Basic materials glow with their colour map.
-                                let slot = if material.kind
-                                    == pm_scene3d::render::gltf::MaterialType::Basic
-                                    && slot == 0
-                                {
-                                    1
-                                } else {
-                                    slot
-                                };
                                 gpu.maps[slot] = index as f32;
                             }
                         }
@@ -578,6 +578,7 @@ impl SceneSource for DocumentSource {
                         mesh,
                         material: materials.len() - 1,
                         material_palette: None,
+                        primary_visible: true,
                         world: Transform(
                             pm_scene3d::render::gltf::math::multiply(&world, &part.world)
                                 .map(|v| v as f32),
@@ -588,17 +589,22 @@ impl SceneSource for DocumentSource {
                 scene.materials.push(m);
                 let mut gpu = m.gpu();
                 gpu.extra[2] = n(p, "opacity", 1.);
+                if object["material"]["doubleSided"] == false {
+                    gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                }
                 materials.push(gpu);
                 instances.push(MeshInstance {
                     layer: id.into(),
                     mesh: self.mesh(&object["source"])?,
                     material: materials.len() - 1,
                     material_palette: None,
+                    primary_visible: true,
                     world: Transform(world.map(|v| v as f32)),
                 });
             }
         }
         scatter::apply(self, &r, &scene, &mut instances)?;
+        material_policy::apply(&r, &mut instances, &mut scene, &mut materials)?;
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for instance in &instances {
             let (a, z) = instance.mesh.bounds();

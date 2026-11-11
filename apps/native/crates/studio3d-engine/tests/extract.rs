@@ -31,6 +31,7 @@ fn instance(mesh: Arc<Mesh>, layer: &str) -> MeshInstance {
         layer: layer.into(),
         material: 0,
         material_palette: None,
+        primary_visible: true,
         world: Transform::default(),
     }
 }
