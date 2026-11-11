@@ -20,6 +20,8 @@ pub struct Properties {
     selection: Vec<String>,
     document: Option<u64>,
     sequence: u64,
+    /// The viewer's layers left out of the frame, `{layer id: reason}`.
+    pub failures: Value,
 }
 impl Properties {
     fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
@@ -80,6 +82,14 @@ impl Properties {
             target["first"]["typeLabel"] = json!(label);
             target["first"]["acceptsEffects"] = json!(false);
             target["first"]["studio"] = json!(true);
+        }
+        if model.selected_layers().len() == 1
+            && let Some(reason) = model
+                .primary()
+                .and_then(|id| self.failures.get(id))
+                .and_then(Value::as_str)
+        {
+            target["first"]["error"] = json!(failure_copy(reason, studio.is_some()));
         }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
@@ -1000,16 +1010,30 @@ impl Properties {
             }
             Role::Camera => {
                 let environment = &data["environment"];
-                let lease = self.control_lease("3d.samples");
-                let options = json!([{"v":16,"label":"Draft · 16"},{"v":64,"label":"Standard · 64"},{"v":256,"label":"High · 256"},{"v":1024,"label":"Best · 1024"}]);
-                let orthographic = data["camera"]["projection"] == "orthographic";
-                let mut quality = row(
-                    "3d.samples",
-                    "Final Quality",
-                    json!({"kind":"choice","binding":lease,"value":environment["samples"].as_f64().unwrap_or(64.),"options":options,"disabled":orthographic}),
+                // Samples per frame now come from the composition's Render
+                // Quality; the camera shows that same control, not a second one.
+                let preset = pm_panel_studio3d::properties::scene_summary(model.published())
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s["quality"]["preset"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "production".into());
+                let mut options: Vec<Value> = pm_panel_studio3d::properties::QUALITY
+                    .iter()
+                    .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
+                    .collect();
+                if preset == "custom" {
+                    options.push(json!({"v":"custom","label":"Custom","disabled":true}));
+                }
+                let lease = self.control_lease("3d.scene.quality");
+                push(
+                    &mut groups,
+                    "Shot",
+                    row(
+                        "3d.scene.quality",
+                        "Render Quality",
+                        json!({"kind":"choice","binding":lease,"value":preset,"options":options}),
+                    ),
                 );
-                quality["disabled"] = json!(orthographic);
-                push(&mut groups, "Shot", quality);
                 push(
                     &mut groups,
                     "Environment",
@@ -1774,5 +1798,24 @@ fn studio_label(
             _ => "Sun",
         },
         (Role::Camera, _) => "Camera",
+    }
+}
+
+/// A layer the viewer couldn't draw, in the inline Error grammar: what
+/// happened and the fix in one sentence. Raw engine text stays in the Error Log.
+fn failure_copy(reason: &str, studio: bool) -> String {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("offline") || r.contains("missing") && r.contains("media") {
+        "This layer’s file is missing, so it isn’t drawn. Relink it in Project.".into()
+    } else if r.contains("font") {
+        "This layer’s font isn’t installed, so it isn’t drawn. Choose an installed font.".into()
+    } else if r.contains("texture") || r.contains("image") {
+        "A texture on this layer couldn’t be read. Choose another image in Texture Maps.".into()
+    } else if r.contains("primitive") {
+        "This shape isn’t supported yet, so it isn’t drawn. Choose another 3D shape.".into()
+    } else if studio {
+        "This 3D layer couldn’t be loaded, so it isn’t drawn. The rest of the scene still renders; details are in Window ▸ Error Log.".into()
+    } else {
+        "This layer couldn’t be drawn. Details are in Window ▸ Error Log.".into()
     }
 }

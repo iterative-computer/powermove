@@ -75,6 +75,17 @@ impl Session {
             Some(NodeKind::Array(layers)) => layers.is_empty(),
             _ => return Err(Error::Invalid("layers")),
         };
+        // A composition with Studio 3D layers shows the Fast/Quality preview
+        // control (3d-studio.md §2); without them the bar is unchanged.
+        let studio = match comp.get("layers").map(Node::kind) {
+            Some(NodeKind::Array(layers)) => layers.iter().any(|l| {
+                matches!(
+                    l.get("d").and_then(|d| d.get("definition")).map(Node::kind),
+                    Some(NodeKind::String(s)) if s.to_string_lossy().starts_with("powermove.3d.")
+                )
+            }),
+            _ => false,
+        };
         let ticket = self
             .ticket
             .checked_add(1)
@@ -99,6 +110,20 @@ impl Session {
             Value::Number(model.chrome.effective_quality),
         );
         value.insert("canvasLost", Value::Bool(lost));
+        value.insert(
+            "studio",
+            if studio {
+                let tier = match model.ui.viewer.get("studioTier").and_then(Value::as_str) {
+                    Some("refine") => "refine",
+                    _ => "live",
+                };
+                let mut m = Map::new();
+                m.insert("tier", Value::from(tier));
+                Value::Object(m)
+            } else {
+                Value::Null
+            },
+        );
         value.insert("showControls", Value::Bool(model.chrome.show_controls));
         value.insert("empty", Value::Bool(empty));
         value.insert(

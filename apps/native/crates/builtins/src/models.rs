@@ -220,6 +220,7 @@ impl Backend {
         self.sync()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        self.native.properties.failures = self.native.facts["layerFailures"].clone();
         self.native.properties.snapshot(
             self.model.as_mut().ok_or("No open project")?,
             time,

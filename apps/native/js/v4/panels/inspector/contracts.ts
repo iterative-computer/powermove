@@ -22,6 +22,8 @@ export type Target =
         acceptsEffects: boolean;
         /** A Studio 3D layer: 2D alignment doesn't apply to it. */
         studio?: boolean;
+        /** The viewer couldn't draw this layer: what happened and the fix. */
+        error?: string;
       };
       sharedType: string | null;
     };

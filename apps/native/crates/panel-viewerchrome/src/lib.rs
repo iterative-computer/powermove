@@ -147,6 +147,7 @@ impl ViewModel {
             Action::Fit => Chrome::write_navigation(&mut ui, self.chrome.navigation.fit())?,
             Action::Navigate(navigation) => Chrome::write_navigation(&mut ui, navigation)?,
             Action::Quality(quality) => Chrome::write_quality(&mut ui, quality)?,
+            Action::StudioTier(tier) => put(&mut ui.viewer, "studioTier", Value::from(tier))?,
             Action::ToggleControls => put(
                 &mut ui.viewer,
                 "showControls",
@@ -306,6 +307,11 @@ impl ViewModel {
                     .as_str()
                     .ok_or(Error::Invalid("quality argument"))?,
             )?),
+            "viewer.studio.tier" => Action::StudioTier(match argument.as_str() {
+                Some("live") => "live",
+                Some("refine") => "refine",
+                _ => return Err(Error::Invalid("studio tier")),
+            }),
             "viewer.controls" => {
                 no_arg()?;
                 Action::ToggleControls
@@ -578,6 +584,8 @@ pub enum Action {
     Fit,
     Navigate(Navigation),
     Quality(Quality),
+    /// Studio 3D preview tier (`live` = Fast, `refine` = Quality), 3d-studio.md §2.
+    StudioTier(&'static str),
     ToggleControls,
     ToggleGuides,
     ToggleSafeAreas,

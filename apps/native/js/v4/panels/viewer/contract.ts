@@ -14,6 +14,8 @@ export interface ViewerModel {
   showControls: boolean;
   empty: boolean;
   selectionCount: number;
+  /** Present when the composition has Studio 3D layers: the preview tier. */
+  studio?: { tier: "live" | "refine" } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */
 export interface ViewerHostFacts {
@@ -75,6 +77,8 @@ export function snapshot(value: unknown): ViewerSnapshot {
     finite(m.effectiveQuality);
     if (m.effectiveQuality < 0.25 || m.effectiveQuality > 1)
       throw new RangeError("Invalid effective quality");
+    if (m.studio !== undefined && m.studio !== null)
+      oneOf(record(m.studio).tier, ["live", "refine"]);
     finite(m.selectionCount);
     if (!Number.isSafeInteger(m.selectionCount) || m.selectionCount < 0)
       throw new RangeError("Invalid selection count");

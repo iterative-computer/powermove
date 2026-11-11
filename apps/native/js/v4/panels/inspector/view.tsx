@@ -690,6 +690,37 @@ export function InspectorPanel({
                 />
               ) : null}
             </div>
+            {target.count === 1 && target.first.error ? (
+              <div
+                role="status"
+                label={target.first.error}
+                style={{
+                  ...horizontal,
+                  alignItems: "start",
+                  gap: token("metrics.gap"),
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                  paddingTop: token("metrics.inner_radius"),
+                  paddingBottom: token("metrics.inner_radius"),
+                }}
+              >
+                <text
+                  attr={{ symbol: "exclamationmark.triangle.fill" }}
+                  style={{
+                    color: token("colors.danger"),
+                    symbolSize: token("metrics.symbol_inline"),
+                  }}
+                />
+                <text
+                  style={{
+                    color: token("colors.danger"),
+                    fontSize: token("typography.body"),
+                  }}
+                >
+                  {target.first.error}
+                </text>
+              </div>
+            ) : null}
             {target.first.studio ? null : (
               <AlignmentStrip key={target.key} session={session} />
             )}

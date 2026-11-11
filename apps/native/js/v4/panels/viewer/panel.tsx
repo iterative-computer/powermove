@@ -1,6 +1,7 @@
 import {
   EmptyState,
   PopUpButton,
+  SegmentedControl,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -134,6 +135,20 @@ export function ViewerPanel({
       </PopUpButton>
     </>
   );
+  // 3d-studio.md §2 item 5: Fast | Quality, shown only with 3D layers.
+  // Fast is the live path; Quality refines toward what the export renders.
+  const studio = m.studio ? (
+    <SegmentedControl
+      id="viewer.studio.tier"
+      label="Preview"
+      value={m.studio.tier}
+      options={[
+        { id: "live", label: "Fast" },
+        { id: "refine", label: "Quality" },
+      ]}
+      onChange={(value) => actions.drive("viewer.studio.tier", value)}
+    />
+  ) : null;
   return (
     <div
       id="viewer"
@@ -156,9 +171,10 @@ export function ViewerPanel({
             gap: token("metrics.gap"),
             paddingLeft: token("metrics.inset"),
             paddingRight: token("metrics.gap"),
-            justifyContent: source ? "space-between" : "end",
+            justifyContent: source || studio ? "space-between" : "end",
           }}
         >
+          {!source && studio}
           {source && (
             <div
               style={{

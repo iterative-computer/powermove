@@ -391,11 +391,22 @@ impl Controller {
                 .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
         });
         // Auto's measured resolution; 0 until a frame has drawn.
+        // Layers left out of the frame on screen, by ID, so Properties can say
+        // so on that layer only (3d-studio.md §10).
+        let failures: serde_json::Map<String, Value> = status
+            .as_ref()
+            .map(|s| {
+                s.layer_failures
+                    .iter()
+                    .map(|f| (f.layer.clone(), json!(f.message)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let effective = status
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"layerFailures":failures,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
             "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
