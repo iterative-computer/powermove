@@ -62,6 +62,25 @@ impl Properties {
         } else {
             json!({"kind":"composition","key":self.key})
         };
+        // A Studio 3D layer: its role, environment kind and the name it goes by.
+        let studio = model
+            .primary()
+            .and_then(|id| model.layer(id).ok())
+            .map(|l| super::data::wire(&l))
+            .and_then(|r| {
+                let (role, _) = pm_panel_studio3d::properties::fields(&r)?;
+                let data = &r["d"]["data"];
+                let env = pm_panel_studio3d::properties::environment(data);
+                Some((role, env, studio_label(role, env, data)))
+            });
+        let mut target = target;
+        if let Some((_, _, label)) = &studio
+            && model.selected_layers().len() == 1
+        {
+            target["first"]["typeLabel"] = json!(label);
+            target["first"]["acceptsEffects"] = json!(false);
+            target["first"]["studio"] = json!(true);
+        }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
             let audio = model
@@ -274,7 +293,8 @@ impl Properties {
                 let row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control});
                 if id.starts_with("layer.") {
                     layer_rows.push(row);
-                } else {
+                } else if studio.is_none() {
+                    // A 3D layer's canvas size is not something you edit.
                     content.push(row);
                 }
             }
@@ -295,7 +315,14 @@ impl Properties {
                         .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
                 }
             }
-            if !audio {
+            if let Some((role, env, _)) = &studio {
+                if *env != Some("world") {
+                    let rows = self.transform_3d(model, &layer, *role, time)?;
+                    if !rows.is_empty() {
+                        sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                    }
+                }
+            } else if !audio {
                 let mut rows = vec![];
                 for (id, label, paths, unit, step) in [
                     (
@@ -379,7 +406,7 @@ impl Properties {
                 sections.push(json!({"id":"animators","title":"Text Animators","collapsed":self.collapsed.get("animators").copied().unwrap_or(false),"rows":[],"action":"animator","animators":animators,"presets":presets}));
             }
             let kind = target["first"]["type"].as_str().unwrap_or("").to_owned();
-            if !matches!(kind.as_str(), "audio" | "camera") {
+            if !matches!(kind.as_str(), "audio" | "camera") && studio.is_none() {
                 let masks = self.masks(model, &layer, time)?;
                 sections.push(json!({"id":"masks","title":"Masks","collapsed":self.collapsed.get("masks").copied().unwrap_or(false),"rows":[],"action":"mask","masks":masks}));
             }
@@ -409,8 +436,150 @@ impl Properties {
             sections.push(
                 json!({"id":"composition","title":"Composition","collapsed":false,"rows":rows}),
             );
+            if let Some(section) = self.scene_section(model)? {
+                sections.push(section);
+            }
         }
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
+    }
+    /// Position, rotation and scale with depth, in scene units and degrees.
+    /// Lights and cameras move but don't scale; a camera never needs X/Y tilt
+    /// here because it aims at its target.
+    fn transform_3d(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        role: pm_panel_studio3d::properties::Role,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        use pm_panel_studio3d::properties::Role;
+        let mut rows = vec![];
+        let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
+            "position",
+            "Position",
+            vec![
+                ("position.x", "X"),
+                ("position.y", "Y"),
+                ("position.z", "Z"),
+            ],
+            "",
+            0.1,
+        )];
+        if role != Role::Camera {
+            groups.push((
+                "rotation3d",
+                "Rotation",
+                vec![("rotation.x", "X"), ("rotation.y", "Y"), ("rotation", "Z")],
+                "°",
+                1.,
+            ));
+        }
+        if role == Role::Object {
+            groups.push((
+                "scale",
+                "Scale %",
+                vec![("scale.x", "X"), ("scale.y", "Y"), ("scale.z", "Z")],
+                // Three axes leave no room for a unit; the label carries it.
+                "",
+                1.,
+            ));
+        }
+        for (id, label, paths, unit, step) in groups {
+            let mut axes = vec![];
+            let mut animation = "static";
+            for (path, axis) in paths {
+                let binding = Binding::Property(PropertyId::new(layer, path));
+                let state = match model.binding_state(&binding, time) {
+                    Ok(state) => state,
+                    Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
+                let Some(value) = state.value.as_f64() else {
+                    continue;
+                };
+                let a = if state.key_at_playhead {
+                    "key-at-playhead"
+                } else if state.animated {
+                    "animated"
+                } else {
+                    "static"
+                };
+                if a != "static" && animation != "key-at-playhead" {
+                    animation = a;
+                }
+                axes.push(json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
+            }
+            if !axes.is_empty() {
+                let mut row = json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                if id == "scale" {
+                    row["linked"] = json!(
+                        model
+                            .layer(layer)
+                            .map_err(|e| e.to_string())?
+                            .get("scaleLinked")
+                            .and_then(pm_model::Value::as_bool)
+                            .unwrap_or(true)
+                    );
+                }
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+    /// The composition's 3D summary: its render quality and sky, so a scene
+    /// looks right in a few clicks without selecting a camera or World.
+    fn scene_section(&mut self, model: &mut Inspector) -> Result<Option<Value>, String> {
+        use pm_panel_studio3d::properties::{QUALITY, SKIES, scene_summary};
+        let Some(summary) = scene_summary(model.published()).map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let quality = summary["quality"]["preset"]
+            .as_str()
+            .unwrap_or("production");
+        let mut options: Vec<Value> = QUALITY
+            .iter()
+            .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
+            .collect();
+        if quality == "custom" {
+            options.push(json!({"v":"custom","label":"Custom","disabled":true}));
+        }
+        let lease = self.control_lease("3d.scene.quality");
+        let mut rows = vec![
+            json!({"id":"3d.scene.quality","label":"Render Quality","control":{"kind":"choice","binding":lease,"value":quality,"options":options}}),
+        ];
+        let q = &summary["quality"];
+        let detail = format!(
+            "{}–{} samples · {} bounces{}{}",
+            q["minSamples"].as_f64().unwrap_or(0.),
+            q["maxSamples"].as_f64().unwrap_or(0.),
+            q["maxBounces"].as_f64().unwrap_or(0.),
+            if q["caustics"] == true {
+                " · caustics"
+            } else {
+                ""
+            },
+            if q["denoise"] == true {
+                " · denoised"
+            } else {
+                ""
+            },
+        );
+
+        let sky = summary["sky"].as_str().unwrap_or("none");
+        let mut skies: Vec<Value> = vec![json!({"v":"none","label":"None"})];
+        skies.extend(
+            SKIES
+                .iter()
+                .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail})),
+        );
+        if sky == "hdri" {
+            skies.push(json!({"v":"hdri","label":"HDRI Image","disabled":true}));
+        }
+        let lease = self.control_lease("3d.scene.sky");
+        rows.insert(0, json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}}));
+        Ok(Some(
+            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"note":detail}),
+        ))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
     /// names the row, and `write` hands it to the Studio's typed edits.
@@ -452,8 +621,132 @@ impl Properties {
                 json!({"kind":"toggle","binding":lease,"value":value}),
             )
         };
-        match role {
-            Role::Object => {
+        let env = pm_panel_studio3d::properties::environment(data);
+        let mut shelf: Option<Value> = None;
+        let choice = |this: &mut Self, id: &str, label: &str, value: Value, options: Value| {
+            let lease = this.control_lease(id);
+            row(
+                id,
+                label,
+                json!({"kind":"choice","binding":lease,"value":value,"options":options}),
+            )
+        };
+        let status = |id: &str, label: &str, value: String| json!({"id":id,"label":label,"control":{"kind":"status","value":value}});
+        let layer_name = |id: &Value| -> String {
+            model
+                .published()
+                .snapshot
+                .root()
+                .and_then(|root| {
+                    let loc = pm_kernel::model::find_layer(root, id.as_str()?)?;
+                    pm_kernel::model::layer_at(root, &loc)?
+                        .get("name")?
+                        .to_value()
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "Missing layer".into())
+        };
+        match (role, env) {
+            (Role::Object, Some("world")) => {
+                let world = &data["object"]["world"];
+                let mode = world["mode"].as_str().unwrap_or("sky");
+                push(
+                    &mut groups,
+                    "Sky",
+                    choice(
+                        self,
+                        "3d.world.mode",
+                        "Lighting",
+                        json!(mode),
+                        json!([{"v":"sky","label":"Physical Sky"},{"v":"hdri","label":"HDRI Image","disabled":world["source"].is_null()},{"v":"none","label":"None"}]),
+                    ),
+                );
+                if mode == "sky" {
+                    let skies = pm_panel_studio3d::properties::SKIES
+                        .iter()
+                        .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
+                        .collect::<Vec<_>>();
+                    push(
+                        &mut groups,
+                        "Sky",
+                        choice(
+                            self,
+                            "3d.world.preset",
+                            "Preset",
+                            world["preset"].clone(),
+                            json!(skies),
+                        ),
+                    );
+                }
+                let visible = world["p"]["visible"]["v"].as_bool().unwrap_or(true);
+                push(
+                    &mut groups,
+                    "Sky",
+                    toggle(self, "3d.world.visible", "Show in Camera", visible),
+                );
+            }
+            (Role::Object, Some("fog")) => {
+                let shape = data["object"]["fog"]["p"]["shape"]["v"].clone();
+                push(
+                    &mut groups,
+                    "Fog",
+                    choice(
+                        self,
+                        "3d.fog.shape",
+                        "Shape",
+                        if shape.is_null() { json!("box") } else { shape },
+                        json!([{"v":"box","label":"Box"},{"v":"sphere","label":"Sphere"}]),
+                    ),
+                );
+            }
+            (Role::Object, Some("terrain")) => {
+                let t = &data["object"]["terrain"];
+                let flag = |k: &str| t["p"][k]["v"].as_bool().unwrap_or(false);
+                push(
+                    &mut groups,
+                    "Terrain",
+                    toggle(
+                        self,
+                        "3d.terrain.natural",
+                        "Natural Ground",
+                        flag("natural"),
+                    ),
+                );
+                push(
+                    &mut groups,
+                    "Terrain",
+                    toggle(self, "3d.terrain.ridged", "Ridged Peaks", flag("ridged")),
+                );
+                let regions = t["regions"].as_array().map_or(0, Vec::len);
+                push(
+                    &mut groups,
+                    "Ground",
+                    status(
+                        "3d.terrain.regions",
+                        "Regions",
+                        match regions {
+                            0 => "None, one ground material".into(),
+                            1 => "1 region".into(),
+                            n => format!("{n} regions"),
+                        },
+                    ),
+                );
+            }
+            (Role::Object, Some(_)) => {
+                let sc = &data["object"]["scatter"];
+                push(
+                    &mut groups,
+                    "Scatter",
+                    status("3d.scatter.model", "Scatters", layer_name(&sc["model"])),
+                );
+                push(
+                    &mut groups,
+                    "Scatter",
+                    status("3d.scatter.surface", "On", layer_name(&sc["surface"])),
+                );
+            }
+            (Role::Object, None) => {
                 let object = &data["object"];
                 let source = &object["source"];
                 let name = if let Some(asset) = source["assetId"].as_str() {
@@ -511,6 +804,24 @@ impl Properties {
                         .into_iter()
                         .map(|o| json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]}))
                         .collect::<Vec<_>>();
+                    // Studio finishes (3d-studio.md §8): a shelf of swatches
+                    // under the Material heading, with no selected state.
+                    let lease = self.control_lease("3d.finish");
+                    push(
+                        &mut groups,
+                        "Material",
+                        json!({"id":"3d.finish","label":"Finish","hidden":true,"locked":locked,"control":{"kind":"choice","binding":lease,"value":null,"options":[]}}),
+                    );
+                    shelf = Some(json!(
+                        pm_panel_studio3d::properties::finishes()
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(
+                                |f| json!({"id":f["id"],"label":f["label"],"color":f["p"]["color"]})
+                            )
+                            .collect::<Vec<_>>()
+                    ));
                     let lease = self.control_lease("3d.screen");
                     push(
                         &mut groups,
@@ -521,9 +832,55 @@ impl Properties {
                             json!({"kind":"choice","binding":lease,"value":object["material"]["screen"],"options":options}),
                         ),
                     );
+                    // Image maps: any imported image can drive a slot.
+                    let mut images = vec![json!({"v":null,"label":"None"})];
+                    if let Some(assets) = model
+                        .published()
+                        .snapshot
+                        .root()
+                        .and_then(|r| r.get("assets"))
+                        .map(|a| super::data::wire(&a.to_value()))
+                        && let Some(assets) = assets.as_object()
+                    {
+                        for (id, asset) in assets {
+                            if asset["kind"] == "image" {
+                                images.push(
+                                    json!({"v":id,"label":asset["name"].as_str().unwrap_or(id)}),
+                                );
+                            }
+                        }
+                    }
+                    let maps = &object["material"]["maps"];
+                    for (slot, label) in [
+                        ("color", "Color Map"),
+                        ("normal", "Normal Map"),
+                        ("roughness", "Roughness Map"),
+                        ("metalness", "Metalness Map"),
+                        ("emissive", "Emissive Map"),
+                        ("ao", "Occlusion Map"),
+                    ] {
+                        let value = maps[slot].clone();
+                        let mut options = images.clone();
+                        if let Some(id) = value.as_str()
+                            && !options.iter().any(|o| o["v"] == id)
+                        {
+                            options.push(json!({"v":id,"label":"Missing image","disabled":true}));
+                        }
+                        let mut r = choice(
+                            self,
+                            &format!("3d.texture.{slot}"),
+                            label,
+                            value,
+                            json!(options),
+                        );
+                        if images.len() == 1 {
+                            r["disabled"] = json!(true);
+                        }
+                        push(&mut groups, "Texture Maps", r);
+                    }
                 }
             }
-            Role::Light => {
+            (Role::Light, _) => {
                 let lease = self.control_lease("3d.type");
                 let options = json!([{"v":"area","label":"Softbox"},{"v":"spot","label":"Spotlight"},{"v":"point","label":"Bulb"},{"v":"sun","label":"Sun"}]);
                 push(
@@ -536,7 +893,7 @@ impl Properties {
                     ),
                 );
             }
-            Role::Camera => {
+            (Role::Camera, _) => {
                 let lease = self.control_lease("3d.projection");
                 let options = json!([{"v":"perspective","label":"Perspective"},{"v":"orthographic","label":"Orthographic"}]);
                 push(
@@ -590,28 +947,48 @@ impl Properties {
             );
         }
         match role {
+            Role::Object if env.is_some() => {}
             Role::Object => {
                 let object = &data["object"];
+                // AE 27 Material Options. The older per-model shadow switches
+                // only appear while one is off, so it can be turned back on.
+                for (key, label) in [
+                    ("castShadow", "Cast Shadows"),
+                    ("receiveShadow", "Receive Shadows"),
+                ] {
+                    if object[key] == false {
+                        push(
+                            &mut groups,
+                            "Model",
+                            toggle(self, &format!("3d.{key}"), label, false),
+                        );
+                    }
+                }
+                let o = &object["materialOptions"]["p"];
+                let casts = o["castsShadows"]["v"].as_str().unwrap_or("on").to_owned();
                 push(
                     &mut groups,
-                    "Model",
-                    toggle(
+                    "Material Options",
+                    choice(
                         self,
-                        "3d.castShadow",
-                        "Cast Shadows",
-                        object["castShadow"] != false,
+                        "3d.options.castsShadows",
+                        "Casts Shadows",
+                        json!(casts),
+                        json!([{"v":"on","label":"On"},{"v":"off","label":"Off"},{"v":"only","label":"Only","detail":"Casts shadows but stays invisible."}]),
                     ),
                 );
-                push(
-                    &mut groups,
-                    "Model",
-                    toggle(
-                        self,
-                        "3d.receiveShadow",
-                        "Receive Shadows",
-                        object["receiveShadow"] != false,
-                    ),
-                );
+                for (key, label) in [
+                    ("acceptsShadows", "Accepts Shadows"),
+                    ("acceptsLights", "Accepts Lights"),
+                    ("appearsInReflections", "Appears in Reflections"),
+                ] {
+                    let on = o[key]["v"].as_bool().unwrap_or(true);
+                    push(
+                        &mut groups,
+                        "Material Options",
+                        toggle(self, &format!("3d.options.{key}"), label, on),
+                    );
+                }
             }
             Role::Light => {
                 let on = data["light"]["castShadow"] != false;
@@ -663,17 +1040,40 @@ impl Properties {
                 }
             }
         }
+        // Maps and options read after the material's own looks.
+        groups.sort_by_key(|(title, _)| match *title {
+            "Texture Maps" => 1,
+            "Material Options" => 2,
+            _ => 0,
+        });
         Ok(groups
             .into_iter()
             .map(|(title, rows)| {
                 let id = format!("3d.{}", title.to_ascii_lowercase().replace(' ', "-"));
                 // Disclosure groups start closed unless a row inside is animated.
-                let closed = matches!(title, "Coat and Glass" | "Surface" | "Emission")
-                    && rows.iter().all(|r| {
-                        r["animation"] != "animated" && r["animation"] != "key-at-playhead"
-                    });
+                let closed = matches!(
+                    title,
+                    "Coat and Glass"
+                        | "Surface"
+                        | "Emission"
+                        | "Material Options"
+                        | "Texture Maps"
+                        | "Atmosphere"
+                        | "Size"
+                        | "Ground"
+                        | "Variation"
+                        | "Placement"
+                ) && rows
+                    .iter()
+                    .all(|r| r["animation"] != "animated" && r["animation"] != "key-at-playhead");
                 let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
-                json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows})
+                let mut section = json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows});
+                if title == "Material"
+                    && let Some(shelf) = &shelf
+                {
+                    section["finishes"] = shelf.clone();
+                }
+                section
             })
             .collect())
     }
@@ -1104,7 +1504,7 @@ impl Properties {
             .and_then(|(path, _)| path.strip_prefix("3d."))
         {
             let published = model.published().clone();
-            if model.selected_layers().len() != 1
+            if (!control.starts_with("scene.") && model.selected_layers().len() != 1)
                 || published.selection.layers() != model.selected_layers()
             {
                 return Err("The selection changed".into());
@@ -1344,4 +1744,35 @@ fn axis_label(tag: &str) -> String {
         _ => tag,
     }
     .to_owned()
+}
+
+/// What a Studio layer is, in the header (`Key · Softbox`, `World · Sky`).
+fn studio_label(
+    role: pm_panel_studio3d::properties::Role,
+    env: Option<&str>,
+    data: &Value,
+) -> &'static str {
+    use pm_panel_studio3d::properties::Role;
+    match (role, env) {
+        (_, Some("world")) => "Sky",
+        (_, Some("fog")) => "Fog Volume",
+        (_, Some("terrain")) => "Terrain",
+        (_, Some("scatter")) => "Scatter",
+        (Role::Object, _) => {
+            if data["object"]["source"].get("nature").is_some() {
+                "Nature"
+            } else if data["object"]["source"].get("assetId").is_some() {
+                "3D Model"
+            } else {
+                "3D Shape"
+            }
+        }
+        (Role::Light, _) => match data["light"]["type"].as_str() {
+            Some("area") => "Softbox",
+            Some("spot") => "Spotlight",
+            Some("point") => "Bulb",
+            _ => "Sun",
+        },
+        (Role::Camera, _) => "Camera",
+    }
 }

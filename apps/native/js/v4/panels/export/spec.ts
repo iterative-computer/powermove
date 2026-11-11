@@ -108,6 +108,14 @@ export const qualities = [
   { v: "high", label: "High · 16 Mbps" },
   { v: "max", label: "Max · 40 Mbps" },
 ];
+/** Per-export 3D quality; the first row is the composition's own preset. */
+export const studioQualities = (saved: string) => [
+  { v: "composition", label: `Composition · ${saved}` },
+  { v: "draft", label: "Draft" },
+  { v: "preview", label: "Preview" },
+  { v: "production", label: "Production" },
+  { v: "final", label: "Final" },
+];
 export const sidecars = [
   { v: "none", label: "None" },
   { v: "srt", label: "SubRip (.srt)" },
@@ -134,6 +142,10 @@ export const rows = {
   range: ["Range", "Export the work area or the whole composition."],
   quality: ["Quality", "Video bitrate used for video exports."],
   mblur: ["Motion Blur", "Render motion blur for moving layers."],
+  studioQuality: [
+    "3D Quality",
+    "How clean 3D layers render. Higher presets take longer per frame.",
+  ],
   useProxies: [
     "Use Proxies (Draft)",
     "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",

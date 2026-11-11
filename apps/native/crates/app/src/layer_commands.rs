@@ -222,8 +222,9 @@ pub fn layer_menu_rows() -> Vec<serde_json::Value> {
         .collect()
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 24] = [
+pub const PLANNED: [&str; 25] = [
     "newSolid",
+    "new3d",
     "newShape",
     "newAdjustment",
     "selectAll",
@@ -449,6 +450,19 @@ pub fn command_plan(
         })
     };
     match name {
+        "new3d" => {
+            // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
+            // new layer is selected so Properties shows it.
+            let kind = args.first().and_then(serde_json::Value::as_str)?;
+            let id = new_id("L");
+            let (label, commands, select) =
+                pm_panel_studio3d::properties::add_layer(published, time, kind, &id).ok()?;
+            Some(Plan {
+                label,
+                commands,
+                select: Some(vec![select]),
+            })
+        }
         "newSolid" => Some(new_layer(published, "solid", "Solid", false, time)),
         "newShape" => Some(new_layer(published, "shape", "Shape", true, time)),
         "newAdjustment" => Some(new_layer(

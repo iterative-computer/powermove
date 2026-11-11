@@ -3193,6 +3193,8 @@ pub fn install_menus() {
     }
     let tools_start = commands.len();
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let new3d_start = commands.len();
+    commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
     let target = Target::new(mtm, commands, None);
     // Dynamic rows look the target up through MENU_TARGET.
     MENU_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
@@ -3273,6 +3275,18 @@ pub fn install_menus() {
                     delegate(&tools, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&tools));
                 }
+                "new3d" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, t) in menu::new3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            sub.addItem(&row(&t.label, &t.chord, new3d_start + i));
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "panels" => {
                     let dynamic = NSMenu::new(mtm);
                     delegate(&dynamic, MenuKind::Panels);
@@ -3293,7 +3307,16 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if menu::SUBMENUS.contains(&spec.command.as_str()) {
+            if matches!(spec.command.as_str(), "tools" | "new3d") {
+                // In an auto-enabling menu an item with no action is disabled;
+                // its submenu's own action keeps the parent enabled.
+                if let Some(sub) = item.submenu() {
+                    unsafe {
+                        item.setTarget(Some(&sub));
+                        item.setAction(Some(sel!(submenuAction:)));
+                    }
+                }
+            } else if menu::SUBMENUS.contains(&spec.command.as_str()) {
                 unsafe { item.setAction(None) };
             }
             submenu.addItem(&item);

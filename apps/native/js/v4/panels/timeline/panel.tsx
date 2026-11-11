@@ -301,6 +301,9 @@ export function kindSymbol(kind: string): string | null {
         solid: "square.fill",
         shader: "wand.and.rays",
         extension: "wand.and.rays",
+        model3d: "cube",
+        light3d: "lightbulb",
+        camera3d: "camera",
       } as Record<string, string>
     )[kind] ?? null
   );

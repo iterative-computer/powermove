@@ -37,7 +37,15 @@ export interface Options {
   dynamicRange: "sdr" | "pq" | "hlg";
   /** Use Proxies (Draft); absent means originals. */
   useProxies?: boolean;
+  /** This export's 3D quality; absent or `composition` uses the saved preset. */
+  studioQuality?: StudioQuality;
 }
+export type StudioQuality =
+  | "composition"
+  | "draft"
+  | "preview"
+  | "production"
+  | "final";
 /** Presets saved before profile, codec and depth existed keep today's output. */
 const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
 export type Run =
@@ -76,6 +84,8 @@ export interface ExportSnapshot {
     hasWorkArea: boolean;
     /** The project keeps HDR light, so HDR delivery is on offer. */
     hdr?: boolean;
+    /** The composition has 3D layers; `saved` names its own quality preset. */
+    studio?: { saved: string };
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;
     note?: string;
@@ -106,6 +116,10 @@ function validOptions(x: unknown): x is Options {
       (v) => typeof v === "boolean",
     ) &&
     (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
+    (x.studioQuality === undefined ||
+      ["composition", "draft", "preview", "production", "final"].includes(
+        x.studioQuality as string,
+      )) &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
     (x.depth === undefined || x.depth === 8 || x.depth === 16)

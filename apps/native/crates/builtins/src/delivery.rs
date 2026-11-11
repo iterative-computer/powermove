@@ -37,6 +37,23 @@ pub fn options(value: &Value) -> Result<Options, String> {
     options.validate()?;
     Ok(options)
 }
+/// "3D Production, about 6 min" for an export of `frames` at `width`×`height`.
+pub fn studio_estimate(
+    comp: &pm_model::Node,
+    options: &Options,
+    frames: u64,
+    width: f64,
+    height: f64,
+) -> Option<String> {
+    let comp = crate::data::wire(&comp.to_value());
+    let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
+    let (policy, label) = pm_panel_studio3d::properties::export_quality(&comp, choice)?;
+    let per = pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, width, height);
+    Some(format!(
+        "3D {label}, {}",
+        pm_panel_studio3d::properties::about(per * frames as f64)
+    ))
+}
 pub struct Plan {
     pub settings: Option<ExportSettings>,
     pub frames: u64,
@@ -187,6 +204,13 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         let seconds = format!("{:.2}", pm_time::seconds_from_ticks(end - start));
         let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
         format!("{frames} frames · {seconds} s · {}×{}", width, height)
+    };
+    // 3D layers render with the composition's saved quality unless the sheet
+    // overrides it for this export: say which, and roughly how long.
+    let summary = match studio_estimate(comp, &options, frames.max(1), width as f64, height as f64)
+    {
+        Some(note) => format!("{summary} · {note}"),
+        None => summary,
     };
     Ok(Plan {
         settings: Some(settings),

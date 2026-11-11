@@ -1514,16 +1514,31 @@ impl crate::gizmo::Host for ControllerDelegate {
         // and Null have no native command yet) and what extensions add to it.
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
-                let entries = vec![pm_shell::MenuEntry::submenu(
-                    "New",
-                    vec![
-                        pm_shell::MenuEntry::item("Solid", "newSolid"),
-                        pm_shell::MenuEntry::item("Shape Layer", "newShape"),
-                        pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
-                        pm_shell::MenuEntry::separator(),
-                        pm_shell::MenuEntry::item("Composition…", "newComposition"),
-                    ],
-                )];
+                let entries = vec![
+                    pm_shell::MenuEntry::submenu(
+                        "New",
+                        vec![
+                            pm_shell::MenuEntry::item("Solid", "newSolid"),
+                            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+                            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                            pm_shell::MenuEntry::separator(),
+                            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+                        ],
+                    ),
+                    // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
+                    pm_shell::MenuEntry::submenu(
+                        "Add 3D Layer",
+                        pm_shell::menu::new3d()
+                            .into_iter()
+                            .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+                                Some(kind) => {
+                                    pm_shell::MenuEntry::item(i.label, format!("new3d:{kind}"))
+                                }
+                                None => pm_shell::MenuEntry::separator(),
+                            })
+                            .collect(),
+                    ),
+                ];
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
                 if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
                     v.host.borrow().context_menu(&entries, at.0, at.1);

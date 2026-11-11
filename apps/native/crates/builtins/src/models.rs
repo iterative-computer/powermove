@@ -984,6 +984,7 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "studioQuality",
                 "preset",
                 "presetName"
             ]))?;
@@ -1032,6 +1033,13 @@ impl Backend {
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
         self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_render::composite::project_color(root).is_ok_and(|c|c.mode==pm_protocol::color::ColorMode::Hdr),"summary":plan.summary});
+        // A composition with 3D layers offers a per-export 3D quality; the sheet
+        // names the composition's own preset as the default choice.
+        if let Some((_, label)) =
+            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
+        {
+            self.native.export["project"]["studio"] = json!({ "saved": label });
+        }
         self.native.export["presets"] = json!(
             self.kernel
                 .state()

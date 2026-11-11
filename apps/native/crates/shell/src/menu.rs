@@ -61,7 +61,7 @@ impl Item {
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
 pub const DISPLAY_ONLY: [&str; 3] = ["Layer", "Timeline", "tools"];
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 4] = ["openRecent", "workspaces", "panels", "tools"];
+pub const SUBMENUS: [&str; 5] = ["openRecent", "workspaces", "panels", "tools", "new3d"];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
     let keymap = crate::keyboard::shipped();
@@ -77,6 +77,50 @@ pub fn tools() -> Vec<Item> {
     ]
     .iter()
     .map(|(l, c)| Item::registered(&keymap, l, c, json!([])))
+    .collect()
+}
+/// Items of Layer ▸ Add 3D Layer (3d-studio.md §7, plus environments) (command `new3d`, argument = kind). Empty labels
+/// are separators. Kinds match pm-panel-studio3d's `new_menu` and `NATURE`.
+pub fn new3d() -> Vec<Item> {
+    let item = |label: &str, kind: &str| {
+        if label.is_empty() {
+            Item::command("", "", "")
+        } else {
+            Item {
+                args: vec![json!(kind)],
+                ..Item::command(label, "new3d", "")
+            }
+        }
+    };
+    [
+        ("Cube", "box"),
+        ("Sphere", "sphere"),
+        ("Plane", "plane"),
+        ("Cylinder", "cylinder"),
+        ("Cone", "cone"),
+        ("Torus", "torus"),
+        ("Capsule", "capsule"),
+        ("Icosphere", "icosahedron"),
+        ("", ""),
+        ("Softbox", "area"),
+        ("Spotlight", "spot"),
+        ("Bulb", "point"),
+        ("Sun", "sun"),
+        ("Camera", "camera"),
+        ("", ""),
+        ("Sky", "sky"),
+        ("Fog Volume", "fog"),
+        ("Terrain", "terrain"),
+        ("", ""),
+        ("Pine Trees", "scatter:conifer"),
+        ("Oak Trees", "scatter:broadleaf"),
+        ("Birch Trees", "scatter:birch"),
+        ("Bushes", "scatter:bush"),
+        ("Grass", "scatter:grass"),
+        ("Rocks", "scatter:rock"),
+    ]
+    .iter()
+    .map(|(l, k)| item(l, k))
     .collect()
 }
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
@@ -197,6 +241,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("New Solid", "newSolid"),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
+                Item::command("Add 3D Layer", "new3d", ""),
                 sep(),
                 r("Group", "groupLayers"),
                 r("Ungroup", "ungroupLayers"),

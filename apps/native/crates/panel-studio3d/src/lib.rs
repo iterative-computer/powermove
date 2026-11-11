@@ -13,10 +13,15 @@ use std::sync::Arc;
 /// Properties' 3D section (3d-studio.md §8) for one selected 3D layer: its
 /// keyframeable fields and the typed edits behind its pop-ups and checkboxes.
 pub mod properties {
-    pub use crate::fields::Field;
+    pub use crate::fields::{Field, environment};
+    pub use crate::view::{
+        NATURE, QUALITY, SKIES, about, add_layer, estimate_seconds_per_frame, export_quality,
+        new_menu, scene_summary,
+    };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};
     pub use pm_scene3d::schema::Role;
+    pub use pm_scene3d::service::presets as finishes;
     use serde_json::Value;
     /// The role and its channel fields (stored keys, Title Case labels,
     /// ranges and groups), or `None` for a layer that isn't 3D.

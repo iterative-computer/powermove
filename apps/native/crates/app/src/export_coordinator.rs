@@ -540,6 +540,13 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    // The sheet's per-export 3D quality; the composition's saved one otherwise.
+    request.studio_quality = frozen
+        .options
+        .opaque
+        .get("studioQuality")
+        .filter(|q| q.as_str().is_some_and(|q| q != "composition"))
+        .cloned();
     let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
     if let Some(overrides) = engine.overrides {

@@ -20,6 +20,8 @@ export type Target =
         locked: boolean;
         audio: boolean;
         acceptsEffects: boolean;
+        /** A Studio 3D layer: 2D alignment doesn't apply to it. */
+        studio?: boolean;
       };
       sharedType: string | null;
     };
@@ -58,6 +60,8 @@ export interface Row {
   control: Control;
   locked?: boolean;
   disabled?: boolean;
+  /** Addressable by intents but drawn elsewhere (the finish shelf). */
+  hidden?: boolean;
   animation?: "static" | "animated" | "key-at-playhead";
   linked?: boolean;
   expression?: { binding: Binding; source: string; error: string | null };
@@ -83,6 +87,10 @@ export interface Section {
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];
+  /** One quiet line under the rows that explains them (a 3D preset's cost). */
+  note?: string;
+  /** Studio finishes: swatch tiles under the heading; a click applies one. */
+  finishes?: { id: string; label: string; color: string }[];
 }
 export interface InspectorSnapshot {
   target: Target;

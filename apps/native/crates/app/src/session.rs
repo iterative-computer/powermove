@@ -1814,6 +1814,10 @@ impl Controller {
         if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
             return true;
         }
+        // The viewer's context menu names its New 3D kind in the command.
+        if let Some(kind) = cmd.name.strip_prefix("new3d:") {
+            return self.run_plan("new3d", &[serde_json::json!(kind)], cx);
+        }
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {
             Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
