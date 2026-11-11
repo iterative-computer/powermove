@@ -607,13 +607,15 @@ impl Properties {
         let lease = self.control_lease("3d.scene.sky");
         rows.insert(0, json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}}));
         // Add Shot (§8): a command pull-down, so it always shows its title.
-        let mut shots = vec![json!({"v":"add","label":"Add Shot…","disabled":true})];
+        // Every row is explicitly unchecked: the title row is the control's
+        // value, and a pop-up would otherwise mark it as a current choice.
+        let mut shots = vec![json!({"v":"add","label":"Add Shot…","disabled":true,"checked":false})];
         shots.extend(
             pm_panel_studio3d::properties::shots()
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|s| json!({"v":s["id"],"label":s["label"],"detail":s["detail"]})),
+                .map(|s| json!({"v":s["id"],"label":s["label"],"detail":s["detail"],"checked":false})),
         );
         let lease = self.control_lease("3d.scene.shot");
         rows.push(json!({"id":"3d.scene.shot","label":"Shot","control":{"kind":"choice","binding":lease,"value":"add","options":shots}}));

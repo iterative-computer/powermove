@@ -406,7 +406,7 @@ async fn execute(
             let offline = !error.offline.is_empty();
             observe(
                 &runtime,
-                json!({"phase":"failed","message":error.message,"offline":offline}),
+                json!({"phase":"failed","message":plain_failure(&error.message),"offline":offline}),
             )
             .await
         }
@@ -615,7 +615,14 @@ async fn execute_inner(
         let run = if job.cancel.load(Ordering::Acquire) {
             json!({"phase":"cancelling"})
         } else if status.state == JobState::Running {
-            json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
+            let elapsed = started.elapsed().as_secs_f64();
+            let mut run = json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
+            // The sheet says "About N min left" from the pace so far (it
+            // waits for a few frames before trusting it).
+            if frame > 0 && frame < planned.frames {
+                run["eta"] = json!(elapsed / frame as f64 * (planned.frames - frame) as f64);
+            }
+            run
         } else {
             json!({"phase":"preparing"})
         };
@@ -709,4 +716,17 @@ mod agent_tests {
         export.finish(Err("Missing media: clip.mov".into()));
         assert_eq!(row("agent-test-failed").state, TaskState::Failed);
     }
+}
+
+/// The sheet says what happened in words; the engine's own wording stays in
+/// the log. A render worker that dies (crash, out of memory, killed) reports
+/// only that it ended without a result.
+fn plain_failure(message: &str) -> String {
+    if message.contains("without a terminal status") {
+        eprintln!("Export: {message}");
+        return "The renderer stopped unexpectedly. Try again; if it stops again, \
+                use a lower 3D Quality or a smaller size."
+            .into();
+    }
+    message.into()
 }
