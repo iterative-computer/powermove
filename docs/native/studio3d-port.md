@@ -154,7 +154,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Front / Bevel / Side / Back | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Camera depth of field/focus | Shared lens; native focus/defocus checks | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Camera iris controls | Shared iris; native defocus check | P (render connected; broader parity pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
-| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Multiple views | Native 1/2/4 pane state, six orthographic axes, named/custom cameras and independent picking checked | G | U | U | G | Read `Views` / `Pane` → `ViewCommand`, `Views::apply_to`, `Viewer::studio_camera` / `studio_state`; UI arrangement pending |
 | glTF embedded animation | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | FBX with embedded animation | Shared `pm-import-fbx`; geometry/material render verified | P (skin/clip data retained; broader animation scenes pending) | Tested original + GLB round trip | Tested | `import_media` accepts FBX; model-source edits | Import worker → `import::prepare` / archive receipt → `Scene3dCommand::Import`; MCP import + `add_object` |
 | 2D layers casting shadows onto 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -1248,3 +1248,44 @@ retention and oversized admission. **30 native kernel scene tests** pass in
 **0.27 s**, including material-source Undo/Redo and PMV reopening. The GPUI app
 build passes in **24.26 s**. These are functional checks, not new fps or export
 budget measurements.
+
+### UI dependency 5 — independent native views
+
+The engine/data lane adopts the UI lane's `FreeView`/`Viewer::studio_view`
+API and extends it without changing any controls. `studio::Views` is validated,
+serializable transient data for **1, 2 or 4** panes. Each `Pane` has a `camera`
+and `tier`; `Views::active()` identifies the selected pane. Hidden pane settings
+survive layout reductions. Commands are `ViewCommand::SetLayout {count}`,
+`Activate {pane}`, `SetCamera {pane,camera}` and `SetTier {pane,tier}`; JSON uses
+camelCase operation names. Indices are 0–3. These commands edit viewer state,
+never the shot or its Undo history.
+
+`ViewCamera` supports `Active`, `Layer {id}`, `Custom {view: FreeView}`, and
+`Orthographic {axis, center, span}`. Axis is Front/Left/Top/Back/Right/Bottom;
+span is vertical scene units. The native source supplies a valid basis even at
+the poles, disables depth of field for orthographic views, and evaluates a named
+camera's animated channels and hierarchy from the immutable kernel snapshot.
+A missing named camera is an explicit query/render error. Viewer overrides apply
+to that viewer's composition; supplying compositions retain their own cameras.
+
+The UI owns surface creation and arrangement. Create ordinary `EngineService`
+viewers for the visible panes, then call `Views::apply_to(&viewers)`. It validates
+all handles first and updates distinct viewers on one service atomically.
+Unchanged data preserves in-flight frames. Release hidden viewer handles when
+reducing the visible count; the `Views` data retains their settings. Per-handle
+commands/queries are `Viewer::studio_camera`, `studio_pane` and `studio_state`.
+Existing `studio_preview` and `studio_view(Option<FreeView>)` remain compatible.
+`studio_view_at`/`studio_camera_at` accept the input event's host timestamp for
+input-to-pixel measurement. Cache identities include camera, tier and font
+generation, and surface picking takes exactly the pane's camera and tier.
+
+Captures/exports retain the active composition camera. No panels, pane placement,
+colours or control behaviour were designed here. The designer binds the view
+model/commands to its UI and session preferences; no document migration is needed.
+
+Checks: **45 native Metal scene/export tests** pass in **11.52 s**, including
+four simultaneous worker camera/tier/pick states, every orthographic pole,
+named-camera selection, invalid poses and supplying-composition isolation.
+The view-command/serialization unit check and camera-sensitive frame-cache
+check both pass. The GPUI app build passes in **22.42 s**. No on-screen fps
+or input percentile is claimed by these functional tests.

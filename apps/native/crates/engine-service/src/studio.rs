@@ -13,9 +13,61 @@ pub use pm_studio3d_engine::service::{
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
 
+mod views;
+pub use views::{Axis, Pane, ViewCamera, ViewCommand, Views};
+
+/// A viewer's transient Free View (3d-studio.md §4): where the editor camera
+/// stands and looks. It never edits the document; captures and exports use
+/// the composition's camera. `zoom` scales the lens as the camera's zoom does.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FreeView {
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub zoom: f64,
+}
+impl FreeView {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .eye
+            .iter()
+            .chain(self.target.iter())
+            .any(|v| !v.is_finite() || v.abs() > 1e6)
+            || !self.zoom.is_finite()
+            || self.zoom <= 0.
+            || self.zoom > 1e6
+            || self
+                .eye
+                .iter()
+                .zip(self.target)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                < 1e-12
+        {
+            return Err(
+                "Free View needs finite distinct eye/target points and a positive zoom".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Exact bits, for cache identities.
+    pub fn key(view: Option<Self>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Some(v) = view {
+            for x in v.eye.iter().chain(v.target.iter()).chain([v.zoom].iter()) {
+                x.to_bits().hash(&mut h);
+            }
+            1u8.hash(&mut h);
+        }
+        h.finish()
+    }
+}
 /// Transient viewer state. Final uses the composition's saved noise/sample
 /// policy; selecting a tier never edits the composition or export override.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Preview {
     #[default]
     Live,
@@ -86,8 +138,46 @@ pub fn attach_with_preview_fonts(
     preview: Preview,
     fonts: Option<&pm_render::text::host::RenderFonts>,
 ) -> Result<(), String> {
+    attach_with_view_fonts(renderer, doc, media, request, preview, None, fonts)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_view(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    view: Option<FreeView>,
+) -> Result<(), String> {
+    attach_with_view_fonts(renderer, doc, media, request, preview, view, None)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_view_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    view: Option<FreeView>,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    attach_with_camera_fonts(renderer, doc, media, request, preview, view.into(), fonts)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_camera_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    camera: ViewCamera,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    camera.validate()?;
     use pm_studio3d_engine::compositor::Source;
-    let source = DocumentSource::new(doc, media.clone()).with_native_fonts(fonts);
+    let source = DocumentSource::new(doc, media.clone())
+        .with_native_fonts(fonts)
+        .with_camera_for(&request.composition, camera);
     let tier = match preview {
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },

@@ -48,6 +48,8 @@ pub struct DocumentSource {
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
+    camera: super::ViewCamera,
+    view_composition: Option<String>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
     material_images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
@@ -100,6 +102,8 @@ impl DocumentSource {
             resources: Mutex::default(),
             resolved: Mutex::default(),
             quality_override: None,
+            camera: super::ViewCamera::Active,
+            view_composition: None,
             environment_maps: Mutex::default(),
             height_maps: Mutex::default(),
             material_images: Mutex::default(),
@@ -140,6 +144,29 @@ impl DocumentSource {
         self.capture_definitions = definitions;
         self
     }
+    pub fn with_view(mut self, view: Option<super::FreeView>) -> Self {
+        self.camera = view.into();
+        self
+    }
+    pub fn with_view_for(self, composition: &str, view: Option<super::FreeView>) -> Self {
+        self.with_camera_for(composition, view.into())
+    }
+    pub fn with_camera_for(mut self, composition: &str, camera: super::ViewCamera) -> Self {
+        self.camera = camera;
+        self.view_composition = Some(composition.into());
+        self
+    }
+    fn camera_for(&self, request: &SceneRequest) -> &super::ViewCamera {
+        if self
+            .view_composition
+            .as_ref()
+            .is_none_or(|id| id == &request.composition)
+        {
+            &self.camera
+        } else {
+            &super::ViewCamera::Active
+        }
+    }
     /// Resolve one export's override without editing the saved composition.
     pub fn with_quality_override(
         mut self,
@@ -176,10 +203,14 @@ impl DocumentSource {
             return Ok(scene.clone());
         }
         let scene = Arc::new(
-            pm_kernel::commands::scene3d::resolve_scene(
+            pm_kernel::commands::scene3d::resolve_scene_with_camera(
                 &self.snapshot,
                 Some(&request.composition),
                 request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                match self.camera_for(request) {
+                    super::ViewCamera::Layer { id } => Some(id.as_str()),
+                    _ => None,
+                },
             )
             .map_err(|e| e.to_string())?,
         );
@@ -509,7 +540,16 @@ impl SceneSource for DocumentSource {
                 || point(cp, "target"),
                 |p| v3(p[0] as f32, p[1] as f32, p[2] as f32),
             );
-        let fov = 2. * ((n(cp, "fov", 45.).to_radians() / 2.).tan() / n(cp, "zoom", 1.)).atan();
+        let choice = self.camera_for(request);
+        choice.validate()?;
+        let view = choice.pose();
+        let (eye, target, zoom) = if let Some(view) = view {
+            let f = |p: [f64; 3]| v3(p[0] as f32, p[1] as f32, p[2] as f32);
+            (f(view.eye), f(view.target), view.zoom as f32)
+        } else {
+            (eye, target, n(cp, "zoom", 1.))
+        };
+        let fov = 2. * ((n(cp, "fov", 45.).to_radians() / 2.).tan() / zoom).atan();
         let e = &r.scene["environment"];
         let ep = &e["p"];
         let env = color(ep, "ambientColor", "#FFFFFF") * n(ep, "ambient", 0.5);
@@ -527,7 +567,11 @@ impl SceneSource for DocumentSource {
                 position: eye,
                 target,
                 fov: fov.to_degrees(),
-                f_stop: n(cp, "fStop", 0.),
+                f_stop: if matches!(choice, super::ViewCamera::Orthographic { .. }) {
+                    0.
+                } else {
+                    n(cp, "fStop", 0.)
+                },
                 focus: (n(cp, "focusDistance", 0.) > 0.)
                     .then(|| eye + (target - eye).normalize() * n(cp, "focusDistance", 0.)),
                 focal_mm: 12. / (n(cp, "fov", 45.).to_radians() / 2.).tan(),
@@ -985,13 +1029,21 @@ impl SceneSource for DocumentSource {
                 });
             }
         }
-        let basis = r.camera_up.map(|up| {
-            let f = (target - eye).normalize();
-            let right = f
-                .cross(v3(up[0] as f32, up[1] as f32, up[2] as f32))
-                .normalize();
-            [f, right, right.cross(f)]
-        });
+        let basis = if view.is_some() {
+            let (forward, right, up) = scene.camera.basis();
+            Some([forward, right, up])
+        } else {
+            r.camera_up.map(|up| {
+                let f = (target - eye).normalize();
+                let side = f.cross(v3(up[0] as f32, up[1] as f32, up[2] as f32));
+                let right = if side.length() < 1e-6 {
+                    scene.camera.basis().1
+                } else {
+                    side.normalize()
+                };
+                [f, right, right.cross(f)]
+            })
+        };
         let floor_y = if e["shadowCatcher"] == true && !instances.is_empty() {
             low.y
         } else {
@@ -1016,9 +1068,16 @@ impl SceneSource for DocumentSource {
                 floor_y,
                 shadows: e["shadows"] != false,
                 ambient,
-                orthographic_span: (c["projection"] == "orthographic")
-                    .then(|| 3. / n(cp, "zoom", 1.)),
-                clip_planes: Some([n(cp, "near", 0.01), n(cp, "far", 1000.)]),
+                orthographic_span: match choice {
+                    super::ViewCamera::Orthographic { span, .. } => Some(*span as f32),
+                    _ => (c["projection"] == "orthographic").then(|| 3. / zoom),
+                },
+                clip_planes: Some(match choice {
+                    super::ViewCamera::Orthographic { span, .. } => {
+                        [0.01, (*span as f32 * 4. + 100.).max(1000.)]
+                    }
+                    _ => [n(cp, "near", 0.01), n(cp, "far", 1000.)],
+                }),
                 iris: [
                     n(cp, "irisShape", 0.),
                     n(cp, "irisRotation", 0.).to_radians(),

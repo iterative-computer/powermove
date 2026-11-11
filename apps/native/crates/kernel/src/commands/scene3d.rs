@@ -1245,9 +1245,19 @@ pub fn resolve_scene(
     comp: Option<&str>,
     time: f64,
 ) -> Result<pm_scene3d::service::ResolvedScene, CommandError> {
+    resolve_scene_with_camera(snapshot, comp, time, None)
+}
+/// A transient viewer camera selection; authored data and history are untouched.
+pub fn resolve_scene_with_camera(
+    snapshot: &crate::Snapshot,
+    comp: Option<&str>,
+    time: f64,
+    camera: Option<&str>,
+) -> Result<pm_scene3d::service::ResolvedScene, CommandError> {
     struct Evaluator {
         queries: crate::queries::QueryContext,
         comp: String,
+        camera: Option<String>,
         layers: Vec<serde_json::Value>,
     }
     impl Evaluator {
@@ -1286,6 +1296,11 @@ pub fn resolve_scene(
             self.query("evP", l, t, serde_json::json!({"key":path,"prop":c}))
         }
         fn active(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<bool> {
+            if let Some(camera) = &self.camera {
+                if pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera) {
+                    return Ok(l["id"] == camera.as_str());
+                }
+            }
             self.query("active", l, t, serde_json::json!({}))
                 .map(|v| v == true)
         }
@@ -1318,12 +1333,21 @@ pub fn resolve_scene(
         .as_array()
         .ok_or_else(|| invalid("No layers"))?
         .clone();
+    if let Some(camera) = camera {
+        if !layers.iter().any(|l| {
+            l["id"] == camera
+                && pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera)
+        }) {
+            return Err(invalid("View camera layer is missing"));
+        }
+    }
     pm_scene3d::service::resolve(
         &c,
         time,
         &mut Evaluator {
             queries: crate::queries::QueryContext::new(&snapshot.document),
             comp,
+            camera: camera.map(str::to_owned),
             layers,
         },
     )

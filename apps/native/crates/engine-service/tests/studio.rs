@@ -2976,3 +2976,214 @@ fn material_capture_preserves_source_masks_effects_and_child_visibility() {
         let left=&frame.pixels[(16*32+8)*4..][..4];let right=&frame.pixels[(16*32+24)*4..][..4];assert!(left[0]<10 && left[1]>240 && left[2]>240 && left[3]>240,"{root}: {left:?}");assert!(right[3]<10,"{root}: {right:?}");
     }
 }
+
+#[test]
+fn studio_view_cameras_select_named_layers_and_all_six_orthographic_axes() {
+    use studio::{Axis, SceneSource, ViewCamera};
+    let original = document(false, 100.);
+    let mut project = pm_scene3d::from_model(&original.to_value().unwrap()).unwrap();
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let mut camera = layers.iter().find(|l| l["id"] == "camera").unwrap().clone();
+    camera["id"] = json!("side");
+    camera["on"] = json!(false);
+    camera["p"]["position.x"]["v"] = json!(5);
+    camera["p"]["position.z"]["v"] = json!(0);
+    layers.push(camera);
+    let doc = project_document(&project);
+    let before = doc.to_value();
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let gpu = pm_gpu::Gpu::new("Studio view axes").unwrap();
+    let mut service = studio::StudioService::with_device(gpu.device, gpu.queue, 64, 64).unwrap();
+    for (axis, normal) in [
+        (Axis::Front, [0., 0., 1.]),
+        (Axis::Back, [0., 0., -1.]),
+        (Axis::Left, [-1., 0., 0.]),
+        (Axis::Right, [1., 0., 0.]),
+        (Axis::Top, [0., 1., 0.]),
+        (Axis::Bottom, [0., -1., 0.]),
+    ] {
+        let source = studio::DocumentSource::new(doc.clone(), Default::default()).with_camera_for(
+            "test",
+            ViewCamera::Orthographic {
+                axis,
+                center: [0.; 3],
+                span: 4.,
+            },
+        );
+        let input = source.scene(&req).unwrap();
+        assert_eq!(input.view.orthographic_span, Some(4.));
+        assert_eq!(input.scene.camera.f_stop, 0.);
+        let hit = service
+            .pick_surface(&source, req.clone(), studio::Tier::QualityLive, 0.5, 0.5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.layer, "mirror");
+        let dot: f32 = hit.normal.iter().zip(normal).map(|(a, b)| a * b).sum();
+        assert!(dot > 0.9, "{axis:?}: {:?}", hit.normal);
+    }
+    let source = studio::DocumentSource::new(doc.clone(), Default::default())
+        .with_camera_for("test", ViewCamera::Layer { id: "side".into() });
+    let input = source.scene(&req).unwrap();
+    assert!((input.scene.camera.position.x - 5.).abs() < 1e-5);
+    let hit = service
+        .pick_surface(&source, req.clone(), studio::Tier::QualityLive, 0.5, 0.5)
+        .unwrap()
+        .unwrap();
+    assert!(hit.normal[0] > 0.9);
+    let invalid = studio::DocumentSource::new(doc.clone(), Default::default()).with_camera_for(
+        "test",
+        ViewCamera::Layer {
+            id: "missing".into(),
+        },
+    );
+    assert!(
+        invalid
+            .scene(&req)
+            .err()
+            .unwrap()
+            .contains("View camera layer is missing")
+    );
+    assert_eq!(doc.to_value(), before);
+}
+#[test]
+fn four_worker_views_keep_their_camera_tier_and_pick_state_independent() {
+    use pm_engine_service::{EngineService, Output, SurfaceQueryKind, ViewerConfig};
+    use studio::{Axis, Preview, ViewCamera, ViewCommand, Views};
+    let doc = document(false, 100.);
+    let snapshot = pm_kernel::DocumentStore::new_untitled(doc.to_value().unwrap()).snapshot();
+    let before = snapshot.document.to_value();
+    let service = EngineService::start(pm_gpu::Gpu::new("four Studio views").unwrap()).unwrap();
+    let viewers: Vec<_> = (0..4)
+        .map(|_| {
+            service
+                .viewer(ViewerConfig {
+                    snapshot: snapshot.clone(),
+                    composition: "test".into(),
+                    media: Default::default(),
+                    output: Output {
+                        width: 64,
+                        height: 64,
+                        display: 1,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                    layer: None,
+                    rate: pm_time::Rate::FPS_30,
+                    end: None,
+                    audio: false,
+                })
+                .unwrap()
+        })
+        .collect();
+    let mut views = Views::default();
+    views.apply(ViewCommand::SetLayout { count: 4 }).unwrap();
+    for (pane, axis) in [Axis::Front, Axis::Right, Axis::Top, Axis::Back]
+        .into_iter()
+        .enumerate()
+    {
+        views
+            .apply(ViewCommand::SetCamera {
+                pane: pane as u8,
+                camera: ViewCamera::Orthographic {
+                    axis,
+                    center: [0.; 3],
+                    span: 4.,
+                },
+            })
+            .unwrap();
+    }
+    views
+        .apply(ViewCommand::SetTier {
+            pane: 1,
+            tier: Preview::Refine,
+        })
+        .unwrap();
+    views.apply_to(&viewers).unwrap();
+    for (i, viewer) in viewers.iter().enumerate() {
+        assert_eq!(viewer.studio_state().unwrap(), views.panes()[i]);
+    }
+    let stamps: Vec<_> = viewers.iter().map(|v| v.stamp()).collect();
+    views.apply_to(&viewers).unwrap();
+    assert_eq!(
+        viewers.iter().map(|v| v.stamp()).collect::<Vec<_>>(),
+        stamps,
+        "unchanged pane state must not discard in-flight frames"
+    );
+    let replies: Vec<_> = viewers
+        .iter()
+        .map(|v| {
+            v.pick_surface(
+                v.stamp().unwrap(),
+                Ticks::ZERO,
+                [0.5, 0.5],
+                SurfaceQueryKind::Click,
+            )
+            .unwrap()
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    for (i, reply) in replies.iter().enumerate() {
+        let hit = loop {
+            match reply.try_recv() {
+                Ok(reply) => break reply.unwrap().hit.unwrap(),
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        };
+        let (axis, sign) = [(2, 1.), (0, 1.), (1, 1.), (2, -1.)][i];
+        assert!(hit.normal[axis] * sign > 0.9, "view {i}: {:?}", hit.normal);
+    }
+    assert_eq!(snapshot.document.to_value(), before);
+    let stamp = viewers[0].stamp();
+    assert!(
+        viewers[0]
+            .studio_view(Some(studio::FreeView {
+                eye: [f64::NAN, 0., 1.],
+                target: [0.; 3],
+                zoom: 1.
+            }))
+            .is_err()
+    );
+    assert_eq!(viewers[0].stamp(), stamp);
+}
+
+#[test]
+fn studio_view_override_does_not_change_a_supplying_compositions_camera() {
+    use studio::{FreeView, SceneSource, ViewCamera};
+    let doc = document(false, 100.);
+    let mut project = pm_scene3d::from_model(&doc.to_value().unwrap()).unwrap();
+    project["comps"]["source"] = project["comps"]["test"].clone();
+    project["comps"]["source"]["id"] = json!("source");
+    let doc = project_document(&project);
+    let source = studio::DocumentSource::new(doc.clone(), Default::default()).with_camera_for(
+        "test",
+        ViewCamera::Custom {
+            view: FreeView {
+                eye: [5., 2., 1.],
+                target: [0.; 3],
+                zoom: 1.,
+            },
+        },
+    );
+    let req = studio::SceneRequest {
+        composition: "source".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let input = source.scene(&req).unwrap();
+    assert!(
+        (input.scene.camera.position.z - 5.).abs() < 1e-6
+            && input.scene.camera.position.x.abs() < 1e-6
+    );
+}

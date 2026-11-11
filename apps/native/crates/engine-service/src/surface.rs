@@ -125,10 +125,11 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
                 v.resources.clone(),
                 v.studio_preview,
                 v.stamp,
+                v.studio_view.clone(),
             ))
         })
     };
-    let Some((id, p, scene, request, resources, preview, current)) = work else {
+    let Some((id, p, scene, request, resources, preview, current, view)) = work else {
         return;
     };
     let result = if current != p.stamp {
@@ -136,6 +137,8 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
     } else {
         engine.set_resources(resources);
         engine.studio_preview(preview);
+        // Picks see what the viewer shows, including its Free View.
+        engine.studio_camera(view);
         engine.use_compat_document(p.stamp.doc_id);
         engine
             .pick_surface(&scene, &request, p.point)

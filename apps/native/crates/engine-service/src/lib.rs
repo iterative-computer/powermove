@@ -351,6 +351,7 @@ struct View {
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
     studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -582,6 +583,62 @@ impl Viewer {
         self.shared.wake.try_send(()).ok();
         Ok(())
     }
+    /// Transient Free View for Studio 3D layers (3d-studio.md §4). `None`
+    /// looks through the composition's camera. Never edits the document.
+    pub fn studio_view(&self, view: Option<studio::FreeView>) -> Result<()> {
+        self.studio_camera(view.into())
+    }
+    pub fn studio_view_at(&self, view: Option<studio::FreeView>, input: f64) -> Result<()> {
+        self.studio_camera_at(view.into(), input)
+    }
+    pub fn studio_camera(&self, camera: studio::ViewCamera) -> Result<()> {
+        self.studio_camera_traced(camera, None)
+    }
+    pub fn studio_camera_at(&self, camera: studio::ViewCamera, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.studio_camera_traced(camera, Some(input))
+    }
+    fn studio_camera_traced(&self, camera: studio::ViewCamera, input: Option<f64>) -> Result<()> {
+        camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != camera {
+                v.studio_view = camera;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+                if let Some(input) = input {
+                    v.input = Some(input);
+                    v.pipeline = trace::Pipeline {
+                        request: trace::now(),
+                        ..Default::default()
+                    };
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_pane(&self, pane: studio::Pane) -> Result<()> {
+        pane.camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                v.studio_view = pane.camera;
+                v.studio_preview = pane.tier;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_state(&self) -> Result<studio::Pane> {
+        let state = self.shared.state.lock().unwrap();
+        let view = state
+            .views
+            .get(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        Ok(studio::Pane {
+            camera: view.studio_view.clone(),
+            tier: view.studio_preview,
+        })
+    }
     /// Transient Studio worker tier, independent of viewer resolution.
     pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
         self.edit(|v| {
@@ -754,7 +811,10 @@ impl Viewer {
             v.enqueue(cmd)?;
             if let Some(input) = input {
                 v.input = Some(input);
-                v.pipeline = trace::Pipeline { request: trace::now(), ..Default::default() };
+                v.pipeline = trace::Pipeline {
+                    request: trace::now(),
+                    ..Default::default()
+                };
             }
             Ok(())
         })
@@ -1077,6 +1137,7 @@ impl EngineService {
                 resources: Arc::default(),
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+                studio_view: studio::ViewCamera::Active,
                 adapt_drags: false,
                 skim: None,
                 skim_input: None,
@@ -1098,9 +1159,11 @@ impl EngineService {
 impl Drop for EngineService {
     fn drop(&mut self) {
         {
-            let mut state=self.shared.state.lock().unwrap();
+            let mut state = self.shared.state.lock().unwrap();
             state.stop = true;
-            for view in state.views.values_mut() {surface::cancel(view,"surface query worker stopped");}
+            for view in state.views.values_mut() {
+                surface::cancel(view, "surface query worker stopped");
+            }
         }
         self.shared.interactive.set(false);
         self.shared.wake.try_send(()).ok();
@@ -1245,6 +1308,7 @@ struct Work {
     scene: Scene,
     spec: FrameSpec,
     studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -2047,6 +2111,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     v.studio_preview
                 },
+                studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -2092,6 +2157,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             scene,
             spec,
             studio_preview,
+            studio_view,
             layer,
             overlays,
             provider,
@@ -2116,6 +2182,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 ..Default::default()
             }));
             engine.studio_preview(studio_preview);
+            engine.studio_camera(studio_view);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
@@ -2658,22 +2725,34 @@ mod worker_tests {
         drawn(&v);
         let stamp = v.stamp();
         for invalid in [0., -1., f64::NAN, f64::INFINITY] {
-            assert!(v.command_at(TransportCommand::Step { frames: 1 }, invalid).is_err());
+            assert!(
+                v.command_at(TransportCommand::Step { frames: 1 }, invalid)
+                    .is_err()
+            );
         }
-        assert_eq!(v.stamp(), stamp, "invalid origins must not enqueue commands");
+        assert_eq!(
+            v.stamp(),
+            stamp,
+            "invalid origins must not enqueue commands"
+        );
         let input = trace::now();
-        v.command_at(TransportCommand::Step { frames: 1 }, input).unwrap();
+        v.command_at(TransportCommand::Step { frames: 1 }, input)
+            .unwrap();
         v.capture_next().unwrap();
         let frame = drawn(&v).frame.unwrap();
         assert_eq!(frame.input_host_seconds, Some(input));
-        assert_eq!(frame.time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+        assert_eq!(
+            frame.time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
         v.command(TransportCommand::Step { frames: 1 }).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
     }
     #[test]
     fn identical_safe_areas_preserve_an_in_flight_frame() {
-        let service = EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
         let v = shapes_viewer(&service, None);
         v.capture_next().unwrap();
         drawn(&v);
@@ -2683,7 +2762,8 @@ mod worker_tests {
             entered.send(()).unwrap();
             barrier.recv_timeout(Duration::from_secs(10)).unwrap();
         }));
-        v.command_at(TransportCommand::Step { frames: 1 }, trace::now()).unwrap();
+        v.command_at(TransportCommand::Step { frames: 1 }, trace::now())
+            .unwrap();
         v.capture_next().unwrap();
         signal.recv_timeout(Duration::from_secs(10)).unwrap();
         let before = v.stamp();
@@ -2691,39 +2771,76 @@ mod worker_tests {
         let after = v.stamp();
         release.send(()).unwrap();
         let status = drawn(&v);
-        assert_eq!(before, after, "unchanged guides/gizmos must not invalidate the frame");
+        assert_eq!(
+            before, after,
+            "unchanged guides/gizmos must not invalidate the frame"
+        );
         assert_eq!(status.stale_rejections, 0);
-        assert_eq!(status.frame.unwrap().time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+        assert_eq!(
+            status.frame.unwrap().time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
     }
     #[test]
     fn surface_hovers_coalesce_without_dropping_clicks_and_the_queue_is_bounded() {
-        let service=EngineService::start(pm_gpu::Gpu::new("surface query queue").unwrap()).unwrap();
-        let (entered,signal)=std::sync::mpsc::channel();
-        let (release,barrier)=std::sync::mpsc::channel();
-        *service.shared.before_submit.lock().unwrap()=Some(Box::new(move || {
-            entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("surface query queue").unwrap()).unwrap();
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
         }));
-        let viewer=shapes_viewer(&service,None);
+        let viewer = shapes_viewer(&service, None);
         viewer.capture_next().unwrap();
         signal.recv_timeout(Duration::from_secs(10)).unwrap();
-        let stamp=viewer.stamp().unwrap();
-        let first=viewer.pick_surface(stamp,Ticks::ZERO,[0.4,0.5],SurfaceQueryKind::Hover).unwrap();
-        let _next=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Hover).unwrap();
-        assert!(first.try_recv().unwrap().unwrap_err().contains("superseded"));
-        let click=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap();
-        let _hover=viewer.pick_surface(stamp,Ticks::ZERO,[0.6,0.5],SurfaceQueryKind::Hover).unwrap();
-        let mut rest=vec![];
-        for _ in 0..5 {rest.push(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap());}
-        let count=service.shared.state.lock().unwrap().views[&viewer.id].surface_queries.len();
-        let full=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click);
-        let click_pending=!click.is_closed();
+        let stamp = viewer.stamp().unwrap();
+        let first = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.4, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let _next = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        assert!(
+            first
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("superseded")
+        );
+        let click = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+            .unwrap();
+        let _hover = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.6, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let mut rest = vec![];
+        for _ in 0..5 {
+            rest.push(
+                viewer
+                    .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                    .unwrap(),
+            );
+        }
+        let count = service.shared.state.lock().unwrap().views[&viewer.id]
+            .surface_queries
+            .len();
+        let full = viewer.pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click);
+        let click_pending = !click.is_closed();
         release.send(()).unwrap();
-        assert_eq!(count,8);
+        assert_eq!(count, 8);
         assert!(full.is_err());
-        assert!(click_pending,"hover must not supersede a click");
+        assert!(click_pending, "hover must not supersede a click");
         drop(service);
-        assert!(click.try_recv().is_ok(),"shutdown must settle accepted queries");
-        assert!(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).is_err());
+        assert!(
+            click.try_recv().is_ok(),
+            "shutdown must settle accepted queries"
+        );
+        assert!(
+            viewer
+                .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                .is_err()
+        );
         drop(viewer);
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
