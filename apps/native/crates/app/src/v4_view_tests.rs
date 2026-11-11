@@ -897,3 +897,31 @@ fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppCon
     );
     assert!(summary.size.height > cancel.size.height, "the notice wraps");
 }
+
+/// Full Keyboard Access: Tab reaches kit controls in order; `tabIndex` -1
+/// (a segmented control's other segments) stays out of the Tab order.
+#[gpui::test]
+fn tab_reaches_kit_controls_and_skips_roving_segments(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":200,"height":40}}), &[]);
+    for (i, (name, tab)) in [("first", 0), ("roving", -1), ("last", 0)].iter().enumerate() {
+        ops.extend(node_ops(
+            2 + i as u64,
+            1,
+            "button",
+            json!({"id":name,"data-pm-component":"toolbar-item","label":name,"tabIndex":tab,"style":{"width":20,"height":16}}),
+            &["click"],
+        ));
+    }
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let mut order = vec![];
+    for _ in 0..2 {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+        let focused = view.update_in(&mut vcx, |v, window, _| v.focused_node(window));
+        order.push(focused);
+    }
+    assert_eq!(order, [Some(2), Some(4)], "Tab skips the -1 segment");
+}

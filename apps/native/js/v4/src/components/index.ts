@@ -175,7 +175,6 @@ export function PopUpButton(
             v: o.v,
             label: o.label,
             ...(o.disabled === undefined ? {} : { disabled: o.disabled }),
-            ...(o.checked ? { checked: true } : {}),
           },
         ];
       }),

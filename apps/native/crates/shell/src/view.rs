@@ -642,6 +642,9 @@ impl Editor {
             "shellFocusNext" | "shellFocusPrevious" | "shellPanelNext" | "shellPanelPrevious"
         ) {
             let reverse = cmd.name.ends_with("Previous");
+            // The shell took the key before the window saw it: still a
+            // keyboard move, so focus rings show (checklist §6).
+            window.note_keyboard_input();
             if cmd.name.starts_with("shellPanel") {
                 let current = self
                     .panel_order
@@ -2389,6 +2392,8 @@ mod keyboard_tests {
                 let mut stops = vec![first.clone()];
                 for _ in 0..100 {
                     v.command(command("shellFocusNext"), w, cx);
+                    // The shell handled the key: rings still show (focus-visible).
+                    assert!(w.last_input_was_keyboard(), "Tab is keyboard input");
                     let focused = w.focused(cx).expect("Tab must have a focused element");
                     if focused == first {
                         break;
