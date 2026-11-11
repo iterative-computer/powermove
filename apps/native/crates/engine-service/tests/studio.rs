@@ -63,6 +63,40 @@ fn request() -> RenderRequest {
     r.background = false;
     r
 }
+#[test]
+fn viewer_surface_query_returns_layer_point_normal_and_rejects_stale_frames() {
+    use pm_engine_service::{EngineService, ViewerConfig, Output, SurfaceQueryKind};
+    let project=document(false,100.).to_value().unwrap();
+    let snapshot=pm_kernel::DocumentStore::new_untitled(project).snapshot();
+    let service=EngineService::start(pm_gpu::Gpu::new("viewer surface query").unwrap()).unwrap();
+    let viewer=service.viewer(ViewerConfig {
+        snapshot, composition:"test".into(), media:Default::default(),
+        output:Output {width:64,height:64,display:1,headroom:1.,crop:None},
+        layer:None, rate:pm_time::Rate::FPS_30, end:None, audio:false,
+    }).unwrap();
+    let stamp=viewer.stamp().unwrap();
+    let receive=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap();
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(20);
+    let reply=loop {
+        match receive.try_recv() {
+            Ok(reply)=>break reply.unwrap(),
+            Err(async_channel::TryRecvError::Empty)=>{
+                assert!(std::time::Instant::now()<deadline,"surface query did not settle");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e)=>panic!("surface query closed: {e}"),
+        }
+    };
+    assert_eq!(reply.stamp,stamp);
+    assert_eq!(reply.time,Ticks::ZERO);
+    let hit=reply.hit.unwrap();
+    assert_eq!(hit.layer,"mirror");
+    assert!(hit.point[0].abs()<0.01 && hit.point[1].abs()<0.01 && hit.point[2]>0.9);
+    assert!(hit.normal[2]>0.9);
+    viewer.quality(pm_engine_service::Quality::Half).unwrap();
+    assert!(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).is_err());
+    assert!(viewer.pick_surface(viewer.stamp().unwrap(),Ticks::ZERO,[f32::NAN,0.5],SurfaceQueryKind::Hover).is_err());
+}
 fn draw(renderer: &mut Renderer, doc: Arc<pm_model::Document>) -> Vec<f32> {
     studio::attach(renderer, doc.clone(), &Default::default());
     let f = renderer

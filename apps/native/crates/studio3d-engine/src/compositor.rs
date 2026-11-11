@@ -143,6 +143,9 @@ impl Pass {
     }
 }
 impl Backend for Pass {
+    fn pick_surface(&mut self, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
+        self.service.as_mut().ok_or("Studio service is not attached")?.pick_surface(self.source.as_ref(), request.clone(), tier, x,y)
+    }
     fn update_source(&mut self, source: &dyn std::any::Any) -> bool {
         let Some(source) = source.downcast_ref::<Adapter>() else {
             return false;

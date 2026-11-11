@@ -553,3 +553,26 @@ fn aperture_units_reset_refine_accumulation_at_the_same_revision() {
     assert_eq!(service.render(&source, request(), tier).unwrap().samples, 2);
     assert_eq!(service.scene_updates(), 1);
 }
+#[test]
+fn surface_queries_share_rendered_layers_world_geometry_and_refine_accumulation() {
+    let source=Source::new();
+    let mut service=StudioService::default();
+    let req=request();
+    let tier=Tier::QualityRefine {samples:4};
+    // A query is useful before the first frame and does not trace samples.
+    let left=service.pick_surface(&source,req.clone(),tier,0.29,0.5).unwrap().unwrap();
+    assert_eq!(left.layer,"left");
+    assert!((left.point[0]+0.8).abs()<0.2 && left.point[2]>0.5);
+    assert!((left.normal.iter().map(|n|n*n).sum::<f32>()-1.).abs()<0.001);
+    assert!(left.normal[2]>0.8);
+    assert!(service.pick_surface(&source,req.clone(),tier,0.5,0.02).unwrap().is_none());
+    assert!(service.pick_surface(&source,req.clone(),tier,f32::NAN,0.5).is_err());
+    assert!(service.pick_surface(&source,req.clone(),tier,1.1,0.5).is_err());
+    assert_eq!(service.render(&source,req.clone(),tier).unwrap().samples,4);
+    let right=service.pick_surface(&source,req.clone(),tier,0.71,0.5).unwrap().unwrap();
+    assert_eq!(right.layer,"right");
+    assert!(right.point[0]>0.6);
+    assert_eq!(service.render(&source,req,tier).unwrap().samples,8,"hover must retain refinement");
+    assert_eq!(service.geometry_uploads(),1);
+    assert_eq!(service.texture_uploads(),1);
+}

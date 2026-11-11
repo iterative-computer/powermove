@@ -4,6 +4,7 @@ use crate::extract::{Extracted, Extractor, SceneInput, SceneRequest, SceneSource
 use crate::gpu::{PresentTarget, Renderer};
 
 pub use pm_render::scene3d::provider::{Denoise, Tier};
+pub use pm_render::scene3d::provider::SurfaceHit;
 
 pub struct LayerTexture {
     pub layer: String,
@@ -31,6 +32,19 @@ pub struct RenderedScene {
     pub adapter: String,
     pub hardware_rt: bool,
     pub timings: FrameTimings,
+}
+
+struct PreparedScene {
+    quality: Option<crate::extract::FinalQuality>,
+    denoise: Denoise,
+    reset: bool,
+    width: u32,
+    height: u32,
+    outputs: Vec<(String, u32, bool)>,
+    key: Vec<u8>,
+    resource_start: usize,
+    adaptive: crate::environment::AdaptiveSampling,
+    layers: Vec<String>,
 }
 
 /// The existing compositor's Fast path. A host must attach it explicitly.
@@ -61,6 +75,24 @@ pub struct StudioService {
 }
 
 impl StudioService {
+    /// Top-left normalized composition coordinates, pinhole camera, world-space
+    /// point/normal. Synchronizes the immutable scene without tracing a frame.
+    pub fn pick_surface(&mut self, source: &dyn SceneSource, request: SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<SurfaceHit>, String> {
+        if !x.is_finite() || !y.is_finite() || !(0. ..=1.).contains(&x) || !(0. ..=1.).contains(&y) {
+            return Err("Surface coordinates must be finite and in 0..=1".into());
+        }
+        if tier == Tier::Fast { return Err("Surface picking requires the Studio scene".into()); }
+        let prepared = self.prepare_scene(source, request.clone(), tier)?;
+        if self.previous.as_ref().is_none_or(|(r,k)| *r != request || *k != prepared.key) || self.previous_tier != Some(tier) {
+            // Querying another view must not let its GPU state masquerade as
+            // the previous view's progressive accumulation on the next render.
+            self.previous = None;
+            self.previous_tier = None;
+        }
+        let Some(hit) = self.renderer.as_mut().unwrap().pick_surface(x,y) else { return Ok(None) };
+        let layer = prepared.layers.get(hit.layer as usize).ok_or("Surface pick returned an unknown layer")?.clone();
+        Ok(Some(SurfaceHit { layer, instance: hit.instance, point:hit.point, normal:hit.normal }))
+    }
     pub fn with_device(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -107,15 +139,7 @@ impl StudioService {
         self.render_oriented(source, request, tier, true)
     }
 
-    fn render_oriented(
-        &mut self,
-        source: &dyn SceneSource,
-        request: SceneRequest,
-        tier: Tier,
-        flip_y: bool,
-    ) -> Result<RenderedScene, String> {
-        let frame_start = std::time::Instant::now();
-        let mut timings = FrameTimings::default();
+    fn prepare_scene(&mut self, source: &dyn SceneSource, request: SceneRequest, tier: Tier) -> Result<PreparedScene, String> {
         if request.width == 0 || request.height == 0 {
             return Err("Studio output is empty".into());
         }
@@ -150,13 +174,6 @@ impl StudioService {
         }
         let input = source.scene(&request)?;
         let auxiliary = source.auxiliary_layers(&request)?;
-        if tier == Tier::Fast {
-            return self
-                .fast
-                .as_mut()
-                .ok_or("Fast compositor adapter is not attached")?
-                .render(&input, &request);
-        }
         let extracted = self.extractor.extract(&input)?;
         validate(&input, &extracted)?;
         // Compare exact bytes, including resources, instead of trusting a revision
@@ -305,6 +322,29 @@ impl StudioService {
                 r.set_clip_planes(Some(near), Some(far));
             }
         }
+        Ok(PreparedScene {
+            quality, denoise, reset, width, height, outputs, key, resource_start,
+            adaptive: input.scene.world.adaptive, layers: extracted.layers,
+        })
+    }
+
+    fn render_oriented(
+        &mut self,
+        source: &dyn SceneSource,
+        request: SceneRequest,
+        tier: Tier,
+        flip_y: bool,
+    ) -> Result<RenderedScene, String> {
+        let frame_start = std::time::Instant::now();
+        let mut timings = FrameTimings::default();
+        if request.width == 0 || request.height == 0 {return Err("Studio output is empty".into())}
+        if tier == Tier::Fast {
+            let input = source.scene(&request)?;
+            return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
+        }
+        let PreparedScene { quality, denoise, reset, width, height, outputs, key, resource_start, adaptive, .. } =
+            self.prepare_scene(source, request.clone(), tier)?;
+        let r = self.renderer.as_mut().unwrap();
         r.live = tier == Tier::QualityLive;
         let (mut samples, mut bounces, salt) = match tier {
             Tier::QualityLive => (1, 3, 0),
@@ -329,7 +369,7 @@ impl StudioService {
         } else {
             r.caustics_enabled = true;
             r.set_precomputed_caustics(false);
-            r.set_adaptive_sampling(input.scene.world.adaptive);
+            r.set_adaptive_sampling(adaptive);
         }
         r.set_time_seed(salt);
         // Stills/deliveries stop at the error target or the sample ceiling.

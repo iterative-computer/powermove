@@ -1071,3 +1071,37 @@ sequence delivery has its own encoder. OIDN is material to Hero's cost, but
 path tracing dominates Chrome/glass. Neither the **2 s Refine** nor **3 s
 Production** gate passes for both scenes. The CPU-only OIDN limitation and
 Metal-enabled bundle recipe remain documented above; no source build was made.
+
+### UI dependency 1: surface picking
+
+`Viewer::pick_surface(stamp, time, [u, v], SurfaceQueryKind::Click | Hover)`
+returns an asynchronous receiver. `SurfaceReply` carries the request stamp,
+media time and optional `SurfaceHit { layer, instance, point, normal }`.
+Coordinates are normalized from the top-left of the full composition; the
+viewer converts fit/pan/zoom/crop into those coordinates. Points and normals
+are in the native scene's world coordinates. A miss is `hit: None`.
+
+GPU picking runs on the existing viewer worker, shared renderer, scene and
+hardware-RT/portable traversal. It uses the pinhole camera even with depth of
+field, and respects primary visibility, sidedness, alpha and material normal
+maps. Scene preparation is shared with rendering; a query traces no image
+samples and performs no image readback. Querying the same Refine scene preserves
+its accumulated samples. Switching query scenes invalidates any incompatible
+progressive state before rendering resumes.
+
+The UI should await the receiver outside its event callback and check the
+returned stamp/time before applying a point-driven light/gizmo command. Stale
+requests and requests that become stale while executing return errors. Up to
+eight queries are retained per viewer. Consecutive pending hover requests
+coalesce; clicks remain queued. Queries alternate with rendering to prevent
+hover traffic starving frames. Retirement, worker restart and shutdown settle
+or close pending receivers. No click handling, navigation, gizmo geometry or
+visual changes were added by this lane.
+
+Checks: **28 native Studio tests**, **96 worker unit tests** (one intentionally
+ignored), **17 service** and **32 native scene/export** tests pass. The app
+builds in **55.68 s**. The public viewer regression queries a native sphere and
+checks its layer, point and normal, stale-frame rejection and invalid input.
+A worker barrier verifies hover coalescing, click preservation, the queue bound
+and shutdown. Direct service checks cover misses, both layer identities,
+retained GPU uploads and Refine accumulation across hover.

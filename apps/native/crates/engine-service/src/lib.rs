@@ -17,6 +17,8 @@ pub mod resources;
 mod scopes;
 pub use scopes::ScopeResult;
 pub mod studio;
+pub mod surface;
+pub use surface::{SurfaceQueryKind, SurfaceReply};
 pub mod trace;
 pub mod transport;
 
@@ -336,6 +338,7 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    surface_queries: VecDeque<surface::Pending>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -1059,6 +1062,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                surface_queries: VecDeque::new(),
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1093,7 +1097,11 @@ impl EngineService {
 }
 impl Drop for EngineService {
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap().stop = true;
+        {
+            let mut state=self.shared.state.lock().unwrap();
+            state.stop = true;
+            for view in state.views.values_mut() {surface::cancel(view,"surface query worker stopped");}
+        }
         self.shared.interactive.set(false);
         self.shared.wake.try_send(()).ok();
         if let Some(t) = self.thread.take() {
@@ -1368,6 +1376,7 @@ fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc
         }
         let now = trace::now();
         for v in state.views.values_mut() {
+            surface::cancel(v, "surface query frame changed after worker restart");
             v.status.error = Some(if restarted {
                 format!("The viewer restarted after an internal error.\n{detail}")
             } else {
@@ -1463,6 +1472,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let mut last_was_surface_query = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
         #[cfg(test)]
@@ -1704,6 +1714,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if state.stop {
             break;
         }
+        if !last_was_surface_query && state.views.values().any(|v| !v.surface_queries.is_empty()) {
+            drop(state);
+            surface::run_one(&mut engine, &shared);
+            last_was_surface_query = true;
+            continue;
+        }
+        last_was_surface_query = false;
         let retired: Vec<_> = runtime
             .keys()
             .filter(|id| !state.views.contains_key(id))
@@ -2398,12 +2415,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Duration::from_secs(3600)
             };
+            let surface_query_waiting = state.views.values().any(|v| !v.surface_queries.is_empty());
             drop(state);
             let tap = shared.scopes.lock().unwrap().clone();
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
-            let timeout = if settle.is_finite() {
+            let timeout = if surface_query_waiting {
+                Duration::from_millis(1)
+            } else if settle.is_finite() {
                 timeout.min(Duration::from_secs_f64(settle))
             } else {
                 timeout
@@ -2674,6 +2694,37 @@ mod worker_tests {
         assert_eq!(before, after, "unchanged guides/gizmos must not invalidate the frame");
         assert_eq!(status.stale_rejections, 0);
         assert_eq!(status.frame.unwrap().time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+    }
+    #[test]
+    fn surface_hovers_coalesce_without_dropping_clicks_and_the_queue_is_bounded() {
+        let service=EngineService::start(pm_gpu::Gpu::new("surface query queue").unwrap()).unwrap();
+        let (entered,signal)=std::sync::mpsc::channel();
+        let (release,barrier)=std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap()=Some(Box::new(move || {
+            entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let viewer=shapes_viewer(&service,None);
+        viewer.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stamp=viewer.stamp().unwrap();
+        let first=viewer.pick_surface(stamp,Ticks::ZERO,[0.4,0.5],SurfaceQueryKind::Hover).unwrap();
+        let _next=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Hover).unwrap();
+        assert!(first.try_recv().unwrap().unwrap_err().contains("superseded"));
+        let click=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap();
+        let _hover=viewer.pick_surface(stamp,Ticks::ZERO,[0.6,0.5],SurfaceQueryKind::Hover).unwrap();
+        let mut rest=vec![];
+        for _ in 0..5 {rest.push(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap());}
+        let count=service.shared.state.lock().unwrap().views[&viewer.id].surface_queries.len();
+        let full=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click);
+        let click_pending=!click.is_closed();
+        release.send(()).unwrap();
+        assert_eq!(count,8);
+        assert!(full.is_err());
+        assert!(click_pending,"hover must not supersede a click");
+        drop(service);
+        assert!(click.try_recv().is_ok(),"shutdown must settle accepted queries");
+        assert!(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).is_err());
+        drop(viewer);
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
