@@ -50,6 +50,7 @@ pub trait Source: Send + Sync + std::any::Any {
     ) -> Result<Box<dyn Backend>, String>;
 }
 pub trait Backend: Send {
+    fn layer_failures(&self) -> &[crate::LayerFailure] { &[] }
     fn pick_surface(&mut self, _request: &SceneRequest, _tier: Tier, _x: f32, _y: f32) -> Result<Option<SurfaceHit>, String> {
         Ok(None)
     }
@@ -98,6 +99,9 @@ pub(crate) struct Pass {
     backend: Option<Box<dyn Backend>>,
 }
 impl Pass {
+    pub fn layer_failures(&self) -> &[crate::LayerFailure] {
+        self.backend.as_ref().map_or(&[],|backend|backend.layer_failures())
+    }
     pub fn pick_surface(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<SurfaceHit>, String> {
         if self.backend.is_none() {
             self.backend = Some(self.source.create(device.clone(), queue.clone(), request.width, request.height)?);

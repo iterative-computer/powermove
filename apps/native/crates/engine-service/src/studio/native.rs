@@ -41,6 +41,7 @@ pub struct DocumentSource {
     vertex_attributes:
         Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
+    failures: Mutex<Option<(SceneRequest,Vec<pm_render::LayerFailure>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -82,6 +83,7 @@ impl DocumentSource {
             material_images: Mutex::default(),
             vertex_attributes: Mutex::default(),
             scatter_placements: Mutex::default(),
+            failures: Mutex::default(),
         }
     }
     /// Resolve one export's override without editing the saved composition.
@@ -254,7 +256,9 @@ impl DocumentSource {
             meshes.insert(key, mesh.clone());
             return Ok(mesh);
         }
-        let mesh = Arc::new(build()?);
+        let mesh=build()?;
+        pm_studio3d_engine::extract::validate_mesh(&mesh,None)?;
+        let mesh = Arc::new(mesh);
         let mut cache = shared
             .lock()
             .map_err(|_| "Studio shared mesh cache poisoned")?;
@@ -284,12 +288,12 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
             let Some(asset) = object["source"]["assetId"].as_str() else {
                 continue;
             };
-            let resource = self.resource(asset)?;
+            let Ok(resource) = self.resource(asset) else {continue};
             let pm_scene3d::import::Model::Splats(data) = &resource.model else {
                 continue;
             };
             let id = object["id"].as_str().ok_or("Splat layer has no ID")?;
-            let (center, radius) = data.normalization().map_err(|e| e.to_string())?;
+            let Ok((center,radius)) = data.normalization() else {continue};
             let math = pm_scene3d::render::gltf::math::compose(
                 center.map(|v| -v),
                 [0., 0., 0., 1.],
@@ -339,16 +343,20 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
     }
 }
 impl SceneSource for DocumentSource {
+    fn layer_failures(&self, request:&SceneRequest) -> Result<Vec<pm_render::LayerFailure>,String> {
+        Ok(self.failures.lock().map_err(|_|"Studio failure cache poisoned")?.as_ref().filter(|(key,_)|key==request).map_or_else(Vec::new,|(_,f)|f.clone()))
+    }
     fn auxiliary_layers(
         &self,
         request: &SceneRequest,
     ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
+        let failures=self.layer_failures(request)?;
         Ok(self.resolve(request)?.scene["objects"]
             .as_array()
             .ok_or("Missing Studio objects")?
             .iter()
             .filter(|o| {
-                o.get("world").is_some() || o.get("fog").is_some() || o.get("scatter").is_some()
+                !failures.iter().any(|f|o["id"]==f.layer) && (o.get("world").is_some() || o.get("fog").is_some() || o.get("scatter").is_some())
             })
             .map(|o| pm_studio3d_engine::extract::AuxiliaryLayer {
                 id: o["id"].as_str().unwrap().into(),
@@ -433,8 +441,9 @@ impl SceneSource for DocumentSource {
             extra_lights: vec![],
             layers: None,
         };
+        let mut failures=vec![];
         let mut instances = vec![];
-        environment::apply(&r, &mut scene, &|source| self.environment_image(source))?;
+        environment::apply(&r, &mut scene, &request.composition, &mut failures, &|source| self.environment_image(source))?;
         let mut materials: Vec<GpuMaterial> = vec![];
         let mut map_layers = vec![];
         let mut map_indices = HashMap::new();
@@ -443,11 +452,13 @@ impl SceneSource for DocumentSource {
             .ok_or("Studio scene has no objects")?
         {
             let id = object["id"].as_str().ok_or("Studio object has no ID")?;
+            let checkpoint=(instances.len(), materials.len(), scene.materials.len(), map_layers.len());
+            let contribution=(|| -> Result<(),String> {
             if object.get("world").is_some() || object.get("fog").is_some() {
-                continue;
+                return Ok(());
             }
             if object.get("scatter").is_some() {
-                continue;
+                return Ok(());
             }
             if object
                 .get("parts")
@@ -528,8 +539,9 @@ impl SceneSource for DocumentSource {
                 });
             } else if let Some(asset) = object["source"]["assetId"].as_str() {
                 let resource = self.resource(asset)?;
-                if matches!(resource.model, pm_scene3d::import::Model::Splats(_)) {
-                    continue;
+                if let pm_scene3d::import::Model::Splats(data)=&resource.model {
+                    data.normalization().map_err(|e|e.to_string())?;
+                    return Ok(());
                 }
                 for part in resource
                     .parts(request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64)
@@ -705,8 +717,26 @@ impl SceneSource for DocumentSource {
                     world: Transform(world.map(|v| v as f32)),
                 });
             }
+
+                for material in &materials[checkpoint.1..] {material.validate()?;}
+                for instance in &instances[checkpoint.0..] {
+                    instance.world.validate()?;
+                    if instance.attributes.as_ref().is_some_and(|a|(!a.colors.is_empty() && a.colors.len()!=instance.mesh.positions.len()) || (!a.secondary_uvs.is_empty() && a.secondary_uvs.len()!=instance.mesh.positions.len())) {
+                        return Err("Invalid Studio imported vertex attributes".into());
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(message)=contribution {
+                instances.truncate(checkpoint.0);
+                materials.truncate(checkpoint.1);
+                scene.materials.truncate(checkpoint.2);
+                map_layers.truncate(checkpoint.3);
+                map_indices.retain(|_,index|*index<checkpoint.3);
+                failures.push(pm_render::LayerFailure {composition:request.composition.clone(),layer:id.into(),message});
+            }
         }
-        scatter::apply(self, &r, &scene, &mut instances)?;
+        scatter::apply(self, &r, &scene, &mut instances, &request.composition, &mut failures)?;
         material_policy::apply(&r, &mut instances, &mut scene, &mut materials)?;
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for instance in &instances {
@@ -736,6 +766,9 @@ impl SceneSource for DocumentSource {
             if val(&p["visible"]) == false {
                 continue;
             }
+            let id=light["id"].as_str().ok_or("Light has no ID")?;
+            let checkpoint=(scene.lights.len(),scene.extra_lights.len(),ambient);
+            let result=(|| -> Result<(),String> {
             let id = light["id"].as_str().ok_or("Light has no ID")?;
             let at = r
                 .light_worlds
@@ -788,6 +821,15 @@ impl SceneSource for DocumentSource {
                 "environment" => {}
                 _ => return Err("Unsupported Studio light".into()),
             }
+                for light in &scene.lights[checkpoint.0..] {light.validate()?;}
+                for light in &scene.extra_lights[checkpoint.1..] {light.validate()?;}
+                if ambient.to_array().iter().any(|v|!v.is_finite() || *v<0.) {return Err("Invalid ambient light".into());}
+                Ok(())
+            })();
+            if let Err(message)=result {
+                scene.lights.truncate(checkpoint.0);scene.extra_lights.truncate(checkpoint.1);ambient=checkpoint.2;
+                failures.push(pm_render::LayerFailure {composition:request.composition.clone(),layer:id.into(),message});
+            }
         }
         let basis = r.camera_up.map(|up| {
             let f = (target - eye).normalize();
@@ -801,6 +843,7 @@ impl SceneSource for DocumentSource {
         } else {
             0.
         };
+        *self.failures.lock().map_err(|_|"Studio failure cache poisoned")?=Some((request.clone(),failures));
         Ok(SceneInput {
             scene,
             instances,

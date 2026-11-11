@@ -2257,6 +2257,12 @@ impl Renderer {
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
+        if let Some(provider)=&self.scene3d.provider {
+            let mut seen:std::collections::HashSet<_>=failures.iter().map(|f|(f.composition.clone(),f.layer.clone())).collect();
+            for failure in provider.layer_failures() {
+                if seen.insert((failure.composition.clone(),failure.layer.clone())) {failures.push(failure.clone());}
+            }
+        }
         crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         let fallbacks = self.vector.take_svg_fallbacks();
         let svg_fallbacks = if fallbacks.is_empty() && !self.svg_warned.contains_key(composition) {
