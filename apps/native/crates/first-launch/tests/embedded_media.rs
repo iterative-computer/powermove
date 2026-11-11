@@ -231,3 +231,35 @@ fn media_the_library_store_holds_are_read_from_the_store() {
         item.source
     );
 }
+
+/// File > Open of a v1 project file reads the media it embeds (both formats).
+#[test]
+fn a_v1_project_file_opened_directly_shows_its_embedded_media() {
+    for saved in ["Embedded.pmv", "Embedded-pmv3.pmv"] {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let file = root.join(saved);
+        fs::copy(fixture(saved), &file).unwrap();
+        let (config, _) = migrated(&root, saved, &root.join("elsewhere.pmv"), |_| {});
+        let mut kernel = Kernel::new(KernelConfig::default());
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: config.native_profile.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .unwrap();
+        kernel
+            .shell(ShellCall::Open {
+                id: "copy".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap();
+        assert_eq!(
+            bytes(&kernel, &root),
+            Some(embedded_bytes(&file)),
+            "{saved}"
+        );
+    }
+}
