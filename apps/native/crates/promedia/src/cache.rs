@@ -115,6 +115,15 @@ impl RenderCache {
         }
         Ok(Some(payload))
     }
+    /// Marks a frame as just used: eviction goes least recently used first.
+    pub fn touch(&self, key: &RenderKey) -> io::Result<()> {
+        let path = self.path(key)?;
+        regular(&path)?;
+        fs::File::options()
+            .write(true)
+            .open(path)?
+            .set_modified(std::time::SystemTime::now())
+    }
     pub fn keep_rendered(&self, key: &RenderKey, keep: bool) -> io::Result<()> {
         if self.get(key)?.is_none() {
             return Err(invalid("cannot keep missing render"));
@@ -203,7 +212,7 @@ impl RenderCache {
         }
         self.trim_to(kept)
     }
-    /// Deterministic oldest-modified eviction. Kept entries may make quota
+    /// Least recently used first (written or [`Self::touch`]ed). Kept entries may make quota
     /// impossible; refusal leaves them intact. Check the whole plan before IO.
     pub fn trim_to(&self, bytes: u64) -> io::Result<u64> {
         no_links(&self.root)?;
