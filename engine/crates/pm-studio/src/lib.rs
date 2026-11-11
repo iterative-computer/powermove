@@ -21,3 +21,5 @@ pub mod scene;
 pub mod validation;
 #[cfg(feature = "oidn")]
 pub mod oidn;
+
+mod parallel;

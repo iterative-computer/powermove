@@ -1220,32 +1220,40 @@ impl Renderer {
             let aov = self.read_f32(&self.aov, pixels as u64 * 32);
             let (mut albedo, mut normal) = (vec![0f32; pixels * 4], vec![0f32; pixels * 4]);
             let mut shade = vec![0f32; pixels * 4];
-            for i in 0..pixels {
-                // The product's albedo × its share of the pixel (aov.wgsl).
-                for c in 0..3 {
-                    albedo[i * 4 + c] = aov[i * 8 + c] * aov[i * 8 + 3];
+            let row_width=w as usize;
+            let catcher_albedo=self.base.env_horizon[3];
+            let opaque_backdrop=self.base.backdrop[3]>0.;
+            crate::parallel::rows(&mut albedo,row_width*4,|y,row| {
+                for (x,pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let i=y*row_width+x;
+                    for c in 0..3 { pixel[c]=aov[i*8+c]*aov[i*8+3]; }
+                    // The catcher is a diffuse receiver, rather than black
+                    // artwork: keep its albedo guide through caustic denoising.
+                    if opaque_backdrop && aov[i*8+3]==0. && aov[i*8+5]>0.9 {pixel[..3].fill(catcher_albedo);}
                 }
-                // The catcher is a diffuse receiver too. A black auxiliary
-                // albedo falsely tells OIDN that its caustic/shadow shading is
-                // detail on a black surface, leaving speckled light behind.
-                if self.base.backdrop[3] > 0. && aov[i * 8 + 3] == 0. && aov[i * 8 + 5] > 0.9 {
-                    albedo[i * 4..i * 4 + 3].fill(self.base.env_horizon[3]);
+            });
+            crate::parallel::rows(&mut normal,row_width*4,|y,row| {
+                for (x,pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let i=y*row_width+x;pixel.copy_from_slice(&aov[i*8+4..i*8+8]);
                 }
-                normal[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8 + 4..i * 8 + 8]);
-                shade[i * 4..i * 4 + 3].fill(color[i * 4 + 3]);
-            }
+            });
+            crate::parallel::rows(&mut shade,row_width*4,|y,row| {
+                for (x,pixel) in row.chunks_exact_mut(4).enumerate() {pixel[..3].fill(color[(y*row_width+x)*4+3]);}
+            });
             timings.guide_readback_ms=read_start.elapsed().as_secs_f64()*1000.;
             let denoise_start=Instant::now();
             if let Err(e) = denoise(&mut color, &mut shade, &albedo, &normal) {
                 eprintln!("denoise failed, keeping the noisy frame: {e}");
             } else {
-                for i in 0..pixels {
-                    // A learned filter can bias a constant unit shade. Empty
-                    // sky/background has no floor shading to denoise; preserve
-                    // its exact authored backdrop instead of tinting the void.
-                    if self.has_shadow_catcher() && (aov[i*8+3]>0. || aov[i*8+5]>0.) {
-                        color[i * 4 + 3] = shade[i * 4];
-                    }
+                // Empty sky has exact unit catcher shading. Only a receiver's
+                // alpha is replaced by the filtered shade; RGB stays untouched.
+                if self.has_shadow_catcher() {
+                    crate::parallel::rows(&mut color,row_width*4,|y,row| {
+                        for (x,pixel) in row.chunks_exact_mut(4).enumerate() {
+                            let i=y*row_width+x;
+                            if aov[i*8+3]>0. || aov[i*8+5]>0. {pixel[3]=shade[i*4];}
+                        }
+                    });
                 }
                 self.queue.write_buffer(&self.display[0], 0, bytemuck::cast_slice(&color));
             }

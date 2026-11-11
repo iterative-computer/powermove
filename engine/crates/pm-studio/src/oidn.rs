@@ -281,9 +281,12 @@ impl Denoiser {
             if constant.iter().all(|v|v.is_finite()) && color.chunks_exact(stride).take(pixels).all(|p|p[..3]==constant) {continue;}
             bind(f.beauty, "color", color.as_mut_ptr(), stride,(width,height));
             execute(f.beauty)?;
-            for i in 0..pixels {
-                color[i * stride..i * stride + 3].copy_from_slice(&f.output[i * 3..i * 3 + 3]);
-            }
+            let output=&f.output;
+            crate::parallel::rows(&mut color[..needed],width*stride,|y,row| {
+                for (x,pixel) in row.chunks_exact_mut(stride).enumerate() {
+                    pixel[..3].copy_from_slice(&output[(y*width+x)*3..][..3]);
+                }
+            });
         }
         timings.beauty_ms=beauty_start.elapsed().as_secs_f64()*1000.;
         timings.total_ms=full_start.elapsed().as_secs_f64()*1000.;
@@ -298,23 +301,23 @@ fn normalize_guide(p:&mut [f32]) {
 }
 fn reduce_guide(input:&[f32],stride:usize,w:usize,h:usize,normal:bool)->Vec<f32>{
     let (rw,rh)=(w.div_ceil(2),h.div_ceil(2));let mut out=vec![0.;rw*rh*3];
-    for y in 0..rh {for x in 0..rw {
-        let pixel=&mut out[(y*rw+x)*3..][..3];let mut count=0.;
+    crate::parallel::rows(&mut out,rw*3,|y,row| {for x in 0..rw {
+        let pixel=&mut row[x*3..][..3];let mut count=0.;
         for sy in y*2..(y*2+2).min(h) {for sx in x*2..(x*2+2).min(w) {
             for c in 0..3 {pixel[c]+=input[(sy*w+sx)*stride+c];}count+=1.;
         }}
         for v in pixel.iter_mut() {*v/=count;}if normal {normalize_guide(pixel);}
-    }}out
+    }});out
 }
 fn expand_guide(input:&[f32],size:(usize,usize),w:usize,h:usize,normal:bool)->Vec<f32>{
     let (rw,rh)=size;let mut out=vec![0.;w*h*3];
-    for y in 0..h {let sy=((y as f32+0.5)*rh as f32/h as f32-0.5).clamp(0.,(rh-1) as f32);let y0=sy as usize;let y1=(y0+1).min(rh-1);let fy=sy-y0 as f32;
+    crate::parallel::rows(&mut out,w*3,|y,row| {let sy=((y as f32+0.5)*rh as f32/h as f32-0.5).clamp(0.,(rh-1) as f32);let y0=sy as usize;let y1=(y0+1).min(rh-1);let fy=sy-y0 as f32;
         for x in 0..w {let sx=((x as f32+0.5)*rw as f32/w as f32-0.5).clamp(0.,(rw-1) as f32);let x0=sx as usize;let x1=(x0+1).min(rw-1);let fx=sx-x0 as f32;
-            let pixel=&mut out[(y*w+x)*3..][..3];
+            let pixel=&mut row[x*3..][..3];
             for c in 0..3 {let top=input[(y0*rw+x0)*3+c]*(1.-fx)+input[(y0*rw+x1)*3+c]*fx;let bottom=input[(y1*rw+x0)*3+c]*(1.-fx)+input[(y1*rw+x1)*3+c]*fx;pixel[c]=top*(1.-fy)+bottom*fy;}
             if normal {normalize_guide(pixel);}
         }
-    }out
+    });out
 }
 
 impl Drop for Denoiser {
@@ -331,7 +334,7 @@ mod tests {
     #[test]
     fn half_resolution_guides_keep_full_size_beauty_and_survive_rebinding() {
         let reused=Denoiser::new().unwrap();
-        for (w,h,half) in [(33,25,true),(20,16,false),(33,25,true)] {
+        for (w,h,half) in [(33,25,true),(20,16,false),(33,25,true),(513,257,true)] {
             let input:Vec<f32>=(0..w*h).flat_map(|i|[0.5+if i%2==0 {0.1}else{-0.1},0.4,0.3,0.25]).collect();
             let albedo=vec![0.5;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
             reused.set_half_resolution_guides(half);let mut actual=input.clone();reused.run(&mut actual,&albedo,&normal,4,w,h).unwrap();
@@ -457,5 +460,20 @@ mod tests {
                 .zip(expected.iter())
                 .all(|(x, y)| (x - y).abs() < 1e-6)
         );
+    }
+}
+
+#[cfg(test)]
+mod parallel_buffer_tests {
+    #[test]
+    fn large_padded_color_keeps_tail_and_non_rgb_channels() {
+        let (w,h,stride)=(513,257,5);let needed=w*h*stride;
+        let mut color:Vec<_>=(0..w*h).flat_map(|i|[0.5+if i%2==0 {0.1}else{-0.1},0.4,0.3,0.25,0.875]).collect();
+        color.extend([0.123;17]);
+        let albedo=vec![0.5;needed];let normal:Vec<_>=(0..w*h).flat_map(|_|[0.,0.,1.,0.,0.]).collect();
+        let denoiser=super::Denoiser::new().unwrap();denoiser.set_half_resolution_guides(true);
+        denoiser.run(&mut color,&albedo,&normal,stride,w,h).unwrap();
+        assert!(color[..needed].chunks_exact(stride).all(|p|p[..3].iter().all(|v|v.is_finite()) && p[3]==0.25 && p[4]==0.875));
+        assert_eq!(&color[needed..],&[0.123;17]);
     }
 }

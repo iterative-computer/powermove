@@ -1800,3 +1800,118 @@ At the same 1464×824 viewer and 60 fps product composition: **59.9423 fps**,
 no rounding-up or changed gate is used. The next throughput check uses the
 same shot at a higher authored cadence to distinguish a cadence limit from
 engine throughput. The 60 fps result is retained independently.
+
+
+### Quiet-window final handoff (2026-11-11)
+
+**Landed this round:** chrome caustic/noise regression `5e19d23cc`, measured
+export-estimate command/state `4ffd5dcfa`, designer round-3 merge `d2fde7a01`,
+Refine progress/cube capture UV/orthographic bevel fixes `d5faa07a8`, material
+scan caching/queued Live trace `fd11ec095`, constant-channel evaluation
+`f4d8a6a01`, and native shared-queue MetalFX `59dd30963`. Remaining changes in
+this final increment parallelize CPU image-row work and finish measurement
+helpers; no app controls, colours, panel layouts or UX were designed here.
+
+**Live and input:** the same torus/three-light product setup at an authored
+120 fps cadence, with a visible key window, one view and **1464×824** Full
+viewer output, presents **78.1725 fps** over 60 s. Largest gap **49.9995 ms**,
+**zero** gaps >=100 ms. Native frame-step input p95 **40.8202 ms**, **133**
+distinct presented inputs. Both throughput/input gates pass in this run.
+The separate 60 fps composition result remains **59.9423 fps** / **49.1634 ms**
+input p95; it is not rounded into a strict >=60 pass. Input sampling covers
+frame stepping, not a claim of gizmo/orbit p95. Larger terrain/scatter sets
+have not received this on-screen throughput acceptance run.
+
+**CPU denoising:** guide reduction/expansion, guide packing and RGB copies use
+at most eight workers over disjoint rows on large images, retaining the same
+per-pixel arithmetic, HDR/filter policy, full-size beauty and half-size guides
+except Final. Small images stay serial. Odd dimensions and padded colour
+buffers are covered, including preserving extra channels and unused tails.
+No build profile, RUSTFLAGS, dependency features, sample targets or convergence
+thresholds were lowered for performance.
+
+1080p single-frame Studio diagnostic, seconds (one measured frame per row;
+these are not percentile measurements):
+
+| Product / preset | Trace | OIDN incl. guide preparation | GPU guide readback + packing | Image ready | Fast PNG total |
+|---|---:|---:|---:|---:|---:|
+| Hero / Draft | 0.182 | 1.187 | 0.131 | 1.525 | 1.575 |
+| Hero / Refine, 32 spp | 1.051 | 0.941 | 0.122 | 2.130 | 2.173 |
+| Hero / Production | 2.589 | 0.947 | 0.127 | 3.679 | 3.722 |
+| Chrome / Draft | 1.421 | 0.954 | 0.183 | 2.574 | 2.646 |
+| Chrome / Refine, 32 spp | 3.787 | 0.941 | 0.181 | 4.925 | 5.003 |
+| Chrome / Production | 22.341 | 0.946 | 0.192 | 23.496 | 23.567 |
+
+Before CPU row parallelization, hero Production was **4.219 s** (OIDN
+**1.383 s**) and chrome Production **24.099 s** (OIDN **1.311 s**). Hero
+Refine image-ready time was **2.784 s**; chrome **5.662 s**. Output readback is
+now about 1–2 ms; fast PNG encoding about 41–76 ms. The first Draft row also
+contains cold OIDN/filter overhead. Native 2D compositing, file writes, animated
+shutter samples and export-process overhead are excluded. **Draft <=1 s,
+Refine <=2 s and Production <=3 s at 1080p remain unmet.** Final retains no
+convergence time cap and was not included in this timing sweep. The documented
+Metal OIDN build is still deferred as instructed; no OIDN source build occurred.
+Chrome needs camera/shadow/transmission-path optimization in addition to OIDN;
+disabling caustics did not reduce its leading trace cost.
+
+**Memory:** `studio3d-fixed-memory.py` alternates two fixed project files in
+one process (white torus and glass sphere), four warmup A/B cycles followed
+by ten measured cycles. It never grows a project catalog. Both use the same
+1464×824 output and live tier. Metal allocation stays exactly **613,564,416 B**
+for A and **613,531,648 B** for B. RSS stays within **844,955,648–852,852,736 B**
+for A and **846,528,512–852,508,672 B** for B. Fitted RSS slopes are
+**76,260 B/cycle** and **47,265 B/cycle**; Metal slopes are **zero**. This is a
+flat, bounded trend over the requested fixed-project run. RSS and Metal overlap
+on unified memory and are reported separately, never added.
+
+**Validation:** full pm-studio Rust suite **105 passed**, followed by the new
+padded-buffer regression (**1 passed**); native Studio integration **54 passed**;
+engine-service units **101 passed, 1 intentionally ignored**; kernel Studio
+**32 passed**; shared two-output compositor preparation regression passes.
+The Cycles yardstick regression passes all **11 scenes** against retained
+validated Cycles references. Portable traversal (`STUDIO_NO_RT=1`) also passes
+the six-face/all-tier capture orientation regression (**1.21 s**). Native app
+build passes (**19.50 s** for the final buffer fix). No Blender dependency was
+introduced into the app.
+
+The three automated noise tests pass against independent 4096-sample references
+for teapot, glass, chrome and the multi-object chrome set. Production/Final
+limits remain RMS <0.02, smooth residual RMS <0.006, block-bias p95 <0.012.
+These fixtures are **192×128**, not a full-HD noise certification. The separate
+orthographic text regression is 640×360. Full-HD image-quality acceptance and
+the export budgets above still need further work.
+
+**UI handoff:** the designer can read `studioRefineProgress` and
+`studioExportEstimate` facts, call `Viewer::estimate_studio_export`, and use
+its measured per-preset ranges/warnings/exclusions. The estimate is extrapolated
+from a bounded calibration; CPU parallelism and OIDN scaling make that an
+approximation. The existing export sheet's older heuristic summary has not been
+redesigned by this lane. Capsule/ring presentation remains with the UI owner.
+
+Reproduce a throughput run, with a fresh evidence directory and a private
+product file authored at the stated cadence:
+
+```sh
+nice -n 10 flock /tmp/pm-build.lock python3 apps/native/scripts/studio3d-quiet-perf.py \
+  --app /path/to/Powermove.app/Contents/MacOS/powermove-native \
+  --library-dir "$HOME/Library/Caches/powermove-engine/ffmpeg/out/lib" \
+  --project /path/to/product.pmv --out /tmp/pm-shots/na-studio3d/NEW-RUN \
+  --focus --seconds 60 --input-seconds 75
+```
+
+During the input phase deliver paced native Page Up/Down events to the viewer;
+>=100 distinct presented event origins are required. The helper checks the
+visible/key window before warmup and drains the last input before quitting.
+Both helpers refuse `USER_ACTIVE` and low storage; every launched test app
+window has been closed. Evidence stays in `/tmp/pm-shots/na-studio3d/`.
+
+On this Mac, run the final built app with a private copy of the 3D product scene:
+
+```sh
+nice -n 10 flock /tmp/pm-build.lock /tmp/pm-shots/na-studio3d/run-review.sh
+```
+
+The launcher checks the disk floor and supplies the development FFmpeg path
+after the system lock launcher. For a source build, use the native README's
+`cargo +1.96.1 run -p pm-native-app --bin powermove-native` from `apps/native`,
+with the documented shared target/runtime environment and the same lock.

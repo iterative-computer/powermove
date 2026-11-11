@@ -46,6 +46,7 @@ def main():
     parser.add_argument('--library-dir', type=pathlib.Path, help='Development FFmpeg dylib directory, set after the system lock/Python launcher')
     parser.add_argument('--out', required=True, type=pathlib.Path)
     parser.add_argument('--seconds', type=int, default=60)
+    parser.add_argument('--focus', action='store_true', help='Activate this disposable test window before warmup')
     parser.add_argument('--input-seconds', type=int, default=30)
     args = parser.parse_args()
     if args.seconds < 1 or args.input_seconds < 1:
@@ -107,6 +108,12 @@ def main():
             if time.monotonic() > deadline:
                 raise RuntimeError('No presented first frame')
             wait(.2)
+        if args.focus:
+            status = command('focus')
+            wait(.25)
+            status = command('status')
+            if not status.get('window_key') or not status.get('window_visible'):
+                raise RuntimeError('Test window is not visible and key')
         initial_status = status
         command('play'); wait(8)  # warm shaders/temporal history
         start = command('status')['accepted_host_s']
@@ -119,6 +126,7 @@ def main():
         wait(args.input_seconds)
         final_status = command('status')
         input_end = final_status['accepted_host_s']
+        wait(2)  # Let the last accepted native input reach a presented frame.
         # Quit may end AppKit before a reply is flushed. Never wait on that reply.
         process.stdin.write(json.dumps({'op': 'quit'}) + '\n'); process.stdin.flush()
         process.wait(timeout=20)
