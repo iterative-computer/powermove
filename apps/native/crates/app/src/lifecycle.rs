@@ -675,6 +675,19 @@ impl Controller {
                         .set_document_metadata("Untitled", "", false, None);
                     v.mcp.bind_window(v.window_key, None);
                     v.close_operation.take();
+                    // Panel owners dispose asynchronously, and GPUI keeps
+                    // the previous frame until the next draw. Collect on the
+                    // UI thread once those references have had time to go;
+                    // the render worker cannot collect this thread's heap.
+                    cx.spawn(async move |_, cx| {
+                        for delay in [250, 1750] {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay))
+                                .await;
+                            cx.update(|_| pm_engine_service::memory::pressure_relief());
+                        }
+                    })
+                    .detach();
                     if intent == Intent::Quit {
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
@@ -686,6 +699,17 @@ impl Controller {
                         v.closing_note = None;
                         v.home = false;
                         v.start_builtins(cx);
+                        let layer = metal::MetalLayer::new();
+                        if pm_engine_service::layers::configure_layer(
+                            objc2::MainThreadMarker::new().unwrap(),
+                            &layer,
+                            &v.engine.metal_device(),
+                        )
+                        .is_ok()
+                        {
+                            v.host.borrow_mut().replace_viewer_layer(layer);
+                            v.main_output.set(None);
+                        }
                         v.message = "No project".into();
                         if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
                             shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
