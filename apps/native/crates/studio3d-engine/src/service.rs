@@ -32,6 +32,7 @@ pub struct RenderedScene {
     pub adapter: String,
     pub hardware_rt: bool,
     pub timings: FrameTimings,
+    pub failures: Vec<pm_render::LayerFailure>,
 }
 
 struct PreparedScene {
@@ -45,6 +46,7 @@ struct PreparedScene {
     resource_start: usize,
     adaptive: crate::environment::AdaptiveSampling,
     layers: Vec<String>,
+    failures: Vec<pm_render::LayerFailure>,
 }
 
 /// The existing compositor's Fast path. A host must attach it explicitly.
@@ -173,6 +175,7 @@ impl StudioService {
             return Err("Studio sample count must be positive".into());
         }
         let input = source.scene(&request)?;
+        let failures = source.layer_failures(&request)?;
         let auxiliary = source.auxiliary_layers(&request)?;
         let extracted = self.extractor.extract(&input)?;
         validate(&input, &extracted)?;
@@ -325,6 +328,7 @@ impl StudioService {
         Ok(PreparedScene {
             quality, denoise, reset, width, height, outputs, key, resource_start,
             adaptive: input.scene.world.adaptive, layers: extracted.layers,
+            failures,
         })
     }
 
@@ -342,7 +346,7 @@ impl StudioService {
             let input = source.scene(&request)?;
             return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
         }
-        let PreparedScene { quality, denoise, reset, width, height, outputs, key, resource_start, adaptive, .. } =
+        let PreparedScene { quality, denoise, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
             self.prepare_scene(source, request.clone(), tier)?;
         let r = self.renderer.as_mut().unwrap();
         r.live = tier == Tier::QualityLive;
@@ -482,6 +486,7 @@ impl StudioService {
             adapter: r.adapter.clone(),
             hardware_rt: r.uses_hardware_rt(),
             timings,
+            failures,
         })
     }
 

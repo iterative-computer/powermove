@@ -22,6 +22,7 @@ struct Pass {
     traces: u64,
     splats: Option<crate::splats::Rasterizer>,
     splat_cache: Option<(SceneRequest, Vec<crate::splats::Layer>)>,
+    failures: Vec<pm_render::LayerFailure>,
 }
 impl Pass {
     pub fn new(source: Arc<dyn Source>) -> Self {
@@ -32,14 +33,17 @@ impl Pass {
             traces: 0,
             splats: None,
             splat_cache: None,
+            failures: vec![],
         }
     }
     pub fn replace_source(&mut self, source: Arc<dyn Source>) {
         self.source = source;
         self.cached = None;
         self.splat_cache = None;
+        self.failures.clear();
     }
     pub fn begin_frame(&mut self) {
+        self.failures.clear();
         if self
             .cached
             .as_ref()
@@ -88,6 +92,9 @@ impl Pass {
             .iter()
             .find(|s| s.id == layer)
         {
+            for failure in self.source.layer_failures(request)? {
+                if !self.failures.iter().any(|f|f.composition==failure.composition && f.layer==failure.layer) {self.failures.push(failure);}
+            }
             let color = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Studio splat compositor layer"),
                 size: wgpu::Extent3d {
@@ -133,6 +140,12 @@ impl Pass {
             self.traces += 1;
         }
         let scene = &self.cached.as_ref().unwrap().1;
+        for failure in &scene.failures {
+            if !self.failures.iter().any(|f|f.composition==failure.composition && f.layer==failure.layer) {self.failures.push(failure.clone());}
+        }
+        if let Some(failure)=scene.failures.iter().find(|f|f.layer==layer) {
+            return Err(failure.message.clone());
+        }
         let texture = &scene
             .layers
             .iter()
@@ -143,6 +156,7 @@ impl Pass {
     }
 }
 impl Backend for Pass {
+    fn layer_failures(&self) -> &[pm_render::LayerFailure] { &self.failures }
     fn pick_surface(&mut self, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
         self.service.as_mut().ok_or("Studio service is not attached")?.pick_surface(self.source.as_ref(), request.clone(), tier, x,y)
     }

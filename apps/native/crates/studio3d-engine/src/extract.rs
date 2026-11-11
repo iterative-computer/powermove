@@ -16,6 +16,8 @@ pub use pm_render::scene3d::provider::SceneRequest;
 /// Interface with the scene/core lane. No kernel mutations, JS or DOM calls.
 pub trait SceneSource: Send + Sync {
     fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String>;
+    /// Failed contributions omitted from this immutable scene, by timeline ID.
+    fn layer_failures(&self, _request: &SceneRequest) -> Result<Vec<pm_render::LayerFailure>, String> { Ok(vec![]) }
     /// Optional saved/export policy. Legacy sources retain their authored sample
     /// count; native policy is resolved on the worker from the frozen document.
     fn final_quality(&self, _request: &SceneRequest) -> Result<Option<FinalQuality>, String> {
@@ -72,6 +74,7 @@ impl Default for Transform {
 }
 
 impl Transform {
+    pub fn validate(self) -> Result<(),String> { self.rows().map(|_|()) }
     fn rows(self) -> Result<[[f32; 4]; 9], String> {
         let w = self.0;
         if !w.iter().all(|x| x.is_finite()) || [w[3], w[7], w[11], w[15]] != [0., 0., 0., 1.] {
@@ -235,8 +238,7 @@ pub struct Extracted {
     pub bounds: (Vec3, Vec3),
 }
 
-fn build(mesh: Arc<Mesh>, attributes: Option<Arc<VertexAttributes>>) -> Result<Blas, String> {
-    let extra = attributes.as_deref();
+pub fn validate_mesh(mesh: &Mesh, extra: Option<&VertexAttributes>) -> Result<(), String> {
     if extra.is_some_and(|a| {
         (!a.colors.is_empty() && a.colors.len() != mesh.positions.len())
             || (!a.secondary_uvs.is_empty() && a.secondary_uvs.len() != mesh.positions.len())
@@ -265,6 +267,15 @@ fn build(mesh: Arc<Mesh>, attributes: Option<Arc<VertexAttributes>>) -> Result<B
     {
         return Err("Invalid Studio vertex colors or face materials".into());
     }
+    if mesh.indices.iter().flatten().any(|&i|i as usize>=mesh.positions.len()) {
+        return Err("Studio triangle index out of bounds".into());
+    }
+    Ok(())
+}
+
+fn build(mesh: Arc<Mesh>, attributes: Option<Arc<VertexAttributes>>) -> Result<Blas, String> {
+    let extra=attributes.as_deref();
+    validate_mesh(&mesh,extra)?;
     let mut corners = Vec::new();
     let mut raw = Vec::new();
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));

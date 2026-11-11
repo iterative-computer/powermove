@@ -1106,6 +1106,35 @@ A worker barrier verifies hover coalescing, click preservation, the queue bound
 and shutdown. Direct service checks cover misses, both layer identities,
 retained GPU uploads and Refine accumulation across hover.
 
+### UI dependency 2: per-layer failure isolation
+
+Native scene contributions are transactional per timeline owner. An unsupported
+mesh, unavailable model, image/capture binding, imported part failure, invalid
+material/transform, World/fog resource or scatter dependency is omitted while
+healthy contributions remain in the shared scene. Partial materials, instances
+and image-atlas slots roll back together, so a failed import cannot leave another
+layer referencing its discarded resources. Geometry is validated at cache
+admission. Failed lights also drop their partial contribution.
+
+`SceneSource::layer_failures(request)` and `RenderedScene.failures` expose
+`LayerFailure { composition, layer, message }`. The compositor reports the
+original error for the failed layer and preserves the rest of its GPU picture.
+Backend failures also enter ordinary frame metadata, including non-surface
+contributors such as lights, and deduplicate by composition/layer. The existing
+`ViewerStatus.layer_failures` and the UI lane's panel facts are the UI hook;
+no error rows or presentation were designed here. Errors clear on the next
+healthy immutable source/frame. Document-resolution and device failures retain
+their existing failure path.
+
+The reproducing test originally reported both the broken model and its healthy
+sibling as failed. It now reports only the broken model and checks visible green
+geometry. Further GPU regressions cover partial atlas rollback, missing images,
+unready material sources, missing HDRI, dependent scatter failures and error
+recovery after replacing the document. **35 native scene/export** and **28
+native Studio** tests pass (two manual diagnostics ignored); the app builds in
+**53.62 s**. Existing Refine, imports, physical maps, World/fog, terrain/scatter,
+source replacement, picking and export regressions remain green.
+
 ## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
 
 Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay
@@ -1161,7 +1190,8 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 
 ### Engine findings from the UI pass (for the engine lane)
 
-- **One bad layer blanks the whole 3D set.** `studio/native.rs` `scene()`
+- **One bad layer blanks the whole 3D set.** (Fixed by UI dependency 2
+  above; kept for the record.) `studio/native.rs` `scene()`
   returns an error for the entire scene when one object's mesh can't be
   built (`self.mesh(&object["source"])?`, e.g. a `roundedBox` primitive) or
   when an object uses a Screen material or part offsets. The viewer then

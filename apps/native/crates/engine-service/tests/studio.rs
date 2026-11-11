@@ -128,6 +128,94 @@ fn viewer_surface_query_returns_layer_point_normal_and_rejects_stale_frames() {
             .is_err()
     );
 }
+fn isolation_project() -> Value {
+    let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
+    let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let good=layers.iter_mut().find(|l|l["id"]=="mirror").unwrap();
+    good["d"]["data"]["object"]["material"]["p"]["metalness"]=json!(0);
+    good["d"]["data"]["object"]["material"]["p"]["color"]=json!("#000000");
+    good["d"]["data"]["object"]["material"]["p"]["emissive"]=json!("#00FF00");
+    good["d"]["data"]["object"]["material"]["p"]["emissiveIntensity"]=json!(1);
+    project
+}
+#[test]
+fn a_broken_model_does_not_blank_its_healthy_sibling() {
+    let mut project=isolation_project();
+    let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let good=layers.iter().find(|l|l["id"]=="mirror").unwrap();
+    let mut broken=good.clone();broken["id"]=json!("broken");
+    broken["d"]["data"]["object"]["source"]=json!({"assetId":"missing-model"});
+    layers.push(broken);
+    let doc=Arc::new(pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document.as_ref().clone());
+    let gpu=pm_gpu::Gpu::new("isolated Studio failure").unwrap();
+    let mut renderer=Renderer::new(gpu.device,gpu.queue);
+    studio::attach(&mut renderer,doc.clone(),&Default::default());
+    let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+    assert_eq!(frame.failures.len(),1,"{:?}",frame.failures);
+    assert_eq!(frame.failures[0].layer,"broken");
+    assert!(frame.failures[0].message.contains("geometry is not loaded"));
+    let pixels=renderer.read_rgba(&frame).unwrap();
+    assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[1]>p[0]*2. && p[3]>0.5).count()>40,"healthy green geometry must remain visible");
+    project["comps"]["test"]["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="broken");
+    let repaired=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
+    studio::attach(&mut renderer,repaired.clone(),&Default::default());
+    let frame=renderer.render(&repaired,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+    assert!(frame.failures.is_empty(),"replacing a bad contribution must clear its failure: {:?}",frame.failures);
+}
+#[test]
+fn failed_material_images_roll_back_their_atlas_and_keep_healthy_geometry() {
+    use studio::SceneSource;
+    let dir=tempfile::tempdir().unwrap();
+    let path=dir.path().join("paint.png");
+    pm_studio3d_engine::gpu::write_png(&path,1,1,&[255,255,255,255]).unwrap();
+    let mut media=pm_export::render::MediaPaths::default();media.paths.insert("paint".into(),path);
+    for maps in [json!({"color":"paint","normal":"missing-image"}),json!({"color":{"layerId":"unready-source"}})] {
+        let mut project=isolation_project();
+        let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+        let mut bad=layers.iter().find(|l|l["id"]=="mirror").unwrap().clone();bad["id"]=json!("bad-image");
+        bad["d"]["data"]["object"]["material"]["maps"]=maps;
+        layers.insert(0,bad);
+        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
+        let source=studio::DocumentSource::new(doc.clone(),media.clone());
+        let req=studio::SceneRequest {composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
+        let input=source.scene(&req).unwrap();
+        assert_eq!(input.instances.len(),1);
+        assert!(input.maps.is_none(),"failed image layers must not retain atlas slots");
+        assert_eq!(source.layer_failures(&req).unwrap()[0].layer,"bad-image");
+        let mut renderer=Renderer::headless().unwrap();studio::attach(&mut renderer,doc.clone(),&media);
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+        assert_eq!(frame.failures.len(),1,"{:?}",frame.failures);
+        assert_eq!(frame.failures[0].layer,"bad-image");
+        let pixels=renderer.read_rgba(&frame).unwrap();
+        assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[3]>0.5).count()>40);
+    }
+}
+#[test]
+fn failed_world_and_scatter_dependencies_leave_the_rest_of_the_scene_visible() {
+    use pm_scene3d::{service::new_layer,schema::Role};
+    for scatter in [false,true] {
+        let mut project=isolation_project();
+        let comp=project["comps"]["test"].clone();
+        let data=if scatter {json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"broken","surface":"mirror","p":{"count":1}}}})}
+            else {json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"hdri","source":"missing-hdri"}}})};
+        let node=new_layer(&comp,"failed-node","Failed node",Role::Object,data,json!({}),true,None,0.).unwrap();
+        let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+        if scatter {
+            let mut bad=layers.iter().find(|l|l["id"]=="mirror").unwrap().clone();bad["id"]=json!("broken");
+            bad["d"]["data"]["object"]["source"]=json!({"assetId":"missing-model"});layers.push(bad);
+        }
+        layers.push(node);
+        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
+        let mut renderer=Renderer::headless().unwrap();studio::attach(&mut renderer,doc.clone(),&Default::default());
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+        assert_eq!(frame.failures.len(),if scatter {2}else{1},"{:?}",frame.failures);
+        assert!(frame.failures.iter().any(|f|f.layer=="failed-node"));
+        assert!(frame.failures.iter().all(|f|f.layer!="mirror"));
+        let pixels=renderer.read_rgba(&frame).unwrap();
+        assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[3]>0.5).count()>40);
+    }
+}
+
 fn draw(renderer: &mut Renderer, doc: Arc<pm_model::Document>) -> Vec<f32> {
     studio::attach(renderer, doc.clone(), &Default::default());
     let f = renderer
@@ -291,13 +379,12 @@ fn missing_revision_and_resources_fail_visibly() {
     let source = studio::DocumentSource::new(broken.clone(), Default::default());
     let mut request = r.clone();
     request.revision = broken.revision();
-    assert!(
-        source
-            .scene(&request)
-            .err()
-            .unwrap()
-            .contains("geometry is not loaded")
-    );
+    let input=source.scene(&request).unwrap();
+    assert!(input.instances.iter().all(|i|i.layer!="mirror"));
+    let failures=source.layer_failures(&request).unwrap();
+    assert_eq!(failures.len(),1);
+    assert_eq!(failures[0].layer,"mirror");
+    assert!(failures[0].message.contains("geometry is not loaded"));
 }
 
 #[test]
@@ -2121,10 +2208,9 @@ fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
             .count()
             > 100
     );
-    let missing = studio::DocumentSource::new(doc, Default::default())
-        .scene(&scene_request)
-        .err()
-        .unwrap();
+    let source=studio::DocumentSource::new(doc,Default::default());
+    source.scene(&scene_request).unwrap();
+    let missing=source.layer_failures(&scene_request).unwrap()[0].message.clone();
     assert!(
         missing.contains("Material image is not loaded"),
         "{missing}"
@@ -2134,10 +2220,9 @@ fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
         revision: live.revision(),
         ..scene_request
     };
-    let error = studio::DocumentSource::new(live, media)
-        .scene(&live_request)
-        .err()
-        .unwrap();
+    let source=studio::DocumentSource::new(live,media);
+    source.scene(&live_request).unwrap();
+    let error=source.layer_failures(&live_request).unwrap()[0].message.clone();
     assert!(
         error.contains("Live layer/group material capture"),
         "{error}"
