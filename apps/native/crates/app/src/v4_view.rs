@@ -1713,7 +1713,16 @@ impl SurfaceView {
                 v.pointer(id, "wheel", detail, cx);
             }));
         }
-        if node.parent == Some(0) && self.prepared.has_keydown {
+        // Keys reach the panel's root and its header slot's root: the shell
+        // draws a header slot (the viewer's bar) apart from the body, so the
+        // body's root isn't an ancestor of the controls there.
+        let slot_root = self
+            .publication
+            .surface
+            .nodes()
+            .get(&id)
+            .is_some_and(|n| n.props.get("data-pm-slot").is_some());
+        if (node.parent == Some(0) || slot_root) && self.prepared.has_keydown {
             element =
                 element.on_key_down(cx.listener(move |v, event: &KeyDownEvent, window, cx| {
                     v.key_down(id, event, window, cx);

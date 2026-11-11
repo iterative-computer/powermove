@@ -42,6 +42,20 @@ thread_local! {
     static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
     /// The context menu being tracked, so a test driver can cancel it.
     static OPEN_MENU:RefCell<Option<Retained<NSMenu>>>=const{RefCell::new(None)};
+    /// View ▸ 3D items with their (group, value), for checkmarks.
+    static VIEW3D_ITEMS:RefCell<Vec<(String,String,Retained<NSMenuItem>)>>=const{RefCell::new(Vec::new())};
+}
+/// Checkmarks for View ▸ 3D (3d-studio.md §2: the same names and checkmarks
+/// as the viewer bar): `on(group, value)` says whether a row is current.
+pub fn check_view3d(on: &dyn Fn(&str, &str) -> bool) {
+    VIEW3D_ITEMS.with(|items| {
+        for (group, value, item) in &*items.borrow() {
+            let state = if on(group, value) { 1 } else { 0 };
+            if item.state() != state {
+                item.setState(state);
+            }
+        }
+    });
 }
 /// A context-menu row. An empty label is a separator.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3298,11 +3312,21 @@ pub fn install_menus() {
                 }
                 "view3d" => {
                     let sub = NSMenu::new(mtm);
+                    VIEW3D_ITEMS.with(|v| v.borrow_mut().clear());
                     for (i, t) in menu::view3d().iter().enumerate() {
                         if t.label.is_empty() {
                             sub.addItem(&NSMenuItem::separatorItem(mtm));
                         } else {
-                            sub.addItem(&row(&t.label, &t.chord, view3d_start + i));
+                            let item = row(&t.label, &t.chord, view3d_start + i);
+                            let arg = |k: usize| {
+                                t.args
+                                    .get(k)
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("")
+                                    .to_owned()
+                            };
+                            VIEW3D_ITEMS.with(|v| v.borrow_mut().push((arg(0), arg(1), item.clone())));
+                            sub.addItem(&item);
                         }
                     }
                     delegate(&sub, MenuKind::DisplayOnly);

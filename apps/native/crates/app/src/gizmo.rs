@@ -579,12 +579,21 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     // 3D layers get 3D handles; their 2D boxes would mislead.
-                    let scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
+                    let mut scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
+                    let mut poses = read_at(&p, time).unwrap_or_default();
+                    // Extruded text and shapes are 3D too: their box in the
+                    // scene, from the layer's flat box, its z and its depth.
+                    if let Some(sc) = scene.as_mut() {
+                        for pose in poses.iter().filter(|pose| is_extruded(&p, &pose.id)) {
+                            if let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height) {
+                                sc.items.push(item);
+                            }
+                        }
+                    }
                     let three_d: Vec<String> = scene
                         .as_ref()
                         .map(|s| s.items.iter().map(|i| i.id.clone()).collect())
                         .unwrap_or_default();
-                    let mut poses = read_at(&p, time).unwrap_or_default();
                     // Extruded text and shapes are drawn by the 3D renderer too:
                     // their flat box would sit somewhere else.
                     poses.retain(|pose| {
@@ -613,14 +622,15 @@ impl GizmoSurface {
                         ui("studioTool"),
                         ui("studioLook"),
                         ui("studioAxes"),
-                        (ui("studioLightKind"), ui("studioLightAdd")),
+                        (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
                     ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look, axes, (kind, add)) =
-                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None)));
+                    let (poses, scene, selected, tool, look, axes, (kind, add, aim)) =
+                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None, None)));
+                    s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
                     s.studio.light_add = add.as_deref() == Some("on");
@@ -2130,6 +2140,66 @@ impl Render for GizmoSurface {
 }
 
 /// A Studio 3D layer (model, light, camera) by its definition.
+/// An extruded layer as a 3D item: the engine maps composition pixels into
+/// the scene with `u = 6 / height` units per pixel, x centred, y up, z out
+/// of the screen (`studio/extrusion.rs`); its depth runs back from its z.
+fn extruded_item(
+    p: &pm_kernel::Published,
+    pose: &Pose,
+    time: f64,
+    width: f64,
+    height: f64,
+) -> Option<pm_panel_studio3d::viewport::Item> {
+    let mut mirror = QueryMirror::new(p);
+    let mut q = |k: &str, d: f64| {
+        mirror
+            .queries()
+            .evaluate(None, &pose.id, k, time)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(d)
+    };
+    let position = [q("position.x", 0.), q("position.y", 0.), q("position.z", 0.)];
+    let rotation = [q("rotation.x", 0.), q("rotation.y", 0.), q("rotation", 0.)];
+    let scale = [q("scale.x", 100.), q("scale.y", 100.), q("scale.z", 100.)];
+    let depth = q("geo.depth", 0.).max(0.);
+    let u = 6. / height.max(1.);
+    let to_scene = |x: f64, y: f64, z: f64| [x * u - width * u / 2., 3. - y * u, -z * u];
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for c in pose.corners {
+        for z in [position[2], position[2] + depth] {
+            let s = to_scene(c[0], c[1], z);
+            for a in 0..3 {
+                lo[a] = lo[a].min(s[a]);
+                hi[a] = hi[a].max(s[a]);
+            }
+        }
+    }
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, &pose.id)?;
+            let l = pm_kernel::model::layer_at(root, &at)?.to_value();
+            l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
+        })
+        .unwrap_or_default();
+    Some(pm_panel_studio3d::viewport::Item {
+        id: pose.id.clone(),
+        role: pm_scene3d::schema::Role::Object,
+        name,
+        locked: pose.locked,
+        bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
+        pivot: to_scene(position[0], position[1], position[2]),
+        target: None,
+        light: None,
+        position,
+        rotation,
+        scale,
+        pixels: Some(u),
+    })
+}
 /// A text or shape layer the 3D renderer draws with depth.
 pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
     p.snapshot.root().is_some_and(|root| {

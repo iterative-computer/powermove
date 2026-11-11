@@ -1,3 +1,4 @@
+import { useEffect, useState } from "preact/hooks";
 import {
   EmptyState,
   NumberField,
@@ -162,6 +163,57 @@ export function ViewerPanel({
     { id: "refine", label: "Quality", help: "Path-traced, as it will export." },
   ];
   const object = m.studio?.axes === "object";
+  // 3d-studio.md §3 status capsule: Quality's progress, bottom-trailing over
+  // the image. Hidden in Fast and while Live; "Clean" shows briefly, then goes.
+  const refine = m.studio?.tier === "refine" ? m.studio?.refine : undefined;
+  const [clean, setClean] = useState(false);
+  const stage = refine?.stage;
+  useEffect(() => {
+    if (stage !== "complete") {
+      setClean(false);
+      return;
+    }
+    setClean(true);
+    const timer = setTimeout(() => setClean(false), 2000);
+    return () => clearTimeout(timer);
+  }, [stage, refine?.samplesTarget]);
+  const percentDone =
+    refine && refine.samplesTarget > 0
+      ? Math.min(99, Math.floor((refine.samplesDone / refine.samplesTarget) * 100))
+      : 0;
+  const capsuleText =
+    stage === "sampling" && refine && refine.samplesDone > 0
+      ? `Refining · ${percentDone} %`
+      : stage === "denoising"
+        ? "Refining · Denoising"
+        : stage === "complete" && clean
+          ? "Clean"
+          : null;
+  const capsule = capsuleText ? (
+    <div
+      id="viewer.studio.status"
+      role="status"
+      label={capsuleText}
+      style={{
+        position: "absolute",
+        right: token("metrics.inset"),
+        bottom: token("metrics.inset"),
+        height: token("metrics.field"),
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: token("metrics.inner_radius"),
+        paddingLeft: token("metrics.inset"),
+        paddingRight: token("metrics.inset"),
+        background: token("colors.floating"),
+        borderRadius: token("metrics.pill_radius"),
+      }}
+    >
+      <text style={{ color: token("colors.secondary"), fontSize: token("typography.body"), fontVariantNumeric: "tabular-nums" }}>
+        {capsuleText === "Clean" ? "✓ Clean" : capsuleText}
+      </text>
+    </div>
+  ) : null;
   // 3d-studio.md §6: the Light panel, top-leading over the stage while Light
   // is the tool. Values are the model's; a pull is one Undo ("Light Size").
   const light = m.studio?.tool === "light" ? m.studio.light : undefined;
@@ -190,6 +242,17 @@ export function ViewerPanel({
         borderRadius: token("metrics.control_radius"),
       }}
     >
+      <SegmentedControl
+        id="viewer.studio.lightAim"
+        label="Aim"
+        value={m.studio?.lightAim ?? "reflect"}
+        options={[
+          { id: "reflect", label: "Reflect", help: "The highlight lands where you click." },
+          { id: "direct", label: "Direct", help: "The light faces where you click." },
+          { id: "orbit", label: "Orbit", help: "Drag to circle the light around its target." },
+        ]}
+        onChange={(value) => actions.drive("viewer.studio.lightAim", value)}
+      />
       <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap") }}>
         <ToolbarItem
           id="viewer.studio.lightAdd"
@@ -465,6 +528,7 @@ export function ViewerPanel({
           style={{ position: "absolute", inset: "fill" }}
         />
         {lightPanel}
+        {capsule}
       </div>
       {!source && m.canvasLost && (
         <ToolbarItem

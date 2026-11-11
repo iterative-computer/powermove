@@ -54,6 +54,50 @@ pub fn studio_estimate(
         pm_panel_studio3d::properties::about(per * frames as f64)
     ))
 }
+/// The measured Studio estimate (the viewer's `studioExportEstimate`) for
+/// this export, in the sheet's words: "3D Production, about 2–3 min" when it's
+/// ready for this size and length, "3D Production, measuring…" while it runs.
+/// `None` when there's nothing measured for this export (the sheet keeps the
+/// rough figure).
+pub fn measured_estimate(
+    state: &Value,
+    preset: &str,
+    label: &str,
+    width: u32,
+    height: u32,
+    frames: u64,
+) -> Option<String> {
+    match state["status"].as_str()? {
+        "queued" | "measuring" => Some(format!("3D {label}, measuring…")),
+        "ready" => {
+            let e = &state["estimate"];
+            if e["width"].as_u64() != Some(width as u64)
+                || e["height"].as_u64() != Some(height as u64)
+                || e["frames"].as_u64() != Some(frames)
+            {
+                return None;
+            }
+            let row = e["presets"].as_array()?.iter().find(|r| r["preset"] == preset)?;
+            let lo = row["totalMs"]["min"].as_f64()? / 1000.;
+            let hi = row["totalMs"]["max"].as_f64()? / 1000.;
+            let about = |s: f64| pm_panel_studio3d::properties::about(s);
+            Some(if (hi - lo) / hi.max(1.) < 0.25 {
+                format!("3D {label}, {}", about((lo + hi) / 2.))
+            } else {
+                // "about 2 min to about 3 min" reads as "about 2–3 min".
+                let (a, b) = (about(lo), about(hi));
+                let unit = |t: &str| t.rsplit(' ').next().unwrap_or("").to_owned();
+                if unit(&a) == unit(&b) {
+                    let n = |t: &str| t.split(' ').nth(1).unwrap_or("").to_owned();
+                    format!("3D {label}, about {}–{} {}", n(&a), n(&b), unit(&b))
+                } else {
+                    format!("3D {label}, {a} to {}", b.trim_start_matches("about "))
+                }
+            })
+        }
+        _ => None,
+    }
+}
 pub struct Plan {
     pub settings: Option<ExportSettings>,
     pub frames: u64,

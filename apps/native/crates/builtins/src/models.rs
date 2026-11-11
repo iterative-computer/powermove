@@ -48,6 +48,9 @@ pub(crate) struct Models {
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
     pub platform: Vec<(String, Value)>,
+    /// The export the viewer last measured a 3D estimate for (size, length,
+    /// revision), so the sheet asks once per change.
+    pub export_estimate_key: Option<String>,
     /// Loaded for the Agent panel only; its load settles interrupted runs.
     pub agent: Option<crate::agent_host::SharedAgent>,
     pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
@@ -117,6 +120,7 @@ impl Models {
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
             fields: BTreeMap::new(),
             platform: vec![],
+            export_estimate_key: None,
             agent,
             agent_link: Default::default(),
             stamp: String::new(),
@@ -440,6 +444,13 @@ impl Backend {
         };
         // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
         let mut model = model;
+        // Refine progress for the status capsule (3d-studio.md §3).
+        if model["studio"].is_object() {
+            let refine = &self.native.facts["studioRefineProgress"];
+            if refine.is_object() {
+                model["studio"]["refine"] = refine.clone();
+            }
+        }
         if model["studio"]["tool"] == "light" {
             let ui = |k: &str| {
                 p.ui_state
@@ -454,6 +465,8 @@ impl Backend {
             if let Ok(light) = pm_panel_studio3d::properties::light_panel(&p, time, &kind, add) {
                 model["studio"]["light"] = light;
                 model["studio"]["lightKind"] = json!(kind);
+                model["studio"]["lightAim"] =
+                    json!(ui("studioLightAim").unwrap_or_else(|| "reflect".into()));
             }
         }
         Ok(
@@ -1058,6 +1071,36 @@ impl Backend {
             pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
         {
             self.native.export["project"]["studio"] = json!({ "saved": label });
+        }
+        // The viewer measures this export's 3D cost on its idle worker; the
+        // sheet asks when the size, length or scene changes and shows the
+        // measured range once it's ready (Sol's export-estimate state).
+        let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
+        if let (Some(settings), Some((policy, label))) = (
+            plan.settings.as_ref(),
+            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
+        ) {
+            let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
+            let key = format!("{w}x{h}x{frames}@{}", p.revision());
+            if self.native.export_estimate_key.as_deref() != Some(key.as_str()) {
+                self.native.export_estimate_key = Some(key);
+                self.native.platform.push((
+                    "export.estimate".into(),
+                    json!({"width":w,"height":h,"frames":frames}),
+                ));
+            }
+            let preset = policy["preset"].as_str().unwrap_or("production");
+            if let Some(note) = crate::delivery::measured_estimate(
+                &self.native.facts["studioExportEstimate"],
+                preset,
+                &label,
+                w,
+                h,
+                frames,
+            ) {
+                let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();
+                self.native.export["project"]["summary"] = json!(format!("{base} · {note}"));
+            }
         }
         self.native.export["presets"] = json!(
             self.kernel

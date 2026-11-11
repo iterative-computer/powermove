@@ -515,6 +515,17 @@ pub fn update_skim_checks(skimming: bool, audio: bool) {
 struct ViewIvars {
     layer: metal::MetalLayer,
     closed: async_channel::Sender<()>,
+    /// An embedded pane's pointer: down/drag/up at normalized view points
+    /// (top-left origin) and scroll deltas.
+    input: std::cell::RefCell<Option<async_channel::Sender<PaneInput>>>,
+}
+/// Pointer input on an embedded pane (Studio 3D views).
+#[derive(Clone, Copy, Debug)]
+pub enum PaneInput {
+    Down([f64; 2]),
+    Drag([f64; 2]),
+    Up([f64; 2]),
+    Scroll(f64),
 }
 define_class!(
     #[unsafe(super(NSView))]
@@ -539,9 +550,42 @@ define_class!(
         fn will_close(&self, _: Option<&objc2_foundation::NSNotification>) {
             let _ = self.ivars().closed.try_send(());
         }
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            self.pointer(event, PaneInput::Down);
+        }
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
+            self.pointer(event, PaneInput::Drag);
+        }
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &objc2_app_kit::NSEvent) {
+            self.pointer(event, PaneInput::Up);
+        }
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &objc2_app_kit::NSEvent) {
+            if let Some(tx) = &*self.ivars().input.borrow() {
+                // A mouse wheel reports lines; a trackpad reports points.
+                let dy = event.scrollingDeltaY()
+                    * if event.hasPreciseScrollingDeltas() { 1. } else { 10. };
+                let _ = tx.try_send(PaneInput::Scroll(dy));
+            }
+        }
     }
 );
 impl PopoutView {
+    fn pointer(&self, event: &objc2_app_kit::NSEvent, kind: fn([f64; 2]) -> PaneInput) {
+        let Some(tx) = &*self.ivars().input.borrow() else {
+            return;
+        };
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        let b = self.bounds().size;
+        let uv = [
+            (p.x / b.width.max(1.)).clamp(0., 1.),
+            (1. - p.y / b.height.max(1.)).clamp(0., 1.),
+        ];
+        let _ = tx.try_send(kind(uv));
+    }
     /// The layer fills the view; its drawable follows bounds × backing scale.
     /// The engine-side OutputBinding observes `drawableSize` and reconfigures.
     fn fit(&self) {
@@ -585,6 +629,9 @@ pub struct Popout {
     embedded: bool,
     /// The pane's camera and preview pull-down (embedded panes only).
     pub menu: Option<Retained<objc2_app_kit::NSPopUpButton>>,
+    /// The tile behind an embedded pane, in the viewer's ground, so every
+    /// pane frames its picture as the main viewer does.
+    backdrop: Option<Retained<NSView>>,
 }
 impl Popout {
     pub fn open(
@@ -616,6 +663,7 @@ impl Popout {
             msg_send![super(PopoutView::alloc(mtm).set_ivars(ViewIvars {
                 layer: layer.clone(),
                 closed,
+                input: Default::default(),
             })), initWithFrame: NSRect::new(NSPoint::ZERO, content.size)]
         };
         unsafe {
@@ -655,6 +703,7 @@ impl Popout {
                 mirrored: None,
                 embedded: false,
                 menu: None,
+                backdrop: None,
             },
             rx,
         ))
@@ -670,6 +719,7 @@ impl Popout {
             msg_send![super(PopoutView::alloc(mtm).set_ivars(ViewIvars {
                 layer: layer.clone(),
                 closed,
+                input: Default::default(),
             })), initWithFrame: NSRect::new(NSPoint::ZERO, NSSize::new(16., 9.))]
         };
         unsafe {
@@ -681,6 +731,22 @@ impl Popout {
             .contentView()
             .ok_or_else(|| anyhow::anyhow!("no content view"))?;
         content.addSubview(&view);
+        let backdrop = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        backdrop.setWantsLayer(true);
+        if let Some(l) = backdrop.layer() {
+            let ground = pm_shell::native_color(
+                pm_design::Tokens::new(Default::default(), Default::default())
+                    .colors
+                    .viewer,
+            );
+            l.setBackgroundColor(Some(&ground.CGColor()));
+        }
+        backdrop.setHidden(true);
+        content.addSubview_positioned_relativeTo(
+            &backdrop,
+            objc2_app_kit::NSWindowOrderingMode::Below,
+            Some(&view),
+        );
         Ok(Self {
             window: objc2::Message::retain(window),
             view,
@@ -692,15 +758,28 @@ impl Popout {
             mirrored: None,
             embedded: true,
             menu: None,
+            backdrop: Some(backdrop),
         })
     }
     /// Places an embedded pane: `[x, y, w, h]` in content points, top-left
     /// origin, as the shell lays out the viewer.
-    pub fn place(&self, rect: [f64; 4]) {
+    pub fn place(&self, rect: [f64; 4], tile: [f64; 4]) {
         let Some(content) = self.window.contentView() else {
             return;
         };
         let h = content.bounds().size.height;
+        if let Some(backdrop) = &self.backdrop {
+            let y = if content.isFlipped() {
+                tile[1]
+            } else {
+                h - tile[1] - tile[3]
+            };
+            let frame = NSRect::new(NSPoint::new(tile[0], y), NSSize::new(tile[2], tile[3]));
+            if backdrop.frame() != frame || backdrop.isHidden() {
+                backdrop.setFrame(frame);
+                backdrop.setHidden(false);
+            }
+        }
         let y = if content.isFlipped() {
             rect[1]
         } else {
@@ -726,6 +805,10 @@ impl Popout {
     }
     pub fn view(&self) -> &NSView {
         &self.view
+    }
+    /// Where an embedded pane's pointer input goes.
+    pub fn listen(&self, input: async_channel::Sender<PaneInput>) {
+        *self.view.ivars().input.borrow_mut() = Some(input);
     }
     /// Binds output/display-link feeds to the current viewer (call after
     /// creating or replacing it).
@@ -801,6 +884,9 @@ impl Popout {
         if self.embedded {
             // A pane leaves the editor window; the window stays.
             self.view.removeFromSuperview();
+            if let Some(b) = &self.backdrop {
+                b.removeFromSuperview();
+            }
         } else if self.window.isVisible() {
             self.window.close();
         }

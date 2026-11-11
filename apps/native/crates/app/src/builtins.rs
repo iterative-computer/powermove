@@ -1002,6 +1002,24 @@ impl Controller {
                     self.media_settings(&request.input, cx);
                     Ok(Value::Null)
                 }
+                // The Export sheet's 3D estimate: the viewer measures the
+                // shot on its idle worker; the state comes back in the facts.
+                "export.estimate" => {
+                    let n = |k: &str| request.input[k].as_u64().unwrap_or(0);
+                    if let Some(viewer) = &self.viewer
+                        && let Some(frame) = viewer.status().frame
+                        && n("width") > 0
+                        && n("height") > 0
+                    {
+                        let _ = viewer.estimate_studio_export(
+                            frame.stamp,
+                            frame.time,
+                            pm_protocol::common::Size::new(n("width") as u32, n("height") as u32),
+                            n("frames").max(1),
+                        );
+                    }
+                    Ok(Value::Null)
+                }
                 "export.begin" | "export.retry" | "export.without" => {
                     self.begin_builtin_export(
                         request.input.clone(),

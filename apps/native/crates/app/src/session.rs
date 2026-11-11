@@ -710,6 +710,8 @@ impl Controller {
             self.message = format!("Popout viewer: {e}");
         }
         self.publish_studio_panes(&p);
+        // A changed Views setting splits the viewer now, not at the next frame.
+        self.sync_studio_panes(cx);
         {
             let _span = crate::diag::span("refresh.mirror");
             if let Some(m) = &mut self.mirror {

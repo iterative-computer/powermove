@@ -34,6 +34,9 @@ pub struct Item {
     pub position: Vec3,
     pub rotation: Vec3,
     pub scale: Vec3,
+    /// Extruded text and shapes keep composition-pixel channels (y down, z
+    /// into the screen): scene units per pixel, `None` for Studio layers.
+    pub pixels: Option<f64>,
 }
 #[derive(Clone, Debug)]
 pub struct Scene {
@@ -341,6 +344,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
                     rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
                     scale: channels(&id, ["scale.x", "scale.y", "scale.z"], 100.),
+                    pixels: None,
                     id,
                     role,
                     name,
@@ -361,6 +365,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     position: channels(&id, ["position.x", "position.y", "position.z"], 0.),
                     rotation: channels(&id, ["rotation.x", "rotation.y", "rotation"], 0.),
                     scale: [100.; 3],
+                    pixels: None,
                     id: id.clone(),
                     role,
                     name,
@@ -450,6 +455,7 @@ mod tests {
             position: [0., 0., z],
             rotation: [0.; 3],
             scale: [100.; 3],
+            pixels: None,
         };
         let scene = Scene {
             shot: e.pose,

@@ -43,6 +43,13 @@ export interface ViewerModel {
       }[];
     };
     lightKind?: string;
+    lightAim?: "reflect" | "direct" | "orbit";
+    /** Quality's refinement (3d-studio.md §3 status capsule). */
+    refine?: {
+      samplesDone: number;
+      samplesTarget: number;
+      stage: "sampling" | "denoising" | "complete";
+    };
   } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */

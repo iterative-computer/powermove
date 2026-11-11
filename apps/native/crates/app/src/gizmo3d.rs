@@ -76,6 +76,13 @@ struct Drag {
     /// The handle axes when the press began (scene or object).
     basis: [Vec3; 3],
 }
+struct LightOrbit {
+    id: String,
+    start: View,
+    origin: Point<Pixels>,
+    active: bool,
+    time: f64,
+}
 #[derive(Default)]
 pub struct State {
     pub scene: Option<Arc<Scene>>,
@@ -91,6 +98,11 @@ pub struct State {
     /// `studioLightKind`, `studioLightAdd`).
     pub light_kind: String,
     pub light_add: bool,
+    /// How a click aims the selected light (UI state `studioLightAim`):
+    /// `reflect` puts its highlight there, `direct` faces it there, `orbit`
+    /// drags it around what it lights.
+    pub light_aim: String,
+    light_orbit: Option<LightOrbit>,
     /// The handle under the pointer, drawn in text colour (§5).
     pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
@@ -110,6 +122,14 @@ fn dist_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
         (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0., 1.)
     };
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+/// A scene-space move as the layer's position channels: scene units for
+/// Studio layers; pixels with y and z flipped for extruded text and shapes.
+fn channel_delta(item: &Item, w: Vec3) -> Vec3 {
+    match item.pixels {
+        Some(u) if u > 0. => [w[0] / u, -w[1] / u, -w[2] / u],
+        _ => w,
+    }
 }
 /// The layer's own axes: the columns of Rz·Ry·Rx, the order the
 /// evaluator composes `rotation`, `rotation.y` and `rotation.x`.
@@ -145,7 +165,7 @@ impl State {
         self.scene.is_some()
     }
     pub fn busy(&self) -> bool {
-        self.nav.is_some() || self.drag.is_some()
+        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some()
     }
     fn view(&self) -> Option<View> {
         let scene = self.scene.as_ref()?;
@@ -629,6 +649,37 @@ impl GizmoSurface {
         let Some(eye) = self.studio.eye() else {
             return false;
         };
+        if self.studio.tool == Tool::Light && self.studio.light_aim == "orbit" {
+            // Orbit: drag the selected light around what it lights.
+            let light = self.studio.scene.as_ref().and_then(|s| {
+                s.items
+                    .iter()
+                    .find(|i| {
+                        i.role == Role::Light && self.studio.selected.contains(&i.id) && !i.locked
+                    })
+                    .cloned()
+            });
+            if let Some(light) = light
+                && let Some(target) = light.target
+            {
+                self.studio.light_orbit = Some(LightOrbit {
+                    id: light.id,
+                    start: View {
+                        position: light.pivot,
+                        target,
+                        zoom: 1.,
+                    },
+                    origin: event.position,
+                    active: false,
+                    time: self.host.time(cx),
+                });
+                self.cursor = CursorStyle::ClosedHand;
+                cx.notify();
+                return true;
+            }
+            self.host.report("Select a light to orbit it.".into(), cx);
+            return true;
+        }
         if self.studio.tool == Tool::Light {
             // The engine's surface (models, terrain) with its true normal;
             // the box pick when no frame can answer.
@@ -815,9 +866,14 @@ impl GizmoSurface {
         };
         let (label, args, select) = if let Some(light) = light {
             let distance = length(sub(light.pivot, light.target.unwrap_or(hit.point))).max(1.);
-            let Ok(p) = pm_scene3d::light_tool::highlight_placement(
-                hit.point, hit.normal, viewer, distance,
-            ) else {
+            // Direct faces the light at the point, along the surface; Reflect
+            // places it so its highlight lands there.
+            let placed = if self.studio.light_aim == "direct" {
+                Ok(add(hit.point, mul(normalize(hit.normal), distance)))
+            } else {
+                pm_scene3d::light_tool::highlight_placement(hit.point, hit.normal, viewer, distance)
+            };
+            let Ok(p) = placed else {
                 return;
             };
             let p = place(p);
@@ -875,6 +931,32 @@ impl GizmoSurface {
     }
     /// Pointer motion while a 3D press is held. `true` when it was ours.
     pub(super) fn studio_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        if let Some(lo) = self.studio.light_orbit.as_mut() {
+            let d = event.position - lo.origin;
+            let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+            if !lo.active {
+                if dx.hypot(dy) < self.tokens.metrics.drag_threshold as f64 {
+                    return true;
+                }
+                lo.active = true;
+                self.queue.push_back(Job::Begin("Orbit Light"));
+            }
+            let fine = if event.modifiers.shift { 0.1 } else { 1. };
+            let pose = orbit(lo.start, dx * fine, dy * fine);
+            let r = |v: f64| (v * 100.).round() / 100.;
+            let command: Command = Scene3dCommand::Apply {
+                comp: None,
+                args: pm_scene3d::to_model(&serde_json::json!({"operation":"update_light","target":lo.id,
+                    "patch":{"p":{"x":r(pose.position[0]),"y":r(pose.position[1]),"z":r(pose.position[2])}}})),
+                selection: vec![],
+                time: lo.time,
+                autokey: false,
+            }
+            .into();
+            self.queue.push_back(Job::Step(vec![command], true));
+            self.pump(cx);
+            return true;
+        }
         if let Some(nav) = &self.studio.nav {
             let (Some(scene), Some(frame)) =
                 (self.studio.scene.clone(), self.host.frame(self.bounds, cx))
@@ -969,13 +1051,14 @@ impl GizmoSurface {
                         t = t.round();
                     }
                     let w = mul(basis[i], t);
+                    let c = channel_delta(item, w);
                     for (a, key) in ["position.x", "position.y", "position.z"]
                         .iter()
                         .enumerate()
                     {
                         // An axis the move doesn't touch keeps its keyframes.
                         if w[a].abs() > 1e-9 || a == i {
-                            commands.push(set(id, key, item.position[a] + w[a], drag.time));
+                            commands.push(set(id, key, item.position[a] + c[a], drag.time));
                         }
                     }
                     offset = w;
@@ -1001,11 +1084,12 @@ impl GizmoSurface {
                     if snap {
                         w = w.map(f64::round);
                     }
+                    let c = channel_delta(item, w);
                     for (a, key) in ["position.x", "position.y", "position.z"]
                         .iter()
                         .enumerate()
                     {
-                        commands.push(set(id, key, item.position[a] + w[a], drag.time));
+                        commands.push(set(id, key, item.position[a] + c[a], drag.time));
                     }
                     offset = w;
                 }
@@ -1016,11 +1100,12 @@ impl GizmoSurface {
                     if snap {
                         w = w.map(f64::round);
                     }
+                    let c = channel_delta(item, w);
                     for (i, key) in ["position.x", "position.y", "position.z"]
                         .iter()
                         .enumerate()
                     {
-                        commands.push(set(id, key, item.position[i] + w[i], drag.time));
+                        commands.push(set(id, key, item.position[i] + c[i], drag.time));
                     }
                     offset = w;
                 }
@@ -1041,6 +1126,11 @@ impl GizmoSurface {
                     }
                     if snap {
                         deg = (deg / 15.).round() * 15.;
+                    }
+                    // Composition space is the scene turned 180° about X:
+                    // Y and Z turn the other way in its channels.
+                    if item.pixels.is_some() && i > 0 {
+                        deg = -deg;
                     }
                     let key = ["rotation.x", "rotation.y", "rotation"][i];
                     commands.push(set(id, key, item.rotation[i] - deg, drag.time));
@@ -1075,6 +1165,15 @@ impl GizmoSurface {
     }
     /// Release. `true` when a 3D press was held.
     pub(super) fn studio_up(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
+        if let Some(orbit) = self.studio.light_orbit.take() {
+            if orbit.active {
+                self.queue.push_back(Job::Finish(commit));
+                self.pump(cx);
+            }
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+            return true;
+        }
         if let Some(nav) = self.studio.nav.take() {
             if !commit {
                 // Esc returns the view to where the gesture began.

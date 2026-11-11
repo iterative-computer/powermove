@@ -805,6 +805,10 @@ fn studio_action(group: &str, value: &str) -> Result<Action, Error> {
             one(value, &["area", "spot", "point", "sun"])?,
         ),
         "lightAdd" => Action::StudioUi("studioLightAdd", one(value, &["on", "off"])?),
+        "lightAim" => Action::StudioUi(
+            "studioLightAim",
+            one(value, &["reflect", "direct", "orbit"])?,
+        ),
         "frame" => Action::Host(HostAction::Command {
             id: "studio.frame".into(),
             args: vec![],

@@ -36,7 +36,7 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
+    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows, check_view3d, native_color,
     document_subtitle, popover_frame, send_menu_command, system_accent, viewer_window,
     window_backdrop, zoom_limit,
 };
