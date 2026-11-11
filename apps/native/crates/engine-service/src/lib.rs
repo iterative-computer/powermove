@@ -2065,12 +2065,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .filter(|store| store.producing_now())
                 .map(|store| store.cache_identity());
             shared.disk.viewing(spec.render_size());
+            // Fonts sync before the cache observes: a font change is seen
+            // before this frame looks for a disk frame.
+            let fonts = engine.font_generation();
             if shared.disk.observe(
                 &scene,
                 engine.definitions(),
                 overrides,
                 engine.tone_identity(),
-                engine.font_generation(),
+                fonts,
                 stamp.doc_id,
                 spec.time,
             ) && let Some(recorder) = &recorder
