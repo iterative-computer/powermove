@@ -628,7 +628,9 @@ impl Effects {
             }
             match b.result {
                 Ok(program) => entry.program = Some(program),
-                Err(f) => entry.status = Status::NeedsFallback(f),
+                Err(f) if remembered(&f) => entry.status = Status::NeedsFallback(f),
+                // Built again by the first frame that draws it.
+                Err(_) => {}
             }
         }
     }
@@ -764,7 +766,9 @@ impl Effects {
             match built {
                 Ok(p) => entry.program = Some(p),
                 Err(f) => {
-                    entry.status = Status::NeedsFallback(f.clone());
+                    if remembered(&f) {
+                        entry.status = Status::NeedsFallback(f.clone());
+                    }
                     return Err(f);
                 }
             }
@@ -785,6 +789,14 @@ impl Effects {
         }
         Ok(entry.program.as_mut().expect("still built"))
     }
+}
+
+/// Whether a program build's failure belongs to the definition (remembered
+/// until it changes) or only to this attempt: a busy, crashed or timed-out
+/// compiler says nothing about the source, and remembering it kept a
+/// healthy project "waiting for a shader compiler slot" for good.
+fn remembered(f: &Failure) -> bool {
+    !f.stage.retryable()
 }
 
 impl crate::composite::EffectHost for Effects {
@@ -1100,6 +1112,46 @@ mod tests {
             pm_protocol::validate::Validate::validate(d)
                 .unwrap_or_else(|e| panic!("{}: {e:?}", d.id.as_str()));
         }
+    }
+
+    /// A build refused because every compiler slot was busy (prewarm at
+    /// launch, many extensions) leaves the definition ready, to be built by
+    /// the first frame that draws it; a failure of the source is kept.
+    #[test]
+    fn a_busy_compiler_is_never_remembered_for_a_definition() {
+        let mut effects = Effects::new("test");
+        effects.set_snapshot(&builtin_definitions()).unwrap();
+        let def = builtin_definitions()
+            .definitions
+            .into_iter()
+            .find(|d| d.kind == DefinitionKind::Effect)
+            .unwrap();
+        let key = (def.kind, def.id.clone());
+        let source = effects.entries[&key].key;
+        let built = |result| prewarm::Built {
+            key: key.clone(),
+            source,
+            result,
+            us: 0,
+        };
+        let busy = built(Err(Failure::new(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all GLSL compiler process slots are occupied; retry later",
+        )));
+        effects.absorb(vec![busy]);
+        assert!(matches!(
+            effects.status(def.kind, def.id.as_str()),
+            Some(Status::Ready)
+        ));
+        let broken = built(Err(Failure::new(
+            pm_glsl::FailureStage::NagaValidate,
+            "the source does not validate",
+        )));
+        effects.absorb(vec![broken]);
+        assert!(matches!(
+            effects.status(def.kind, def.id.as_str()),
+            Some(Status::NeedsFallback(_))
+        ));
     }
 
     #[test]
