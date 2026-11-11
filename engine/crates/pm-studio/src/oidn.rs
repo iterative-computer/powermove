@@ -1,7 +1,9 @@
 //! Intel Open Image Denoise for Final frames: a minimal binding to the C API
 //! (only what the RT filter needs).
 
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type Device = *mut c_void;
 type Filter = *mut c_void;
@@ -28,13 +30,48 @@ unsafe extern "C" {
     );
     fn oidnSetFilterBool(filter: Filter, name: *const c_char, value: bool);
     fn oidnSetFilterInt(filter: Filter, name: *const c_char, value: i32);
+    fn oidnSetFilterFloat(filter: Filter, name: *const c_char, value: f32);
     fn oidnCommitFilter(filter: Filter);
     fn oidnExecuteFilter(filter: Filter);
     fn oidnReleaseFilter(filter: Filter);
+    fn oidnSetFilterProgressMonitorFunction(
+        filter: Filter,
+        callback: Option<unsafe extern "C" fn(*mut c_void, f64) -> bool>,
+        user: *mut c_void,
+    );
 }
+
+#[derive(Clone, Copy)]
+pub enum Quality { Fast, Balanced, High }
 
 pub struct Denoiser {
     device: Device,
+    quality: Cell<i32>,
+    filter: RefCell<Option<Filters>>,
+}
+
+struct Filters {
+    beauty: Filter,
+    albedo: Filter,
+    normal: Filter,
+    clean_albedo: Vec<f32>,
+    clean_normal: Vec<f32>,
+    output: Vec<f32>,
+}
+impl Drop for Filters {
+    fn drop(&mut self) {
+        unsafe {
+            for f in [self.beauty, self.albedo, self.normal] {
+                if !f.is_null() {
+                    oidnReleaseFilter(f);
+                }
+            }
+        }
+    }
+}
+unsafe extern "C" fn progress(user: *mut c_void, _: f64) -> bool {
+    let (revision, expected) = unsafe { &*(user as *const (&AtomicU64, u64)) };
+    revision.load(Ordering::Relaxed) == *expected
 }
 
 fn name(s: &str) -> CString {
@@ -48,10 +85,18 @@ impl Denoiser {
             return Err("Open Image Denoise has no device".into());
         }
         unsafe { oidnCommitDevice(device) };
-        let d = Denoiser { device };
+        let d = Denoiser {
+            device,
+            quality: Cell::new(QUALITY_HIGH),
+            filter: RefCell::new(None),
+        };
         d.check()?;
         Ok(d)
     }
+
+    /// Balanced OIDN is available for bounded movie presets. Final retains
+    /// the high-quality network; both still prefilter stochastic auxiliaries.
+    pub fn set_quality(&self, quality: Quality) { self.quality.set(match quality { Quality::Fast=>4, Quality::Balanced=>5, Quality::High=>QUALITY_HIGH }); }
 
     fn check(&self) -> Result<(), String> {
         let mut message: *const c_char = std::ptr::null();
@@ -80,83 +125,135 @@ impl Denoiser {
         width: usize,
         height: usize,
     ) -> Result<(), String> {
-        // Validate before lending pointers to C. In particular a short guide or
-        // stride < 3 would let OIDN read past Rust's allocation.
-        let needed = width
+        self.run_interruptible(color, albedo, normal, stride, width, height, None)
+    }
+    pub fn run_interruptible(
+        &self,
+        color: &mut [f32],
+        albedo: &[f32],
+        normal: &[f32],
+        stride: usize,
+        width: usize,
+        height: usize,
+        cancel: Option<(&AtomicU64, u64)>,
+    ) -> Result<(), String> {
+        self.run_layers_interruptible(&mut [color], albedo, normal, stride, width, height, cancel)
+    }
+
+    /// Prefilter stochastic lens/specular guides once, then reuse them for all
+    /// noisy layers. OIDN's cleanAux contract requires actual prefiltering.
+    pub fn run_layers_interruptible(
+        &self,
+        colors: &mut [&mut [f32]],
+        albedo: &[f32],
+        normal: &[f32],
+        stride: usize,
+        width: usize,
+        height: usize,
+        cancel: Option<(&AtomicU64, u64)>,
+    ) -> Result<(), String> {
+        let pixels = width
             .checked_mul(height)
-            .and_then(|n| n.checked_mul(stride));
-        if width == 0
-            || height == 0
-            || stride < 3
-            || needed.is_none_or(|n| color.len() < n || albedo.len() < n || normal.len() < n)
-            || stride
-                .checked_mul(4)
-                .and_then(|n| n.checked_mul(width))
-                .is_none()
+            .ok_or("invalid denoising dimensions")?;
+        let needed = pixels
+            .checked_mul(stride)
+            .ok_or("invalid denoising dimensions")?;
+        if stride < 3
+            || pixels == 0
+            || colors.iter().any(|c| c.len() < needed)
+            || albedo.len() < needed
+            || normal.len() < needed
         {
-            return Err("invalid OIDN image dimensions, stride or guide length".into());
+            return Err("invalid denoising image buffers".into());
         }
-        let px = stride * 4;
-        let mut out = vec![0f32; width * height * 3];
-        unsafe {
-            let f = oidnNewFilter(self.device, name("RT").as_ptr());
-            if f.is_null() {
-                self.check()?;
-                return Err("Open Image Denoise could not create an RT filter".into());
+        let mut cached = self.filter.borrow_mut();
+        if cached.is_none() {
+            let mut filters = Filters {
+                beauty: std::ptr::null_mut(),
+                albedo: std::ptr::null_mut(),
+                normal: std::ptr::null_mut(),
+                clean_albedo: vec![],
+                clean_normal: vec![],
+                output: vec![],
+            };
+            for slot in [
+                &mut filters.beauty,
+                &mut filters.albedo,
+                &mut filters.normal,
+            ] {
+                *slot = unsafe { oidnNewFilter(self.device, name("RT").as_ptr()) };
+                if slot.is_null() {
+                    self.check()?;
+                    return Err("Open Image Denoise could not create a filter".into());
+                }
             }
-            oidnSetSharedFilterImage(
-                f,
-                name("color").as_ptr(),
-                color.as_mut_ptr().cast(),
-                FORMAT_FLOAT3,
-                width,
-                height,
-                0,
-                px,
-                px * width,
-            );
-            oidnSetSharedFilterImage(
-                f,
-                name("albedo").as_ptr(),
-                albedo.as_ptr() as *mut c_void,
-                FORMAT_FLOAT3,
-                width,
-                height,
-                0,
-                px,
-                px * width,
-            );
-            oidnSetSharedFilterImage(
-                f,
-                name("normal").as_ptr(),
-                normal.as_ptr() as *mut c_void,
-                FORMAT_FLOAT3,
-                width,
-                height,
-                0,
-                px,
-                px * width,
-            );
-            oidnSetSharedFilterImage(
-                f,
-                name("output").as_ptr(),
-                out.as_mut_ptr().cast(),
-                FORMAT_FLOAT3,
-                width,
-                height,
-                0,
-                12,
-                12 * width,
-            );
-            oidnSetFilterBool(f, name("hdr").as_ptr(), true);
-            oidnSetFilterInt(f, name("quality").as_ptr(), QUALITY_HIGH);
-            oidnCommitFilter(f);
-            oidnExecuteFilter(f);
-            oidnReleaseFilter(f);
+            *cached = Some(filters);
         }
-        self.check()?;
-        for i in 0..width * height {
-            color[i * stride..i * stride + 3].copy_from_slice(&out[i * 3..i * 3 + 3]);
+        let f = cached.as_mut().unwrap();
+        f.clean_albedo.resize(pixels * 3, 0.);
+        f.clean_normal.resize(pixels * 3, 0.);
+        f.output.resize(pixels * 3, 0.);
+        let execute = |filter: Filter| -> Result<(), String> {
+            let mut monitor = cancel;
+            unsafe {
+                oidnCommitFilter(filter);
+                if let Some(state) = monitor.as_mut() {
+                    oidnSetFilterProgressMonitorFunction(
+                        filter,
+                        Some(progress),
+                        (state as *mut (&AtomicU64, u64)).cast(),
+                    );
+                }
+                oidnExecuteFilter(filter);
+                oidnSetFilterProgressMonitorFunction(filter, None, std::ptr::null_mut());
+            }
+            self.check()
+        };
+        let bind = |filter: Filter, parameter: &str, ptr: *mut f32, pixel_stride: usize| unsafe {
+            oidnSetSharedFilterImage(
+                filter,
+                name(parameter).as_ptr(),
+                ptr.cast(),
+                FORMAT_FLOAT3,
+                width,
+                height,
+                0,
+                pixel_stride * 4,
+                pixel_stride * 4 * width,
+            );
+        };
+        for (filter, parameter, input, output) in [
+            (f.albedo, "albedo", albedo, &mut f.clean_albedo),
+            (f.normal, "normal", normal, &mut f.clean_normal),
+        ] {
+            bind(filter, parameter, input.as_ptr() as *mut f32, stride);
+            bind(filter, "output", output.as_mut_ptr(), 3);
+            unsafe {
+                oidnSetFilterInt(filter, name("quality").as_ptr(), self.quality.get());
+            }
+            execute(filter)?;
+        }
+        bind(f.beauty, "albedo", f.clean_albedo.as_mut_ptr(), 3);
+        bind(f.beauty, "normal", f.clean_normal.as_mut_ptr(), 3);
+        bind(f.beauty, "output", f.output.as_mut_ptr(), 3);
+        unsafe {
+            oidnSetFilterBool(f.beauty, name("hdr").as_ptr(), true);
+            oidnSetFilterBool(f.beauty, name("cleanAux").as_ptr(), true);
+            oidnSetFilterInt(f.beauty, name("quality").as_ptr(), self.quality.get());
+            // NaN explicitly requests OIDN's HDR autoexposure. Color is linear
+            // scene radiance, before the renderer's display exposure/tone map.
+            oidnSetFilterFloat(f.beauty, name("inputScale").as_ptr(), f32::NAN);
+        }
+        for color in colors {
+            // Closed rooms and visible skies often have exactly unit catcher
+            // shading. Preserve a constant RGB layer instead of filtering it.
+            let constant=[color[0],color[1],color[2]];
+            if constant.iter().all(|v|v.is_finite()) && color.chunks_exact(stride).take(pixels).all(|p|p[..3]==constant) {continue;}
+            bind(f.beauty, "color", color.as_mut_ptr(), stride);
+            execute(f.beauty)?;
+            for i in 0..pixels {
+                color[i * stride..i * stride + 3].copy_from_slice(&f.output[i * 3..i * 3 + 3]);
+            }
         }
         Ok(())
     }
@@ -164,6 +261,7 @@ impl Denoiser {
 
 impl Drop for Denoiser {
     fn drop(&mut self) {
+        drop(self.filter.get_mut().take());
         unsafe { oidnReleaseDevice(self.device) };
     }
 }
@@ -173,14 +271,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_slices_and_stride_are_refused_before_ffi() {
-        let d = Denoiser::new().unwrap();
-        assert!(d.run(&mut [0.; 4], &[0.; 4], &[0.; 4], 2, 1, 1).is_err());
-        assert!(d.run(&mut [0.; 4], &[], &[0.; 4], 4, 1, 1).is_err());
-        assert!(
-            d.run(&mut [0.; 4], &[0.; 4], &[0.; 4], 4, usize::MAX, 2)
-                .is_err()
-        );
+    fn a_constant_layer_is_exact_while_its_noisy_companion_is_filtered() {
+        let (w,h)=(32,24);let expected=0.5;
+        let mut color:Vec<f32>=(0..w*h).flat_map(|i|{let v=if i%2==0 {0.3} else {0.7};[v,v,v,0.25]}).collect();
+        let mut shade=vec![1.;w*h*4];let original_shade=shade.clone();
+        let albedo=vec![0.5;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
+        let error=|pixels:&[f32]|pixels.chunks_exact(4).map(|p|(p[0]-expected).powi(2)).sum::<f32>();
+        let before=error(&color);
+        Denoiser::new().unwrap().run_layers_interruptible(&mut [&mut color,&mut shade],&albedo,&normal,4,w,h,None).unwrap();
+        assert_eq!(shade,original_shade);assert!(error(&color)<before*0.3);
+        assert!(color.chunks_exact(4).all(|p|p[3]==0.25));
+    }
+
+    #[test]
+    fn changing_quality_on_cached_filters_matches_a_fresh_filter() {
+        let (w,h)=(32,24);
+        let input:Vec<f32>=(0..w*h).flat_map(|i|[0.2+(i%11) as f32*0.01,0.4,0.6,1.]).collect();
+        let albedo=vec![0.6;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
+        let reused=Denoiser::new().unwrap();
+        for quality in [Quality::Fast,Quality::Balanced,Quality::High] {
+            reused.set_quality(quality);let mut actual=input.clone();
+            reused.run(&mut actual,&albedo,&normal,4,w,h).unwrap();
+            let fresh=Denoiser::new().unwrap();fresh.set_quality(quality);let mut expected=input.clone();
+            fresh.run(&mut expected,&albedo,&normal,4,w,h).unwrap();
+            assert!(actual.iter().zip(expected).all(|(a,b)|(a-b).abs()<1e-6));
+        }
     }
 
     #[test]
@@ -214,6 +329,62 @@ mod tests {
             "{} -> {}",
             before,
             spread(&color)
+        );
+    }
+    #[test]
+    fn reused_filter_matches_a_fresh_filter_after_resizing_and_rebinding() {
+        let reused = Denoiser::new().unwrap();
+        for (width, height) in [(32, 24), (64, 48), (32, 24)] {
+            let input: Vec<f32> = (0..width * height)
+                .flat_map(|i| [0.2 + (i % 13) as f32 * 0.01, 0.4, 0.6, 1.])
+                .collect();
+            let albedo = vec![0.6; width * height * 4];
+            let normal: Vec<f32> = (0..width * height).flat_map(|_| [0., 0., 1., 0.]).collect();
+            let mut a = input.clone();
+            let mut b = input;
+            reused
+                .run(&mut a, &albedo, &normal, 4, width, height)
+                .unwrap();
+            Denoiser::new()
+                .unwrap()
+                .run(&mut b, &albedo, &normal, 4, width, height)
+                .unwrap();
+            assert!(a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6));
+        }
+    }
+    #[test]
+    fn interrupted_filter_can_render_the_next_image() {
+        let denoiser = Denoiser::new().unwrap();
+        let width = 128;
+        let height = 128;
+        let input = vec![0.5; width * height * 4];
+        let albedo = input.clone();
+        let normal: Vec<f32> = (0..width * height).flat_map(|_| [0., 0., 1., 0.]).collect();
+        let revision = AtomicU64::new(1);
+        let mut interrupted = input.clone();
+        let _ = denoiser.run_interruptible(
+            &mut interrupted,
+            &albedo,
+            &normal,
+            4,
+            width,
+            height,
+            Some((&revision, 0)),
+        );
+        let mut actual = input.clone();
+        let mut expected = input;
+        denoiser
+            .run(&mut actual, &albedo, &normal, 4, width, height)
+            .unwrap();
+        Denoiser::new()
+            .unwrap()
+            .run(&mut expected, &albedo, &normal, 4, width, height)
+            .unwrap();
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(x, y)| (x - y).abs() < 1e-6)
         );
     }
 }

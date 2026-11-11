@@ -6,12 +6,18 @@
 
 use crate::math::{Vec3, v3};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<[u32; 3]>,
+    /// Optional linear vertex tint; empty means white.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub colors: Vec<Vec3>,
+    /// Optional material per triangle, for shared multi-material nature meshes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triangle_materials: Vec<usize>,
 }
 
 impl Mesh {
@@ -29,22 +35,18 @@ impl Mesh {
             normals: self.normals.iter().map(|&n| g(n).normalize()).collect(),
             uvs: self.uvs.clone(),
             indices: self.indices.clone(),
+            colors: self.colors.clone(),
+            triangle_materials: self.triangle_materials.clone(),
         }
     }
 
     /// Rotate about x by `tilt`, then about y by `turn`, then move by `offset`.
     pub fn placed(&self, tilt: f32, turn: f32, offset: Vec3) -> Mesh {
-        self.transformed(
-            move |p| p.rotate_x(tilt).rotate_y(turn) + offset,
-            move |n| n.rotate_x(tilt).rotate_y(turn),
-        )
+        self.transformed(move |p| p.rotate_x(tilt).rotate_y(turn) + offset, move |n| n.rotate_x(tilt).rotate_y(turn))
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        self.positions.iter().fold(
-            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-            |(lo, hi), &p| (lo.min(p), hi.max(p)),
-        )
+        self.positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)))
     }
 }
 
@@ -70,21 +72,9 @@ fn rounded_rect(half_w: f32, half_d: f32, radius: f32, segments: usize) -> Vec<(
 }
 
 /// A flat, fan-triangulated cap over a convex outline at height `y`.
-fn cap(
-    mesh: &mut Mesh,
-    outline: &[(Vec3, Vec3)],
-    inset: f32,
-    y: f32,
-    up: bool,
-    uv_extent: (f32, f32),
-) {
+fn cap(mesh: &mut Mesh, outline: &[(Vec3, Vec3)], inset: f32, y: f32, up: bool, uv_extent: (f32, f32)) {
     let n = if up { Vec3::Y } else { -Vec3::Y };
-    let uv = |p: Vec3| {
-        [
-            0.5 + p.x / (2.0 * uv_extent.0),
-            0.5 - p.z / (2.0 * uv_extent.1),
-        ]
-    };
+    let uv = |p: Vec3| [0.5 + p.x / (2.0 * uv_extent.0), 0.5 - p.z / (2.0 * uv_extent.1)];
     let center = mesh.vertex(v3(0.0, y, 0.0), n, [0.5, 0.5]);
     let ring: Vec<u32> = outline
         .iter()
@@ -95,8 +85,7 @@ fn cap(
         .collect();
     for i in 0..ring.len() {
         let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-        mesh.indices
-            .push(if up { [center, b, a] } else { [center, a, b] });
+        mesh.indices.push(if up { [center, b, a] } else { [center, a, b] });
     }
 }
 
@@ -120,21 +109,11 @@ pub fn tablet() -> Tablet {
     let mut profile: Vec<(f32, f32, f32, f32)> = Vec::new();
     for s in 0..=8 {
         let a = (-90.0 + 90.0 * s as f32 / 8.0f32).to_radians();
-        profile.push((
-            -edge + edge * a.cos(),
-            edge + edge * a.sin(),
-            a.cos(),
-            a.sin(),
-        ));
+        profile.push((-edge + edge * a.cos(), edge + edge * a.sin(), a.cos(), a.sin()));
     }
     for s in 0..=8 {
         let a = (90.0 * s as f32 / 8.0f32).to_radians();
-        profile.push((
-            -edge + edge * a.cos(),
-            t - edge + edge * a.sin(),
-            a.cos(),
-            a.sin(),
-        ));
+        profile.push((-edge + edge * a.cos(), t - edge + edge * a.sin(), a.cos(), a.sin()));
     }
 
     let mut body = Mesh::default();
@@ -149,12 +128,7 @@ pub fn tablet() -> Tablet {
     for i in 0..count {
         let j = (i + 1) % count;
         for r in 0..rows - 1 {
-            let (a, b, c, e) = (
-                i * rows + r,
-                j * rows + r,
-                j * rows + r + 1,
-                i * rows + r + 1,
-            );
+            let (a, b, c, e) = (i * rows + r, j * rows + r, j * rows + r + 1, i * rows + r + 1);
             body.indices.push([a, e, b]);
             body.indices.push([b, e, c]);
         }
@@ -166,26 +140,13 @@ pub fn tablet() -> Tablet {
 
     let screen_outline = rounded_rect(w / 2.0 - bezel, d / 2.0 - bezel, corner - bezel * 0.75, 16);
     let mut display = Mesh::default();
-    cap(
-        &mut display,
-        &screen_outline,
-        0.0,
-        t + 0.01,
-        true,
-        (w / 2.0 - bezel, d / 2.0 - bezel),
-    );
+    cap(&mut display, &screen_outline, 0.0, t + 0.01, true, (w / 2.0 - bezel, d / 2.0 - bezel));
 
     // Camera bump on the back, near one corner.
     let at = v3(w / 2.0 - 13.0, 0.0, -(d / 2.0 - 13.0));
     let camera_ring = cylinder(at, 5.6, -0.7, 48).0;
     let camera_lens = cylinder(at, 4.4, -0.72, 48).1;
-    Tablet {
-        body,
-        glass,
-        display,
-        camera_ring,
-        camera_lens,
-    }
+    Tablet { body, glass, display, camera_ring, camera_lens }
 }
 
 /// A short cylinder from y=0 to y=`height` around `center`: (side + cap, cap only).
@@ -222,11 +183,7 @@ fn cylinder(center: Vec3, radius: f32, height: f32, segments: usize) -> (Mesh, M
     both.positions.extend(&lid.positions);
     both.normals.extend(&lid.normals);
     both.uvs.extend(&lid.uvs);
-    both.indices.extend(
-        lid.indices
-            .iter()
-            .map(|t| [t[0] + base, t[1] + base, t[2] + base]),
-    );
+    both.indices.extend(lid.indices.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
     (both, lid)
 }
 
@@ -236,21 +193,12 @@ pub fn stylus() -> Mesh {
     let segments = 48usize;
     let mut m = Mesh::default();
     // Rings: back cap edge, barrel start, barrel end, tip end.
-    let rings = [
-        (0.0f32, radius),
-        (barrel, radius),
-        (barrel + tip * 0.85, 1.2),
-        (barrel + tip, 0.35),
-    ];
+    let rings = [(0.0f32, radius), (barrel, radius), (barrel + tip * 0.85, 1.2), (barrel + tip, 0.35)];
     for &(x, r) in &rings {
         for s in 0..=segments {
             let a = std::f32::consts::TAU * s as f32 / segments as f32;
             let (c, sn) = (a.cos(), a.sin());
-            let slope = if x > barrel {
-                (radius - 1.2) / (tip * 0.85)
-            } else {
-                0.0
-            };
+            let slope = if x > barrel { (radius - 1.2) / (tip * 0.85) } else { 0.0 };
             m.vertex(v3(x, radius + r * c, r * sn), v3(slope, c, sn), [0.0, 0.0]);
         }
     }
@@ -279,11 +227,7 @@ pub fn sphere(center: Vec3, radius: f32, rings: usize, segments: usize) -> Mesh 
         for s in 0..=segments {
             let th = std::f32::consts::TAU * s as f32 / segments as f32;
             let n = v3(phi.sin() * th.cos(), phi.cos(), phi.sin() * th.sin());
-            m.vertex(
-                center + n * radius,
-                n,
-                [s as f32 / segments as f32, r as f32 / rings as f32],
-            );
+            m.vertex(center + n * radius, n, [s as f32 / segments as f32, r as f32 / rings as f32]);
         }
     }
     let stride = segments as u32 + 1;
@@ -301,41 +245,46 @@ pub fn sphere(center: Vec3, radius: f32, rings: usize, segments: usize) -> Mesh 
 /// A Wavefront OBJ (triangles or polygons; positions, normals, texcoords).
 /// A `.usdz` converts to OBJ with macOS ModelIO (`tools/usdz-to-obj.swift`).
 pub fn load_obj(text: &str, scale: f32) -> Mesh {
+    if !scale.is_finite() { return Mesh::default(); }
     let (mut p, mut n, mut t) = (Vec::new(), Vec::new(), Vec::new());
     let mut m = Mesh::default();
     let mut cache = std::collections::HashMap::new();
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        let f = |it: &mut std::str::SplitWhitespace| -> f32 {
-            it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0)
-        };
+        let f = |it: &mut std::str::SplitWhitespace| -> f32 { it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0) };
         match it.next() {
             Some("v") => p.push(v3(f(&mut it), f(&mut it), f(&mut it)) * scale),
             Some("vn") => n.push(v3(f(&mut it), f(&mut it), f(&mut it))),
             Some("vt") => t.push([f(&mut it), f(&mut it)]),
             Some("f") => {
-                let ids: Vec<u32> = it
-                    .map(|c| {
-                        *cache.entry(c.to_string()).or_insert_with(|| {
-                            let mut parts = c.split('/');
-                            let idx = |s: Option<&str>, len: usize| -> Option<usize> {
-                                let v: i64 = s?.parse().ok()?;
-                                Some(if v < 0 {
-                                    (len as i64 + v) as usize
-                                } else {
-                                    v as usize - 1
-                                })
-                            };
-                            let pi = idx(parts.next(), p.len()).unwrap_or(0);
-                            let ti = idx(parts.next(), t.len());
-                            let ni = idx(parts.next(), n.len());
-                            m.positions.push(p[pi]);
-                            m.uvs.push(ti.map(|i| t[i]).unwrap_or([0.0, 0.0]));
-                            m.normals.push(ni.map(|i| n[i]).unwrap_or(Vec3::ZERO));
-                            (m.positions.len() - 1) as u32
-                        })
+                // OBJ indexes are 1-based, or relative to the vertices seen
+                // at this face. Resolve before caching so repeated negative
+                // tokens after new vertices do not alias an earlier face.
+                let parsed: Option<Vec<_>> = it.map(|corner| {
+                    let mut parts=corner.split('/');
+                    let index=|text:&str,len:usize|->Option<usize>{
+                        let raw=text.parse::<i64>().ok()?;
+                        let i=if raw<0 {(len as i64).checked_add(raw)?}else{raw.checked_sub(1)?};
+                        (i>=0 && (i as usize)<len).then_some(i as usize)
+                    };
+                    let pi=index(parts.next()?,p.len())?;
+                    let optional=|text:Option<&str>,len:usize|->Option<Option<usize>>{
+                        match text {None|Some("")=>Some(None),Some(text)=>Some(Some(index(text,len)?))}
+                    };
+                    let ti=optional(parts.next(),t.len())?;
+                    let ni=optional(parts.next(),n.len())?;
+                    if parts.next().is_some(){return None;}
+                    Some((pi,ti,ni))
+                }).collect();
+                let Some(parsed)=parsed else {continue;};
+                let ids:Vec<u32>=parsed.into_iter().map(|(pi,ti,ni)|{
+                    *cache.entry((pi,ti,ni)).or_insert_with(||{
+                        m.positions.push(p[pi]);
+                        m.uvs.push(ti.map(|i|t[i]).unwrap_or([0.,0.]));
+                        m.normals.push(ni.map(|i|n[i]).unwrap_or(Vec3::ZERO));
+                        (m.positions.len()-1) as u32
                     })
-                    .collect();
+                }).collect();
                 for k in 1..ids.len().saturating_sub(1) {
                     m.indices.push([ids[0], ids[k], ids[k + 1]]);
                 }
@@ -354,4 +303,25 @@ pub fn load_obj(text: &str, scale: f32) -> Mesh {
         }
     }
     m
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+    #[test]
+    fn malformed_obj_indices_skip_only_the_broken_face() {
+        let vertices="v 0 0 0\nv 1 0 0\nv 0 1 0\n";
+        for face in ["f 0 1 2","f 1 2 99","f -99 -2 -1","f 1/99 2/99 3/99","f 1//99 2//99 3//99"] {
+            let m=load_obj(&format!("{vertices}{face}\nf 1 2 3"),1.);
+            assert_eq!(m.indices.len(),1,"{face}");
+            assert!(m.normals.iter().all(|n|(n.length()-1.).abs()<1e-6));
+        }
+    }
+    #[test]
+    fn relative_obj_indices_follow_each_faces_current_vertex_count() {
+        let m=load_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\nv 0 0 1\nf -3 -2 -1",1.);
+        assert_eq!(m.indices.len(),2);
+        let last=m.indices[1][2] as usize;
+        assert_eq!(m.positions[last],v3(0.,0.,1.));
+    }
 }
