@@ -64,6 +64,13 @@ type BaseState = {
   time: number;
   crop: unknown;
   touched: boolean;
+  /** What the engine paints it from (`render.raster`'s first argument). */
+  spec: Data;
+  /** Its pixels were loaded (`cv` or a geometry field read). */
+  loaded: boolean;
+  /** The revision whose document the host keeps for it (a windowed base
+   * the realm answered without loading): its pixels are that revision's. */
+  pinned?: number;
 };
 /** Exports whose frozen projects the realm keeps at once. */
 export class CompatRealm {
@@ -854,6 +861,75 @@ export class CompatRealm {
       JSON.stringify(state.crop ?? null) === JSON.stringify(need.crop ?? null)
     );
   }
+  /**
+   * Whether `value` is the whole base raster of exactly `need`'s layer,
+   * frame and scale, untouched and not yet loaded, that an override returned
+   * without the frame's crop window: the frame samples only that window of
+   * it, so the engine can paint just the window.
+   */
+  isUncroppedBase(
+    value: unknown,
+    need: { layer: string; seconds: number; scale: number; crop?: Data | null },
+  ): boolean {
+    if (typeof value !== "object" || value === null || !need.crop) return false;
+    const state = this.bases.get(value);
+    return (
+      !!state &&
+      state.own &&
+      !state.touched &&
+      !state.loaded &&
+      state.crop === null &&
+      state.id === need.layer &&
+      state.time === need.seconds &&
+      state.scale === need.scale
+    );
+  }
+  /**
+   * The `baseWindow` answers (`{args, window}`) of a batch's uncropped base
+   * rasters, decided once every need ran (an override may draw into another
+   * one's canvas meanwhile; then it is that canvas, read as any other), or
+   * `null` for one answered the usual way. A windowed base keeps the
+   * revision it was answered from: the host keeps that document while the
+   * object lives (or answers `null`: past its cap of kept documents, the base
+   * is read whole now), so loading it later paints the frame it was returned
+   * for.
+   */
+  windowBases(entries: { value: unknown; need: Data }[]): (Data | null)[] {
+    const candidate = ({ value, need }: { value: unknown; need: Data }) =>
+      this.isUncroppedBase(value, need as any)
+        ? this.bases.get(value as object)!
+        : null;
+    if (!entries.some(candidate)) return entries.map(() => null);
+    // As `load` does before it asks for the pixels: the document a load in
+    // this batch would paint from is the one now, which the host keeps. What
+    // the flush emits may draw into a candidate: check them after it.
+    this.flush();
+    return entries.map((entry) => {
+      const state = candidate(entry);
+      if (!state) return null;
+      // A base answered before keeps the document it was answered from.
+      let revision = state.pinned;
+      if (revision === undefined) {
+        const pinned = this.options.host.query("render.rasterPin", {});
+        if (typeof pinned !== "number") return null;
+        revision = state.pinned = pinned;
+        this.pins.register(entry.value as object, revision);
+      }
+      return {
+        args: [state.spec, state.scale, state.time, null],
+        revision,
+        window: (entry.need as Data).crop,
+      };
+    });
+  }
+
+  /** A windowed base raster went: the host may let its revision go. */
+  private pins = new FinalizationRegistry<number>((revision) => {
+    if (this.disposed) return;
+    try {
+      this.options.host.query("render.rasterUnpin", { revision });
+    } catch {}
+  });
   /** The composition holding layer `id` (null: the open one). */
   private compositionOf(id: string): string | null {
     const project = this.PM.proj;
@@ -896,10 +972,11 @@ export class CompatRealm {
     let loaded: Data | null | undefined;
     const load = () => {
       if (loaded !== undefined) return loaded;
+      state.loaded = true;
       this.flush();
       const value = this.options.host.query("render.raster", {
         args: [spec, scale, time, crop ?? null],
-        revision: this.publication.revision,
+        revision: state.pinned ?? this.publication.revision,
         realm: this.options.id,
         generation: this.options.generation,
       });
@@ -923,6 +1000,8 @@ export class CompatRealm {
       time,
       crop: crop ?? null,
       touched: false,
+      spec,
+      loaded: false,
     };
     const written: Data = {};
     // Today's cache key: the same layer, frame, scale and crop paint the same.

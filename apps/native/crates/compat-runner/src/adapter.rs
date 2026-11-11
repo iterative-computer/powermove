@@ -370,6 +370,15 @@ impl KernelAdapter {
         let p = self.published()?;
         Ok((p.snapshot.document.clone(), p.snapshot.render_comp()))
     }
+    /// [`Self::document`] and the revision it is.
+    pub fn revision_document(&self) -> Result<(u64, Arc<pm_model::Document>, String)> {
+        let p = self.published()?;
+        Ok((
+            p.revision(),
+            p.snapshot.document.clone(),
+            p.snapshot.render_comp(),
+        ))
+    }
     /// The open composition's width and height.
     pub fn size(&self) -> Result<(f64, f64)> {
         let p = self.published()?;

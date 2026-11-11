@@ -103,6 +103,7 @@ fn raster(w: u32, h: u32, color: [u8; 4], size: [f64; 2], anchor: [f64; 2]) -> A
         size,
         uv: [0.0, 0.0, 1.0, 1.0],
         data: Arc::new(color.repeat((w * h) as usize)),
+        window: None,
     })
 }
 
@@ -512,6 +513,7 @@ fn rasters_of_any_width_keep_their_rows() {
         size: [200.0, 132.0],
         uv: [0.0, 0.0, 1.0, 1.0],
         data: Arc::new(data),
+        window: None,
     });
     let mut renderer = Renderer::headless().unwrap();
     renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(column))));
@@ -558,6 +560,7 @@ fn text_rows(precision: Precision) {
         size: [200.0, 132.0],
         uv: [0.0, 0.0, 1.0, 1.0],
         data: Arc::new(data),
+        window: None,
     });
     let mut renderer = Renderer::headless().unwrap();
     renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(column))));
@@ -591,4 +594,225 @@ fn text_rows(precision: Precision) {
             assert_eq!(px(&out, x, y)[3], 0.0, "{precision:?} row {y}, x {x}");
         }
     }
+}
+
+/// A raster of the shape's own geometry (`render.raster` at the need's
+/// density) with distinct texels everywhere, whole or holding only `window`.
+fn textured(
+    renderer: &mut Renderer,
+    doc: &Value,
+    scale: f64,
+    window: Option<PixelRect>,
+) -> Arc<CompatRaster> {
+    let base = renderer
+        .layer_raster(
+            &load(doc),
+            "Ptest-root",
+            "box",
+            None,
+            0.0,
+            scale,
+            Precision::Float32,
+        )
+        .unwrap()
+        .unwrap();
+    let (w, h) = base.canvas;
+    let [x0, y0, ww, wh] = window.map_or([0, 0, w, h], |c| {
+        let (x, y) = (c.x.min(w), c.y.min(h));
+        [x, y, c.width.min(w - x), c.height.min(h - y)]
+    });
+    let mut data = Vec::with_capacity((ww * wh * 4) as usize);
+    for y in y0..y0 + wh {
+        for x in x0..x0 + ww {
+            let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) as u8;
+            let a = 128 | (v & 127);
+            data.extend([v.min(a), (v / 2).min(a), (255 - v).min(a), a]);
+        }
+    }
+    Arc::new(CompatRaster {
+        width: w,
+        height: h,
+        format: CompatFormat::Rgba8Premultiplied,
+        anchor: [base.anchor.0, base.anchor.1],
+        size: [base.box_size.0, base.box_size.1],
+        uv: [0.0, 0.0, 1.0, 1.0],
+        data: Arc::new(data),
+        window: window.map(|_| [x0, y0, ww, wh]),
+    })
+}
+
+/// An override that hands back the whole base raster without the frame's
+/// crop window is answered with only that window painted: the viewer frame
+/// is bit-identical to the one the whole raster draws (zoomed, rotated, and
+/// through the viewer's pan-buffer canvas).
+#[test]
+fn a_raster_holding_only_the_crop_window_draws_the_whole_raster_s_frame() {
+    for (rotation, canvas) in [(0.0, false), (30.0, false), (-12.5, true)] {
+        let d = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#FFFFFF80", "stroke": 0 });
+        let mut shape = layer("box", "shape", d, 128.0, 128.0, 2.0);
+        set(&mut shape, "rotation", json!(rotation));
+        let doc = project(W, H, 2.0, no_fill(), vec![shape]);
+        let loaded = load(&doc);
+        let mut request = RenderRequest::sized(Size::new(512, 512), Precision::Float32);
+        request.scale = Some((8.0, 8.0));
+        request.origin = Some((0.0, 768.0));
+        request.region = Some(PixelRect {
+            x: 128,
+            y: 128,
+            width: 256,
+            height: 256,
+        });
+        request.preview_canvas = canvas;
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Missing)));
+        let need = match renderer.render(
+            &loaded,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        ) {
+            Err(RenderError::CompatPending(needs)) => needs[0].clone(),
+            other => panic!("expected the raster's need, got {:?}", other.err()),
+        };
+        let crop = need.crop.expect("a partly visible layer is cropped");
+        let frame = |raster: Arc<CompatRaster>| {
+            let mut renderer = Renderer::headless().unwrap();
+            renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(raster))));
+            let frame = renderer
+                .render(
+                    &loaded,
+                    "Ptest-root",
+                    ticks(0.0),
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            renderer.read_rgba(&frame).unwrap()
+        };
+        let whole = frame(textured(&mut renderer, &doc, need.scale, None));
+        let window = textured(&mut renderer, &doc, need.scale, Some(crop));
+        assert!(window.data.len() < (window.width * window.height * 4) as usize);
+        let windowed = frame(window);
+        assert!(whole.iter().any(|v| *v > 0.0), "the layer draws something");
+        let differ = whole
+            .iter()
+            .zip(&windowed)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(
+            differ, 0,
+            "rotation {rotation}, canvas {canvas}: {differ} channels differ"
+        );
+    }
+}
+
+/// A base raster painted for a window reads back only the window's texels,
+/// and they are the whole raster's texels there.
+#[test]
+fn a_windowed_base_raster_is_the_whole_raster_s_pixels_in_the_window() {
+    let rect = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#3366FFC0", "stroke": 6, "strokeColor": "#FF8800", "radius": 18 });
+    let ellipse = json!({ "shape": "ellipse", "w": 140, "h": 90, "color": "#22CC88", "stroke": 3, "strokeColor": "#000000" });
+    for d in [rect, ellipse] {
+        let doc = load(&shape_doc("box", d, 128.0, 128.0));
+        let mut renderer = Renderer::headless().unwrap();
+        let whole = renderer
+            .layer_raster(
+                &doc,
+                "Ptest-root",
+                "box",
+                None,
+                0.0,
+                6.5,
+                Precision::Float16,
+            )
+            .unwrap()
+            .unwrap();
+        let (cw, ch) = whole.canvas;
+        let [hx, hy, hw, _] = whole.pixels.crop;
+        for window in [
+            [cw / 3, ch / 4, cw / 2, ch / 3],
+            [0, 0, 7, 5],
+            [cw - 3, ch - 2, 50, 50],
+        ] {
+            let part = renderer
+                .layer_raster_window(
+                    &doc,
+                    "Ptest-root",
+                    "box",
+                    None,
+                    0.0,
+                    6.5,
+                    Precision::Float16,
+                    Some(window),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(part.canvas, whole.canvas);
+            assert_eq!((part.box_size, part.anchor), (whole.box_size, whole.anchor));
+            let [px0, py0, pw, ph] = part.pixels.crop;
+            assert!(px0 >= window[0] && py0 >= window[1]);
+            assert!(
+                px0 + pw <= (window[0] + window[2]).min(cw)
+                    && py0 + ph <= (window[1] + window[3]).min(ch)
+            );
+            assert_eq!(part.pixels.pixels.len(), (pw * ph * 4) as usize);
+            for y in 0..ph {
+                for x in 0..pw {
+                    let (cx, cy) = (px0 + x, py0 + y);
+                    let at = |p: &[f32], i: usize| {
+                        p[i..i + 4].iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    };
+                    let ours = at(&part.pixels.pixels, ((y * pw + x) * 4) as usize);
+                    let theirs = at(
+                        &whole.pixels.pixels,
+                        (((cy - hy) * hw + (cx - hx)) * 4) as usize,
+                    );
+                    assert_eq!(ours, theirs, "texel {cx},{cy} of window {window:?}");
+                }
+            }
+        }
+    }
+}
+
+/// A raster's texture is its whole size, a windowed one's too, so textures
+/// stay only while frames draw them: playing through answers the store
+/// keeps holds the GPU memory of the last two frames' rasters, not of every
+/// answer kept (review: a 1 MiB window kept a 160 MB texture alive).
+#[test]
+fn raster_textures_follow_the_frames_that_draw_them() {
+    let doc = load(&doc(1.0));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut kept = Vec::new();
+    let one = 512u64 * 400 * 8;
+    for i in 0..12u8 {
+        let raster = Arc::new(CompatRaster {
+            width: 512,
+            height: 400,
+            format: CompatFormat::Rgba8Premultiplied,
+            anchor: [50.0, 30.0],
+            size: [100.0, 60.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            data: Arc::new([i, 0, 0, 255].repeat(256)),
+            window: Some([0, 0, 16, 16]),
+        });
+        kept.push(raster.clone());
+        renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(raster))));
+        renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(
+            renderer.compat_texture_bytes() <= 2 * one,
+            "frame {i}: {} bytes of raster textures",
+            renderer.compat_texture_bytes()
+        );
+    }
+    assert_eq!(kept.len(), 12, "every answer is still held");
 }
