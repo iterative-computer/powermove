@@ -756,6 +756,16 @@ fn a_band_of_a_reduced_resolution_effect_keeps_the_frames_grid() {
     assert_bit_equal(halo_bands(60.0));
 }
 
+/// A band's padding covers each pass's sampling footprint beyond the
+/// declared spread: the halo declares exactly its kernel radius, and its
+/// half-resolution bilinear taps, downsample and upsample read a few
+/// pixels further.
+#[test]
+fn a_band_covers_the_sampling_beyond_an_effects_declared_spread() {
+    let _gpu = gpu();
+    assert_bit_equal(halo_bands(40.0));
+}
+
 #[test]
 fn effects_on_groups_and_inside_precomps() {
     let _gpu = gpu();
