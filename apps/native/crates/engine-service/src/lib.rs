@@ -5,6 +5,7 @@ pub mod clock;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
+mod frame_inputs;
 pub mod jobs;
 pub mod layers;
 pub mod media;
@@ -1175,6 +1176,8 @@ struct Flight {
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
+    /// The disk render cache's frame this one measures (`DiskFrames::measured`).
+    costed: Option<(i64, [u8; 32])>,
 }
 /// One frame taken from the shared state, drawn without its lock.
 struct Work {
@@ -1394,6 +1397,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
+    shared.disk.set_activity(shared.interactive.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
     let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
@@ -1567,6 +1571,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         cost
                     };
                     r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                }
+                if let Some(costed) = f.costed
+                    && t.gpu_ok
+                    && !t.cache_hit
+                    && t.gpu_start > 0.
+                {
+                    let gpu = (t.gpu_done - t.gpu_start) * 1e6;
+                    shared.disk.measured(costed, gpu.max(t.render_cpu_ms * 1e3));
                 }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
@@ -2042,6 +2054,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 overrides,
                 engine.tone_identity(),
                 stamp.doc_id,
+                spec.time,
             ) && let Some(recorder) = &recorder
             {
                 recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
@@ -2178,6 +2191,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         if let Some(r) = runtime.get_mut(&id) {
                             r.last = Some((stamp, spec.time));
                         }
+                        // A playing frame drawn whole at full resolution:
+                        // its cost tells background rendering what plays.
+                        let costed = (spec.moment == Moment::Playing
+                            && spec.scale >= 1.
+                            && !s.stand_ins)
+                            .then(|| shared.disk.frame_id(&scene, spec.time))
+                            .flatten();
                         flights.push_back(Flight {
                             id,
                             stamp,
@@ -2186,6 +2206,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             input,
                             audio_host,
                             pipeline,
+                            costed,
                         });
                     }
                     Ok(None) => {

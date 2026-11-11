@@ -14,7 +14,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -58,6 +58,27 @@ pub struct ExportRequest {
     pub cache: Option<crate::render_cache::CacheFill>,
 }
 
+/// Export children running now (render cache fills not counted).
+static EXPORTS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Whether an export (the person's, an agent's, or a still) is rendering:
+/// background rendering waits for it.
+pub fn exports_running() -> bool {
+    EXPORTS_RUNNING.load(Ordering::Acquire) > 0
+}
+/// Counts an export child while its reader lives.
+struct Exporting;
+impl Exporting {
+    fn start() -> Self {
+        EXPORTS_RUNNING.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+impl Drop for Exporting {
+    fn drop(&mut self) {
+        EXPORTS_RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The viewer's activity, as exports and cache fills see it: whether it is
 /// drawing or playing now, and an epoch that rises every time it starts, so
 /// an activity shorter than any sampling interval is still seen.
@@ -92,6 +113,35 @@ impl Activity {
             quiet = self.quiet.1.wait(quiet).unwrap();
         }
         waited
+    }
+    /// Waits until the viewer has been inactive for `delay` (milliseconds,
+    /// read live), unless `cancel` is set. `seen` and `active_at` carry the
+    /// epoch last seen and when activity was last seen, across calls.
+    fn wait_idle(
+        &self,
+        cancel: &AtomicBool,
+        delay: &AtomicU64,
+        seen: &mut u64,
+        active_at: &mut Option<std::time::Instant>,
+    ) {
+        let mut quiet = self.quiet.0.lock().unwrap();
+        while !cancel.load(Ordering::Acquire) {
+            let (busy, epoch) = (self.busy(), self.epoch());
+            if busy || epoch != *seen {
+                *seen = epoch;
+                *active_at = Some(std::time::Instant::now());
+            }
+            let delay = std::time::Duration::from_millis(delay.load(Ordering::Acquire));
+            let left = active_at.map_or(std::time::Duration::ZERO, |at| {
+                delay.saturating_sub(at.elapsed())
+            });
+            if !busy && left.is_zero() {
+                return;
+            }
+            let poll = std::time::Duration::from_millis(100);
+            let wait = if busy { poll } else { left.min(poll) };
+            quiet = self.quiet.1.wait_timeout(quiet, wait).unwrap().0;
+        }
     }
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
@@ -145,6 +195,9 @@ pub struct JobSession {
     pub request: ExportRequest,
     overrides: Option<OverrideAnswers>,
     cancel: Cancel,
+    /// Background work: its GPU submissions and override answers wait until
+    /// the viewer has been inactive this long (milliseconds, read live).
+    idle: Option<Arc<AtomicU64>>,
 }
 /// Set when dropped: whatever a job pinned is let go when it ends, however
 /// it ends.
@@ -160,7 +213,14 @@ impl JobSession {
             request,
             overrides: None,
             cancel: Cancel(Arc::default()),
+            idle: None,
         }
+    }
+    /// The job is background work: it submits GPU work and has its
+    /// overrides answered only once the viewer has been inactive for
+    /// `delay` milliseconds, so any interaction pauses it at once.
+    pub fn in_background(&mut self, delay: Arc<AtomicU64>) {
+        self.idle = Some(delay);
     }
     /// Set when the job is cancelled or over.
     pub fn cancellation(&self) -> Arc<AtomicBool> {
@@ -221,6 +281,8 @@ enum ChildMessage {
         id: u64,
         needs: Vec<CompatJobNeed>,
     },
+    /// A render cache fill's frame, before the progress that counts it.
+    Frame(crate::render_cache::FrameReport),
 }
 /// One need's answer on the child's stdin.
 #[derive(Debug, Serialize, Deserialize)]
@@ -467,6 +529,8 @@ pub struct ExportHandle {
     reader: Option<std::thread::JoinHandle<bool>>,
     submissions: Arc<std::sync::atomic::AtomicU64>,
     asks: Arc<std::sync::atomic::AtomicU64>,
+    /// A render cache fill's frame reports not taken yet.
+    frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>>,
 }
 impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
@@ -488,6 +552,7 @@ impl ExportHandle {
             request,
             overrides,
             cancel: release,
+            idle,
         } = session.into();
         request.resources.validate()?;
         ensure!(
@@ -502,6 +567,7 @@ impl ExportHandle {
             .spawn()?;
         let mut input = child.stdin.take().unwrap();
         let id = request.job.clone();
+        let exporting = request.cache.is_none().then(Exporting::start);
         if let Err(e) = send(&mut input, &ParentMessage::Start(Box::new(request))) {
             let _ = child.kill();
             let _ = child.wait();
@@ -523,10 +589,13 @@ impl ExportHandle {
         let granted = submissions.clone();
         let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let asked = asks.clone();
+        let frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>> = Arc::default();
+        let reports = frames.clone();
         let reader = std::thread::spawn(move || {
             // Dropped with the reader: the job is over, and what its
             // overrides pinned goes.
             let _release = release;
+            let _exporting = exporting;
             // The viewer's activity epoch at the last grant, and when it was
             // last seen to move (an epoch moved since counts as now).
             let mut seen = interactive.epoch();
@@ -554,7 +623,13 @@ impl ExportHandle {
                         ));
                     }
                     Ok(ChildMessage::Status(s)) => events.set(*s),
+                    Ok(ChildMessage::Frame(report)) => reports.lock().unwrap().push(report),
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
+                        // Background work runs extensions only while the
+                        // person is away, as it renders.
+                        if let Some(delay) = &idle {
+                            interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
+                        }
                         let answered = match &overrides {
                             Some(answer) => answer(&needs),
                             None => Err("No window has this project's extensions open".into()),
@@ -564,7 +639,11 @@ impl ExportHandle {
                     }
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
-                        if interactive.wait_quiet(&cancel) {
+                        if let Some(delay) = &idle {
+                            interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
+                            // Idle for longer than any quiet period: whole frames.
+                            active_at = None;
+                        } else if interactive.wait_quiet(&cancel) {
                             active_at = Some(std::time::Instant::now());
                         }
                         if !cancel.load(Ordering::Acquire) {
@@ -602,7 +681,12 @@ impl ExportHandle {
             reader: Some(reader),
             submissions,
             asks,
+            frames,
         })
+    }
+    /// A render cache fill's frame reports since the last call, in order.
+    pub fn take_frames(&self) -> Vec<crate::render_cache::FrameReport> {
+        std::mem::take(&mut *self.frames.lock().unwrap())
     }
     pub fn status(&self) -> JobStatus {
         self.status.now.lock().unwrap().clone()
@@ -883,6 +967,9 @@ pub fn run_child() -> Result<()> {
                 &mut |fraction| {
                     let _ = emit(status(&job, JobState::Running, fraction, None, None));
                 },
+                &mut |frame| {
+                    let _ = send(&mut std::io::stdout().lock(), &ChildMessage::Frame(frame));
+                },
             );
         }
         let job = pm_export::render::ExportJob {
@@ -1157,6 +1244,12 @@ impl pm_render::compat::CompatRasters for JobRasters {
 /// request at the composition's size, RGBA16F) into the render cache folder
 /// captured when the fill started, stopping before the volume or the Render
 /// Files Limit is full (`crate::render_cache`).
+///
+/// With a budget (background rendering), each chunk's probe frames come
+/// first: a chunk renders and stores its frames only when a probe costs
+/// the budget or more (GPU time, measured warm), and is left alone
+/// otherwise, so ranges that play in real time take no disk. A frame
+/// that can't be drawn exactly (a layer failed) is never stored.
 #[allow(clippy::too_many_arguments)]
 fn fill_cache(
     renderer: &mut pm_render::Renderer,
@@ -1167,8 +1260,13 @@ fn fill_cache(
     gate: &ChildGate,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
+    report: &mut dyn FnMut(crate::render_cache::FrameReport),
 ) -> Result<PathBuf> {
-    use crate::render_cache::{DISK_FULL, LIMIT_FULL};
+    use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
+    if fill.budget_us.is_some() {
+        // Background work never competes with the app for the CPU.
+        let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
+    }
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {
         doc: doc.clone(),
@@ -1186,14 +1284,20 @@ fn fill_cache(
     };
     let pass = pm_export::render::pass_key(2, size);
     renderer.set_isolate_layers(true);
-    let total = fill.frames.len().max(1) as f64;
-    for (i, frame) in fill.frames.iter().enumerate() {
+    // One frame's coded pixels and GPU time, or `None` when it can't be
+    // drawn exactly (a layer failed): it is left out and the fill goes on.
+    // An error (often passing: an override answer that didn't come) stops
+    // the fill.
+    let draw = |renderer: &mut pm_render::Renderer,
+                    frame: &crate::render_cache::CacheFrame|
+     -> Result<Option<(Vec<u8>, f64)>> {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
         let time = pm_protocol::common::Ticks::new(frame.ticks)?;
         let request = crate::render::FrameSpec::exact(time, output).request(&scene)?;
-        let read = pm_export::render::render_frame_reusing(
+        gate.take_measured();
+        let read = match pm_export::render::render_frame_reusing(
             renderer,
             &doc,
             composition,
@@ -1203,18 +1307,31 @@ fn fill_cache(
             gate,
             pass,
             cancel,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        ) {
+            Ok(read) => read,
+            Err(pm_export::render::JobError::Cancelled) => anyhow::bail!("cancelled"),
+            Err(e) => anyhow::bail!("{e}"),
+        };
+        let cost = gate.take_measured();
+        // A layer that failed drew nothing: not the frame's exact picture.
+        if !read.failures.is_empty() {
+            return Ok(None);
+        }
         let bytes: Vec<u8> = read
             .rgba
             .iter()
             .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
             .collect();
-        let bytes = crate::frame_codec::encode(&bytes, fill.width, fill.height);
+        Ok(Some((
+            crate::frame_codec::encode(&bytes, fill.width, fill.height),
+            cost,
+        )))
+    };
+    let store = |frame: &crate::render_cache::CacheFrame, bytes: &[u8]| -> Result<()> {
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }
-        cache.put(&frame.key, &bytes).map_err(|e| {
+        cache.put(&frame.key, bytes).map_err(|e| {
             if e.kind() == std::io::ErrorKind::StorageFull {
                 anyhow::anyhow!(DISK_FULL)
             } else if e.to_string().contains("quota") {
@@ -1222,8 +1339,76 @@ fn fill_cache(
             } else {
                 anyhow::Error::from(e)
             }
-        })?;
-        progress((i + 1) as f64 / total);
+        })
+    };
+    let frames = &fill.frames;
+    let total = frames.len().max(1) as f64;
+    let mut at = 0;
+    while at < frames.len() {
+        let chunk = frames[at].chunk;
+        let end = at + frames[at..].iter().take_while(|f| f.chunk == chunk).count();
+        // Probes first: drawn, measured, and held until the chunk is judged.
+        let mut held = Vec::new();
+        let mut probed = false;
+        while at < end && frames[at].probe {
+            probed = true;
+            let frame = &frames[at];
+            match draw(renderer, frame)? {
+                Some((bytes, mut cost)) => {
+                    // A first frame pays for warming up (programs, decoders):
+                    // a probe over budget is measured once more, warm.
+                    if fill.budget_us.is_some_and(|b| cost >= b)
+                        && let Some((_, again)) = draw(renderer, frame)?
+                    {
+                        cost = cost.min(again);
+                    }
+                    held.push((at, bytes, cost));
+                }
+                None => report(FrameReport {
+                    at: at as u32,
+                    cost_us: None,
+                    stored: false,
+                    refused: true,
+                }),
+            }
+            at += 1;
+            progress(at as f64 / total);
+        }
+        let heavy = match fill.budget_us {
+            None => true,
+            Some(budget) => !probed || held.iter().any(|h| h.2 >= budget),
+        };
+        for (i, bytes, cost) in held {
+            if heavy {
+                store(&frames[i], &bytes)?;
+            }
+            report(FrameReport {
+                at: i as u32,
+                cost_us: Some(cost),
+                stored: heavy,
+                refused: false,
+            });
+        }
+        if !heavy {
+            at = end;
+            progress(at as f64 / total);
+            continue;
+        }
+        while at < end {
+            let frame = &frames[at];
+            let drawn = draw(renderer, frame)?;
+            if let Some((bytes, _)) = &drawn {
+                store(frame, bytes)?;
+            }
+            report(FrameReport {
+                at: at as u32,
+                cost_us: drawn.as_ref().map(|d| d.1),
+                stored: drawn.is_some(),
+                refused: drawn.is_none(),
+            });
+            at += 1;
+            progress(at as f64 / total);
+        }
     }
     renderer.release_frame_reuse();
     Ok(fill.dir.clone())
@@ -1280,13 +1465,21 @@ impl Costs {
 struct ChildGate {
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
+    /// Microseconds measured since [`ChildGate::take_measured`] last ran.
+    measured: Mutex<f64>,
 }
 impl ChildGate {
     fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
         Self {
             permits: Mutex::new(permits),
             costs: Mutex::default(),
+            measured: Mutex::default(),
         }
+    }
+    /// The measured time of the submissions finished since the last call:
+    /// one frame's GPU time when taken around it.
+    fn take_measured(&self) -> f64 {
+        std::mem::take(&mut *self.measured.lock().unwrap())
     }
 }
 impl pm_export::render::GpuGate for ChildGate {
@@ -1309,6 +1502,7 @@ impl pm_export::render::GpuGate for ChildGate {
     }
     fn finished(&self, _: u64, units: u32, measured_us: f64) {
         self.costs.lock().unwrap().record(units, measured_us);
+        *self.measured.lock().unwrap() += measured_us;
     }
     fn abandoned(&self, _: u64) {}
     /// Whole frames (a quiet viewer) overlap: the next frame's CPU work runs
