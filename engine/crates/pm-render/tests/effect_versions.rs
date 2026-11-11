@@ -227,6 +227,48 @@ fn a_winning_fork_draws_saved_version_one_and_refuses_later_revisions() {
     );
 }
 
+/// An extension layer whose extension isn't installed draws today's
+/// missing-definition checkerboard where frames show the project (the
+/// viewer, agent stills: today's compositor draws it in every frame), and an
+/// export refuses it, as it refuses an uninstalled effect.
+#[test]
+fn an_extension_layer_with_no_installed_provider_is_the_checkerboard_in_the_viewer_and_refused_in_exports()
+ {
+    let mut renderer = Renderer::headless().unwrap();
+    let field = layer(
+        "field",
+        "extension",
+        json!({"definition":"acme.field.layer","version":1,"w":16,"h":16,"data":{},"params":{}}),
+        0.,
+        0.,
+        1.,
+    );
+    let mut absent = load(&project(16, 16, 1., Value::Null, vec![field]));
+    absent.set_saving_app_version(Some("1.3.0".into()));
+    renderer.set_main_effects_for_document(&absent).unwrap();
+    let request = RenderRequest::sized(Size::new(16, 16), Precision::Float16);
+    let export = renderer.render(
+        &absent,
+        "Ptest-root",
+        ticks(0.),
+        &request,
+        &MapResolver::default(),
+    );
+    assert!(export.is_err(), "an export never omits a layer silently");
+    renderer.set_isolate_layers(true);
+    let shown = draw(&mut renderer, &absent);
+    renderer.set_isolate_layers(false);
+    // `mix(vec3(.055,.05,.07), vec3(.16,.09,.15), checker)`, opaque.
+    let cells = [[0.055, 0.05, 0.07], [0.16, 0.09, 0.15]];
+    for (x, y) in [(2, 2), (8, 8), (13, 5)] {
+        let px = &shown[(y * 16 + x) * 4..][..4];
+        assert!((px[3] - 1.).abs() < 1e-3, "{px:?}");
+        assert!(
+            cells.iter().any(|c| c.iter().zip(px).all(|(w, g)| (w - g).abs() < 0.02)),
+            "({x}, {y}) {px:?}"
+        );
+    }
+}
 #[test]
 fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in_exports() {
     let mut renderer = Renderer::headless().unwrap();

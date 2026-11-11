@@ -517,11 +517,11 @@ fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
     assert_eq!(off.state, JobState::Done, "{off:?}");
 }
 /// An agent's still is a look at the project, as the viewer shows it: an
-/// extension layer whose extension isn't installed is left out of the
-/// picture (today's compositor skips it too), not a refusal of the whole
-/// frame. A delivery still refuses it by name.
+/// extension layer whose extension isn't installed draws today's
+/// missing-definition checkerboard, not a refusal of the whole frame. A
+/// delivery still refuses it by name.
 #[test]
-fn a_preview_still_leaves_out_a_layer_without_a_definition_and_an_export_refuses_it() {
+fn a_preview_still_shows_a_layer_without_a_definition_and_an_export_refuses_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut project: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
