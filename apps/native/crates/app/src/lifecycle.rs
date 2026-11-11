@@ -657,6 +657,14 @@ impl Controller {
                     if let Some(viewer) = v.viewer.take() {
                         viewer.retire();
                     }
+                    // The playback feed owns the viewer's placement binding,
+                    // whose drawableSize observer retains the layer and its
+                    // drawable pool. Nothing else wakes the feed now (the
+                    // display link is paused and the retired viewer sends
+                    // nothing), so tell it the viewer is gone.
+                    if let Some(wake) = &v.playback_wake {
+                        let _ = wake.try_send(());
+                    }
                     if let Some(popout) = v.popout.take() {
                         popout.shutdown();
                     }
