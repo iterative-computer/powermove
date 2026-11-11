@@ -89,7 +89,30 @@ impl Properties {
                 .and_then(|id| self.failures.get(id))
                 .and_then(Value::as_str)
         {
-            target["first"]["error"] = json!(failure_copy(reason, studio.is_some()));
+            // A shape the renderer can't build fails the whole 3D set: name
+            // the layer that caused it on every layer it took down.
+            let culprit = reason
+                .contains("primitive")
+                .then(|| reason.split_whitespace().next())
+                .flatten()
+                .and_then(|shape| {
+                    let root = model.published().snapshot.root()?;
+                    let comp = pm_kernel::model::comp_node(
+                        root,
+                        model.published().snapshot.open_comp().as_deref(),
+                    )?;
+                    let comp = super::data::wire(&comp.to_value());
+                    comp["layers"].as_array()?.iter().find_map(|l| {
+                        (l["d"]["data"]["object"]["source"]["primitive"] == shape)
+                            .then(|| (l["id"].clone(), l["name"].as_str().unwrap_or("").to_owned()))
+                    })
+                });
+            target["first"]["error"] = json!(match culprit {
+                Some((id, name)) if model.primary() != id.as_str() => format!(
+                    "“{name}” uses a shape that isn’t supported yet, so the 3D scene isn’t drawn. Choose another shape for “{name}”."
+                ),
+                _ => failure_copy(reason, studio.is_some()),
+            });
         }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
@@ -520,18 +543,8 @@ impl Properties {
                 axes.push(json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
             }
             if !axes.is_empty() {
-                let mut row = json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}});
-                if id == "scale" {
-                    row["linked"] = json!(
-                        model
-                            .layer(layer)
-                            .map_err(|e| e.to_string())?
-                            .get("scaleLinked")
-                            .and_then(pm_model::Value::as_bool)
-                            .unwrap_or(true)
-                    );
-                }
-                rows.push(row);
+                // Three axes fill the value column; no room for a link button.
+                rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
             }
         }
         Ok(rows)

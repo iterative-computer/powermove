@@ -144,7 +144,7 @@ export const rows = {
   mblur: ["Motion Blur", "Render motion blur for moving layers."],
   studioQuality: [
     "3D Quality",
-    "How clean 3D layers render. Higher presets take longer per frame.",
+    "Cleaner 3D takes longer per frame.",
   ],
   useProxies: [
     "Use Proxies (Draft)",

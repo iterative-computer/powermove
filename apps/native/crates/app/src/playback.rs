@@ -221,6 +221,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     }
                 }).or_else(||status.notice());
                 if line!=shown {
+                    // Layers newly left out (or back): Properties marks them.
+                    v.update_builtins(cx);
                     match &line {
                         Some(text)=>{v.message=text.clone();cx.notify();}
                         None if shown.as_ref()==Some(&v.message)=>{v.message.clear();cx.notify();}

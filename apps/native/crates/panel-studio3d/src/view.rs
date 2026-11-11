@@ -753,6 +753,13 @@ pub fn add_layer(
             .find(|(k, _)| *k == species)
             .ok_or_else(|| invalid("Unknown nature asset"))?
             .1;
+        // A grove, not a wall: trees are large, grass is small.
+        let count = match species {
+            "conifer" | "broadleaf" | "birch" => 36,
+            "bush" => 60,
+            "rock" => 30,
+            _ => 600,
+        };
         // Scatter on the selected model or terrain, else the first terrain;
         // with none, the same Undo step adds a terrain to grow on.
         let selected = p.selection.layers().first().cloned();
@@ -785,7 +792,7 @@ pub fn add_layer(
         commands.push(scene(
             p,
             time,
-            json!({"operation":"add_scatter","id":id,"name":label,"scatter":{"model":format!("nature:{species}"),"surface":surface}}),
+            json!({"operation":"add_scatter","id":id,"name":label,"scatter":{"model":format!("nature:{species}"),"surface":surface,"p":{"count":count}}}),
         ));
         if let Some(camera) = overview_camera(&layers, id) {
             commands.push(scene(p, time, camera));
