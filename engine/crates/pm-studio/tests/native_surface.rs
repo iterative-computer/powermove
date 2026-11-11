@@ -42,9 +42,13 @@ fn prepared_layers_share_one_filter_and_preserve_their_masks(){
 #[test]
 fn metalfx_in_process_texture_is_retained_and_flips_without_readback(){
     let mut r=Renderer::new(64,36).unwrap();let scene=preset("hero","blue",0.).unwrap();
-    r.set_scene(&scene,&scene.prepare());r.live=true;r.trace(1,3,true,6);
+    r.set_scene(&scene,&scene.prepare());
+    assert!(r.queue_live_trace(3,6).is_err());
+    assert_eq!(r.samples,0);
+    r.live=true;r.queue_live_trace(3,6).unwrap();
     let (source,_)=r.finish_metalfx_texture(128,72,false,false).unwrap();
     let timings=r.timings;
+    assert!(timings.trace_deferred);
     assert!(timings.trace_ms>0. && timings.guides_ms>0. && timings.metalfx_ms>0. && timings.post_ms>0.);
     assert_eq!(timings.denoise_ms,0.,"Live never invokes CPU OIDN");
     assert!(timings.metalfx_gpu_ms>0. && timings.metalfx_gpu_ms<=timings.metalfx_ms);
