@@ -27,6 +27,11 @@ pub struct Scene {
     pub media: Arc<pm_export::render::MediaPaths>,
     pub content: u64,
 }
+/// The viewer's rendered-frame cache (RGBA16F surfaces).
+const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+/// The most a paused composition-size surface may take: half the frame
+/// cache, so it always holds two.
+pub const PAUSED_FULL_BYTES: u64 = FRAME_CACHE_BYTES / 2;
 /// One viewer frame's request. The renderer's playback path, never an export.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameSpec {
@@ -80,7 +85,17 @@ impl FrameSpec {
             if v.is_finite() && v > 0. { v } else { 0. }
         };
         let ratio = (side("w") / f64::from(output.width)).max(side("h") / f64::from(output.height));
-        ratio.clamp(1., 4.)
+        let scale = ratio.clamp(1., 4.);
+        // Admitted whole within [`PAUSED_FULL_BYTES`] (RGBA16F), or not at
+        // all: a share of the way gives neither the delivered pixel grid nor
+        // the drawable's (an 8K composition in a 4K drawable draws at the
+        // drawable's size). A side one pixel longer bounds the rounding.
+        let side = |v: u32| (f64::from(v) * scale).round() + 1.;
+        if side(output.width) * side(output.height) * 8. <= PAUSED_FULL_BYTES as f64 {
+            scale
+        } else {
+            1.
+        }
     }
     fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
@@ -656,7 +671,7 @@ impl Engine {
             found
         } else {
             let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-            let capacity = ((128 * 1024 * 1024 / bytes).clamp(1, 8)) as usize;
+            let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
             while self.cache.len() >= capacity {
                 self.cache.pop_front();
             }

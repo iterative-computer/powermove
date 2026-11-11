@@ -336,6 +336,9 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    /// When the oldest pending command was sent (host s), for the
+    /// diagnostic trace's command-to-frame latency.
+    commands_sent: Option<f64>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -383,6 +386,7 @@ impl View {
             _ => {}
         }
         self.commands.push_back(cmd);
+        self.commands_sent.get_or_insert_with(trace::now);
         self.stamp.sequence += 1;
         self.dirty = true;
         Ok(())
@@ -413,6 +417,9 @@ struct Shared {
     disk: render_cache::DiskFrames,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test record: each drawn frame's stamp, time and scale, in order.
+    #[cfg(test)]
+    drawn: Mutex<Vec<(Stamp, Ticks, f64)>>,
     #[cfg(test)]
     lose_device: std::sync::atomic::AtomicBool,
     /// Test hook: the worker panics once, as a bug in a frame would.
@@ -885,6 +892,8 @@ impl EngineService {
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
+            drawn: Mutex::new(Vec::new()),
+            #[cfg(test)]
             lose_device: Default::default(),
             #[cfg(test)]
             panic_once: Default::default(),
@@ -1006,6 +1015,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                commands_sent: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1074,6 +1084,15 @@ struct Runtime {
     /// A dragged frame was drawn below full resolution: draw it exact once
     /// the playhead has stayed put until then (host s).
     refine_at: Option<f64>,
+    /// A paused picture drawn at the drawable's size that still owes its
+    /// composition-size refinement ([`FrameSpec::paused_full_scale`]).
+    full_owed: Option<Stamp>,
+    /// The fast picture was submitted: its refinement is drawn next, unless
+    /// something newer is asked for first.
+    full_due: bool,
+    /// The picture the refinement is drawn for; any newer one (a seek, an
+    /// edit, play) is drawn fast again.
+    full_for: Option<Stamp>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1742,6 +1761,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     scrub: false,
                     stand_in: None,
                     refine_at: None,
+                    full_owed: None,
+                    full_due: false,
+                    full_for: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -1770,7 +1792,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             // Audio starts are placed on this viewer's last known vsync line.
             r.transport.grid = r.grid.filter(|_| !legacy);
+            if let Some(sent) = v.commands_sent.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "commands": v.commands.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
+                    "sent": sent, "drained": now, "viewer_id": id,
+                }));
+            }
             while let Some(cmd) = v.commands.pop_front() {
+                // Any command (a seek, play) drops a pending refinement.
+                (r.full_owed, r.full_due, r.full_for) = (None, false, None);
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
                     r.refine_at = None;
@@ -1784,6 +1816,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A skim draws on the drag path; leaving returns exact.
                 r.scrub = v.skim.is_some();
                 r.refine_at = None;
+                (r.full_owed, r.full_due, r.full_for) = (None, false, None);
                 let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
                     (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
                 });
@@ -1865,6 +1898,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.stamp.sequence += 1;
                 v.dirty = true;
             }
+            // The paused picture landed at the drawable's size: draw it again
+            // at the composition's size, a new picture of the same time.
+            if !r.transport.running() && std::mem::take(&mut r.full_due) {
+                v.stamp.sequence += 1;
+                v.dirty = true;
+                r.full_for = Some(v.stamp);
+            }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
             }
@@ -1934,6 +1974,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             let budget = frame.max(interval);
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
+            let refining = r.full_for == Some(v.stamp);
             work = Some(Work {
                 id,
                 stamp: v.stamp,
@@ -1959,11 +2000,20 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 },
                             )
                         };
-                        // A paused (or captured) frame at Full renders at the
-                        // composition's size; playing and dragged frames keep
-                        // their policy.
-                        if scale == 1. && (capture || moment == Moment::Paused) {
-                            full
+                        // A paused frame at Full is drawn at the drawable's size
+                        // at once, then refined at the composition's size (a
+                        // capture reads the refined picture directly); playing
+                        // and dragged frames keep their policy.
+                        // (A play waiting for its audio start draws as it is.)
+                        if scale == 1.
+                            && (capture || (moment == Moment::Paused && !r.transport.running()))
+                        {
+                            if capture || refining || full <= 1. {
+                                full
+                            } else {
+                                r.full_owed = Some(v.stamp);
+                                1.
+                            }
                         } else {
                             scale
                         }
@@ -2128,6 +2178,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 match result {
                     Ok(Some(mut s)) => {
+                        #[cfg(test)]
+                        shared
+                            .drawn
+                            .lock()
+                            .unwrap()
+                            .push((stamp, spec.time, spec.scale));
                         v.status.error = None;
                         let late_layers = s.compat_late.len();
                         // A scrubbed frame's late override layers are asked
@@ -2157,6 +2213,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             // rests, the same time is drawn again exact.
                             if spec.moment == Moment::Scrub {
                                 r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
+                            if r.full_owed == Some(stamp) {
+                                r.full_owed = None;
+                                r.full_due = true;
                             }
                             if capture {
                                 r.capture_waiting = None;
@@ -3002,6 +3062,84 @@ mod worker_tests {
         assert_eq!(status.effective_quality, 1., "Full");
     }
 
+    /// A paused frame shows at once at the drawable's size, then a refined
+    /// picture of the same time at the composition's; a seek starts over,
+    /// and playback never waits for (or draws) a refinement.
+    #[test]
+    fn a_paused_frame_is_shown_at_once_then_refined_and_play_skips_the_refinement() {
+        use pm_protocol::clock::SeekMode;
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("paused-refine-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let drawn = || service.shared.drawn.lock().unwrap().clone();
+        // The frames drawn of `time` from `from` on: their scales in order.
+        let scales = |from: usize, time: Ticks| -> Vec<f64> {
+            drawn()[from..]
+                .iter()
+                .filter(|(_, t, _)| *t == time)
+                .map(|(_, _, scale)| *scale)
+                .collect()
+        };
+        let refined = |from: usize, time: Ticks| {
+            wait_for(&v, "the refinement", |_| scales(from, time).contains(&4.));
+            scales(from, time)
+        };
+        let first = wait_for(&v, "a first frame", |s| s.frame.is_some())
+            .frame
+            .unwrap()
+            .time;
+        assert_eq!(refined(0, first)[..2], [1., 4.], "at once, then refined");
+        let (fast, fine) = {
+            let d = drawn();
+            let fast = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 1.)
+                .unwrap()
+                .0;
+            let fine = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 4.)
+                .unwrap()
+                .0;
+            (fast, fine)
+        };
+        assert!(
+            fine.sequence > fast.sequence,
+            "a new picture of the same time"
+        );
+        // A seek: the fast picture of the new time, then its refinement.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        assert_eq!(refined(from, seconds(1.))[..2], [1., 4.]);
+        // Play right after a pause's fast picture: nothing more is drawn at
+        // the composition's size while the transport runs.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(0.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            drawn()[from..].iter().all(|(_, _, scale)| *scale <= 1.),
+            "{:?}",
+            &drawn()[from..]
+        );
+    }
+
     /// A crop that is the whole canvas (Fit, whose window the shell can round
     /// a pixel narrower than its canvas) renders at the composition's size
     /// like no crop; a zoomed-in window keeps its scale.
@@ -3057,8 +3195,52 @@ mod worker_tests {
         assert_eq!(FrameSpec::paused_full_scale(&scene, &output(zoomed)), 1.);
     }
 
+    /// The composition-size surface is admitted whole within a byte budget,
+    /// or not at all: an 8K composition in a 4K or 1440p drawable draws at
+    /// the drawable's size, a UHD one in a 1080p drawable at its own.
+    #[test]
+    fn paused_supersampling_fits_a_byte_budget() {
+        let scene = |w: u32, h: u32| {
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            (project["w"], project["h"]) = (w.into(), h.into());
+            let doc = pm_model::json::parse(&project.to_string()).unwrap();
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(doc)),
+                    1,
+                )),
+                comp: "Pshapes-primitives-root".into(),
+                media: Default::default(),
+                content: 0,
+            }
+        };
+        let output = |width, height| Output {
+            width,
+            height,
+            display: 1,
+            headroom: 1.,
+            crop: None,
+        };
+        let fill =
+            |w: u32, h: u32| FrameSpec::paused_full_scale(&scene(w, h), &output(w / 2, h / 2));
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(3840, 2160)),
+            1.
+        );
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(2560, 1440)),
+            1.
+        );
+        assert_eq!(fill(3840, 2160), 2.);
+        let bytes = 3841. * 2161. * 8.;
+        assert!(bytes <= render::PAUSED_FULL_BYTES as f64);
+    }
+
     /// A capture taken during a reduced drag (explicit Half quality, a
-    /// scrub) reads an exact frame: paused, full resolution, final resampler.
+    /// scrub) reads an exact frame: paused, at least full resolution (the
+    /// composition's size, as an export), final resampler. (Other tests'
+    /// captures share the record.)
     #[test]
     fn a_capture_during_a_reduced_drag_reads_the_exact_frame() {
         use pm_render::sampling::Sampling;
@@ -3092,7 +3274,9 @@ mod worker_tests {
         assert!(
             captured()
                 .iter()
-                .all(|c| *c == (Moment::Paused, 1., Sampling::Final)),
+                .all(|&(moment, scale, sampling)| moment == Moment::Paused
+                    && scale >= 1.
+                    && sampling == Sampling::Final),
             "{:?}",
             captured()
         );
