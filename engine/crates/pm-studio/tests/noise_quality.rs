@@ -91,11 +91,25 @@ fn teapot_glass_and_chrome_production_and_final_have_bounded_noise_and_blotches(
     let mut renderer = Renderer::new(w, h).unwrap();
     let denoiser = Denoiser::new().unwrap();
     let mut failures = vec![];
-    for name in ["teapot", "glass", "chrome"] {
-        let scene = scenes::product(name);
+    for name in ["teapot", "glass", "chrome", "chrome-set"] {
+        let scene = if name == "chrome-set" {
+            // The owner's product stress set includes glass, lacquer and the
+            // shadow catcher; a chrome sphere alone misses those caustics.
+            pm_studio::scene::preset("chrome", "starlight", 0.).unwrap()
+        } else {
+            scenes::product(name)
+        };
         scene.validate().unwrap();
-        renderer.set_scene(&scene, &scene.prepare());
-        renderer.set_void(None);
+        // A camera seed alone does not change the fixed precomputed photon
+        // map. Rotate the physically identical emitters so each emitter uses
+        // a disjoint set of photon IDs in the reference. Otherwise shared
+        // baked caustic grain can incorrectly score as zero error.
+        let mut reference_scene = scene.clone();
+        assert!(reference_scene.lights.len() > 1);
+        reference_scene.lights.rotate_left(1);
+        renderer.set_scene(&reference_scene, &reference_scene.prepare());
+        let backdrop = (name == "chrome-set").then(|| scene.backdrop.to_array());
+        renderer.set_void(backdrop);
         renderer.set_precomputed_caustics(true);
         renderer.set_adaptive_sampling(AdaptiveSampling {
             enabled: false,
@@ -105,6 +119,8 @@ fn teapot_glass_and_chrome_production_and_final_have_bounded_noise_and_blotches(
         renderer.trace(4096, 8, true, 0);
         let reference = renderer.finish(0).0;
         save(&format!("{name}-reference4096"), w, h, &reference);
+        renderer.set_scene(&scene, &scene.prepare());
+        renderer.set_void(backdrop);
         for (quality, max_samples, min_samples, threshold) in
             [("production", 256, 32, 0.03), ("final", 1024, 512, 0.015)]
         {

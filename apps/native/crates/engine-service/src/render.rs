@@ -466,6 +466,21 @@ impl Engine {
     pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
         self.studio_view = camera;
     }
+    pub(crate) fn estimate_studio_export(
+        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64,
+        progress: &dyn Fn(usize) -> bool,
+    ) -> Result<crate::ExportEstimate> {
+        #[cfg(feature = "kernel")]
+        {
+            self.sync_studio(scene, time)?;
+            crate::export_estimate::calibrate(
+                self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,
+                self.renderer.definitions(), self.fonts.as_ref(), progress,
+            ).map_err(anyhow::Error::msg)
+        }
+        #[cfg(not(feature = "kernel"))]
+        { let _ = (scene, time, size, frames, progress); anyhow::bail!("Studio estimates need the native document adapter") }
+    }
     pub(crate) fn pick_surface(
         &mut self,
         scene: &Scene,
