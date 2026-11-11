@@ -52,7 +52,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 | glTF/GLB (including mesh instances), OBJ import | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | Embedded glTF animation/skinning | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | glTF source material names/indexes, vertex colors and six standard texture slots | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
-| Extended glTF sampling, texture transforms and physical-material maps | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
+| Extended glTF sampling, texture transforms and physical-material maps | Native 18-slot/UV/transform bindings checked; broader format parity pending | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | Imported parts tree, picking and selection | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | Part position/rotation/scale/visibility offsets | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Parent/group transforms, anchors, opacity and solo | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -741,3 +741,29 @@ build counts across source replacement. Distinct/malformed attribute bindings
 are checked separately. Existing full-viewport World/HDRI, transparent empty
 scatter, reflections, splats and windowless export checks remain green.
 The next material step is binding the shared shader's extended physical maps.
+
+### Extended imported physical maps
+
+The native adapter now packs the shared 24-scalar / 18-map contract: Base Color,
+Emissive, separate Roughness/Metalness, Normal, AO, coat amount/roughness/normal,
+transmission, thickness, specular intensity/color, sheen color/roughness,
+iridescence amount/thickness and anisotropy. Each slot keeps its own UV0/UV1,
+transform and repeat/clamp/mirror modes. Two glTF samplers referencing one image
+share one GPU image layer. Sixteen decoded images (64 MiB at the fixed 1024²
+map size) are retained by immutable resource/image identity across snapshots.
+
+Specular/sheen colors, attenuation color/distance, thickness, anisotropy rotation,
+film IOR/ranges, normal/coat scales, AO strength, dispersion and alpha cutoff now
+reach the shared shader. Unlit and Accepts Lights=false materials use the base
+map for emission while retaining its alpha. Secondary and physical-map indices
+are checked against the actual image array before GPU work; UV sets above 1
+fail explicitly, matching the pinned engine limit.
+
+Checks: **2 physical packing unit**, **26 native scene/export** and **26 adapter**
+tests pass; the GPUI app builds. The retained GLB regression carries all 18 slots,
+two samplers/one image, UV1 with a nonidentity transform, physical optical values
+and alpha cutoff through to a rendered frame. Unit checks cover every slot,
+missing-map sentinels, unlit map selection and unsupported UV sets. These checks
+do not establish every glTF extension/asset combination or minification-filter
+parity. Authored image maps and live layer/group material capture remain separate
+adapters, followed by sparse intrinsic/material/part overrides.

@@ -573,7 +573,12 @@ fn validate(input: &SceneInput, e: &Extracted) -> Result<(), String> {
         {
             return Err("non-finite Studio material".into());
         }
-        for &index in &m.maps {
+        for index in m.maps.iter().chain(m.maps2[..3].iter()).copied().chain(
+            m.physical_maps
+                .iter()
+                .filter(|_| m.imported[5][3] > 0.5)
+                .map(|map| map.info[0]),
+        ) {
             if index != -1.
                 && (index < 0.
                     || index.fract() != 0.
@@ -629,6 +634,29 @@ mod tests {
         assert!(validate(&input, &extracted).is_err());
         input.view.basis = Some([v3(0., -1., 0.), v3(1., 0., 0.), v3(0., 0., 1.)]);
         assert!(validate(&input, &extracted).is_ok());
+    }
+    #[test]
+    fn secondary_and_physical_maps_cannot_reference_missing_images() {
+        let input = SceneInput {
+            scene: crate::swatch::scene(Material::dielectric(Vec3::splat(0.5), 0.5)),
+            instances: vec![],
+            materials: None,
+            maps: None,
+            view: View::default(),
+        };
+        let mut extracted = Extractor::default().extract(&input).unwrap();
+        extracted.prepared.materials[0].maps2[2] = 0.;
+        assert!(validate(&input, &extracted).is_err());
+        extracted.prepared.materials[0].maps2[2] = -1.;
+        let m = &mut extracted.prepared.materials[0];
+        m.imported[5][3] = 1.;
+        m.imported[3][2] = 1.38;
+        for map in &mut m.physical_maps {
+            map.info[0] = -1.;
+        }
+        assert!(validate(&input, &extracted).is_ok());
+        extracted.prepared.materials[0].physical_maps[17].info[0] = 0.;
+        assert!(validate(&input, &extracted).is_err());
     }
 }
 

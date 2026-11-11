@@ -1630,3 +1630,110 @@ fn imported_secondary_uvs_vertex_alpha_and_snapshot_geometry_identity_survive() 
             > 100
     );
 }
+
+fn physical_map_glb() -> Vec<u8> {
+    let original = vertex_attribute_glb();
+    let json_len = u32::from_le_bytes(original[12..16].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&original[20..20 + json_len]).unwrap();
+    let mut bin = original[28 + json_len..].to_vec();
+    let image = include_bytes!("../../../../../engine/fixtures/still-red.png");
+    let image_view = header["bufferViews"].as_array().unwrap().len();
+    header["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer":0,"byteOffset":bin.len(),"byteLength":image.len()}));
+    bin.extend(image);
+    header["buffers"][0]["byteLength"] = json!(bin.len());
+    header["images"] = json!([{"bufferView":image_view,"mimeType":"image/png"}]);
+    header["samplers"] = json!([{"wrapS":33071,"wrapT":33648},{"wrapS":10497,"wrapT":10497}]);
+    header["textures"] = json!([{"source":0,"sampler":0},{"source":0,"sampler":1}]);
+    let texture = json!({"index":0});
+    header["materials"] = json!([{"doubleSided":true,"alphaMode":"MASK","alphaCutoff":0.3,"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0.2,"roughnessFactor":0.4,"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"offset":[0.125,0.375],"scale":[2,3],"texCoord":1}}},"metallicRoughnessTexture":{"index":1}},"normalTexture":{"index":0,"scale":0.7},"occlusionTexture":{"index":0,"strength":0.8},"emissiveFactor":[1,0,0],"emissiveTexture":texture,"extensions":{"KHR_materials_clearcoat":{"clearcoatFactor":0.2,"clearcoatRoughnessFactor":0.3,"clearcoatTexture":texture,"clearcoatRoughnessTexture":texture,"clearcoatNormalTexture":texture},"KHR_materials_transmission":{"transmissionFactor":0.4,"transmissionTexture":texture},"KHR_materials_volume":{"thicknessFactor":0.2,"thicknessTexture":texture,"attenuationDistance":2,"attenuationColor":[0.3,0.5,0.7]},"KHR_materials_specular":{"specularFactor":0.6,"specularColorFactor":[0.7,0.8,0.9],"specularTexture":texture,"specularColorTexture":texture},"KHR_materials_sheen":{"sheenColorFactor":[0.1,0.2,0.3],"sheenRoughnessFactor":0.5,"sheenColorTexture":texture,"sheenRoughnessTexture":texture},"KHR_materials_iridescence":{"iridescenceFactor":0.6,"iridescenceIor":1.4,"iridescenceThicknessMinimum":120,"iridescenceThicknessMaximum":450,"iridescenceTexture":texture,"iridescenceThicknessTexture":texture},"KHR_materials_anisotropy":{"anisotropyStrength":0.2,"anisotropyRotation":0.3,"anisotropyTexture":texture},"KHR_materials_dispersion":{"dispersion":0.4}}}]);
+    header["extensionsUsed"] = json!([
+        "KHR_texture_transform",
+        "KHR_materials_clearcoat",
+        "KHR_materials_transmission",
+        "KHR_materials_volume",
+        "KHR_materials_specular",
+        "KHR_materials_sheen",
+        "KHR_materials_iridescence",
+        "KHR_materials_anisotropy",
+        "KHR_materials_dispersion"
+    ]);
+    let mut encoded = serde_json::to_vec(&header).unwrap();
+    while !encoded.len().is_multiple_of(4) {
+        encoded.push(b' ');
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let mut out = vec![];
+    for word in [
+        0x46546c67u32,
+        2,
+        (12 + 8 + encoded.len() + 8 + bin.len()) as u32,
+        encoded.len() as u32,
+        0x4e4f534a,
+    ] {
+        out.extend(word.to_le_bytes());
+    }
+    out.extend(encoded);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(0x004e4942u32.to_le_bytes());
+    out.extend(bin);
+    out
+}
+#[test]
+fn imported_physical_maps_keep_uv_sampling_optics_and_shared_pixels() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("physical.bin");
+    std::fs::write(&path, physical_map_glb()).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let doc = imported_document();
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let scene_request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let input = source.scene(&scene_request).unwrap();
+    assert_eq!(
+        input.maps.as_ref().unwrap().layers.len(),
+        1,
+        "two samplers share one image layer"
+    );
+    let m = &input.materials.as_ref().unwrap()[input.instances[0].material];
+    assert!(m.physical_maps.iter().all(|map| map.info[0] == 0.));
+    assert_eq!(m.physical_maps[0].info, [0., 1., 1., 2.]);
+    assert_eq!(m.physical_maps[0].u, [2., 0., 0.125, 0.]);
+    assert_eq!(m.physical_maps[0].v, [0., 3., 0.375, 0.]);
+    assert_eq!(m.physical_maps[2].info, [0., 0., 0., 0.]);
+    assert_eq!(m.imported[2], [0.3, 0.5, 0.7, 2.]);
+    assert_eq!(m.imported[3], [0.2, 0.3, 1.4, 120.]);
+    assert_eq!(m.layers[2], 0.4);
+    assert_eq!(m.extra[3], 0.2);
+    assert_eq!(m.policy[2], 0.3);
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[0] > 0. && p[3] > 0.)
+    );
+}

@@ -78,6 +78,7 @@ pub(super) fn apply(
                 gpu.emit[..3].copy_from_slice(&gpu.base[..3]);
                 // Keep base alpha sampling as well as unlit color emission.
                 gpu.maps[1] = gpu.maps[0];
+                gpu.physical_maps[1] = gpu.physical_maps[0];
             }
             gpu.policy[1] = flags as f32;
             let index = materials.len();

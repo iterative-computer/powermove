@@ -17,6 +17,8 @@ use std::{
 mod environment;
 #[path = "geometry.rs"]
 mod geometry;
+#[path = "imported.rs"]
+mod imported;
 #[path = "material_policy.rs"]
 mod material_policy;
 #[path = "scatter.rs"]
@@ -530,42 +532,32 @@ impl SceneSource for DocumentSource {
                     gpu.extra[2] =
                         source_material.map_or(n(p, "opacity", 1.), |m| m.opacity as f32);
                     if let Some(material) = source_material {
-                        if material.kind == pm_scene3d::render::gltf::MaterialType::Basic {
-                            gpu.policy[1] = (gpu.policy[1] as u32 | 8) as f32;
-                        }
-                        if !material.double_sided {
-                            gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
-                        }
-                        for (slot, map) in [
-                            material.map.as_ref(),
-                            material.emissive_map.as_ref(),
-                            material
-                                .roughness_map
-                                .as_ref()
-                                .or(material.metalness_map.as_ref()),
-                            material.normal_map.as_ref(),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            if let Some(map) = map {
-                                let key = (resource.key.clone(), map.texture);
-                                let index = if let Some(index) = map_indices.get(&key) {
-                                    *index
-                                } else {
-                                    if map_layers.len() >= 256 {
-                                        return Err("Studio map array exceeds 256 layers".into());
-                                    }
-                                    let index = map_layers.len();
-                                    map_layers.push(
-                                        resource.texture(map.texture).map_err(|e| e.to_string())?,
-                                    );
-                                    map_indices.insert(key, index);
-                                    index
-                                };
-                                gpu.maps[slot] = index as f32;
-                            }
-                        }
+                        imported::pack(material, &mut gpu, |texture_index| {
+                            let pm_scene3d::import::Model::Gltf(model) = &resource.model else {
+                                return Err("Imported maps require a glTF resource".into());
+                            };
+                            let texture = model
+                                .textures
+                                .get(texture_index)
+                                .ok_or("Imported map texture is missing")?;
+                            // One image layer; each physical slot keeps its own sampler.
+                            let key = (resource.key.clone(), texture.image);
+                            let index = if let Some(index) = map_indices.get(&key) {
+                                *index
+                            } else {
+                                if map_layers.len() >= 256 {
+                                    return Err("Studio map array exceeds 256 layers".into());
+                                }
+                                let pixels = imported::image(&resource, texture_index)?;
+                                let index = map_layers.len();
+                                map_layers.push((*pixels).clone());
+                                map_indices.insert(key, index);
+                                index
+                            };
+                            Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
+                        })?;
+                    } else if object["material"]["doubleSided"] == false {
+                        gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
                     }
                     materials.push(gpu);
                     let mesh = self.cached_mesh(
@@ -803,6 +795,8 @@ fn imported_material(m: &pm_scene3d::render::gltf::Material) -> Material {
             ) * m.emissive_intensity as f32
         },
         sheen: m.sheen as f32,
+        dispersion: m.dispersion as f32,
+        anisotropy: m.anisotropy as f32,
         film_nm: if m.iridescence > 0. {
             m.iridescence_thickness_range[1] as f32
         } else {
