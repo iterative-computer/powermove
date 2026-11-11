@@ -724,7 +724,7 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && spec.moment != Moment::Paused;
+        let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
         let disk = looked
             .then(|| self.disk.as_ref()?.read(scene, time))
             .flatten()
@@ -806,8 +806,13 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 self.renderer.set_preview_media(!spec.exact);
                 self.renderer.set_draw_reuse(!spec.exact);
-                self.renderer.set_scrub(spec.moment == Moment::Scrub);
-                self.renderer.set_playback(spec.decode_deadline);
+                self.renderer
+                    .set_scrub(!spec.exact && spec.moment == Moment::Scrub);
+                self.renderer.set_playback(if spec.exact {
+                    None
+                } else {
+                    spec.decode_deadline
+                });
                 self.renderer.set_isolate_layers(true);
                 if let Some(store) = &self.compat_document {
                     store.begin_frame(spec.moment);

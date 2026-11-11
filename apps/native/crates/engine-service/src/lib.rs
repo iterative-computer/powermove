@@ -1916,7 +1916,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
                 comp: v.config.composition.clone(),
-                media: v.paths.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else {
+                    v.paths.clone()
+                },
                 content: v.content,
             };
             cursor = id;
