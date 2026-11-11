@@ -962,9 +962,12 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 - Until composition capture lands, Properties offers Screen compositions
   disabled ("Screens aren’t available in this version yet.") because
   choosing one stops the whole scene from drawing.
-- `edit_3d` from MCP/agents still writes the generic Undo name `Edit 3D
-  Layers`; UI edits carry specific names (`Add Pine Trees`, `Sky`,
-  `Finish: Gold`, `3D Quality: Final`).
+- Set Up Studio (`auto_studio`) adds the softboxes and camera, but the
+  seamless set draws as a black void in the native renderer.
+- Agents' `edit_3d` without a label is now named for the operation
+  (`Add Softbox`, `Sky`, `Add Terrain`, `Set Up Studio`…); UI edits carry
+  specific names (`Add Pine Trees`, `Import Bottle.obj`, `Finish: Gold`,
+  `3D Quality: Final`, `Add Shot: Push-In`).
 
 ### Still open for the designer
 
@@ -972,8 +975,10 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   navigation tools, Frame), gizmos (§5), the Light tool panel (§6) and the
   status capsule (§3: Refining · n %, Clean). These need picking, projected
   gizmo geometry and worker refine progress. Per §3, Live is never shown.
-- Import 3D Model…: needs the NSOpenPanel → `import::prepare` worker →
-  `Scene3dCommand::Import` route in the app.
+- Import 3D Model… is built on the media import worker (glTF, GLB, OBJ,
+  FBX) and adds model layers at the origin. The spec's floor drop and studio
+  set on import need the `import::prepare` → `Scene3dCommand::Import` route
+  (scene import archive) in the app.
 - Text/shape extrusion (Front/Bevel/Side/Back), layers and groups as material
   sources, 1/2/4 views and per-layer error rows have no native document data
   or commands yet (extrusion schema, live source capture and multiple views
