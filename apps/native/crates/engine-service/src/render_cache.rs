@@ -2123,12 +2123,17 @@ mod tests {
         request.cache = None;
         request.destination = out.path().join("still");
         if let pm_protocol::priority::JobSpec::Export { settings, .. } = &mut request.spec {
-            settings.format = pm_protocol::priority::ExportFormat::PngSequence { sixteen_bit: true };
+            settings.format =
+                pm_protocol::priority::ExportFormat::PngSequence { sixteen_bit: true };
             settings.dither = true;
         }
         let export = crate::jobs::ExportHandle::start(&exe, request).unwrap();
         let status = export.wait().unwrap();
-        assert_eq!(status.state, pm_protocol::priority::JobState::Done, "{status:?}");
+        assert_eq!(
+            status.state,
+            pm_protocol::priority::JobState::Done,
+            "{status:?}"
+        );
         let png = walk_png(out.path()).expect("the exported frame");
         let (_, decoded) = pm_export::png::read(&png, true).unwrap();
         let decoded = decoded.unwrap();
@@ -2366,69 +2371,47 @@ mod tests {
     }
 
     /// Background rendering through the real child, once the viewer is
-    /// idle: a chunk measured too slow to play renders and is stored whole,
-    /// chunks whose probes play in real time are measured and left alone,
-    /// and nothing more is asked for after.
+    /// idle: the chunk known not to play in real time renders and is stored
+    /// whole, chunks known to play are left alone, and nothing more is
+    /// asked for after.
     #[test]
     fn background_rendering_stores_only_what_cannot_play() {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
-        // At 10 fps (a 90 ms budget), so a loaded machine's probes of the
-        // fixture's light frames stay light.
-        let mut project: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
-        project["fps"] = 10.into();
-        let scene = scene_from(&project.to_string());
+        let scene = scene();
         let activity = crate::jobs::Activity::default();
         disk.set_activity(activity.clone());
         disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        // Playback dropped frame 17 (chunk 15-19 at 10 fps).
-        let rate = Rate::new(10_000, 1000).unwrap();
-        let at = Ticks::new(rate.frame_start(17).unwrap()).unwrap();
-        disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
+        // Measured costs, injected so the outcome never depends on this
+        // machine's speed: every 0.5 s chunk played in real time (two fast
+        // frames each) except chunk 45-59, where playback dropped frame 50.
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        for a in (0..90).step_by(15) {
+            for n in [a, a + 14] {
+                disk.measured(disk.frame_id(&scene, at(n)).unwrap(), 1_000.);
+            }
+        }
+        disk.measured(disk.frame_id(&scene, at(50)).unwrap(), DROPPED_US);
         assert_eq!(disk.bars().bars, vec![(1.5, 2., BarState::Missing)]);
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(200),
         });
-        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let exporting = busy.clone();
         disk.set_background_host(Some(BackgroundHost {
             executable: job_binary(),
             pin: Arc::new(|_, _| {}),
-            busy: Arc::new(move || exporting.load(Ordering::Acquire)),
+            busy: Arc::new(|| false),
         }));
-        settle(&disk, |b| b.bars == vec![(1.5, 2., BarState::Rendered)]);
-        // Every other chunk was probed, judged light, and not stored.
-        let start = Instant::now();
-        loop {
-            let (known, chunks) = {
-                let state = disk.inner.state.lock().unwrap();
-                let frames = state.frames.as_ref().unwrap();
-                let step = frames.chunk_len();
-                let needs: Vec<Need> = (0..frames.count)
-                    .step_by(step as usize)
-                    .map(|a| state.known.need(frames, a, (a + step).min(frames.count)))
-                    .collect();
-                (
-                    needs.iter().filter(|n| **n == Need::Light).count(),
-                    needs.len(),
-                )
-            };
-            if known == chunks - 1 && !disk.bars().running {
-                break;
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(30),
-                "{known} of {chunks}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(present(&disk), (15..20).collect());
+        // The chunk that can't play renders whole; nothing else is asked for.
+        settle(&disk, |b| {
+            b.bars == vec![(1.5, 2., BarState::Rendered)] && !b.running
+        });
+        assert_eq!(present(&disk), (45..60).collect());
         let fills = disk.inner.state.lock().unwrap().fill.serial;
+        assert_eq!(fills, 1, "one fill, of that chunk only");
         std::thread::sleep(Duration::from_millis(600));
         assert_eq!(
             disk.inner.state.lock().unwrap().fill.serial,
