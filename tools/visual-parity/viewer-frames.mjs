@@ -68,20 +68,20 @@ for (const s of v1.samples) {
   // Settled: Auto has replaced its reduced first picture with the exact one
   // (the quality menu reads "currently Full") and two window screenshots
   // 1.5 s apart match (video decode and extension rasters take seconds), at
-  // most 60 s.
+  // most 90 s.
   // The last sample's picture can stay up, already exact and still, while
-  // the new frame decodes: a picture equal to it counts only after 20 s.
+  // the new frame decodes: a picture equal to it counts only after 60 s.
   const file = `${timeName(s.time)}.png`;
   let previous = null;
   const started = Date.now();
-  for (const deadline = Date.now() + 60_000; ;) {
+  for (const deadline = Date.now() + 90_000; ;) {
     await sleep(1500);
     const quality = call('get_window_state', { include_screenshot: false, query: 'Preview resolution' }).tree_markdown;
     if (/currently (?!Full)/.test(quality) && Date.now() < deadline) continue;
     call('get_window_state', { include_accessibility_tree: false, max_image_dimension: 0, screenshot_out_file: shot });
     execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', shot, '-vf', `crop=${w}:${h}:${x}:${y}`, path.join(out, file)]);
     const bytes = readFileSync(path.join(out, file));
-    const stale = before?.equals(bytes) && Date.now() - started < 20_000;
+    const stale = before?.equals(bytes) && Date.now() - started < 60_000;
     if ((previous && previous.equals(bytes) && !stale) || Date.now() > deadline) break;
     previous = bytes;
   }
