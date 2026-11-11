@@ -74,6 +74,8 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod media_sequence;
+#[cfg(debug_assertions)]
+mod memory_review;
 mod migration_report;
 mod mixer_panel;
 mod notes_panel;
@@ -379,6 +381,8 @@ fn main() -> Result<()> {
                 })
                 .detach();
                 playback::install(&entity, cx);
+                #[cfg(debug_assertions)]
+                memory_review::install(&entity, service.clone(), cx);
                 let opening = entry::take_for_new_window(cx)
                     .or_else(|| launch.take().map(entry::Pending::File));
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
