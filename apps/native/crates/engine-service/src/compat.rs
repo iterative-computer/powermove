@@ -243,8 +243,6 @@ struct Answers {
     queued: Vec<CompatNeed>,
     /// Measured realm time per need (round trip of a batch over its size).
     per_need: Option<Duration>,
-    /// The revision before an edit, for stand-ins only.
-    previous: Option<Previous>,
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
     horizon: Option<i64>,
@@ -330,36 +328,16 @@ impl Drop for Wakes {
         self.0.changed.notify_all();
     }
 }
-struct Previous {
-    map: HashMap<NeedKey, CompatAnswer>,
-    by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
-}
-/// The nearest answered frame of a layer in one revision's answers.
-fn nearest<'a>(
-    map: &'a HashMap<NeedKey, CompatAnswer>,
-    by_layer: &HashMap<(String, String), BTreeMap<i64, NeedKey>>,
-    composition: &str,
-    layer: &str,
-    ticks: i64,
-) -> Option<&'a CompatAnswer> {
-    let times = by_layer.get(&(composition.to_owned(), layer.to_owned()))?;
-    let before = times.range(..=ticks).next_back();
-    let after = times.range(ticks..).next();
-    let key = match (before, after) {
-        (Some(b), Some(a)) if ticks - b.0 <= a.0 - ticks => b.1,
-        (Some(_), Some(a)) => a.1,
-        (Some((_, k)), None) | (None, Some((_, k))) => k,
-        (None, None) => return None,
-    };
-    map.get(key)
-}
 impl Answers {
-    /// The nearest answered frame of a late layer, this revision's first.
+    /// A late layer's stand-in: its nearest answered frame at or before
+    /// `ticks`, in this revision only (a later frame is content not reached
+    /// yet; an earlier revision's is content the edit may have changed).
     fn nearest(&self, composition: &str, layer: &str, ticks: i64) -> Option<&CompatAnswer> {
-        nearest(&self.map, &self.by_layer, composition, layer, ticks).or_else(|| {
-            let p = self.previous.as_ref()?;
-            nearest(&p.map, &p.by_layer, composition, layer, ticks)
-        })
+        let times = self
+            .by_layer
+            .get(&(composition.to_owned(), layer.to_owned()))?;
+        let (_, key) = times.range(..=ticks).next_back()?;
+        self.map.get(key)
     }
     fn forget(&mut self, key: &NeedKey) {
         self.map.remove(key);
@@ -467,14 +445,9 @@ impl CompatStore {
     pub fn set_state(&self, producing: bool, revision: u64, epoch: u64) {
         let mut answers = self.answers.lock().unwrap();
         if answers.revision != revision || answers.epoch != epoch {
+            // An edit or new wrappers: no earlier answer stands in, so a
+            // frame never shows content the edit changed.
             let old = std::mem::take(&mut *answers);
-            // An edit keeps the last revision's answers as stand-ins for
-            // playing and scrubbed frames until its own land; new wrappers
-            // don't.
-            let previous = (old.epoch == epoch).then_some(Previous {
-                map: old.map,
-                by_layer: old.by_layer,
-            });
             *answers = Answers {
                 revision,
                 epoch,
@@ -483,7 +456,6 @@ impl CompatStore {
                 stood_in: old.stood_in,
                 per_need: old.per_need,
                 layers: old.layers,
-                previous,
                 ..Answers::default()
             };
         }
@@ -1064,13 +1036,18 @@ mod tests {
         store.begin_frame(Moment::Paused);
         assert!(matches!(answer_at(&store, "x", 1.4), CompatAnswer::Missing));
         assert!(store.end_frame().is_empty());
-        // Playing and scrubbed frames draw the nearest answered frame and say so.
+        // Playing and scrubbed frames draw the nearest earlier answered frame
+        // and say so: never one the playhead hasn't reached.
         store.begin_frame(Moment::Playing);
         assert_eq!(byte_of(answer_at(&store, "x", 1.4)), Some(10));
-        assert_eq!(byte_of(answer_at(&store, "x", 1.6)), Some(20));
+        assert_eq!(byte_of(answer_at(&store, "x", 1.9)), Some(10));
         assert_eq!(byte_of(answer_at(&store, "x", 2.0)), Some(20));
         let late = store.end_frame();
         assert_eq!(late.len(), 2, "the exact frame is not late");
+        // Before its first answer there is nothing earlier: the frame holds.
+        store.begin_frame(Moment::Playing);
+        assert!(matches!(answer_at(&store, "x", 0.5), CompatAnswer::Missing));
+        store.end_frame();
         // A layer never answered is never left out: playing and scrubbing
         // hold the picture until it is answered.
         store.begin_frame(Moment::Playing);
@@ -1106,15 +1083,20 @@ mod tests {
             CompatAnswer::Failed(_)
         ));
         store.end_frame();
-        // An edit keeps the last revision's answers as stand-ins only.
+        // After an edit no earlier revision's answer stands in, playing or
+        // paused: the frame holds until this revision's answer lands.
         store.set_state(true, 8, 1);
         store.begin_frame(Moment::Paused);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
         store.end_frame();
         store.begin_frame(Moment::Playing);
-        assert_eq!(byte_of(answer_at(&store, "x", 1.)), Some(10));
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
         store.end_frame();
-        // New wrappers don't.
+        store.answer_all(8, 1, vec![(at("x", 1.), draw(30))]);
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(answer_at(&store, "x", 1.5)), Some(30));
+        store.end_frame();
+        // New wrappers neither.
         store.set_state(true, 8, 2);
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
