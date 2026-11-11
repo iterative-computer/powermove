@@ -1415,6 +1415,12 @@ impl Renderer {
         self.effects.bypass_missing = on;
     }
 
+    /// Whether failing layers are left out of the frame
+    /// ([`Renderer::set_isolate_layers`]).
+    pub fn isolates_layers(&self) -> bool {
+        self.isolate_layers
+    }
+
     /// Draws a layer without an effect whose provider isn't installed
     /// instead of refusing it (a look at the project, not a delivery).
     pub fn set_bypass_missing_effects(&mut self, on: bool) {

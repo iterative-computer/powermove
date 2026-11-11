@@ -1163,7 +1163,13 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
 /// transitions, and extension layers, and its fonts its text.
 pub fn plan_export_for(job: &ExportJob, renderer: &Renderer) -> Result<ExportPlan, JobError> {
     plan_export_checked(job, &|doc, composition, media| {
-        renderer.unsupported_with_media(doc, composition, media)
+        let mut list = renderer.unsupported_with_media(doc, composition, media);
+        // A renderer that leaves failing layers out (a look at the project,
+        // as the viewer: an agent's still) draws the rest of the frame.
+        if renderer.isolates_layers() {
+            list.retain(|u| u.layer.is_none());
+        }
+        list
     })
 }
 
@@ -1463,6 +1469,7 @@ fn export_frames<S: Sink + Send>(
 where
     S::Output: Send,
 {
+    let isolated = renderer.isolates_layers();
     let ExportPlan {
         spec,
         timeline,
@@ -1640,6 +1647,10 @@ where
         // it, to the encoder in order. False: the encoder is gone.
         let deliver = |n: u64, read: Result<ReadFrame, JobError>| -> Result<bool, JobError> {
             let mut f = read?;
+            // A renderer that leaves failing layers out drew the rest.
+            if isolated {
+                f.failures.clear();
+            }
             // Offline clips render absent (their names go in the report).
             f.failures.retain(|failure| {
                 let asset = failure
