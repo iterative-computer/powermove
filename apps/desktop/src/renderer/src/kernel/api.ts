@@ -423,6 +423,8 @@ export interface Scene3DAPI {
   groupParts(layerId:string,keys:readonly string[],name?:string):EditResult;
   /** Ungroup a static controller while preserving member placement and animation. */
   ungroupParts(layerId:string,key:string):EditResult;
+  /** Move parts into an existing group, or back to their file level, retaining their current pose. */
+  moveParts(layerId:string,keys:readonly string[],group:string|null):EditResult;
   renamePartGroup(layerId:string,key:string,name:string):EditResult;
   onActivePartChange(listener:()=>void):Disposable;
   /** The part under a composition point (double-click: outer part first, then deeper). */

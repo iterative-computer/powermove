@@ -143,3 +143,42 @@ test('groups selected model parts, animates the group, renames and reopens it',a
   await expect(section.locator(`[data-part-key="${key}"]`)).toBeVisible();
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('drags a part into a collapsed existing group and back out without changing its placement',async({session},info)=>{
+  await session.openEditor();const {page}=session;
+  const setup=await page.evaluate(async(bytes:number[])=>{
+    const PM=(window as any).PM,api=PM.Kernel.api('part-drop-e2e').scene3d;PM.pause();PM.AutomaticPreview?.cancel?.();
+    PM.replaceProject(PM.mkProject({w:640,h:360,dur:3,fps:30}));api.edit({operation:'add_camera',camera:{p:{x:0,y:0,z:3.2}}});
+    const result=await PM.cmd('3d.import-obj',new File([new Uint8Array(bytes)],'Console.glb',{type:'model/gltf-binary'}));if(!result.ok)throw new Error(result.message);
+    const id=PM.proj.layers.find((layer:any)=>layer.d?.data?.object).id;PM.selectLayers([id]);
+    api.groupParts(id,['0_0','0_1'],'Body');const group=api.getActivePart(id);
+    api.setPart(id,group,{x:.2,rz:20,scale:130});api.setPart(id,'0_2',{y:.1});PM.invalidate();return {id,group};
+  },[...partsGlb()]);
+  const section=page.locator('[data-parts-section]'),source=section.locator('[data-part-key="0_2"]'),target=section.locator(`[data-part-key="${setup.group}"]`);
+  const state=()=>page.evaluate(({id,group})=>{
+    const PM=(window as any).PM,api=PM.Kernel.api('part-drop-e2e').scene3d;
+    return {parent:api.listParts(id).find((p:any)=>p.key==='0_2').parent,groups:api.listParts(id).filter((p:any)=>p.group).length,
+      history:PM.hist.list().length,pixels:[...PM.GL.renderToPixels(0,100,60,{transparent:true,mblur:false})]};
+  },setup);
+  const before=await state();
+  await target.getByRole('button',{name:'Collapse Body',exact:true}).click();
+  await expect(target).toHaveAttribute('aria-expanded','false');
+  await source.dragTo(target);
+  await expect.poll(async()=>(await state()).parent).toBe(setup.group);
+  await expect(target).toHaveAttribute('aria-expanded','true');
+  const added=await state();expect(added.groups).toBe(1);expect(added.pixels).toEqual(before.pixels);expect(added.history).toBe(before.history+1);
+  await page.evaluate(()=>(window as any).PM.hist.undo());expect((await state()).parent).toBe('0');
+  await page.evaluate(()=>(window as any).PM.hist.redo());expect((await state()).parent).toBe(setup.group);
+  await source.dragTo(section.locator('[data-part-key=""]'));expect((await state()).parent).toBe('0');expect((await state()).pixels).toEqual(before.pixels);
+  await source.dragTo(target);expect((await state()).parent).toBe(setup.group);
+  for(const theme of ['light','dark']){
+    await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);
+    await section.screenshot({path:info.outputPath(`part-drop-${theme}.png`)});
+  }
+  const filePath=session.userData+'/part-drop.pmv';
+  await session.app.evaluate(({dialog},filePath)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath});dialog.showOpenDialog=async()=>({canceled:false,filePaths:[filePath]});},filePath);
+  await page.evaluate(async()=>{const PM=(window as any).PM;if(!await PM.saveProject())throw new Error('Save failed');await PM.openProject();});
+  await page.waitForFunction(id=>{const PM=(window as any).PM;return !!PM.assets.get(PM.L(id)?.d?.data?.object?.source.assetId)?.object3d;},setup.id);
+  expect((await state()).parent).toBe(setup.group);expect((await state()).pixels).toEqual(before.pixels);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

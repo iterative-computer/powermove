@@ -11,7 +11,7 @@ import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } f
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|'group_parts'|'ungroup_parts'|'rename_part_group';
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|'group_parts'|'ungroup_parts'|'rename_part_group'|'move_parts';
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
   /** set_part: the part's key from listParts; patch null removes its offsets. */
   part?:string;
@@ -188,7 +188,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       }
       break;
     }
-    case 'group_parts':case 'ungroup_parts':case 'rename_part_group':{
+    case 'group_parts':case 'ungroup_parts':case 'rename_part_group':case 'move_parts':{
       if(role!=='object')throw new Error('Choose a model layer');
       editPartGroup(PM,layer,content,args);break;
     }

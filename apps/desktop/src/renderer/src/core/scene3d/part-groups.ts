@@ -1,10 +1,60 @@
 import * as THREE from 'three';
 import { compositionRuntime } from './service';
-import { GROUP_PART_KEY, PART_DEFAULTS, PART_FIELDS, listLayerParts, partNode, partsRoot } from './model-parts';
+import { GROUP_PART_KEY, PART_DEFAULTS, PART_FIELDS, listLayerParts, partNode, partsRoot, partPath } from './model-parts';
 
 const neutral = () => Object.fromEntries(PART_FIELDS.map(field => [field, { v: PART_DEFAULTS[field], kf: [], expr: null }]));
 export function editPartGroup(PM: any, layer: any, content: any, args: { operation: string; parts?: string[]; part?: string; name?: string }): string | undefined {
   const parts = content.object.parts ||= {}, tree = listLayerParts(PM, layer), byKey = new Map(tree.map(part => [part.key, part]));
+  if (args.operation === 'move_parts') {
+    const destination=args.part || null;
+    if(destination && !parts[destination]?.members)throw new Error('Drop onto a part group');
+    const requested=new Set(args.parts || []);
+    if(!requested.size || [...requested].some(key=>!byKey.has(key)))throw new Error('Choose parts from this model');
+    const ancestors=(key:string)=>{
+      const chain:string[]=[];
+      for(let parent=byKey.get(key)?.parent;parent;parent=byKey.get(parent)?.parent){
+        if(chain.includes(parent))throw new Error('Invalid part hierarchy');chain.push(parent);
+      }
+      return chain;
+    };
+    const keys=[...requested].filter(key=>!ancestors(key).some(parent=>requested.has(parent)));
+    if(destination && keys.some(key=>key===destination || ancestors(destination).includes(key)))throw new Error('A group cannot contain itself or its ancestors');
+    // File nodes retain their glTF hierarchy for animation and skin bindings.
+    // Membership can move across any custom groups sharing that file level.
+    const fileLevel=(key:string)=>GROUP_PART_KEY.test(key)?ancestors(key).find(parent=>!GROUP_PART_KEY.test(parent)) ?? null
+      :key.includes('_')?key.slice(0,key.lastIndexOf('_')):null;
+    const level=destination?fileLevel(destination):fileLevel(keys[0]!);
+    if(keys.some(key=>fileLevel(key)!==level))throw new Error('Move parts into a group at the same model level');
+    const frame=(parent:string|null)=>{
+      const matrix=new THREE.Matrix4();
+      for(let key=parent;key && GROUP_PART_KEY.test(key);key=byKey.get(key)?.parent ?? null){
+        const group=parts[key],v=Object.fromEntries(PART_FIELDS.map(field=>[field,PM.evP(layer,group.p[field],PM.time,partPath(key,field))]));
+        matrix.premultiply(groupMatrix(group,v));
+      }
+      return matrix;
+    };
+    const targetFrame=frame(destination);
+    if(Math.abs(targetFrame.determinant())<1e-12)throw new Error('Increase the destination group’s zero scale before adding parts');
+    const inverse=targetFrame.invert();
+    // Snapshot every correction before changing memberships or removing groups.
+    const moves=keys.filter(key=>byKey.get(key)!.parent!==(destination || level)).map(key=>({key,
+      matrix:inverse.clone().multiply(frame(byKey.get(key)!.parent)).multiply(new THREE.Matrix4().fromArray(parts[key]?.matrix || new THREE.Matrix4().elements))}));
+    for(const {key,matrix} of moves){
+      const part=parts[key] ||= {name:byKey.get(key)!.name,p:neutral()};
+      const previous=byKey.get(key)!.parent;
+      if(previous && parts[previous]?.members)parts[previous].members=parts[previous].members.filter((member:string)=>member!==key);
+      part.matrix=matrix.toArray();
+      if(part.members)part.parent=destination || level;
+      if(destination)parts[destination].members.push(key);
+    }
+    // Removing a final member removes its empty controller, including empty ancestors.
+    let empty:string|undefined;
+    while((empty=Object.keys(parts).find(key=>parts[key].members?.length===0))){
+      for(const group of Object.values<any>(parts))if(group.members)group.members=group.members.filter((member:string)=>member!==empty);
+      delete parts[empty];
+    }
+    return destination || undefined;
+  }
   if (args.operation === 'group_parts') {
     const keys = [...new Set(args.parts || [])], selected = keys.map(key => byKey.get(key));
     if (keys.length < 2 || selected.some(part => !part)) throw new Error('Select at least two model parts');
@@ -44,12 +94,8 @@ export function editPartGroup(PM: any, layer: any, content: any, args: { operati
     group.name = name; return key;
   }
   if (Object.values<any>(group.p).some(prop => prop.kf?.length || prop.expr)) throw new Error('Remove group animation before ungrouping');
-  const v = Object.fromEntries(Object.entries<any>(group.p).map(([field, prop]) => [field, prop.v])), pivot = group.pivot;
-  const matrix = new THREE.Matrix4().fromArray(group.matrix || new THREE.Matrix4().elements)
-    .multiply(new THREE.Matrix4().compose(new THREE.Vector3(pivot[0] + v.x, pivot[1] + v.y, pivot[2] + v.z),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(...[v.rx, v.ry, v.rz].map(THREE.MathUtils.degToRad) as [number,number,number], 'XYZ')),
-      new THREE.Vector3().setScalar(v.scale / 100)))
-    .multiply(new THREE.Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
+  const v = Object.fromEntries(Object.entries<any>(group.p).map(([field, prop]) => [field, prop.v]));
+  const matrix = groupMatrix(group,v);
   const parent = byKey.get(key)?.parent ?? null;
   for (const member of group.members) {
     const part = parts[member] ||= { name: byKey.get(member)?.name || 'Part', p: neutral() };
@@ -59,4 +105,14 @@ export function editPartGroup(PM: any, layer: any, content: any, args: { operati
   }
   if (parent && parts[parent]?.members) parts[parent].members = parts[parent].members.flatMap((member: string) => member === key ? group.members : [member]);
   delete parts[key]; return undefined;
+}
+
+/** Groups act in model coordinates; the retained matrix precedes their channels. */
+function groupMatrix(group:any,v:Record<string,any>):THREE.Matrix4 {
+  const pivot=group.pivot;
+  return new THREE.Matrix4().fromArray(group.matrix || new THREE.Matrix4().elements)
+    .multiply(new THREE.Matrix4().compose(new THREE.Vector3(pivot[0]+v.x,pivot[1]+v.y,pivot[2]+v.z),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...[v.rx,v.ry,v.rz].map(THREE.MathUtils.degToRad) as [number,number,number],'XYZ')),
+      new THREE.Vector3().setScalar(v.scale/100)))
+    .multiply(new THREE.Matrix4().makeTranslation(-pivot[0],-pivot[1],-pivot[2]));
 }

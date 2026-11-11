@@ -53,6 +53,54 @@
       return true;
     });
   });
+  const dragType='application/x-powermove-model-parts';
+  let dragging=$state<string[]>([]),dropTarget=$state<string|null|undefined>(undefined);
+  function ancestors(key:string):string[]{
+    const chain:string[]=[];
+    for(let parent=byKey.get(key)?.parent;parent;parent=byKey.get(parent)?.parent)chain.push(parent);
+    return chain;
+  }
+  function fileLevel(key:string):string|null {
+    return byKey.get(key)?.group?ancestors(key).find(parent=>!byKey.get(parent)?.group) ?? null
+      :key.includes('_')?key.slice(0,key.lastIndexOf('_')):null;
+  }
+  function canMove(keys:readonly string[],destination:string|null):boolean {
+    if(!keys.length || destination && !byKey.get(destination)?.group)return false;
+    if(destination && keys.some(key=>key===destination || ancestors(destination).includes(key)))return false;
+    const level=destination?fileLevel(destination):fileLevel(keys[0]!);
+    return keys.every(key=>byKey.has(key) && fileLevel(key)===level)
+      && keys.some(key=>byKey.get(key)?.parent!==(destination || level));
+  }
+  function move(keys:readonly string[],destination:string|null):void {
+    const result=api.scene3d.moveParts(layer.id,keys,destination);
+    if(!result.ok){api.ui.toast(result.message,{error:true});return;}
+    if(destination)expanded.set(`${layer.id}:${destination}`,true);
+    version++;
+  }
+  function dragStart(event:DragEvent,key:string):void {
+    if(!event.dataTransfer || (event.target as HTMLElement)?.closest('button')){event.preventDefault();return;}
+    if(!selected.includes(key))choose(key);
+    dragging=[...api.scene3d.getSelectedParts(layer.id)];
+    event.stopPropagation();event.dataTransfer.effectAllowed='move';
+    event.dataTransfer.setData(dragType,JSON.stringify({layerId:layer.id,keys:dragging}));
+  }
+  function dragOver(event:DragEvent,destination:string|null):void {
+    if(!canMove(dragging,destination))return;
+    event.preventDefault();event.stopPropagation();
+    if(event.dataTransfer)event.dataTransfer.dropEffect='move';
+    dropTarget=destination;
+  }
+  function dragLeave(event:DragEvent):void {
+    if(!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node|null))dropTarget=undefined;
+  }
+  function drop(event:DragEvent,destination:string|null):void {
+    event.preventDefault();event.stopPropagation();dropTarget=undefined;
+    try{
+      const payload=JSON.parse(event.dataTransfer?.getData(dragType) || 'null');
+      if(payload?.layerId===layer.id && Array.isArray(payload.keys) && canMove(payload.keys,destination))move(payload.keys,destination);
+    }catch {/* Ignore other applications' drag data. */}
+    dragging=[];
+  }
   let rangeAnchor: string | null = null;
   function choose(key: string | null, event?: MouseEvent | KeyboardEvent): void {
     let keys = key ? [key] : [];
@@ -90,6 +138,8 @@
     if (!selected.includes(key)) choose(key);
     api.ui.menu({x:event.clientX,y:event.clientY}, [
       {label:'Group Parts',kb:'⌘G',disabled:api.scene3d.getSelectedParts(layer.id).length < 2,run:group},
+      {label:'Move to Group',submenu:parts.filter(part=>part.group && canMove(selected,part.key)).map(part=>({label:part.name,run:()=>move(selected,part.key)})),disabled:!parts.some(part=>part.group && canMove(selected,part.key))},
+      {label:'Move out of Group',disabled:!canMove(selected,null),run:()=>move(selected,null)},
       {label:'Ungroup Parts',kb:'⌘⇧G',disabled:!byKey.get(key)?.group,run:()=>{const result=api.scene3d.ungroupParts(layer.id,key);if(!result.ok)api.ui.toast(result.message,{error:true});}}
     ]);
   }
@@ -101,7 +151,8 @@
   </Section>
   <div class="parts" data-parts-section>
     <div class="part-tree" role="tree" aria-label="Model parts" aria-multiselectable="true">
-      <div class="part" role="treeitem" tabindex="0" aria-selected={!active} class:on={!active} data-part-key=""
+      <div class="part" role="treeitem" tabindex="0" aria-selected={!active} class:on={!active} class:drop-target={dropTarget===null} data-part-key=""
+        ondragover={event=>dragOver(event,null)} ondragleave={dragLeave} ondrop={event=>drop(event,null)}
         onclick={(event) => choose(null, event)} onkeydown={(event) => onKey(event, null)}>
         <span class="twirl-gap" aria-hidden="true"></span>
         <span class="part-icon" aria-hidden="true">{@html api.ui.icon('cube')}</span>
@@ -112,7 +163,9 @@
         {@const visible = (ui.version, ui.time, api.scene3d.getPart(layer.id, part.key, ui.time).values.visible)}
         {@const edited = (ui.version, partEdited(layer, part.key))}
         <div class="part" role="treeitem" tabindex="0" aria-selected={selected.includes(part.key)} aria-expanded={part.children ? open : undefined}
-          class:on={selected.includes(part.key)} class:hidden-part={!visible} data-part-key={part.key} style={`--depth:${part.depth + 1}`}
+          draggable="true" ondragstart={event=>dragStart(event,part.key)} ondragend={()=>{dragging=[];dropTarget=undefined;}}
+          ondragover={event=>{if(part.group)dragOver(event,part.key);}} ondragleave={dragLeave} ondrop={event=>{if(part.group)drop(event,part.key);}}
+          class:drop-target={dropTarget===part.key} class:dragging={dragging.includes(part.key)} class:on={selected.includes(part.key)} class:hidden-part={!visible} data-part-key={part.key} style={`--depth:${part.depth + 1}`}
           title={part.name} onclick={(event) => choose(part.key, event)} oncontextmenu={(event) => menu(event, part.key)} onkeydown={(event) => onKey(event, part.key)}>
           {#if part.children}
             <button type="button" class="twirl" aria-label={`${open ? 'Collapse' : 'Expand'} ${part.name}`} onclick={(event) => toggle(part.key, event)}>{@html api.ui.icon(open ? 'chevD' : 'chev')}</button>
@@ -158,6 +211,8 @@
   .part:hover { background: var(--bg-row); }
   .part:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .part.on { background: var(--accent-dim); color: var(--accent-tx); }
+  .part.drop-target { background: var(--accent-dim); box-shadow: inset 0 0 0 1px var(--accent); }
+  .part.dragging { opacity: .5; }
   .part.hidden-part .part-name { color: var(--tx-3); }
   .twirl, .twirl-gap { display: grid; place-items: center; width: 12px; height: 12px; flex: none; padding: 0; border: 0; background: none; color: var(--tx-2); }
   .twirl :global(svg) { width: 10px; height: 10px; }

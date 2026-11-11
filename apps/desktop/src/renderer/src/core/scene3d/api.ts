@@ -104,6 +104,10 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       const result=editScene(PM,{operation:'ungroup_parts',target:layerId,part:key},{origin:'inspector',label:'Ungroup model parts'});
       if(result.ok)setSelectedParts(PM,layerId,members);return result;
     },
+    moveParts(layerId,keys,group){
+      const result=editScene(PM,{operation:'move_parts',target:layerId,parts:[...keys],...(group?{part:group}:{})},{origin:'inspector',label:'Move model parts'});
+      if(result.ok)setSelectedParts(PM,layerId,keys);return result;
+    },
     renamePartGroup:(layerId,key,name)=>editScene(PM,{operation:'rename_part_group',target:layerId,part:key,name},{origin:'inspector',label:'Rename part group'}),
     onActivePartChange:listener=>({dispose:onActivePartChange(PM,listener)}),
     pickPart(layerId,x,y){
