@@ -17,6 +17,7 @@ import type { SurfaceProps } from "../../src/jsx-runtime";
 import type { SurfaceEvent } from "../../src/protocol";
 import type {
   Alignment,
+  Finish,
   Binding,
   MenuItem,
   Row,
@@ -550,7 +551,7 @@ function FinishShelf({
   disabled,
   session,
 }: {
-  finishes: { id: string; label: string; color: string }[];
+  finishes: Finish[];
   disabled: boolean;
   session: InspectorSession;
 }) {
@@ -581,29 +582,85 @@ function FinishShelf({
           style={{ ...horizontal, gap: token("metrics.gap") }}
         >
           {row.map((finish) => (
-            <Action
+            <div
               key={finish.id}
-              id={`finish:${finish.id}`}
-              label={finish.label}
-              tooltip={finish.label}
-              disabled={disabled}
+              role="presentation"
               style={{
+                position: "relative",
                 width: token("metrics.row"),
                 height: token("metrics.row"),
                 minWidth: token("metrics.row"),
-                borderRadius: token("metrics.control_radius"),
-                background: finish.color,
-                borderWidth: token("metrics.border"),
-                borderColor: token("colors.separator"),
               }}
-              onActivate={() =>
-                session.send({
-                  type: "set-value",
-                  row: "3d.finish",
-                  value: finish.id,
-                })
-              }
-            />
+            >
+              {/* Rim, lit body up-left, highlight, and a coat's glint. */}
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                  background: finish.rim,
+                  borderWidth: token("metrics.border"),
+                  borderColor: token("colors.separator"),
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "8%",
+                  top: "6%",
+                  width: finish.size,
+                  height: finish.size,
+                  borderRadius: token("metrics.row"),
+                  background: finish.body,
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "20%",
+                  top: "18%",
+                  width: finish.spot,
+                  height: finish.spot,
+                  borderRadius: token("metrics.row"),
+                  background: finish.highlight,
+                }}
+              />
+              {finish.glint ? (
+                <div
+                  role="presentation"
+                  style={{
+                    position: "absolute",
+                    left: "26%",
+                    top: "24%",
+                    width: finish.glintSize,
+                    height: finish.glintSize,
+                    borderRadius: token("metrics.row"),
+                    background: finish.glint,
+                  }}
+                />
+              ) : null}
+              <Action
+                id={`finish:${finish.id}`}
+                label={finish.label}
+                tooltip={finish.label}
+                disabled={disabled}
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                }}
+                onActivate={() =>
+                  session.send({
+                    type: "set-value",
+                    row: "3d.finish",
+                    value: finish.id,
+                  })
+                }
+              />
+            </div>
           ))}
         </div>
       ))}

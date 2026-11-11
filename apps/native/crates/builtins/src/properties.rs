@@ -676,21 +676,6 @@ impl Properties {
             )
         };
         let status = |id: &str, label: &str, value: String| json!({"id":id,"label":label,"control":{"kind":"status","value":value}});
-        let layer_name = |id: &Value| -> String {
-            model
-                .published()
-                .snapshot
-                .root()
-                .and_then(|root| {
-                    let loc = pm_kernel::model::find_layer(root, id.as_str()?)?;
-                    pm_kernel::model::layer_at(root, &loc)?
-                        .get("name")?
-                        .to_value()
-                        .as_str()
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "Missing layer".into())
-        };
         match (role, env) {
             (Role::Object, Some("world")) => {
                 let world = &data["object"]["world"];
@@ -779,16 +764,27 @@ impl Properties {
             }
             (Role::Object, Some(_)) => {
                 let sc = &data["object"]["scatter"];
-                push(
-                    &mut groups,
-                    "Scatter",
-                    status("3d.scatter.model", "Scatters", layer_name(&sc["model"])),
-                );
-                push(
-                    &mut groups,
-                    "Scatter",
-                    status("3d.scatter.surface", "On", layer_name(&sc["surface"])),
-                );
+                // What is scattered and where, as pickers over the scene's
+                // models (hidden scatter sources included) and surfaces.
+                for (key, label) in [("model", "Object"), ("surface", "Surface")] {
+                    let options = pm_panel_studio3d::properties::scatter_options(
+                        model.published(),
+                        layer,
+                        key,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    push(
+                        &mut groups,
+                        "Scatter",
+                        choice(
+                            self,
+                            &format!("3d.scatter.{key}"),
+                            label,
+                            sc[key].clone(),
+                            json!(options),
+                        ),
+                    );
+                }
             }
             (Role::Object, None) => {
                 let object = &data["object"];
@@ -870,9 +866,12 @@ impl Properties {
                             .as_array()
                             .into_iter()
                             .flatten()
-                            .map(
-                                |f| json!({"id":f["id"],"label":f["label"],"color":f["p"]["color"]})
-                            )
+                            .map(|f| {
+                                let mut tile = finish_swatch(&f["p"]);
+                                tile["id"] = f["id"].clone();
+                                tile["label"] = f["label"].clone();
+                                tile
+                            })
                             .collect::<Vec<_>>()
                     ));
                     let lease = self.control_lease("3d.screen");
@@ -1874,4 +1873,65 @@ fn failure_copy(reason: &str, studio: bool) -> String {
     } else {
         "This layer couldn’t be drawn. Details are in Window ▸ Error Log.".into()
     }
+}
+
+/// A finish as a tiny shaded sphere (3d-studio.md §8 shelf), drawn from its
+/// material: a rim, a lit body, a highlight sized by roughness and tinted by
+/// metal, and a sharp glint for a clear coat. Glass reads as a cool,
+/// see-through body with a bright edge. Content colours, not UI chrome.
+fn finish_swatch(p: &Value) -> Value {
+    let hex = |c: [f64; 3]| {
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            (c[0].clamp(0., 1.) * 255.).round() as u8,
+            (c[1].clamp(0., 1.) * 255.).round() as u8,
+            (c[2].clamp(0., 1.) * 255.).round() as u8
+        )
+    };
+    let base = p["color"]
+        .as_str()
+        .and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok())
+        .unwrap_or(0x808080);
+    let base = [(base >> 16) & 255, (base >> 8) & 255, base & 255].map(|c| c as f64 / 255.);
+    let num = |k: &str, d: f64| p[k].as_f64().unwrap_or(d);
+    let (metal, rough, coat, glass, spec) = (
+        num("metalness", 0.),
+        num("roughness", 0.5),
+        num("clearcoat", 0.),
+        num("transmission", 0.),
+        num("specular", 1.),
+    );
+    let mix = |a: [f64; 3], b: [f64; 3], t: f64| -> [f64; 3] {
+        std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+    };
+    let scale = |a: [f64; 3], k: f64| a.map(|v| v * k);
+    let white = [1.; 3];
+    let (rim, body, highlight) = if glass > 0.5 {
+        // Clear glass: cool, dark-ish centre and a bright edge; frosted is milky.
+        let core = mix([0.62, 0.70, 0.78], base, rough * 1.4);
+        (mix(core, white, 0.65), core, mix(core, white, 0.95 - rough))
+    } else if metal > 0.5 {
+        // Metal: strong contrast, the highlight takes the metal's tint.
+        (
+            scale(base, 0.32),
+            base,
+            mix(base, white, 0.85 - rough * 0.6),
+        )
+    } else {
+        (
+            scale(base, 0.62),
+            base,
+            mix(base, white, (spec * (1. - rough)).clamp(0.08, 0.9)),
+        )
+    };
+    json!({
+        "rim": hex(rim),
+        "body": hex(body),
+        "highlight": hex(highlight),
+        // Sharp finishes: a small bright spot; rough ones: a broad soft one.
+        "size": "78%",
+        "spot": format!("{}%", (16. + rough * 44.).round()),
+        "glintSize": "12%",
+        "glint": (coat > 0.5 || (glass > 0.5 && rough < 0.1)).then_some("#FFFFFF"),
+    })
 }

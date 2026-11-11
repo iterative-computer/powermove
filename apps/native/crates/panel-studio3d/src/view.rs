@@ -490,6 +490,29 @@ pub(crate) fn commands(
                 )],
             ));
         }
+        (Role::Object, "scatter.model" | "scatter.surface") => {
+            let key = &id["scatter.".len()..];
+            let options = scatter_options(p, target, key)?;
+            if !options
+                .iter()
+                .any(|o| o["v"] == arg && o["disabled"] != true)
+            {
+                return Err(invalid("Choose a model in this composition"));
+            }
+            return Ok((
+                if key == "model" {
+                    "Scatter Object"
+                } else {
+                    "Scatter Surface"
+                }
+                .into(),
+                vec![scene(
+                    p,
+                    time,
+                    json!({"operation":"update_scatter","target":target,"scatter":{key:arg}}),
+                )],
+            ));
+        }
         (Role::Object, "fog.shape") => {
             if !["box", "sphere"].iter().any(|k| arg == *k) {
                 return Err(invalid("Invalid fog shape"));
@@ -803,11 +826,13 @@ pub fn add_layer(
             .ok_or_else(|| invalid("Unknown nature asset"))?
             .1;
         // A grove, not a wall: trees are large, grass is small.
+        // A grove on a landscape that runs past the frame: trees about ten
+        // units apart, small things denser.
         let count = match species {
-            "conifer" | "broadleaf" | "birch" => 36,
-            "bush" => 60,
-            "rock" => 30,
-            _ => 600,
+            "conifer" | "broadleaf" | "birch" => 320,
+            "bush" => 500,
+            "rock" => 200,
+            _ => 4000,
         };
         // Scatter on the selected model or terrain, else the first terrain;
         // with none, the same Undo step adds a terrain to grow on.
@@ -833,7 +858,7 @@ pub fn add_layer(
                 commands.push(scene(
                     p,
                     time,
-                    json!({"operation":"add_terrain","id":terrain,"terrain":{"p":{"natural":true,"erosion":8,"amplitude":1.5}}}),
+                    json!({"operation":"add_terrain","id":terrain,"terrain":{"p":{"natural":true,"erosion":10,"amplitude":2.5,"width":260,"depth":260,"resolution":160,"frequency":0.06}}}),
                 ));
                 terrain
             }
@@ -859,6 +884,9 @@ pub fn add_layer(
         if let Some(camera) = overview_camera(&layers, id) {
             commands.push(scene(p, time, camera));
         }
+        if let Some(sky) = landscape_sky(&layers, id) {
+            commands.push(scene(p, time, sky));
+        }
         return Ok((format!("Add {label}"), commands, id.into()));
     }
     let label = new_menu()
@@ -880,17 +908,24 @@ pub fn add_layer(
         }
         "fog" => json!({"operation":"add_fog","id":id}),
         "terrain" => {
-            json!({"operation":"add_terrain","id":id,"terrain":{"p":{"natural":true,"erosion":8,"amplitude":1.5}}})
+            json!({"operation":"add_terrain","id":id,"terrain":{"p":{"natural":true,"erosion":10,"amplitude":2.5,"width":260,"depth":260,"resolution":160,"frequency":0.06}}})
         }
         _ => {
             json!({"operation":"add_object","id":id,"name":label,"object":{"source":{"primitive":kind}}})
         }
     };
     let mut commands = vec![scene(p, time, args)];
-    if kind == "terrain"
-        && let Some(camera) = overview_camera(&layers, id)
-    {
-        commands.push(scene(p, time, camera));
+    if kind == "terrain" {
+        if let Some(camera) = overview_camera(&layers, id) {
+            commands.push(scene(p, time, camera));
+        }
+        if let Some(sky) = landscape_sky(&layers, id) {
+            commands.push(scene(p, time, sky));
+        }
+    }
+    let shape = new_menu().iter().take(8).any(|(k, _)| *k == kind);
+    if shape {
+        commands.extend(starter(&layers, id).into_iter().map(|a| scene(p, time, a)));
     }
     let select = if kind == "sky" {
         world.unwrap_or_else(|| id.into())
@@ -939,10 +974,51 @@ fn overview_camera(layers: &[Value], id: &str) -> Option<Value> {
     if layers.iter().any(|l| schema::role(l) == Some(Role::Camera)) {
         return None;
     }
+    // Far and high enough to see distinct trees against the sky.
     Some(
         json!({"operation":"add_camera","id":format!("{id}c"),"camera":{"p":{
-        "x":0,"y":6,"z":19,"targetX":0,"targetY":0.5,"targetZ":0,"fov":40}}}),
+        "x":0,"y":14,"z":46,"targetX":0,"targetY":3,"targetZ":0,"fov":35}}}),
     )
+}
+/// A landscape with no sky gets a clear day; its ground colour matches the
+/// meadow so the far terrain edge doesn't read as a strip. (Atmospheric fog
+/// darkens the whole foreground in Quality for now; see the port doc.)
+fn landscape_sky(layers: &[Value], id: &str) -> Option<Value> {
+    if layers
+        .iter()
+        .any(|l| fields::environment(&l["d"]["data"]) == Some("world"))
+    {
+        return None;
+    }
+    Some(
+        json!({"operation":"set_world","id":format!("{id}w"),"world":{"mode":"sky","preset":"clear-noon",
+        "p":{"elevation":38,"haze":3,"intensity":1,"sunIntensity":0.9,"groundColor":"#5F6B45"}}}),
+    )
+}
+/// The first object in an empty scene arrives lit (3d-studio.md's product
+/// film): a clear sky, a key softbox placed for a highlight, and a floor so
+/// it has a contact shadow and a reflection. Nothing is added
+/// when the composition already has a light or a sky.
+fn starter(layers: &[Value], id: &str) -> Vec<Value> {
+    let lit = layers.iter().any(|l| {
+        schema::role(l) == Some(Role::Light)
+            || fields::environment(&l["d"]["data"]) == Some("world")
+    });
+    if lit {
+        return vec![];
+    }
+    vec![
+        json!({"operation":"set_world","id":format!("{id}w"),"world":{"mode":"sky","preset":"clear-noon","p":{"elevation":35,"intensity":0.6,"sunIntensity":0.5,"haze":3}}}),
+        json!({"operation":"add_light","id":format!("{id}k"),"name":"Key","light":{"type":"area","p":{
+            "x":-2.6,"y":3.4,"z":3.2,"targetX":0,"targetY":0.3,"targetZ":0,"width":2.4,"height":1.6,"intensity":9}}}),
+        // A real floor under the object's base for its contact shadow and a
+        // soft reflection (the renderer's shadow catcher draws a black void
+        // for now; see the port doc).
+        json!({"operation":"add_object","id":format!("{id}f"),"name":"Floor","object":{
+            "source":{"primitive":"plane","parameters":{"width":200,"height":200}},
+            "p":{"y":-0.5,"rx":-90},
+            "material":{"p":{"color":"#8A8781","roughness":0.32,"metalness":0}}}}),
+    ]
 }
 
 /// Import 3D Model…: one model layer per imported model asset, in one Undo
@@ -985,4 +1061,26 @@ pub fn add_models(
         many => format!("Import {} 3D Models", many.len()),
     };
     Ok((label, commands, select))
+}
+
+/// Scatter's Object and Surface choices: the composition's models (a hidden
+/// scatter source reads as itself), and for Surface also terrains. The
+/// scatter layer itself is never a choice.
+pub fn scatter_options(p: &Published, scatter: &str, key: &str) -> Result<Vec<Value>> {
+    let comp = composition(p)?;
+    let mut out = vec![];
+    for l in comp["layers"].as_array().into_iter().flatten() {
+        if schema::role(l) != Some(Role::Object) || l["id"] == scatter {
+            continue;
+        }
+        let env = fields::environment(&l["d"]["data"]);
+        let ok = match key {
+            "model" => env.is_none(),
+            _ => env.is_none() || env == Some("terrain"),
+        };
+        if ok {
+            out.push(json!({"v":l["id"],"label":l["name"].as_str().unwrap_or("Model")}));
+        }
+    }
+    Ok(out)
 }

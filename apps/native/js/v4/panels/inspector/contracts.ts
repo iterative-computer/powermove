@@ -80,6 +80,21 @@ export interface AnimatorPreset {
   label: string;
   disabled: boolean;
 }
+/** A finish tile drawn as a tiny shaded sphere (colours are content). */
+export interface Finish {
+  id: string;
+  label: string;
+  rim: string;
+  body: string;
+  highlight: string;
+  /** The lit body's size, the highlight's and the glint's, as percentages
+   * of the tile (swatch artwork, from the material). */
+  size: string;
+  spot: string;
+  glintSize: string;
+  /** A clear coat's sharp glint colour, or null for none. */
+  glint: string | null;
+}
 export interface Section {
   id: string;
   title: string;
@@ -93,7 +108,7 @@ export interface Section {
   /** One quiet line under the rows that explains them (a 3D preset's cost). */
   note?: string;
   /** Studio finishes: swatch tiles under the heading; a click applies one. */
-  finishes?: { id: string; label: string; color: string }[];
+  finishes?: Finish[];
 }
 export interface InspectorSnapshot {
   target: Target;
