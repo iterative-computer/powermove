@@ -16,6 +16,36 @@ pub use pm_render::scene3d::provider::SceneRequest;
 /// Interface with the scene/core lane. No kernel mutations, JS or DOM calls.
 pub trait SceneSource: Send + Sync {
     fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String>;
+    /// Optional saved/export policy. Legacy sources retain their authored sample
+    /// count; native policy is resolved on the worker from the frozen document.
+    fn final_quality(&self, _request: &SceneRequest) -> Result<Option<FinalQuality>, String> {
+        Ok(None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalQuality {
+    pub min_samples: u32,
+    pub max_samples: u32,
+    pub noise_threshold: f32,
+    pub max_bounces: u32,
+    pub caustics: bool,
+    pub denoise: bool,
+    pub half_resolution_guides: bool,
+}
+impl FinalQuality {
+    pub fn validate(self) -> Result<Self, String> {
+        if self.min_samples == 0
+            || self.min_samples > self.max_samples
+            || self.max_samples > 4096
+            || !(1..=32).contains(&self.max_bounces)
+            || !self.noise_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.noise_threshold)
+        {
+            return Err("Invalid Studio render quality".into());
+        }
+        Ok(self)
+    }
 }
 
 /// Column-major affine object-to-world transform (the editor's matrix order).

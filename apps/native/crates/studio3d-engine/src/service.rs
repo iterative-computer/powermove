@@ -101,15 +101,27 @@ impl StudioService {
         if request.width == 0 || request.height == 0 {
             return Err("Studio output is empty".into());
         }
+        let quality = if matches!(tier, Tier::Final { .. }) {
+            source
+                .final_quality(&request)?
+                .map(|q| q.validate())
+                .transpose()?
+        } else {
+            None
+        };
+        let denoise = match tier {
+            Tier::Final { denoise, .. } => quality.map_or(denoise, |q| {
+                if q.denoise {
+                    Denoise::Oidn
+                } else {
+                    Denoise::None
+                }
+            }),
+            _ => Denoise::Guided,
+        };
         // Refuse unsupported optional requests before extraction or GPU work.
         #[cfg(not(feature = "oidn"))]
-        if matches!(
-            tier,
-            Tier::Final {
-                denoise: Denoise::Oidn,
-                ..
-            }
-        ) {
+        if denoise == Denoise::Oidn || matches!(tier, Tier::QualityRefine { .. }) {
             return Err("Studio built without optional OIDN support".into());
         }
         if matches!(
@@ -228,23 +240,37 @@ impl StudioService {
             );
         }
         r.live = tier == Tier::QualityLive;
-        let (samples, bounces, salt) = match tier {
+        let (mut samples, mut bounces, salt) = match tier {
             Tier::QualityLive => (1, 3, 0),
             Tier::QualityRefine { samples } => (samples, 6, 0),
             Tier::Final { samples, salt, .. } => (samples, 8, salt),
             Tier::Fast => unreachable!(),
         };
+        if let Some(q) = quality {
+            samples = samples.min(q.max_samples);
+            bounces = q.max_bounces;
+            r.caustics_enabled = q.caustics;
+            r.set_precomputed_caustics(q.caustics);
+            r.set_adaptive_sampling_with_floor(
+                crate::environment::AdaptiveSampling {
+                    enabled: q.noise_threshold > 0.,
+                    min_samples: q.min_samples.min(samples),
+                    relative_error: q.noise_threshold,
+                    absolute_error: 0.001,
+                },
+                true,
+            );
+        } else {
+            r.caustics_enabled = true;
+            r.set_precomputed_caustics(false);
+            r.set_adaptive_sampling(input.scene.world.adaptive);
+        }
         r.set_time_seed(salt);
+        // Stills/deliveries stop at the error target or the sample ceiling.
+        // The saved time limit remains a preview hint, never an export deadline.
         r.trace(samples, bounces, reset, if r.live { 6 } else { 64 });
         r.set_output_mask(None, false);
-        let passes = if r.live
-            || matches!(
-                tier,
-                Tier::Final {
-                    denoise: Denoise::Guided,
-                    ..
-                }
-            ) {
+        let passes = if r.live || denoise == Denoise::Guided {
             4
         } else {
             0
@@ -254,14 +280,16 @@ impl StudioService {
         #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
         let metalfx = false;
         #[cfg(feature = "oidn")]
-        if matches!(
-            tier,
-            Tier::Final {
-                denoise: Denoise::Oidn,
-                ..
-            } | Tier::QualityRefine { .. }
-        ) {
+        if denoise == Denoise::Oidn || matches!(tier, Tier::QualityRefine { .. }) {
             let denoiser = crate::oidn::Denoiser::new()?;
+            let half_guides = quality.is_some_and(|q| q.half_resolution_guides)
+                || matches!(tier, Tier::QualityRefine { .. });
+            denoiser.set_half_resolution_guides(half_guides);
+            denoiser.set_quality(if half_guides {
+                crate::oidn::Quality::Balanced
+            } else {
+                crate::oidn::Quality::High
+            });
             r.prepare_frame(
                 0,
                 Some(&|color, shade, albedo, normal| {

@@ -758,3 +758,84 @@ fn pending_environment_translation_fails_explicitly_instead_of_drawing_a_plane()
         .unwrap();
     assert!(error.contains("environment document adapter"), "{error}");
 }
+
+#[test]
+fn saved_quality_and_export_override_drive_samples_without_mutating_the_document() {
+    use pm_studio3d_engine::compositor::Source;
+    use studio::SceneSource;
+    let old = document(true, 100.);
+    let mut project = pm_scene3d::from_model(&old.root().unwrap().to_value()).unwrap();
+    let saved = pm_scene3d::quality::resolve(
+        &pm_scene3d::quality::preset("production").unwrap(),
+        &json!({"minSamples":8,"maxSamples":8,"noiseThreshold":0,"maxBounces":2,
+            "denoise":false,"caustics":false,"timeLimitSeconds":0.000001}),
+    )
+    .unwrap();
+    project["comps"]["test"]["studioQuality"] = saved.clone();
+    let doc = Arc::new(
+        pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+            .snapshot()
+            .document
+            .as_ref()
+            .clone(),
+    );
+    let before = doc.to_value();
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(doc.clone(), Default::default());
+    assert_eq!(source.final_samples(&req).unwrap(), 8);
+    let q = source.final_quality(&req).unwrap().unwrap();
+    assert_eq!(q.max_bounces, 2);
+    assert!(!q.denoise && !q.caustics && q.half_resolution_guides);
+    let overridden = studio::DocumentSource::new(doc.clone(), Default::default())
+        .with_quality_override("test", json!({"maxSamples":4,"minSamples":4}))
+        .unwrap();
+    assert_eq!(overridden.final_samples(&req).unwrap(), 4);
+    assert!(
+        studio::DocumentSource::new(doc.clone(), Default::default())
+            .with_quality_override("test", json!({"minSamples":20}))
+            .is_err()
+    );
+    let final_source = studio::DocumentSource::new(doc.clone(), Default::default())
+        .with_quality_override("test", json!("final"))
+        .unwrap();
+    assert!(
+        !final_source
+            .final_quality(&req)
+            .unwrap()
+            .unwrap()
+            .half_resolution_guides
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    draw(&mut renderer, doc.clone());
+    assert_eq!(
+        renderer.studio_counters().samples,
+        8,
+        "a tiny saved preview time cap must not truncate the delivery"
+    );
+    studio::attach_with_quality(
+        &mut renderer,
+        doc.clone(),
+        &Default::default(),
+        "test",
+        json!({"minSamples":4,"maxSamples":4}),
+    )
+    .unwrap();
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(renderer.studio_counters().samples, 4);
+    assert_eq!(doc.to_value(), before);
+}

@@ -86,6 +86,7 @@ pub struct VideoOptions {
     pub audio: bool,
     pub motion_blur: bool,
     pub alpha: bool,
+    pub studio_quality: Option<Value>,
 }
 impl VideoOptions {
     pub fn parse(a: &Value) -> Result<Self> {
@@ -101,6 +102,7 @@ impl VideoOptions {
             audio: a["audio"].as_bool().unwrap_or(true),
             motion_blur: a["motionBlur"].as_bool().unwrap_or(true),
             alpha,
+            studio_quality: a.get("studioQuality").cloned(),
         })
     }
 }

@@ -55,7 +55,7 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_3d_schemas_change_from_the_frozen_catalog() {
+fn only_studio_and_export_schemas_change_from_the_frozen_catalog() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
@@ -63,7 +63,7 @@ fn only_3d_schemas_change_from_the_frozen_catalog() {
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
-        if ["edit_3d", "get_3d_scene"].contains(&name) {
+        if ["edit_3d", "get_3d_scene", "export_video"].contains(&name) {
             assert_eq!(
                 tool,
                 source["tools"]
@@ -84,6 +84,27 @@ fn only_3d_schemas_change_from_the_frozen_catalog() {
                     .unwrap()
             );
         }
+    }
+}
+
+#[test]
+fn export_quality_is_a_separate_validated_job_option() {
+    let args = json!({"studioQuality":{"preset":"production","maxSamples":512}});
+    catalog::validate("export_video", &args).unwrap();
+    assert_eq!(
+        pm_mcp::services::VideoOptions::parse(&args)
+            .unwrap()
+            .studio_quality,
+        Some(args["studioQuality"].clone())
+    );
+    for quality in [
+        json!("unknown"),
+        json!({"maxSamples":4097}),
+        json!({"denoise":7}),
+        json!({"unknown":true}),
+        json!({"noiseThreshold":-0.1}),
+    ] {
+        assert!(catalog::validate("export_video", &json!({"studioQuality":quality})).is_err());
     }
 }
 #[test]

@@ -202,6 +202,7 @@ impl EngineJobs {
         destination: PathBuf,
         look: bool,
         preview: bool,
+        studio_quality: Option<serde_json::Value>,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -222,6 +223,7 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
+        request.studio_quality = studio_quality;
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -321,7 +323,14 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let handle = match self.start(&published, settings, destination, false, false) {
+        let handle = match self.start(
+            &published,
+            settings,
+            destination,
+            false,
+            false,
+            request.options.studio_quality.clone(),
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -522,6 +531,7 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
+        None,
     )?;
     while matches!(
         handle.status().state,
