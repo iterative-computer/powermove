@@ -1341,7 +1341,7 @@ fn fill_cache(
         crop: None,
     };
     let pass = pm_export::render::pass_key(2, size);
-    renderer.set_isolate_layers(true);
+    isolate_for_fill(renderer);
     // One frame drawn as `spec` asks, with its GPU time, or `None` when it
     // can't be drawn exactly (a layer failed): it is left out and the fill
     // goes on. An error (often passing: an override answer that didn't
@@ -1566,6 +1566,14 @@ fn own_time(wall_us: f64, waited_us: f64, deferred_us: u64) -> f64 {
 /// behind one unit.
 fn grants_whole_frames(background: bool, active_at: Option<std::time::Instant>) -> bool {
     !background && active_at.is_none_or(|t| t.elapsed() >= QUIET)
+}
+
+/// A fill's renderer: a layer that fails is reported, not drawn into a
+/// frame the cache would keep (the frame is refused), and a missing effect
+/// is never bypassed, though isolation turns bypassing on for the viewer.
+fn isolate_for_fill(renderer: &mut pm_render::Renderer) {
+    renderer.set_isolate_layers(true);
+    renderer.set_bypass_missing_effects(false);
 }
 
 /// How long the viewer stays quiet before an export submits whole frames
@@ -1796,6 +1804,43 @@ mod tests {
         // A 450 ms draw that waited 300 ms for its grant and had 100 ms of
         // answers held: 50 ms of its own.
         assert_eq!(own_time(450_000., 300_000., 100_000), 50_000.);
+    }
+    /// A fill never draws a layer without an effect it can't find: the
+    /// frame fails or reports the layer, so the cache refuses it.
+    #[test]
+    fn a_fill_never_bypasses_a_missing_effect() {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] =
+            serde_json::json!([{"id": "fx-gone", "type": "not-installed.effect", "on": true, "p": {}}]);
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            )),
+            1,
+        );
+        // Set up as the fill child sets its renderer up.
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        let _ = renderer.set_document_effects(&doc, &[]);
+        isolate_for_fill(&mut renderer);
+        let size = pm_protocol::common::Size::new(640, 360);
+        let request = pm_render::RenderRequest::sized(size, pm_protocol::color::Precision::Float16);
+        let time = pm_protocol::common::Ticks::new(0).unwrap();
+        let read = pm_export::render::render_frame_reusing(
+            &mut renderer,
+            &doc,
+            "Pshapes-primitives-root",
+            time,
+            &request,
+            &Default::default(),
+            &pm_export::render::Unrestricted,
+            1,
+            &AtomicBool::new(false),
+        );
+        assert!(
+            read.is_err() || read.is_ok_and(|r| !r.failures.is_empty()),
+            "the layer drew without its effect"
+        );
     }
     /// An activity that lands while a background grant is being checked
     /// and sent waits for it; one that landed first stops it, so nothing
