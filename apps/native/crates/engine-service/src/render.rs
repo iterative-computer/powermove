@@ -402,6 +402,10 @@ impl Engine {
         self.font_generation = None;
         self.clear_cache();
     }
+    /// The font registry generation frames were last drawn with.
+    pub(crate) fn font_generation(&self) -> Option<u64> {
+        self.font_generation
+    }
     fn sync_fonts(&mut self) {
         if let Some(fonts) = &self.fonts
             && fonts.sync(&mut self.renderer, &mut self.font_generation)

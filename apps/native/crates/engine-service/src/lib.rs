@@ -2053,6 +2053,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 engine.definitions(),
                 overrides,
                 engine.tone_identity(),
+                engine.font_generation(),
                 stamp.doc_id,
                 spec.time,
             ) && let Some(recorder) = &recorder

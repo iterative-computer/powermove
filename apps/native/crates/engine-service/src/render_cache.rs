@@ -86,6 +86,9 @@ pub struct CacheFill {
     /// play in real time; chunks whose probes cost less are not stored.
     #[serde(default)]
     pub budget_us: Option<f64>,
+    /// One frame's length in ticks: a probe is warmed by the frame before it.
+    #[serde(default)]
+    pub frame_ticks: i64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheFrame {
@@ -134,6 +137,9 @@ struct Identity {
     comp: String,
     tone: Option<String>,
     overrides: Option<u64>,
+    /// The engine's font registry generation: an installed or removed font
+    /// is observed again (the fingerprint reads the font files).
+    fonts: Option<u64>,
     media: Vec<Stamp>,
 }
 impl Identity {
@@ -607,6 +613,7 @@ impl DiskFrames {
         definitions: &[DefinitionSnapshot],
         overrides: Option<u64>,
         tone: Option<String>,
+        fonts: Option<u64>,
         doc_id: u64,
         time: Ticks,
     ) -> bool {
@@ -619,6 +626,7 @@ impl DiskFrames {
             f.identity.scene_matches(scene)
                 && f.identity.tone == tone
                 && f.identity.overrides == overrides
+                && f.identity.fonts == fonts
         });
         let recheck = state
             .media_checked
@@ -652,6 +660,7 @@ impl DiskFrames {
             comp: scene.comp.clone(),
             tone,
             overrides,
+            fonts,
             media,
         };
         let source = Source {
@@ -697,6 +706,8 @@ impl DiskFrames {
                     &identity.comp,
                     rate,
                     count,
+                    // Override code can read anything in the document.
+                    identity.overrides.is_some(),
                 )
                 .unwrap_or_default();
                 // A frame is its inputs at its time.
@@ -863,6 +874,7 @@ impl DiskFrames {
             height: size.height,
             frames: frames.into_iter().map(|m| m.1).collect(),
             budget_us,
+            frame_ticks: rate.frame_start(1).unwrap_or(0),
         };
         let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill)
@@ -1753,8 +1765,8 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        assert!(disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap()));
-        assert!(!disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        assert!(!disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         let time = write_frame(&disk, 30);
         let bars = settle(&disk, |b| !b.bars.is_empty());
@@ -1799,7 +1811,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        assert!(disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
         let read_already = |n: i64| {
@@ -1835,7 +1847,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let time = write_frame(&disk, 30);
         assert!(read_eventually(&disk, &scene, time).is_some());
@@ -1844,16 +1856,17 @@ mod tests {
             &[],
             None,
             Some("Pq".into()),
+            None,
             1,
             Ticks::new(0).unwrap()
         ));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_none());
-        assert!(disk.observe(&scene, &[], Some(3), None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&scene, &[], Some(3), None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_none());
         // Back to the first state: its frame is found again.
-        assert!(disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_some());
     }
@@ -1870,7 +1883,7 @@ mod tests {
         disk.set_storage(Some((PathBuf::from(dir), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], Some(7), None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], Some(7), None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let time = write_frame(&disk, 30);
         assert!(read_eventually(&disk, &scene, time).is_some());
@@ -1895,11 +1908,11 @@ mod tests {
         let scene = scene();
         let relaunched = DiskFrames::default();
         relaunched.set_storage(Some((frames, u64::MAX))).unwrap();
-        relaunched.observe(&scene, &[], Some(7), None, 1, Ticks::new(0).unwrap());
+        relaunched.observe(&scene, &[], Some(7), None, None, 1, Ticks::new(0).unwrap());
         ready(&relaunched);
         let time = relaunched.with(|s| (s.frames.as_ref().unwrap().ticks(30).unwrap(), false));
         assert!(read_eventually(&relaunched, &scene, time).is_some());
-        assert!(relaunched.observe(&scene, &[], Some(8), None, 1, Ticks::new(0).unwrap()));
+        assert!(relaunched.observe(&scene, &[], Some(8), None, None, 1, Ticks::new(0).unwrap()));
         ready(&relaunched);
         assert!(read_eventually(&relaunched, &scene, time).is_none());
     }
@@ -1922,7 +1935,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let queued = disk
             .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {})
@@ -1956,7 +1969,7 @@ mod tests {
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
-        disk.observe(scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
@@ -2004,7 +2017,7 @@ mod tests {
         disk.set_storage(Some((frames_dir.clone(), 1 << 30)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
@@ -2069,25 +2082,64 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = sequenced(|_| {});
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let (early, late) = (write_frame(&disk, 10), write_frame(&disk, 80));
         assert_eq!(present(&disk), BTreeSet::from([10, 80]));
         // L002 (1-2 s) moves: frame 80 (2.67 s) and 10 (0.33 s) don't show it.
         let mut edited = sequenced(|p| p["layers"][7]["p"]["opacity"]["v"] = 10.into());
         edited.content = 2;
-        assert!(disk.observe(&edited, &[], None, None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert!(read_eventually(&disk, &edited, early).is_some());
         assert!(read_eventually(&disk, &edited, late).is_some());
         // The layers at 2-3 s change: frame 80 misses, frame 10 doesn't.
         let mut edited = sequenced(|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into());
         edited.content = 3;
-        assert!(disk.observe(&edited, &[], None, None, 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert_eq!(present(&disk), BTreeSet::from([10]));
         assert!(read_eventually(&disk, &edited, early).is_some());
         assert!(read_eventually(&disk, &edited, late).is_none());
+    }
+
+    /// With raster overrides producing, an edit anywhere misses every
+    /// frame: the override's reads of the document aren't tracked.
+    #[test]
+    fn with_overrides_an_edit_misses_every_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = sequenced(|_| {});
+        disk.observe(&scene, &[], Some(7), None, None, 1, t0);
+        ready(&disk);
+        write_frame(&disk, 10);
+        assert_eq!(present(&disk), BTreeSet::from([10]));
+        // The layers at 2-3 s change; frame 10 (0.33 s) doesn't draw them.
+        let mut edited = sequenced(|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into());
+        edited.content = 2;
+        assert!(disk.observe(&edited, &[], Some(7), None, None, 1, t0));
+        ready(&disk);
+        assert!(present(&disk).is_empty());
+    }
+
+    /// A font installed or removed (the engine's font generation moves)
+    /// is observed again, so frames are fingerprinted against the fonts
+    /// installed now.
+    #[test]
+    fn a_font_change_is_observed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, Some(1), 1, t0));
+        ready(&disk);
+        assert!(!disk.observe(&scene, &[], None, None, Some(1), 1, t0));
+        assert!(disk.observe(&scene, &[], None, None, Some(2), 1, t0));
     }
 
     /// Background rendering through the real child, once the viewer is
@@ -2103,7 +2155,7 @@ mod tests {
         let scene = scene();
         let activity = crate::jobs::Activity::default();
         disk.set_activity(activity.clone());
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         // The viewer played frame 50 too slowly (chunk 45-59 at 30 fps).
         let at = Ticks::new(Rate::FPS_30.frame_start(50).unwrap()).unwrap();
@@ -2168,7 +2220,7 @@ mod tests {
         let scene = scene();
         let activity = crate::jobs::Activity::default();
         disk.set_activity(activity.clone());
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         // Every chunk measured too slow: all 90 frames render.
         for n in (0..90).step_by(15) {
@@ -2222,7 +2274,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("a"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1, Ticks::new(0).unwrap());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         disk.set_storage(Some((dir.path().join("b"), u64::MAX)))
             .unwrap();
         std::thread::sleep(Duration::from_millis(300));

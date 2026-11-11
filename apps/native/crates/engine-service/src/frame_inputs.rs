@@ -7,19 +7,21 @@
 //!
 //! - the composition's own fields and the root's (`Comp::member` falls back
 //!   to the root), except bookkeeping no frame reads ([`BOOKKEEPING`]);
-//! - in stacking order, every layer whose span meets the frame (one frame of
-//!   margin each side, for motion-blur samples), and every layer those name
-//!   anywhere in their subtree (parent, group, track matte, an effect's
-//!   layer parameter), transitively;
+//! - in stacking order, every layer whose span meets the frame (widened by
+//!   half the composition's shutter and a frame each side, for motion-blur
+//!   samples), every layer those name anywhere in their subtree (parent,
+//!   group, track matte, an effect's layer parameter), and every member of
+//!   a group among them (its transitions time from all its members),
+//!   transitively;
 //! - every composition and asset those layers name, whole (a precomp's own
 //!   layers, transitively).
 //!
-//! Anything that can couple a frame to layers it does not name makes every
+//! Anything that can couple a frame to inputs it does not name makes every
 //! frame depend on the whole document ([`Inputs::Whole`]): a solo switch,
-//! or an expression that can address another layer or composition.
-//! Extension raster overrides are assumed to draw from their own layer at
-//! the frame's time, with their code identity in the cache's global
-//! fingerprint (p0-decisions).
+//! an expression that can address another layer or composition, or (the
+//! caller's `whole`) extension raster overrides, whose reads of the
+//! document are not tracked. A key that missed an input would play a stale
+//! frame; re-rendering is the lesser cost.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -48,6 +50,7 @@ pub(crate) fn frame_digests(
     comp: &str,
     rate: Rate,
     count: i64,
+    whole: bool,
 ) -> Option<Vec<[u8; 32]>> {
     let resolved = pm_eval::Comp::resolve(doc, comp).ok()?;
     let (root, node) = (resolved.root(), resolved.node());
@@ -65,7 +68,10 @@ pub(crate) fn frame_digests(
         })
     };
     let frame = seconds(1) - seconds(0);
-    if let Inputs::Whole = inputs(layers, root) {
+    // Motion-blur samples reach half the shutter each side; one frame more
+    // for rounding.
+    let margin = (pm_render::motion::shutter_frames(node) / 2. + 1.) * frame;
+    if whole || matches!(inputs(layers, root), Inputs::Whole) {
         // Every frame reads every layer, composition and asset.
         base.update(b"whole");
         base.update(&fields_digest(root, &BOOKKEEPING));
@@ -84,7 +90,7 @@ pub(crate) fn frame_digests(
     let mut out = Vec::with_capacity(count.max(0) as usize);
     let mut last: Option<(Vec<usize>, [u8; 32])> = None;
     for n in 0..count {
-        let (from, to) = (seconds(n) - frame, seconds(n) + 2. * frame);
+        let (from, to) = (seconds(n) - margin, seconds(n) + frame + margin);
         let drawn = index.closure(from, to);
         // Neighbouring frames usually draw the same layers.
         if let Some((same, digest)) = &last
@@ -191,6 +197,8 @@ struct Index {
     /// group or an audio layer, drawn through what names it).
     spans: Vec<Option<(f64, f64)>>,
     layers: Vec<Vec<usize>>,
+    /// A group's members: its transitions time from all of them.
+    members: Vec<Vec<usize>>,
     comps: Vec<Vec<String>>,
     assets: Vec<Vec<String>>,
 }
@@ -211,9 +219,17 @@ impl Index {
         let mut index = Index {
             spans: Vec::new(),
             layers: Vec::new(),
+            members: vec![Vec::new(); layers.len()],
             comps: Vec::new(),
             assets: Vec::new(),
         };
+        for (i, layer) in layers.iter().enumerate() {
+            if let Some(&g) = layer.get("group").and_then(string).and_then(|g| by_id.get(&g))
+                && g != i
+            {
+                index.members[g].push(i);
+            }
+        }
         for (i, layer) in layers.iter().enumerate() {
             let ty = layer.get("type").and_then(string);
             let number = |key: &str| match layer.get(key).map(Node::kind) {
@@ -268,7 +284,12 @@ impl Index {
             if std::mem::replace(&mut seen[i], true) {
                 continue;
             }
-            stack.extend(self.layers[i].iter().filter(|&&j| !seen[j]));
+            stack.extend(
+                self.layers[i]
+                    .iter()
+                    .chain(&self.members[i])
+                    .filter(|&&j| !seen[j]),
+            );
         }
         seen.iter()
             .enumerate()
@@ -375,14 +396,17 @@ mod tests {
         serde_json::json!({"id": id, "type": "shape", "name": id, "from": from, "dur": dur,
             "p": {"opacity": {"v": 100}}})
     }
-    fn digests(project: &serde_json::Value) -> Vec<[u8; 32]> {
+    fn digests(project: &serde_json::Value, whole: bool) -> Vec<[u8; 32]> {
         let parsed = pm_model::json::parse(&project.to_string()).unwrap();
         let doc = pm_model::Document::new(Some(parsed), 1);
-        frame_digests(&doc, ROOT, Rate::FPS_30, 120).unwrap()
+        frame_digests(&doc, ROOT, Rate::FPS_30, 120, whole).unwrap()
     }
     /// Frames whose digest differs between two documents.
     fn changed(a: &serde_json::Value, b: &serde_json::Value) -> Vec<i64> {
-        let (a, b) = (digests(a), digests(b));
+        changed_with(a, b, false)
+    }
+    fn changed_with(a: &serde_json::Value, b: &serde_json::Value, whole: bool) -> Vec<i64> {
+        let (a, b) = (digests(a, whole), digests(b, whole));
         (0..a.len() as i64)
             .filter(|&n| a[n as usize] != b[n as usize])
             .collect()
@@ -391,9 +415,8 @@ mod tests {
         range.collect()
     }
 
-    /// Editing a layer changes the frames it draws in (and one frame of
-    /// motion-blur margin each side), nothing else; bookkeeping changes
-    /// nothing at all.
+    /// Editing a layer changes the frames it draws in (and the motion-blur
+    /// margin each side), nothing else; bookkeeping changes nothing at all.
     #[test]
     fn an_edit_changes_only_the_frames_its_layer_draws() {
         let a = project(serde_json::json!([
@@ -402,7 +425,7 @@ mod tests {
         ]));
         let mut b = a.clone();
         b["layers"][1]["p"]["opacity"]["v"] = 50.into();
-        assert_eq!(changed(&a, &b), frames(59..91));
+        assert_eq!(changed(&a, &b), frames(58..92));
         let mut c = a.clone();
         c["revision"] = 2.into();
         c["work"] = serde_json::json!([1, 2]);
@@ -434,10 +457,10 @@ mod tests {
         assert!(parent.contains(&0) && parent.contains(&100) && !parent.contains(&70));
         let mut c = a.clone();
         c["comps"]["Cpre"]["layers"][0]["from"] = 1.into();
-        assert_eq!(changed(&a, &c), frames(59..91));
+        assert_eq!(changed(&a, &c), frames(58..92));
         let mut d = a.clone();
         d["assets"]["Aimg"]["name"] = "b.png".into();
-        assert_eq!(changed(&a, &d), frames(59..91));
+        assert_eq!(changed(&a, &d), frames(58..92));
     }
 
     /// Composition fields change every frame; a solo switch or an
@@ -462,11 +485,51 @@ mod tests {
         wiggle["layers"][0]["p"]["opacity"]["expr"] = "wiggle(2, 10)".into();
         let mut edited = wiggle.clone();
         edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
-        assert_eq!(changed(&wiggle, &edited), frames(59..91));
+        assert_eq!(changed(&wiggle, &edited), frames(58..92));
         let mut solo = a.clone();
         solo["layers"][0]["solo"] = true.into();
         let mut edited = solo.clone();
         edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
         assert_eq!(changed(&solo, &edited).len(), 120);
+    }
+
+    /// A group's transitions time from all its members: moving a member
+    /// that isn't drawn at a frame still changes the frames its siblings
+    /// draw in.
+    #[test]
+    fn a_group_member_changes_its_siblings_frames() {
+        let mut group = layer("Lgroup", 0., 4.);
+        group["type"] = "group".into();
+        group["transitionIn"] = serde_json::json!({"type": "fade", "duration": 0.5});
+        let mut first = layer("L1", 0., 1.);
+        first["group"] = "Lgroup".into();
+        let mut second = layer("L2", 2., 1.);
+        second["group"] = "Lgroup".into();
+        let a = project(serde_json::json!([group, first, second]));
+        let mut b = a.clone();
+        b["layers"][2]["from"] = 2.5.into();
+        assert!(changed(&a, &b).contains(&10), "frame 10 draws L1 only");
+    }
+
+    /// With raster overrides, whose reads of the document aren't tracked,
+    /// any edit changes every frame.
+    #[test]
+    fn overrides_key_every_frame_on_the_whole_document() {
+        let a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        let mut b = a.clone();
+        b["layers"][1]["p"]["opacity"]["v"] = 50.into();
+        assert_eq!(changed_with(&a, &b, true).len(), 120);
+        assert_eq!(changed_with(&a, &b, false), frames(58..92));
+    }
+
+    /// The margin follows the shutter: a two-frame shutter half reaches
+    /// further than one frame each side.
+    #[test]
+    fn the_motion_margin_follows_the_shutter() {
+        let mut a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        a["shutter"] = 4.into();
+        let mut b = a.clone();
+        b["layers"][1]["p"]["opacity"]["v"] = 50.into();
+        assert_eq!(changed(&a, &b), frames(57..93));
     }
 }
