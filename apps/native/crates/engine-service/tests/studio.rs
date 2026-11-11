@@ -716,17 +716,17 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
 }
 
 #[test]
-fn pending_environment_translation_fails_explicitly_instead_of_drawing_a_plane() {
+fn pending_terrain_translation_fails_explicitly_instead_of_drawing_a_plane() {
     use studio::SceneSource;
     let old = document(false, 100.);
     let mut project = pm_scene3d::from_model(&old.root().unwrap().to_value()).unwrap();
     let comp = &project["comps"]["test"];
     let world = pm_scene3d::service::new_layer(
         comp,
-        "world",
-        "World",
+        "terrain",
+        "Terrain",
         pm_scene3d::schema::Role::Object,
-        json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky"}}}),
+        json!({"object":{"source":{"primitive":"plane"},"terrain":{}}}),
         json!({}),
         true,
         None,
@@ -870,4 +870,122 @@ fn metal_persisted_fbx_uses_source_materials_and_windowless_export() {
             "FBX Coral material must reach the native compositor and exported image"
         );
     });
+}
+
+fn environment_document(visible: bool, model: bool) -> Arc<pm_model::Document> {
+    let old = document(false, 100.);
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    let comp = &project["comps"]["test"];
+    let world = pm_scene3d::service::new_layer(comp,"world","World",pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky","p":{"visible":visible,"sunIntensity":0}}}}),json!({}),true,None,0.).unwrap();
+    let fog = pm_scene3d::service::new_layer(comp,"fog","Fog",pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"fog":{"p":{"width":2,"height":4,"depth":6,"density":0.01}}}}),
+        json!({"rotation.y":90,"scale.x":200}),true,None,0.).unwrap();
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    if !model {
+        layers.retain(|l| l["id"] != "mirror");
+    }
+    layers.extend([world, fog]);
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+
+#[test]
+fn world_and_transformed_fog_reach_transport_without_proxy_surfaces() {
+    use studio::SceneSource;
+    let doc = environment_document(true, true);
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(doc, Default::default());
+    let input = source.scene(&req).unwrap();
+    assert_eq!(
+        input.instances.len(),
+        1,
+        "World and Fog have no proxy planes"
+    );
+    assert_eq!(input.scene.world.sky.unwrap().sun_intensity, 0.);
+    assert_eq!(input.scene.world.volumes.len(), 1);
+    let size = input.scene.world.volumes[0].size;
+    assert!(
+        (size.x - 3.).abs() < 0.001 && (size.y - 2.).abs() < 0.001 && (size.z - 2.).abs() < 0.001,
+        "{size:?}"
+    );
+    let outputs = source.auxiliary_layers(&req).unwrap();
+    assert!(outputs.iter().any(|o| o.id == "world" && o.include_void));
+    assert!(outputs.iter().any(|o| o.id == "fog" && !o.include_void));
+}
+
+#[test]
+fn world_alone_renders_a_sky_and_hidden_world_is_transparent() {
+    let mut renderer = Renderer::headless().unwrap();
+    let visible = draw(&mut renderer, environment_document(true, false));
+    assert!(
+        visible
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0.9 && p[2] > 0.01)
+            .count()
+            > 4000,
+        "a World-only composition must render its sky"
+    );
+    let doc = environment_document(true, false);
+    studio::attach(&mut renderer, doc.clone(), &Default::default());
+    let mut live = request();
+    live.export = false;
+    live.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &live,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0.9 && p[2] > 0.01)
+            .count()
+            > 4000,
+        "Live must present the World background through its GPU surface too"
+    );
+    let hidden = draw(&mut renderer, environment_document(false, false));
+    assert!(
+        hidden.chunks_exact(4).all(|p| p[3] == 0.),
+        "camera-hidden World and Fog layers draw no planes"
+    );
+}
+
+#[test]
+fn world_edits_update_pixels_and_reuse_surface_geometry() {
+    let first = environment_document(true, true);
+    let mut project = pm_scene3d::from_model(&first.to_value().unwrap()).unwrap();
+    for layer in project["comps"]["test"]["layers"].as_array_mut().unwrap() {
+        if layer["id"] == "world" {
+            layer["d"]["data"]["object"]["world"]["p"]["overcast"]["v"] = json!(1);
+        }
+    }
+    let cloudy = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let mut renderer = Renderer::headless().unwrap();
+    let a = draw(&mut renderer, first.clone());
+    let before = renderer.studio_counters().geometry_uploads;
+    let b = draw(&mut renderer, cloudy);
+    assert_ne!(a, b, "updated sky must invalidate its cached trailer");
+    assert_eq!(renderer.studio_counters().geometry_uploads, before);
+    assert_eq!(
+        draw(&mut renderer, first),
+        a,
+        "restored World is deterministic"
+    );
 }

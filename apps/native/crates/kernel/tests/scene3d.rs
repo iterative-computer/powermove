@@ -877,3 +877,39 @@ fn fbx_import_undo_and_pmv_keep_converted_and_original_bytes() {
     reopened.redo().unwrap();
     assert_eq!(project(&reopened), saved);
 }
+
+#[test]
+fn sky_presets_write_source_defaults_and_quality_combines_preset_with_patch() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"set_world","id":"world","world":{"preset":"golden-hour","p":{"haze":5}}}),
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["elevation"]["v"],
+        6.
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["haze"]["v"],
+        5.
+    );
+    let before = project(&s);
+    apply(
+        &mut s,
+        json!({"operation":"set_world","patch":{"preset":"night"}}),
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["elevation"]["v"],
+        -20.
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    apply(
+        &mut s,
+        json!({"operation":"set_render_quality","preset":"draft","patch":{"maxSamples":8}}),
+    );
+    let q = &project(&s)["comps"]["C"]["studioQuality"];
+    assert_eq!(q["minSamples"], 4);
+    assert_eq!(q["maxSamples"], 8);
+    assert_eq!(q["maxBounces"], 4);
+}

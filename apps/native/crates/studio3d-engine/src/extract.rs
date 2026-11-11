@@ -21,6 +21,17 @@ pub trait SceneSource: Send + Sync {
     fn final_quality(&self, _request: &SceneRequest) -> Result<Option<FinalQuality>, String> {
         Ok(None)
     }
+    fn auxiliary_layers(&self, _request: &SceneRequest) -> Result<Vec<AuxiliaryLayer>, String> {
+        Ok(vec![])
+    }
+}
+
+/// Non-surface timeline layers still need a compositor answer. World owns the
+/// visible environment; fog volumes affect transport without drawing a proxy.
+#[derive(Clone, Debug)]
+pub struct AuxiliaryLayer {
+    pub id: String,
+    pub include_void: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +136,7 @@ pub struct View {
     pub ground: Option<Vec3>,
     pub floor_y: f32,
     pub shadows: bool,
+    pub ambient: Vec3,
 }
 impl Default for View {
     fn default() -> Self {
@@ -133,6 +145,7 @@ impl Default for View {
             ground: None,
             floor_y: 0.,
             shadows: true,
+            ambient: Vec3::ZERO,
         }
     }
 }
@@ -160,6 +173,7 @@ struct Blas {
 #[derive(Default)]
 pub struct Extractor {
     cache: HashMap<usize, Blas>,
+    world_cache: Option<(String, Vec<[f32; 4]>)>,
     pub builds: u64,
 }
 
@@ -347,7 +361,17 @@ impl Extractor {
             rows[3][3] = roots[i as usize] as f32;
             sdata.extend(rows);
         }
-        sdata.extend(input.scene.world.pack(&lights));
+        // The physical sky bake is independent of camera and object motion.
+        // Retain its trailer until the exact world/light input changes.
+        if input.scene.world.hdri.is_none() {
+            let key = format!("{:?}{lights:?}", input.scene.world);
+            if self.world_cache.as_ref().is_none_or(|(old, _)| *old != key) {
+                self.world_cache = Some((key, input.scene.world.pack(&lights)));
+            }
+            sdata.extend_from_slice(&self.world_cache.as_ref().unwrap().1);
+        } else {
+            sdata.extend(input.scene.world.pack(&lights));
+        }
         if boxes.is_empty() {
             lo = Vec3::ZERO;
             hi = Vec3::ZERO;

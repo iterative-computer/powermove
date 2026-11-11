@@ -13,6 +13,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "environment.rs"]
+mod environment;
+
 pub struct DocumentSource {
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
@@ -278,6 +281,24 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
     }
 }
 impl SceneSource for DocumentSource {
+    fn auxiliary_layers(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
+        Ok(self.resolve(request)?.scene["objects"]
+            .as_array()
+            .ok_or("Missing Studio objects")?
+            .iter()
+            .filter(|o| o.get("world").is_some() || o.get("fog").is_some())
+            .map(|o| pm_studio3d_engine::extract::AuxiliaryLayer {
+                id: o["id"].as_str().unwrap().into(),
+                include_void: o.get("world").is_some()
+                    && val(&o["p"]["visible"]) != false
+                    && val(&o["world"]["p"]["visible"]) != false
+                    && o["world"]["mode"] != "none",
+            })
+            .collect())
+    }
     fn final_quality(
         &self,
         request: &SceneRequest,
@@ -357,6 +378,7 @@ impl SceneSource for DocumentSource {
             layers: None,
         };
         let mut instances = vec![];
+        environment::apply(&r, &mut scene)?;
         let mut materials: Vec<GpuMaterial> = vec![];
         let mut map_layers = vec![];
         let mut map_indices = HashMap::new();
@@ -365,7 +387,10 @@ impl SceneSource for DocumentSource {
             .ok_or("Studio scene has no objects")?
         {
             let id = object["id"].as_str().ok_or("Studio object has no ID")?;
-            if ["world", "fog", "terrain", "scatter"]
+            if object.get("world").is_some() || object.get("fog").is_some() {
+                continue;
+            }
+            if ["terrain", "scatter"]
                 .iter()
                 .any(|key| object.get(*key).is_some())
                 || object["source"].get("nature").is_some()
@@ -528,6 +553,7 @@ impl SceneSource for DocumentSource {
             (high - low).length()
         };
         let radius = (size * 0.004).max(0.001);
+        let mut ambient = Vec3::ZERO;
         for light in r.scene["lights"]
             .as_array()
             .ok_or("Studio scene has no lights")?
@@ -561,7 +587,7 @@ impl SceneSource for DocumentSource {
                         radiance,
                     });
                 }
-                "sun" => scene.extra_lights.push(GpuLight::sun(
+                "sun" | "parallel" => scene.extra_lights.push(GpuLight::sun(
                     -direction,
                     1.5_f32.to_radians(),
                     radiance
@@ -582,6 +608,10 @@ impl SceneSource for DocumentSource {
                         .cos(),
                     radiance * (1. / (std::f32::consts::PI * radius * radius)),
                 )),
+                "ambient" => {
+                    ambient = ambient + radiance;
+                }
+                "environment" => {}
                 _ => return Err("Unsupported Studio light".into()),
             }
         }
@@ -611,6 +641,7 @@ impl SceneSource for DocumentSource {
                 ground: Some(env * 0.35),
                 floor_y,
                 shadows: e["shadows"] != false,
+                ambient,
             },
         })
     }

@@ -131,6 +131,7 @@ impl StudioService {
             return Err("Studio sample count must be positive".into());
         }
         let input = source.scene(&request)?;
+        let auxiliary = source.auxiliary_layers(&request)?;
         if tier == Tier::Fast {
             return self
                 .fast
@@ -142,7 +143,20 @@ impl StudioService {
         validate(&input, &extracted)?;
         // Compare exact bytes, including resources, instead of trusting a revision
         // or a lossy/partial scene key. No stale frame survives a material edit.
-        let key = content(&input, &extracted);
+        let mut key = content(&input, &extracted);
+        key.extend_from_slice(format!("{auxiliary:?}").as_bytes());
+        let mut outputs: Vec<_> = extracted
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.clone(), index as u32, false))
+            .collect();
+        for layer in auxiliary {
+            if layer.id.is_empty() || outputs.iter().any(|(id, _, _)| *id == layer.id) {
+                return Err("Duplicate or empty Studio output layer".into());
+            }
+            outputs.push((layer.id, extracted.layers.len() as u32, layer.include_void));
+        }
         let reset = self
             .previous
             .as_ref()
@@ -238,6 +252,7 @@ impl StudioService {
                 input.view.shadows,
                 center.to4(bound),
             );
+            r.set_ambient(input.view.ambient.to_array());
         }
         r.live = tier == Tier::QualityLive;
         let (mut samples, mut bounces, salt) = match tier {
@@ -312,10 +327,10 @@ impl StudioService {
             r.prepare_frame(passes, None)?;
         }
         let mut layers = Vec::new();
-        for (index, layer) in extracted.layers.iter().enumerate() {
+        for (index, (layer, mask, include_void)) in outputs.iter().enumerate() {
             #[cfg(all(feature = "metalfx", target_os = "macos"))]
             if metalfx {
-                r.set_output_mask(Some(index as u32), false);
+                r.set_output_mask(Some(*mask), *include_void);
                 match r.finish_metalfx_texture(request.width, request.height, index > 0, flip_y) {
                     Ok((source, _)) => {
                         let texture = r.device().create_texture(&wgpu::TextureDescriptor {
@@ -373,8 +388,8 @@ impl StudioService {
             let target = PresentTarget {
                 view: &view,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                layer: Some(index as u32),
-                include_void: false,
+                layer: Some(*mask),
+                include_void: *include_void,
                 flip_y,
             };
             r.present_frame(target);
@@ -474,6 +489,7 @@ fn validate(input: &SceneInput, e: &Extracted) -> Result<(), String> {
         input.scene.backdrop,
         input.scene.environment.0,
         input.scene.environment.1,
+        input.view.ambient,
     ]
     .into_iter()
     .chain(c.focus)

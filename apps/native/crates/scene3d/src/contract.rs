@@ -286,11 +286,17 @@ pub fn plan(
     if operation == "set_render_quality" {
         schema::strict(args, &["operation", "preset", "patch"])?;
         let current = crate::quality::get(comp)?;
-        let update = args
-            .get("patch")
-            .or_else(|| args.get("preset"))
-            .ok_or_else(|| Error("Choose a quality preset or patch".into()))?;
-        let quality = crate::quality::resolve(&current, update)?;
+        let mut update = args.get("patch").cloned().unwrap_or(json!({}));
+        if !update.is_object() {
+            return fail("Expected Studio quality patch");
+        }
+        if let Some(preset) = args.get("preset") {
+            update["preset"] = preset.clone();
+        }
+        if update.as_object().unwrap().is_empty() {
+            return fail("Choose a quality preset or patch");
+        }
+        let quality = crate::quality::resolve(&current, &update)?;
         return Ok(Plan {
             actions: vec![Action::RenderQuality { quality }],
             id: None,
@@ -340,6 +346,27 @@ pub fn plan(
         .unwrap_or(json!({}));
     if kind == "materialOptions" && patch.get("p").is_none() {
         patch = json!({"p":patch});
+    }
+    // Match the pinned command's preset channel writes; parsing saved data
+    // never substitutes preset defaults over authored/keyframed channels.
+    if kind == "world" && patch.get("preset").is_some() {
+        let values = match patch["preset"].as_str() {
+            Some("clear-noon") => (45., 2., 0., 1.),
+            Some("golden-hour") => (6., 3., 0., 1.),
+            Some("overcast") => (45., 4., 1., 0.1),
+            Some("blue-hour") => (-5., 2., 0., 0.),
+            Some("night") => (-20., 2., 0., 0.),
+            _ => return fail("Invalid Studio sky preset"),
+        };
+        let authored = patch.get("p").cloned().unwrap_or(json!({}));
+        let mut p = json!({"elevation":values.0,"haze":values.1,"overcast":values.2,"sunIntensity":values.3});
+        for (key, value) in authored
+            .as_object()
+            .ok_or_else(|| Error("Expected World channels".into()))?
+        {
+            p[key] = value.clone();
+        }
+        patch["p"] = p;
     }
     if adding {
         let id = args["id"]

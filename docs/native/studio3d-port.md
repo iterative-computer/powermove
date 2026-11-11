@@ -37,8 +37,8 @@ texture, with portable temporal filtering as fallback. Refine/Final share one
 resolved/denoised image across per-layer compositor targets. Viewer, headless
 capture and windowless export use the same native seam. The newer document
 contract and quality bridge are integrated after their targeted checks and the
-GPUI binary build passed. Native renderer translation for new environment and
-nature nodes is not finished; those nodes return an explicit unsupported error.
+GPUI binary build passed. World sky/atmosphere and transformed fog now render. HDRI sources, terrain,
+scatter and nature still need translation and report explicit unsupported errors.
 
 ## Main capability inventory
 
@@ -340,8 +340,8 @@ The actor remains the sole author; planned structural staging is validated at
 the end of each compound edit, before publication.
 
 Still required for full scene parity: wire new scene nodes and
-hidden prototypes into native extraction; world/HDRI source loading; terrain,
-scatter/LOD, atmosphere and volume translation; material source capture and all
+hidden prototypes into native extraction; HDRI source loading; terrain and
+scatter/LOD translation; material source capture and all
 imported maps; iris/orthographic transport; quality motion-blur sample integration and automatic
 paused Refine scheduling; broader imported animation/map parity; render passes;
 noise convergence/filter/edge checks and native presentation/input measurements.
@@ -468,13 +468,43 @@ shared executables and the other checkout were retained. Raw EXR/array/scene
 intermediates are removed from this lane's evidence after scoring, while logs,
 summary metrics and comparison PNGs remain outside Git.
 
-The port remains incomplete. New World/fog/terrain/scatter/nature and sparse
-material/part records are authored and saved but their native render translation
-is not finished. World preset-only edits still need upstream preset defaults;
-full cross-composition source-cycle analysis is pending. Remaining gates include
+The port remains incomplete. World sky/atmosphere/fog translation is now implemented (see the next checkpoint).
+Terrain/scatter/nature and sparse material/part records remain authored/saved
+while their native renderer translation is unfinished. HDRI source decoding and
+full cross-composition source-cycle analysis remain pending. Remaining gates include
 material source capture, extended imported maps, iris/orthographic transport,
 quality shutter samples and automatic idle Refine, complete Electron scene
 round trips, pixel filtering/extra edge sampling/enamel/no-visible-noise grading,
 and measured native presentation/input latency. The measured Production/Refine
 limits above remain open. No on-screen fps, input p95 or packaging acceptance
 is claimed from headless tests or an app build.
+
+
+### World and fog rendering checkpoint
+
+After storage recovered to about 12 GB, implementation continued. World sky,
+sun and global atmosphere now reach the native renderer. Transformed box fog
+uses world-space AABB half extents, and sphere fog uses the maximum authored
+world scale, matching the pinned Electron environment adapter. World and Fog
+create no proxy geometry. World has a background-only compositor output; Fog
+has a transparent surface output while affecting 3D transport. Camera-hidden
+World stays transparent while its environment can still light geometry.
+
+Ambient lights now use the renderer's additive ambient channel; parallel lights
+use directional transport. Environment-light World settings are carried into
+lighting with their intensity multiplier. HDRI decoding is still pending. The
+native extractor retains the exact sky/light trailer so camera/object motion
+does not rebake an unchanged physical sky. Changes invalidate the cached
+trailer, while surface geometry stays resident.
+
+`set_world` now writes the source command's preset channel defaults, with an
+explicit caller patch taking precedence; saved channels are never changed by
+parsing. `set_render_quality` now combines a supplied preset and patch, matching
+the pinned command. Ordinary property writes and Undo remain the only writer.
+
+Checks: 18 adapter tests pass; 26 kernel scene tests pass; 11 native scene/export
+tests pass, plus the extended Live World regression. The World tests verify an
+empty geometry scene's full-viewport sky in Live and Final, transparent hidden World/Fog
+outputs, rotated/scaled volume extents, visible world edits, deterministic
+restoration and geometry reuse. The remaining unsupported-node guard now covers
+terrain. These pixel checks do not establish the 60 fps or input-latency gates.
