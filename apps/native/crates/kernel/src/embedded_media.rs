@@ -151,6 +151,31 @@ pub(crate) fn for_copy(
     })
 }
 
+/// The asset ids the library project `project` in `profile` reads from its
+/// original's file (`embeddedMedia`), as an open would.
+pub fn lent(profile: &Path, project: &str) -> BTreeSet<String> {
+    let Some(p) = crate::library::LibraryStore::open(profile)
+        .load(project)
+        .ok()
+        .flatten()
+    else {
+        return BTreeSet::new();
+    };
+    let meta = p.session.as_ref();
+    let Some(path) = meta
+        .filter(|m| m.get("file").is_none())
+        .and_then(|m| m.get("embeddedMedia"))
+        .and_then(|m| m.get("path"))
+        .and_then(Value::as_str)
+    else {
+        return BTreeSet::new();
+    };
+    let store = profile.join(crate::library_media::DIR);
+    for_copy(Path::new(path), &p, Some(&store))
+        .map(|f| f.media.iter().map(|e| e.id.to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// Whether the item's bytes are proven: by the file's checksum (verified at
 /// open and again on every read), or without one by the asset's fingerprint.
 fn proven(entry: &MediaEntry, asset: &Identity) -> bool {

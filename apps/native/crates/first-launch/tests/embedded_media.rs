@@ -41,9 +41,19 @@ fn migrated(root: &Path, saved: &str, file: &Path, seed: impl FnOnce(&Path)) -> 
         &json!({"time":3,"file":{"path":file,"savedHash":entry["savedHash"],"baselineHash":entry["baselineHash"]}}),
     );
     let outcome = run(&config, |_| Ok(())).unwrap();
-    assert!(matches!(outcome, Outcome::Complete { .. }), "{outcome:?}");
+    let Outcome::Complete {
+        already_offline, ..
+    } = outcome
+    else {
+        panic!("{outcome:?}")
+    };
     let id = checkpoint(&config).projects["e"].clone();
+    OFFLINE.set(already_offline);
     (config, id)
+}
+thread_local! {
+    /// What the last [`migrated`] reported as already offline.
+    static OFFLINE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn open(config: &Config, project: &str) -> Kernel {
@@ -291,4 +301,19 @@ fn the_copy_keeps_embedded_media_after_the_original_file_is_gone() {
         })
         .unwrap();
     assert_eq!(bytes(&kernel, &root), Some(expected));
+}
+
+/// The migration doesn't call media offline that the copy reads from its
+/// original's file; media the file can't lend still count.
+#[test]
+fn the_migration_counts_media_the_file_lends_as_available() {
+    let count = |saved: &str| {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let file = root.join("Embedded.pmv");
+        fs::copy(fixture(saved), &file).unwrap();
+        migrated(&root, "Embedded.pmv", &file, |_| {});
+        OFFLINE.get()
+    };
+    assert_eq!(count("Embedded.pmv") + 1, count("Other.pmv"));
 }
