@@ -841,7 +841,20 @@ pub fn add_layer(
         commands.push(scene(
             p,
             time,
-            json!({"operation":"add_scatter","id":id,"name":label,"scatter":{"model":format!("nature:{species}"),"surface":surface,"p":{"count":count}}}),
+            // The hidden prototype is named for what it is, not "Nature".
+            json!({"operation":"add_object","id":format!("{id}s"),"name":format!("{} Source", match species {
+                "conifer" => "Pine Tree",
+                "broadleaf" => "Oak Tree",
+                "birch" => "Birch Tree",
+                "bush" => "Bush",
+                "grass" => "Grass",
+                _ => "Rock",
+            }),"object":{"source":{"nature":species,"seed":1},"p":{"visible":false}}}),
+        ));
+        commands.push(scene(
+            p,
+            time,
+            json!({"operation":"add_scatter","id":id,"name":label,"scatter":{"model":format!("{id}s"),"surface":surface,"p":{"count":count}}}),
         ));
         if let Some(camera) = overview_camera(&layers, id) {
             commands.push(scene(p, time, camera));

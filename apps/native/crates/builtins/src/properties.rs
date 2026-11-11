@@ -79,7 +79,10 @@ impl Properties {
         if let Some((_, _, label)) = &studio
             && model.selected_layers().len() == 1
         {
-            target["first"]["typeLabel"] = json!(label);
+            // `Terrain · Terrain` says nothing twice: a layer named for its
+            // kind shows the generic 3D kind instead.
+            let named = target["first"]["name"].as_str().unwrap_or("") == *label;
+            target["first"]["typeLabel"] = json!(if named { "3D Layer" } else { label });
             target["first"]["acceptsEffects"] = json!(false);
             target["first"]["studio"] = json!(true);
         }
