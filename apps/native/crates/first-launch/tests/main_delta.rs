@@ -655,3 +655,86 @@ fn diff_paths(a: &pm_model::Value, b: &pm_model::Value, at: &str, out: &mut Vec<
         _ => out.push(at.to_owned()),
     }
 }
+
+/// A profile whose media the new engine's development builds kept in main's
+/// content-addressed store (`Media Store/keys` + `objects`, the native
+/// library's own layout) and nowhere else: its originals come across verified
+/// and the project's assets resolve; a key whose object has other bytes stays
+/// offline without blocking the copy.
+#[test]
+fn content_addressed_main_store_media_migrate_as_verified_originals() {
+    use sha2::{Digest, Sha256};
+    let t = private_tempdir();
+    let root = t.path().canonicalize().unwrap();
+    let config = profile(&root);
+    let source = &config.electron_profile;
+    let original =
+        fs::read(source.join("IndexedDB/app_powermove_0.indexeddb.blob/1/00/2")).unwrap();
+    fs::remove_dir_all(source.join("IndexedDB")).unwrap();
+    let store = source.join("Media Store");
+    let put = |key: &str, bytes: &[u8], named: &[u8]| {
+        let hash = blake3::hash(named).to_hex().to_string();
+        fs::create_dir_all(store.join("objects").join(&hash[..2])).unwrap();
+        fs::create_dir_all(store.join("keys")).unwrap();
+        fs::write(store.join("objects").join(&hash[..2]).join(&hash), bytes).unwrap();
+        write(
+            &store
+                .join("keys")
+                .join(format!("{:x}.json", Sha256::digest(key.as_bytes()))),
+            &json!({"key":key,"hash":hash,"size":bytes.len(),"type":"video/quicktime",
+                "revision":"synthetic-revision","at":1,"source":"stream"}),
+        );
+    };
+    put("media:original", &original, &original);
+    // Named for other bytes than it holds: not media the store vouches for.
+    put("content-key", b"tampered", b"what it should be");
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(
+        matches!(
+            result,
+            Outcome::Complete {
+                blocked_owners: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    let state: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    let pass = state["passes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    assert!(
+        pass["diskRecords"].get("media:original").is_some(),
+        "{pass}"
+    );
+    assert!(pass["diskRecords"].get("content-key").is_none(), "{pass}");
+    let clip = pass["closure"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["reference"]["key"] == "media:original" && e["reference"]["ownerKind"] == "current"
+        })
+        .unwrap();
+    assert_eq!(clip["status"], "verified-original", "{clip}");
+    // The native library's store now holds the bytes under the asset's key.
+    let key: Value = read(&config.native_profile.join(format!(
+        "Media Store/keys/{:x}.json",
+        Sha256::digest(b"media:original")
+    )));
+    let hash = key["hash"].as_str().unwrap();
+    assert_eq!(
+        fs::read(
+            config
+                .native_profile
+                .join("Media Store/objects")
+                .join(&hash[..2])
+                .join(hash)
+        )
+        .unwrap(),
+        original
+    );
+}
