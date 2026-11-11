@@ -358,16 +358,49 @@ impl Drop for Wakes {
         self.0.changed.notify_all();
     }
 }
+/// Whether `answer` (to the need `key`) can stand in for a frame at `scale`
+/// and `crop`: a whole raster always can; one holding only a window
+/// ([`CompatRaster::window`]) only at the same scale for a crop inside its
+/// window (elsewhere it is transparent, and the frame would show holes).
+fn stands_in(key: &NeedKey, answer: &CompatAnswer, scale: f64, crop: Option<PixelRect>) -> bool {
+    let CompatAnswer::Raster(raster) = answer else {
+        return true;
+    };
+    if raster.window.is_none() {
+        return true;
+    }
+    let [x, y, w, h] = raster.held();
+    key.3 == scale.to_bits()
+        && crop.is_some_and(|c| {
+            let (right, bottom) = (
+                (c.x.saturating_add(c.width)).min(raster.width),
+                (c.y.saturating_add(c.height)).min(raster.height),
+            );
+            x <= c.x && y <= c.y && x + w >= right && y + h >= bottom
+        })
+}
 impl Answers {
     /// A late layer's stand-in: its nearest answered frame at or before
     /// `ticks`, in this revision only (a later frame is content not reached
-    /// yet; an earlier revision's is content the edit may have changed).
-    fn nearest(&self, composition: &str, layer: &str, ticks: i64) -> Option<&CompatAnswer> {
+    /// yet; an earlier revision's is content the edit may have changed),
+    /// that can stand in for a frame at `scale` and `crop`.
+    fn nearest(
+        &self,
+        composition: &str,
+        layer: &str,
+        ticks: i64,
+        scale: f64,
+        crop: Option<PixelRect>,
+    ) -> Option<&CompatAnswer> {
         let times = self
             .by_layer
             .get(&(composition.to_owned(), layer.to_owned()))?;
-        let (_, key) = times.range(..=ticks).next_back()?;
-        self.map.get(key)
+        times
+            .range(..=ticks)
+            .rev()
+            .filter_map(|(_, key)| Some((key, self.map.get(key)?)))
+            .find(|(key, answer)| stands_in(key, answer, scale, crop))
+            .map(|(_, answer)| answer)
     }
     fn forget(&mut self, key: &NeedKey) {
         self.map.remove(key);
@@ -785,7 +818,10 @@ impl CompatRasters for CompatStore {
         if answers.late == Late::Wait {
             return CompatAnswer::Missing;
         }
-        let Some(stand_in) = answers.nearest(composition, layer, ticks).cloned() else {
+        let Some(stand_in) = answers
+            .nearest(composition, layer, ticks, scale, crop)
+            .cloned()
+        else {
             return CompatAnswer::Missing;
         };
         answers.stood_in.push(CompatNeed {
@@ -1127,6 +1163,67 @@ mod tests {
             CompatAnswer::Raster(r) => Some(r.data[0]),
             _ => None,
         }
+    }
+    /// A raster holding only its need's crop window stands in only for a
+    /// frame at its scale whose crop it holds: anything else would sample its
+    /// transparent rest, so that frame holds as for no answer (review: panning
+    /// across a crop bucket showed holes).
+    #[test]
+    fn a_windowed_answer_stands_in_only_for_crops_it_holds() {
+        use crate::policy::Moment;
+        let crop = |x, y, width, height| {
+            Some(PixelRect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        let windowed = |window| {
+            Reply::Draw(override_raster_window(
+                100,
+                80,
+                Some(window),
+                vec![7; 40 * 30 * 4],
+                [100., 80.],
+                [0., 0.],
+                [0., 0., 1., 1.],
+            ))
+        };
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        let mut first = at("x", 1.);
+        first.crop = crop(20, 10, 40, 30);
+        store.answer_all(7, 1, vec![(first, windowed([20, 10, 40, 30]))]);
+        let ask = |crop, scale| {
+            let t = 1.5;
+            store.answer("c", "x", t, scale, CompatSource::RasterOverride, crop)
+        };
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(ask(crop(20, 10, 40, 30), 1.)), Some(7));
+        assert_eq!(byte_of(ask(crop(25, 12, 30, 20), 1.)), Some(7));
+        // A crop the window ends inside of at the raster's edge is held too.
+        assert!(matches!(
+            ask(crop(60, 40, 256, 256), 1.),
+            CompatAnswer::Missing
+        ));
+        assert!(matches!(
+            ask(crop(10, 10, 40, 30), 1.),
+            CompatAnswer::Missing
+        ));
+        assert!(matches!(ask(None, 1.), CompatAnswer::Missing));
+        assert!(matches!(
+            ask(crop(20, 10, 40, 30), 2.),
+            CompatAnswer::Missing
+        ));
+        store.end_frame();
+        // A whole raster stands in for any crop and scale, as before.
+        let mut whole = at("x", 1.2);
+        whole.crop = crop(0, 0, 256, 256);
+        store.answer_all(7, 1, vec![(whole, draw(9))]);
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(ask(crop(10, 10, 40, 30), 2.)), Some(9));
+        store.end_frame();
     }
     #[test]
     fn a_playing_frame_draws_a_late_layer_from_its_nearest_answer() {
