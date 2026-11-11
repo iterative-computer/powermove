@@ -12,6 +12,7 @@ pub struct CacheUsage {
     pub decoder_bytes: u64,
     pub decoder_sessions: usize,
     pub decoder_pool_free_bytes: u64,
+    pub disk_read_ahead_bytes: u64,
     pub surface_bytes: u64,
     pub text_bytes: u64,
     pub vector_bytes: u64,
@@ -31,6 +32,7 @@ impl CacheUsage {
             + self.converted_frame_bytes
             + self.decoded_frame_bytes
             + self.decoder_bytes
+            + self.disk_read_ahead_bytes
             + self.surface_bytes
             + self.text_bytes
             + self.vector_bytes

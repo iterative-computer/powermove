@@ -2337,6 +2337,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 timeout
             };
             if engine.maintain_memory() {
+                shared.disk.release_idle_reads();
                 for r in runtime.values() {
                     if let Some(audio) = &r.transport.audio {
                         audio.send(audio::AudioCtl::MemoryPressure);

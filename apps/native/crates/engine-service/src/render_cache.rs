@@ -290,6 +290,28 @@ fn snapshot(state: &State) -> RenderBars {
 }
 
 impl DiskFrames {
+    /// Drop CPU read-ahead while stopped, fencing queued/in-flight reads
+    /// with an empty wanted range. Authored/kept files and scene identity stay.
+    pub(crate) fn release_idle_reads(&self) {
+        let generation = self.with(|s| {
+            s.last_read = None;
+            (s.generation, false)
+        });
+        self.inner.reader.clear(generation);
+    }
+
+    pub(crate) fn ready_bytes(&self) -> u64 {
+        self.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum()
+    }
+
     /// Called (on any thread, never blocking) whenever the render bar changes.
     pub fn set_notify(&self, notify: Option<Notify>) {
         self.inner.state.lock().unwrap().notify = notify;
@@ -1134,6 +1156,41 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_releases_read_ahead_without_forgetting_the_open_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().to_owned(), 64 << 20)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, 7));
+        ready(&disk);
+        let generation = disk.inner.state.lock().unwrap().generation;
+        disk.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .push_back(((generation, 0), Arc::new(vec![0; 4096])));
+        assert_eq!(disk.ready_bytes(), 4096);
+        disk.release_idle_reads();
+        assert_eq!(disk.ready_bytes(), 0);
+        assert!(disk.inner.state.lock().unwrap().frames.is_some());
+        assert_eq!(disk.inner.state.lock().unwrap().generation, generation);
+        // The empty range refuses both queued work and a late completion;
+        // the next explicit read can establish its normal window again.
+        assert_eq!(
+            disk.inner.reader.ready.lock().unwrap().wanted,
+            Some((generation, 1, 0))
+        );
+        disk.inner.reader.want(generation, 0, 3);
+        assert_eq!(
+            disk.inner.reader.ready.lock().unwrap().wanted,
+            Some((generation, 0, 3))
+        );
+    }
 
     #[test]
     fn closing_document_releases_the_scene_and_ready_disk_frames() {

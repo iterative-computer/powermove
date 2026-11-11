@@ -240,6 +240,7 @@ impl Engine {
             decoder_bytes: media.decoders as u64,
             decoder_sessions: media.sessions,
             decoder_pool_free_bytes: media.pool.free_bytes as u64,
+            disk_read_ahead_bytes: self.disk.as_ref().map_or(0, |disk| disk.ready_bytes()),
             surface_bytes: self
                 .pool
                 .iter()
