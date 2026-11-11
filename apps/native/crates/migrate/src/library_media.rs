@@ -1,4 +1,5 @@
-//! Read main's `Media Store/Index` records from an immutable checkpoint. Never
+//! Read main's `Media Store` records (`Index/`, or the new engine's
+//! content-addressed `keys/` + `objects/`) from an immutable checkpoint. Never
 //! dereference external source links here: cloud availability belongs to the
 //! platform adapter. Owned payloads are bounded, streamed and checksum verified.
 use crate::snapshot::open_regular;
@@ -215,12 +216,29 @@ pub enum SourceStatus {
     Changed,
 }
 
+/// Main's media records in `root` (`<profile>/Media Store`): the shipped
+/// app's `Index/` and the content-addressed `keys/` + `objects/` store that
+/// development builds with the new engine wrote. An `Index/` record wins
+/// over a `keys/` record of the same key.
 pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
     match fs::symlink_metadata(root) {
         Ok(m) => ensure!(m.is_dir(), "unsafe media root"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     }
+    let mut records = read_main_index(root)?;
+    let indexed: std::collections::BTreeSet<String> =
+        records.iter().map(|r| r.key.clone()).collect();
+    records.extend(
+        read_store_keys(root)?
+            .into_iter()
+            .filter(|r| !indexed.contains(&r.key)),
+    );
+    records.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(records)
+}
+
+fn read_main_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
     let index = root.join("Index");
     match fs::symlink_metadata(&index) {
         Ok(m) => ensure!(m.is_dir(), "unsafe media index directory"),
@@ -258,6 +276,99 @@ pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
         record.verify_owned()?;
         records.push(record);
     }
-    records.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(records)
+}
+
+fn hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The content-addressed store's records: `keys/<sha256(key)>.json` naming
+/// `objects/<hash[..2]>/<hash>` by its BLAKE3 hash (the native library's own
+/// layout). Each object is read once to check its name and take the SHA-256
+/// the rest of the migration verifies. A record whose object is missing, the
+/// wrong size or other bytes is not media this store can vouch for: it is
+/// left out, and its assets stay offline as they would in the original app.
+fn read_store_keys(root: &Path) -> Result<Vec<DiskMediaRecord>> {
+    let keys = root.join("keys");
+    match fs::symlink_metadata(&keys) {
+        Ok(m) => ensure!(m.is_dir(), "unsafe media key directory"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&keys)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(name_hash) = name.strip_suffix(".json").filter(|h| hex64(h)) else {
+            continue;
+        };
+        if let Some(record) = store_record(root, &entry.path(), name_hash) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+fn store_record(root: &Path, path: &Path, name_hash: &str) -> Option<DiskMediaRecord> {
+    let input = open_regular(path).ok()?;
+    let mut bytes = Vec::new();
+    input.take(256 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 256 * 1024 {
+        return None;
+    }
+    let raw: Value = serde_json::from_slice(&bytes).ok()?;
+    let text = |k: &str| raw.get(k).and_then(Value::as_str);
+    let key = text("key")?.to_owned();
+    let valid_key = !key.is_empty()
+        && key.len() <= 256
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b":._-".contains(&b));
+    if !valid_key || format!("{:x}", Sha256::digest(key.as_bytes())) != name_hash {
+        return None;
+    }
+    let hash = text("hash").filter(|h| hex64(h))?.to_owned();
+    let size = raw
+        .get("size")
+        .and_then(Value::as_u64)
+        .filter(|s| *s < (1u64 << 53))?;
+    let owned = root.join("objects").join(&hash[..2]).join(&hash);
+    let mut object = open_regular(&owned).ok()?;
+    if object.metadata().ok()?.len() != size {
+        return None;
+    }
+    let (mut blake, mut sha) = (blake3::Hasher::new(), Sha256::new());
+    let mut buffer = vec![0; 1024 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = object.read(&mut buffer).ok()?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        blake.update(&buffer[..n]);
+        sha.update(&buffer[..n]);
+    }
+    if total != size || blake.finalize().to_hex().as_str() != hash {
+        return None;
+    }
+    Some(DiskMediaRecord {
+        revision: text("revision")
+            .filter(|r| !r.is_empty())
+            .unwrap_or(&hash)
+            .to_owned(),
+        mime: text("type")
+            .unwrap_or("application/octet-stream")
+            .to_owned(),
+        size,
+        sha256: format!("{:x}", sha.finalize()),
+        owned_path: Some(owned),
+        source_path: None,
+        key,
+        raw,
+    })
 }

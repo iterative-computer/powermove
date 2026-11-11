@@ -1923,7 +1923,17 @@ fn compat_quad<'d>(
         CompatAnswer::Native => Ok(None),
         CompatAnswer::Raster(raster) => {
             let [w, h] = raster.size;
-            let [ax, ay] = raster.anchor;
+            // Today's compositor centres a plain shape's raster on the layer
+            // whatever anchor it reports (`nativeContentQuad`): a wrapper that
+            // passes a shape through without the crop argument hands back the
+            // whole raster anchored at its padding, drawn centred all the same.
+            let paths = node::member(node::member(Some(layer), "d"), "paths")
+                .is_some_and(|v| matches!(v.kind(), pm_model::NodeKind::Array(a) if !a.is_empty()));
+            let [ax, ay] = if ty == "shape" && !paths {
+                [w / 2.0, h / 2.0]
+            } else {
+                raster.anchor
+            };
             let uv = raster.uv;
             Ok(Some(Some(Quad::Texture {
                 source: Source::Compat(CompatDraw(raster)),

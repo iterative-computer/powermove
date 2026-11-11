@@ -230,6 +230,24 @@ fn a_producer_s_raster_replaces_the_layer_on_its_own_quad_through_the_layer_s_tr
 }
 
 #[test]
+fn a_plain_shape_s_raster_is_centred_on_the_layer_whatever_anchor_it_reports() {
+    // A wrapper that passes a shape through without today's crop argument
+    // (`raster(layer, scale, time)`) answers the whole raster anchored at its
+    // 4-pixel padding. Today's compositor centres a plain shape's raster
+    // regardless (`ax = r.w / 2`), so the rectangle stays where it is.
+    let mut renderer = Renderer::headless().unwrap();
+    let red = raster(216, 136, [255, 0, 0, 255], [108.0, 68.0], [4.0, 4.0]);
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(red))));
+    let out = render(&mut renderer, &doc(100.0), 0.0).unwrap();
+    let center = px(&out, 128, 128);
+    assert!(center[0] > 0.99 && center[3] > 0.99, "{center:?}");
+    // 108 × 68 around (128, 128): drawn at its centre, not 50 px down-right.
+    assert!(px(&out, 75, 128)[3] > 0.99 && px(&out, 72, 128)[3] == 0.0);
+    assert!(px(&out, 128, 95)[3] > 0.99 && px(&out, 128, 92)[3] == 0.0);
+    assert_eq!(px(&out, 200, 180)[3], 0.0);
+}
+
+#[test]
 fn one_raster_drawn_on_a_new_device_is_uploaded_there() {
     // A renderer rebuilt (device loss) draws the answers it already holds:
     // each device gets its own texture of the same raster.

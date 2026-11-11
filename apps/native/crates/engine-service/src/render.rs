@@ -673,11 +673,17 @@ impl Engine {
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
-                self.renderer.set_scrub(spec.moment == Moment::Scrub);
+                // An exact read never takes a stand-in, whatever the moment.
+                self.renderer
+                    .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
                 self.renderer.set_playback(spec.decode_deadline);
                 self.renderer.set_isolate_layers(true);
                 if let Some(store) = &self.compat_document {
-                    store.begin_frame(spec.moment);
+                    store.begin_frame(if spec.exact {
+                        Moment::Paused
+                    } else {
+                        spec.moment
+                    });
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
