@@ -19,6 +19,8 @@ mod environment;
 mod geometry;
 #[path = "imported.rs"]
 mod imported;
+#[path = "intrinsic.rs"]
+mod intrinsic;
 #[path = "maps.rs"]
 mod maps;
 #[path = "material_policy.rs"]
@@ -447,22 +449,12 @@ impl SceneSource for DocumentSource {
             if object.get("scatter").is_some() {
                 continue;
             }
-            if [
-                "materialProperties",
-                "sourceMaterialProperties",
-                "sourceMaterials",
-                "parts",
-            ]
-            .iter()
-            .any(|key| {
-                object
-                    .get(*key)
-                    .and_then(Value::as_object)
-                    .is_some_and(|m| !m.is_empty())
-            }) {
-                return Err(
-                    "Studio sparse material/part document adapter is not connected yet".into(),
-                );
+            if object
+                .get("parts")
+                .and_then(Value::as_object)
+                .is_some_and(|p| !p.is_empty())
+            {
+                return Err("Studio part-offset document adapter is not connected yet".into());
             }
 
             if !object["slots"].as_array().is_none_or(Vec::is_empty)
@@ -501,7 +493,7 @@ impl SceneSource for DocumentSource {
                 };
                 let first = materials.len();
                 let indices = Arc::new((first..first + palette.len()).collect());
-                for material in palette {
+                for (slot, mut material) in palette.into_iter().enumerate() {
                     let mut gpu = material.gpu();
                     gpu.extra[2] = n(p, "opacity", 1.);
                     self.bind_material_maps(
@@ -510,6 +502,18 @@ impl SceneSource for DocumentSource {
                         &mut map_layers,
                         &mut map_indices,
                     )?;
+                    if object.get("terrain").is_none() || slot == 0 {
+                        let emission = material.emission;
+                        intrinsic::apply(
+                            object,
+                            None,
+                            &mut material,
+                            &mut gpu,
+                            emission,
+                            1.,
+                            false,
+                        );
+                    }
                     materials.push(gpu);
                     scene.materials.push(material);
                 }
@@ -534,8 +538,7 @@ impl SceneSource for DocumentSource {
                     let source_material = (object["useSourceMaterials"] == true)
                         .then_some(part.material.as_ref())
                         .flatten();
-                    let selected = source_material.map_or(m, imported_material);
-                    scene.materials.push(selected);
+                    let mut selected = source_material.map_or(m, imported_material);
                     let mut gpu = selected.gpu();
                     gpu.extra[2] =
                         source_material.map_or(n(p, "opacity", 1.), |m| m.opacity as f32);
@@ -565,16 +568,60 @@ impl SceneSource for DocumentSource {
                             Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
                         })?;
                     } else {
-                        self.bind_material_maps(
-                            &object["material"],
-                            &mut gpu,
-                            &mut map_layers,
-                            &mut map_indices,
-                        )?;
                         if object["material"]["doubleSided"] == false {
                             gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
                         }
                     }
+                    let basic = source_material
+                        .is_some_and(|m| m.kind == pm_scene3d::render::gltf::MaterialType::Basic);
+                    let index = if source_material.is_some() {
+                        part.source_material
+                    } else {
+                        Some(0)
+                    };
+                    let overrides = maps::overrides(object, index, basic);
+                    self.bind_material_maps(
+                        &overrides,
+                        &mut gpu,
+                        &mut map_layers,
+                        &mut map_indices,
+                    )?;
+                    let mut emission_color = source_material.map_or_else(
+                        || color(p, "emissive", "#000000"),
+                        |m| {
+                            v3(
+                                m.emissive[0] as f32,
+                                m.emissive[1] as f32,
+                                m.emissive[2] as f32,
+                            )
+                        },
+                    );
+                    let mut emission_intensity = source_material
+                        .map_or(n(p, "emissiveIntensity", 1.), |m| {
+                            m.emissive_intensity as f32
+                        });
+                    if source_material.is_some() {
+                        if overrides["maps"].get("color").is_some() {
+                            selected.base = Vec3::splat(1.);
+                            gpu.base[..3].fill(1.);
+                        }
+                        if overrides["maps"].get("emissive").is_some() {
+                            emission_color = Vec3::splat(1.);
+                            emission_intensity = emission_intensity.max(1.);
+                            selected.emission = emission_color * emission_intensity;
+                            gpu.emit[..3].fill(emission_intensity);
+                        }
+                    }
+                    intrinsic::apply(
+                        object,
+                        index,
+                        &mut selected,
+                        &mut gpu,
+                        emission_color,
+                        emission_intensity,
+                        basic,
+                    );
+                    scene.materials.push(selected);
                     materials.push(gpu);
                     let mesh = self.cached_mesh(
                         format!("asset:{}", pm_scene3d::render::geometry_key(&part.geometry)),
@@ -625,18 +672,28 @@ impl SceneSource for DocumentSource {
                     });
                 }
             } else {
-                scene.materials.push(m);
-                let mut gpu = m.gpu();
+                let mut material = m;
+                let mut gpu = material.gpu();
                 gpu.extra[2] = n(p, "opacity", 1.);
+                if object["material"]["doubleSided"] == false {
+                    gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                }
                 self.bind_material_maps(
-                    &object["material"],
+                    &maps::overrides(object, Some(0), false),
                     &mut gpu,
                     &mut map_layers,
                     &mut map_indices,
                 )?;
-                if object["material"]["doubleSided"] == false {
-                    gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
-                }
+                intrinsic::apply(
+                    object,
+                    Some(0),
+                    &mut material,
+                    &mut gpu,
+                    color(p, "emissive", "#000000"),
+                    n(p, "emissiveIntensity", 1.),
+                    false,
+                );
+                scene.materials.push(material);
                 materials.push(gpu);
                 instances.push(MeshInstance {
                     layer: id.into(),

@@ -65,6 +65,48 @@ fn create_update_undo_redo_is_exact() {
     assert_eq!(project(&s), created);
 }
 #[test]
+fn sparse_material_commands_channels_history_and_pmv_roundtrip() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}),
+    );
+    let before = project(&s);
+    s.execute(command(json!({"operation":"update_object","target":"model","patch":{
+        "materialProperties":{"opacity":75,"roughness":0.6,"emissionIntensity":2,"ambientResponse":25},
+        "sourceMaterialProperties":{"1":{"metallic":0.3,"emissionColor":"#00FF00"}},
+        "sourceMaterials":{"1":{"color":"paint","emissive":"paint"}}
+    }})), Origin::Mcp).unwrap();
+    let authored = project(&s);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), authored);
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("model", "mi.1.metallic", 0.8, 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let resolved = pm_kernel::commands::scene3d::resolve_scene(&s.snapshot(), None, 0.).unwrap();
+    assert_eq!(
+        resolved.scene["objects"][0]["sourceMaterialProperties"]["1"]["metallic"]["v"],
+        0.8
+    );
+    let saved = project(&s);
+    let mut dir = common::TempDir::new("sparse-material");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    reopened.undo().unwrap();
+    assert_eq!(project(&reopened), authored);
+    reopened.redo().unwrap();
+    assert_eq!(project(&reopened), saved);
+}
+#[test]
 fn failure_is_atomic_and_preserves_history() {
     let mut s = store();
     apply(&mut s, json!({"operation":"add_camera","id":"cam"}));

@@ -65,9 +65,9 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Angular/concave/convex bevels, inner hole bevel depth | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front/Bevel/Side/Back independent materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | PBR color/roughness/metalness/emission/opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Color/normal/roughness/metalness/emissive/AO image maps | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Color/normal/roughness/metalness/emissive/AO image maps | Native retained-image and indexed replacement checks | Connected image sources; live capture pending | Tested sparse records | Tested | Tested | Read maps/source material IDs → `update_object` material.maps or sourceMaterials; live sources pending |
 | Source materials versus whole-model overrides | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material opacity/roughness/metallic/emission color/intensity/ambient response | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material opacity/roughness/metallic/emission color/intensity/ambient response | Native sparse values, source IDs and rendered emission checked | Connected | Tested PMV | Tested Undo/Redo | Tested | `update_object` patch `materialProperties` / `sourceMaterialProperties`; `mi.*` / `mi.index.*` channel edits |
 | Live composition textures on named model materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Live layer material sources in same composition | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Layer material source timing, masks, effects; transform/opacity excluded | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
@@ -134,7 +134,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Live / Refine / Final path tracing | Shared engine; native worker tiers tested | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Live / Refine / Final path tracing | Shared engine; all native worker tiers checked | Saved quality plus transient viewer tier | Quality tested | Quality tested; tier transient | Quality exposed; direct native tier hook | `studio3d.drive` id=tier, `UiState.viewer.studioTier`, `Viewer::studio_preview`; automatic idle refinement pending |
 | Fast / Quality preview | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Finish presets and rendered swatches | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Softbox lights and light-by-pointing | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -843,3 +843,44 @@ and history. All **90 general engine-worker unit** tests also pass (one relaunch
 helper intentionally ignored), using a canonical temporary root because the
 storage admission tests correctly reject macOS symlink ancestors. The GPUI app
 builds with the unchanged profile/features.
+
+
+### Sparse intrinsic and indexed image material overrides
+
+The engine-only `2709e2943` keeps original glTF material identity alongside each
+final material variant. Native retained parts expose that identity; a generated
+GPU material slot never substitutes for the file's material index. This change
+can be cherry-picked independently of the native adapter.
+
+Native rendering now overlays evaluated whole-model `materialProperties` and
+indexed `sourceMaterialProperties`: opacity percent, roughness, metallic,
+emission color/intensity and ambient response percent. Indexed values win;
+absent values preserve the original material. Emission color and intensity stay
+separate, including a colored original with zero intensity. Basic/unlit file
+materials accept opacity only, matching the pinned runtime. Terrain regions keep
+their authored regional finishes. Scatter retains its prototype material bindings.
+
+Whole-model image maps and indexed `sourceMaterials` maps now replace the six
+standard slots on imported materials. Indexed replacements take precedence before
+loading an overridden source. Replacement images retain the original slot's UV
+set, transform and wrapping. Extra physical maps stay intact. Imported color and
+emission factors reset for replacement images before sparse intrinsic edits;
+clearing an override on the next immutable snapshot restores file state. Live
+layer/group/composition maps still report the capture gap.
+
+Designer hooks: `edit_3d` / `Scene3dCommand::Apply` operation `update_object`,
+patch `materialProperties`, `sourceMaterialProperties`, `sourceMaterials`;
+ordinary property commands use `mi.opacity`, `mi.roughness`, `mi.metallic`,
+`mi.emissionColor`, `mi.emissionIntensity`, `mi.ambientResponse` and
+`mi.<source index>.<field>`. `get_3d_scene` publishes their evaluated channels.
+These edits use the single kernel writer and existing document/history paths.
+
+Checks: **52 shared geometry unit**, **4 native material unit**, **31 native
+scene/export**, **22 import/image**, **28 kernel scene** and **10 MCP scene**
+checks pass. Regressions cover a GPU-slot/file-ID mismatch, visible green
+emission, exact file restoration, UV1 replacements, all 18 retained physical
+slots, zero-intensity emission edits, unlit opacity, per-source channel edits,
+PMV reopen, post-reopen Undo/Redo and agent readback. The GPUI app builds
+(42.68 s, unchanged profile/features). Part offsets remain explicitly unsupported; complete
+Electron-project render equivalence still needs the outstanding capture,
+extrusion, mixed-depth and broader import cases.

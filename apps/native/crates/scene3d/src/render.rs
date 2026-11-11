@@ -14,6 +14,8 @@ pub struct Part {
     pub geometry: Arc<Geometry>,
     pub world: [f64; 16],
     pub material: Option<gltf::Material>,
+    /// File material identity; final geometry variants can have other indices.
+    pub source_material: Option<usize>,
     pub attributes: Arc<VertexAttributes>,
 }
 /// Resource lifetime owns decoded bytes and derived immutable geometry. Static
@@ -113,6 +115,7 @@ impl Resource {
                     geometry,
                     world: math::IDENTITY,
                     material: None,
+                    source_material: None,
                     attributes: Arc::default(),
                 }])
             }
@@ -254,6 +257,7 @@ impl Resource {
                                 geometry: geometry.clone(),
                                 world: math::multiply(&worlds[object], &instance.map(f64::from)),
                                 material: material.clone(),
+                                source_material: m.material_sources[d.material],
                                 attributes: attributes.clone(),
                             });
                         }
@@ -262,6 +266,7 @@ impl Resource {
                             geometry,
                             world: worlds[object],
                             material,
+                            source_material: m.material_sources[d.material],
                             attributes,
                         });
                     }
