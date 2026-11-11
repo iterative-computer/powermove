@@ -910,6 +910,106 @@ median/p95 were **32.668 / 49.843 ms**, which are not input-to-pixel latency.
 Other native apps remained running, so this was not quiet-machine acceptance.
 The input-origin correction requires a fresh on-screen latency run.
 
+### Linear reconstruction and edge/noise acceptance
+
+Engine-only `f4ec85e59` adds a default separable **Blackman–Harris 1.5 px**
+footprint, using an inverse CDF and digitally shifted Sobol camera samples.
+Radiance, emission, backdrop/coverage and OIDN guides share that footprint in
+linear HDR before denoising and tone mapping. Live retains its temporal jitter.
+`Renderer::set_pixel_filter` exposes Box for references and configurable
+Blackman–Harris widths; changing it invalidates accumulated samples. Existing
+WebGPU hosts with the old buffer allocation retain their former box estimator.
+
+A separate GPU pass classifies first-batch silhouette, normal, depth and color
+edges without cross-pixel races in the tracer. Those pixels receive at least
+four times their authored sample floor, bounded by the chosen ceiling. Adaptive
+stopping checks RGB channel error as well as luminance, so chromatic noise
+cannot hide behind equal luminance. Saved still/export policies continue to
+converge on their noise target or sample ceiling, with no three-second cutoff.
+The extra moments cost 16 bytes/pixel plus a 4 KiB filter table; admission accounts
+for them. No panel or controls were designed. UI can keep using saved
+`studioQuality`, its noise/floor/ceiling fields and per-export overrides.
+
+Checks: **132 engine tests pass**, including all **11 Cycles yardstick scenes**
+with matching Blackman–Harris reconstruction, plus portable and hardware-RT
+HDR/alpha coverage tests. The native app builds in **31.80 s**. Numeric image
+checks render original procedural teapot, thick-wall glass cup and chrome-sphere
+fixtures at **192×128** against fresh **4096-spp** references. Both Production
+(32–256 spp, half-resolution guides) and Final (512–1024 spp) pass these normalized
+sRGB-code thresholds: foreground luminance RMS < 0.020, smooth-region residual
+noise RMS < 0.006, p95 absolute 8×8 block bias < 0.012. Final measured values:
+
+| Fixture | Luminance RMS | Smooth noise RMS | Block bias p95 |
+|---|---:|---:|---:|
+| Teapot | 0.00166 | 0.00161 | 0.00071 |
+| Glass cup | 0.00554 | 0.00321 | 0.00169 |
+| Chrome | 0.00237 | 0.00219 | 0.00103 |
+
+These bounded regression fixtures do not establish 1080p quality acceptance for
+every imported asset. Their matte enamel uses authored perceptual roughness 0.7
+and zero mirror clearcoat, checked through GPU material preparation. Sparse
+native roughness overrides already reach that same engine material path. The
+owner's exact teapot asset/finish still needs comparison; no unnamed material
+preset was silently restyled.
+
+### Native Live timing and presentation invalidation
+
+Engine-only `5ffc0a9cc` splits completed MetalFX guide and denoiser wall time
+from packing/submission. `09c4b50b8` also reports the external Metal command
+buffer's GPU execution time. These timings do not add GPU barriers.
+Development builds emit `STUDIO_FRAME_TIMING` when `STUDIO_TIMINGS=1`; the
+immutable request size/tier, preparation, pipeline stages and retained-resource
+counters are available to the app/debug lane. Texture-only pack timing measures
+submission, not a separate GPU completion.
+
+Direct transport commands now have `Viewer::command_at(command, event_time)`;
+the app uses the originating key event for frame steps. The worker rejects
+invalid timestamps before enqueueing and retains an accepted origin through
+presentation. Time-field edits include the editing interval and are excluded
+from input acceptance measurements.
+
+Unchanged guide/gizmo publications previously advanced the viewer sequence,
+retiring an in-flight picture even with no selected layer. `safe_areas` now
+preserves the sequence when geometry and provider/time ownership are unchanged.
+A barrier regression reproduced that invalidation and now confirms the same
+frame lands without a stale rejection. Changed geometry still uses the ordinary
+invalidation path. Checks: **95 worker unit tests** (one intentionally ignored)
+and **17 service tests** pass; the app builds in **27.78 s**.
+
+The diagnostic fixture is a rotating torus with three softboxes, a 1920×1080
+60-fps composition, Fit 38%, Auto/Full resolution and Live. The measured worker
+output is **1464×824**, internally traced at **732×412** before MetalFX. A repeat
+before overlay deduplication presented **1247 frames / 46.4703 s ≈ 26.81 fps**;
+after it, **4005 frames over 147.7401 s ≈ 27.10 fps**. FPS uses intervals between
+the first and last presented frames, excluding startup. This is a diagnostic,
+not a 60-fps acceptance pass. A separate instrumented run's median stage times
+were preparation **1.11 ms**, trace **6.46 ms**, guides **3.24 ms**, MetalFX wall
+**13.78 ms** (GPU **11.78 ms**), pack submission **0.29 ms**. Live uses no CPU OIDN.
+
+Thirty direct frame steps after five warmups now carry timestamps. After
+overlay deduplication they measured input-to-presented-pixel median/p95
+**50.67 / 115.73 ms**. The state-to-worker median became **0.075 ms**, with one
+sequence increment per step; 29/30 presented frames used a newly rendered
+picture. Median GPU-completion-to-display was **21.25 ms**. These measurements
+include GPU load from other open apps: total GPU utilization was **95%** during
+playback and **46%** just after closing only the test app. Other apps were not
+closed. The quiet-machine **60 fps / 50 ms p95** gates remain open.
+
+A headless 1080p native-service diagnostic (30 frames per case, after four
+warmups, retained wallpaper input) measured these median wall times. It is not
+presented fps or an image-quality gate:
+
+| Scene | Motion | Preparation | Trace | Guides | MetalFX | Total |
+|---|---|---:|---:|---:|---:|---:|
+| Hero | Static | 0.55 ms | 5.23 ms | 1.03 ms | 5.31 ms | 12.38 ms |
+| Hero | Instances rotate | 12.50 ms | 5.68 ms | 1.02 ms | 5.08 ms | 24.50 ms |
+| Chrome/glass | Static | 10.32 ms | 17.49 ms | 1.21 ms | 4.81 ms | 34.05 ms |
+| Chrome/glass | Instances rotate | 21.28 ms | 14.52 ms | 1.17 ms | 4.69 ms | 42.01 ms |
+
+GPU time confirms that the Live deficit includes real GPU execution and other
+on-screen GPU work, not CPU OIDN. Animated preparation also exposes avoidable
+texture reuploads; the source image is unchanged when only instances move.
+
 ## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
 
 Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay

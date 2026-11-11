@@ -119,6 +119,16 @@ impl Pass {
                 request.clone(),
                 tier,
             )?;
+            if cfg!(debug_assertions) && std::env::var_os("STUDIO_TIMINGS").is_some() {
+                let service = self.service.as_ref().unwrap();
+                eprintln!(
+                    "STUDIO_FRAME_TIMING ticks={} size={}x{} tier={tier:?} hardware_rt={} prepare_ms={:.3} total_ms={:.3} geometry_uploads={} scene_updates={} blas_builds={} pipeline={:?}",
+                    request.ticks, request.width, request.height, rendered.hardware_rt,
+                    rendered.timings.prepare_ms, rendered.timings.total_ms,
+                    service.geometry_uploads(), service.scene_updates(), service.blas_builds(),
+                    rendered.timings.pipeline,
+                );
+            }
             self.cached = Some((tier, rendered));
             self.traces += 1;
         }

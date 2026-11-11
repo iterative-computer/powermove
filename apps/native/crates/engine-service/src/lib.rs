@@ -60,12 +60,12 @@ use std::{
 
 /// Geometry is normalized to the content viewport. Colours are linear P3 RGBA.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OverlayLine {
     pub ends: [f32; 4],
     pub color: [f32; 4],
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverlayGeometry {
     lines: Vec<OverlayLine>,
 }
@@ -723,6 +723,11 @@ impl Viewer {
     /// Safe areas are time-invariant and are drawn with every video frame.
     pub fn safe_areas(&self, geometry: OverlayGeometry) -> Result<()> {
         self.edit(|v| {
+            // Selection/time publications often resend the same guides. They
+            // must not retire a picture currently rendering those exact lines.
+            if v.overlay_time.is_none() && v.locked_provider.is_none() && v.overlays == geometry {
+                return Ok(());
+            }
             v.overlays = geometry;
             v.overlay_time = None;
             v.locked_provider = None;
@@ -732,9 +737,24 @@ impl Viewer {
         })
     }
     pub fn command(&self, cmd: TransportCommand) -> Result<()> {
+        self.command_traced(cmd, None)
+    }
+    /// Interactive transport input, measured through the frame it presents.
+    pub fn command_at(&self, cmd: TransportCommand, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.command_traced(cmd, Some(input))
+    }
+    fn command_traced(&self, cmd: TransportCommand, input: Option<f64>) -> Result<()> {
         use pm_protocol::validate::Validate;
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        self.edit(|v| v.enqueue(cmd))
+        self.edit(|v| {
+            v.enqueue(cmd)?;
+            if let Some(input) = input {
+                v.input = Some(input);
+                v.pipeline = trace::Pipeline { request: trace::now(), ..Default::default() };
+            }
+            Ok(())
+        })
     }
     /// The Mixer's monitor solo: only these top-level layers are heard
     /// (empty: every strip). Meters still read every strip.
@@ -2609,6 +2629,51 @@ mod worker_tests {
         assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn interactive_frame_step_retains_its_event_origin() {
+        let service = EngineService::start(pm_gpu::Gpu::new("step-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let stamp = v.stamp();
+        for invalid in [0., -1., f64::NAN, f64::INFINITY] {
+            assert!(v.command_at(TransportCommand::Step { frames: 1 }, invalid).is_err());
+        }
+        assert_eq!(v.stamp(), stamp, "invalid origins must not enqueue commands");
+        let input = trace::now();
+        v.command_at(TransportCommand::Step { frames: 1 }, input).unwrap();
+        v.capture_next().unwrap();
+        let frame = drawn(&v).frame.unwrap();
+        assert_eq!(frame.input_host_seconds, Some(input));
+        assert_eq!(frame.time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+        v.command(TransportCommand::Step { frames: 1 }).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn identical_safe_areas_preserve_an_in_flight_frame() {
+        let service = EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.command_at(TransportCommand::Step { frames: 1 }, trace::now()).unwrap();
+        v.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before = v.stamp();
+        v.safe_areas(OverlayGeometry::default()).unwrap();
+        let after = v.stamp();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert_eq!(before, after, "unchanged guides/gizmos must not invalidate the frame");
+        assert_eq!(status.stale_rejections, 0);
+        assert_eq!(status.frame.unwrap().time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

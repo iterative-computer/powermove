@@ -20,6 +20,7 @@ unsafe extern "C" {
         jitter_y: f32,
         reset: bool,
     ) -> bool;
+    fn studio_metalfx_gpu_ms(context: *mut c_void) -> f64;
     fn studio_metalfx_send(context: *mut c_void, texture: *mut c_void, frame: u64) -> bool;
     fn studio_metalfx_release(context: *mut c_void, frame: u64);
     fn studio_metalfx_destroy(context: *mut c_void);
@@ -491,6 +492,7 @@ impl Renderer {
         let near = 0.01f32;
         let far = (self.bounds[3] * 1000. + self.base.cam_fwd[3] * 10.).max(10000.);
         if !reuse || !fx.valid {
+            let guide_start = Instant::now();
             let params = Guides {
                 previous: self.previous_camera,
                 misc: [near, far, j[0], j[1]],
@@ -545,6 +547,7 @@ impl Renderer {
             }
             self.queue.submit([enc.finish()]);
             self.wait();
+            self.timings.guides_ms += guide_start.elapsed().as_secs_f64()*1000.;
             let mut textures = Vec::new();
             for input in fx.inputs.iter().take(7) {
                 textures.push(raw_texture(input)?);
@@ -603,6 +606,7 @@ impl Renderer {
             ];
             // SAFETY: wgpu work has completed. Borrowed Metal textures remain
             // alive in `fx`; this call waits for its own command buffer.
+            let encode_start = Instant::now();
             let ok = unsafe {
                 studio_metalfx_encode(
                     fx.context,
@@ -614,10 +618,14 @@ impl Renderer {
                     !self.history_valid || !fx.valid,
                 )
             };
+            self.timings.metalfx_ms += encode_start.elapsed().as_secs_f64()*1000.;
+            // Same exclusive context; encode has completed its command buffer.
+            self.timings.metalfx_gpu_ms += unsafe { studio_metalfx_gpu_ms(fx.context) };
             if !ok {
                 return Err("MetalFX command buffer failed".into());
             }
         }
+        let pack_start = Instant::now();
         let params = Pack {
             dims: [ow, oh, self.width, self.height],
             mask: [
@@ -670,6 +678,7 @@ impl Renderer {
             self.queue.submit([enc.finish()]);
             self.metalfx.as_mut().unwrap().valid=true;
             if !reuse {self.advance_history();}
+            self.timings.post_ms += pack_start.elapsed().as_secs_f64()*1000.;
             return Ok((Vec::new(),start.elapsed().as_secs_f64()*1000.));
         }
         if let Some(frame) = surface_id {
@@ -681,6 +690,7 @@ impl Renderer {
                 self.last_surface = Some(frame);
                 self.metalfx.as_mut().unwrap().valid = true;
                 self.advance_history();
+                self.timings.post_ms += pack_start.elapsed().as_secs_f64()*1000.;
                 return Ok((Vec::new(), start.elapsed().as_secs_f64() * 1000.));
             }
             enc = self.device.create_command_encoder(&Default::default());
@@ -703,6 +713,7 @@ impl Renderer {
         fx.readback.unmap();
         self.metalfx.as_mut().unwrap().valid = true;
         self.advance_history();
+        self.timings.post_ms += pack_start.elapsed().as_secs_f64()*1000.;
         Ok((bytes, start.elapsed().as_secs_f64() * 1000.))
     }
 }

@@ -147,6 +147,32 @@ fn pcg(v: u32) -> u32 {
 fn rnd() -> f32 { seed = pcg(seed); return f32(seed >> 8u) * (1.0 / 16777216.0); }
 fn rnd2() -> vec2f { return vec2f(rnd(), rnd()); }
 
+// Older WebGPU hosts keep the original 16-byte emission allocation. Rust
+// additionally keeps RGB second moments/edge flags and a 1024-entry film CDF.
+fn film_data() -> bool { return arrayLength(&ebuf) >= 2u*P.dims.x*P.dims.y+256u; }
+fn film_offset(u:f32)->f32 {
+  let at=clamp(u,0.,1.)*1023.;let lo=u32(at);let hi=min(lo+1u,1023u);
+  let base=2u*P.dims.x*P.dims.y;
+  return mix(ebuf[base+lo/4u][lo%4u],ebuf[base+hi/4u][hi%4u],fract(at));
+}
+fn film_jitter(u:vec2f)->vec2f {
+  if(P.opts.x!=0u || !film_data()){return u;}
+  return vec2f(0.5)+vec2f(film_offset(u.x),film_offset(u.y));
+}
+// Digitally shifted Sobol points keep finite pixel footprints stratified across
+// all batches. The independent pixel shift preserves each sample's marginal.
+fn film_sample(pixel:u32,index:u32)->vec2f {
+  var direction=0x80000000u;var bits=index;var y=0u;
+  for(var bit=0u;bit<32u;bit++) {
+    if((bits&1u)!=0u){y^=direction;}
+    bits>>=1u;if(bits==0u){break;}direction^=direction>>1u;
+  }
+  let salt=P.dims.z/4099u;
+  return vec2f(f32((reverseBits(index)^pcg(pixel^pcg(salt+0x51633e2du)))>>8u),
+    f32((y^pcg(pixel^pcg(salt+0x68bc21ebu)))>>8u))*(1./16777216.);
+}
+
+
 struct Hit { t: f32, tri: i32, b: vec2f, inst: u32 }
 
 fn hit_tri(ro: vec3f, rd: vec3f, i: u32, best: f32) -> vec3f {
@@ -1777,12 +1803,21 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // A fixed precomputed map (mode 2) has no per-batch drift. The user floor
     // then controls all paths, including lens and volume samples. Explicit
     // saved quality (enabled=2) also owns its floor with progressive caustics.
-    let minimum=max(settings.y,select(0.,512.,settings.x<1.5 && P.caustic.z>.5 && P.caustic.z<1.5));
+    var minimum=max(settings.y,select(0.,512.,settings.x<1.5 && P.caustic.z>.5 && P.caustic.z<1.5));
+    let full_film=film_data();
+    if(full_film && ebuf[w*h+idx].w>0.5){minimum=max(minimum,settings.y*4.);}
     if(settings.x>0.5 && a.w>=minimum && a.w>1.){
-      let mean=dot(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
+      let mean_rgb=(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz)/a.w;
+      let mean=dot(mean_rgb,vec3f(0.2126,0.7152,0.0722));
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
       let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*settings.z);
-      if(error<limit){return;}
+      var quiet=error<limit;
+      if(full_film){
+        let rgb_variance=max(vec3f(0.),(ebuf[w*h+idx].xyz-a.w*mean_rgb*mean_rgb)/max(a.w-1.,1.));
+        let rgb_error=sqrt(rgb_variance/a.w);
+        quiet=quiet && all(rgb_error<max(vec3f(settings.w),abs(mean_rgb)*settings.z));
+      }
+      if(quiet){return;}
     }
   }
   seed = pcg(idx ^ pcg(P.dims.z * 9781u + 1u));
@@ -1792,6 +1827,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var em = vec3f(0.0);
   // Sampling luminance² includes backdrop shadow/coverage noise too.
   var l2 = 0.0;
+  var rgb2=vec3f(0.);var mixed=false;
+  var first_object=select(0u,u32(gbuf[idx].z+0.5),P.counts.z==0u);
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
   for (var i = 0u; i < P.dims.w; i++) {
@@ -1806,6 +1843,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let rotation=pcg(idx ^ pcg(path_index/3u+0xa511e9b3u))%3u;
     spectral_band=i32((path_index%3u+rotation)%3u);
     spectral_seed=pcg(idx ^ pcg(path_index/3u+0x63d83595u));
+    if(P.opts.x==0u && film_data()){
+      let sample_index=((P.dims.z-1u)%4099u)*P.dims.w+i;
+      jitter=film_jitter(film_sample(idx,sample_index));
+    }
     var smp=path(vec2f(f32(gid.x),f32(gid.y))+jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
@@ -1818,11 +1859,20 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     rad += smp.radiance * select(1.,min(1.,f32(P.counts.w)/max(lum,1e-6)),P.opts.x!=0u);
     let x = clamped + dot(smp.emit+smp.bg, vec3f(0.2126, 0.7152, 0.0722));
     l2 += x * x;
+    if(P.opts.x==0u && film_data()){
+      let total=smp.radiance+smp.emit+smp.bg;rgb2+=total*total;
+      if(i==0u && P.counts.z!=0u){first_object=smp.object;}
+      mixed=mixed || smp.object!=first_object;
+    }
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
     if (i == 0u && object == 0u) { nd = vec4f(smp.normal,smp.depth); }
     if (smp.object != 0u && (object == 0u || smp.depth < nd.w)) { nd = vec4f(smp.normal,smp.depth); object = smp.object; }
+  }
+  if(P.opts.x==0u && film_data()){
+    let previous=select(ebuf[w*h+idx],vec4f(0.),P.counts.z!=0u);
+    ebuf[w*h+idx]=vec4f(previous.xyz+rgb2,max(previous.w,select(0.,1.,mixed)));
   }
   let n = f32(P.dims.w);
   if (P.counts.z == 1u) {

@@ -2144,7 +2144,7 @@ impl Controller {
                         return v.shuttle(key, name == "shuttleReverse").unwrap_or(false);
                     }
                 };
-                if let Err(e) = v.command(command) {
+                if let Err(e) = v.command_at(command, Self::event_time()) {
                     self.message = e.to_string();
                 }
             }

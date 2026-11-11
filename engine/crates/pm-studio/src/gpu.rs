@@ -5,6 +5,7 @@ use std::time::Instant;
 use wgpu::util::DeviceExt;
 mod resampling;
 mod query;
+mod edges;
 pub use query::SurfacePick;
 #[cfg(all(feature="metalfx",target_os="macos"))]
 mod metalfx;
@@ -83,9 +84,16 @@ pub struct PresentTarget<'a> {
 #[derive(Clone,Copy,Debug,Default,serde::Serialize)]
 pub struct PipelineTimings {
     pub trace_ms:f64,
+    /// Queued Live: trace_ms is submission time; guides_ms includes trace completion.
+    pub trace_deferred:bool,
     pub guides_ms:f64,
     pub guide_readback_ms:f64,
     pub denoise_ms:f64,
+    /// MetalFX's completed external Metal command buffer; zero on OIDN/WGSL.
+    pub metalfx_ms:f64,
+    /// Metal command-buffer execution only, excluding host/scheduling waits.
+    pub metalfx_gpu_ms:f64,
+    /// Post/pack wall time. Texture-only packing is submitted, not CPU-waited.
     pub post_ms:f64,
 }
 
@@ -154,6 +162,9 @@ pub struct Renderer {
     bgsum: wgpu::Buffer,
     gbuf: wgpu::Buffer,
     ebuf: wgpu::Buffer,
+    pixel_filter: crate::film::PixelFilter,
+    film_reset: bool,
+    edge_classifier: Option<edges::Classifier>,
     grid: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
@@ -418,7 +429,7 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let r = Renderer {
+        let mut r = Renderer {
             adapter,
             timings: Default::default(),
             params: buf("params", std::mem::size_of::<Params>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
@@ -426,7 +437,9 @@ impl Renderer {
             accum: buf("accum", pixels * 16, rw),
             bgsum: buf("bgsum", pixels * 16, rw),
             gbuf: buf("gbuf", pixels * 16, rw),
-            ebuf: buf("ebuf", pixels * 16, rw),
+            // Emission/luminance moments, RGB moments/edge flags, inverse film CDF.
+            ebuf: buf("ebuf", pixels * 32 + 4096, rw),
+            pixel_filter: Default::default(), film_reset: true, edge_classifier: None,
             grid: buf("photon grid", GRID_CELLS * 32, rw),
             aov: buf("aov", pixels * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
@@ -482,6 +495,7 @@ impl Renderer {
             photon_bounces: 0,
             present: None,
         };
+        r.set_pixel_filter(Default::default())?;
         Ok(r)
     }
 
@@ -499,14 +513,26 @@ impl Renderer {
         self.accum=buffer("accum",pixels*16,rw);
         self.bgsum=buffer("bgsum",pixels*16,rw);
         self.gbuf=buffer("gbuf",pixels*16,rw);
-        self.ebuf=buffer("ebuf",pixels*16,rw);
+        self.ebuf=buffer("ebuf",pixels*32+4096,rw);
         self.aov=buffer("aov",pixels*32,rw);
         self.display=[buffer("display a",pixels*16,rw),buffer("display b",pixels*16,rw)];
         self.packed=buffer("packed",pixels*4,rw);
         self.readback=buffer("readback",pixels*4,wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST);
         self.history=[buffer("history a",64,rw),buffer("history b",64,rw)];
         self.width=width;self.height=height;self.samples=0;self.history_valid=false;self.history_index=0;
+        self.set_pixel_filter(self.pixel_filter)?;
         Ok(true)
+    }
+
+    /// Reconstruction belongs to linear path accumulation, before denoising and
+    /// tone mapping. Changing the footprint retires the previous accumulation.
+    pub fn set_pixel_filter(&mut self, filter: crate::film::PixelFilter) -> Result<(), String> {
+        let table = filter.quantiles()?;
+        self.queue.write_buffer(&self.ebuf, u64::from(self.width)*u64::from(self.height)*32,
+            bytemuck::cast_slice(&table));
+        self.pixel_filter = filter;
+        self.film_reset = true;
+        Ok(())
     }
 
     /// The display composition, sRGB RGBA8.
@@ -794,6 +820,20 @@ impl Renderer {
     /// controls error stopping; the deadline can preempt it.
     /// No extra image buffers or GPU allocations are needed for adaptive work.
     pub fn trace_budgeted_interruptible(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool)->f64 {
+        self.trace_impl(spp,bounces,reset,clamp,min_samples,budget_ms,cancelled,true)
+    }
+    /// Queue one Live sample without a CPU completion barrier. Subsequent wgpu
+    /// work is ordered on the same queue. MetalFX waits after its guide pass,
+    /// before borrowing those textures on its external Metal queue. CPU image
+    /// reads retain their own completion barrier. Returns submission wall time.
+    pub fn queue_live_trace(&mut self, bounces:u32, clamp:u32)->Result<f64,String> {
+        if !self.live {return Err("Queued tracing requires Live mode".into());}
+        Ok(self.trace_impl(1,bounces,true,clamp,0,0,&||false,false))
+    }
+    fn trace_impl(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool, wait:bool)->f64 {
+        let film_reset = std::mem::take(&mut self.film_reset);
+        let reset = reset || film_reset;
+        self.timings = Default::default();
         let (w, h) = (self.width, self.height);
         // Several dispatches of at most 4 samples keep each submission short.
         let start = Instant::now();
@@ -863,12 +903,15 @@ impl Renderer {
                 pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             }
             self.queue.submit([enc.finish()]);
-            self.wait();
+            if wait { self.wait(); }
             if use_reservoirs {let r=self.resampling.as_mut().unwrap();r.index=1-r.index;}
             if reset && first {
                 self.samples = 0;
             }
             self.samples += n;
+            if !self.live && self.adaptive_enabled && reset && first {
+                self.classify_edges();
+            }
             left -= n;
             first = false;
             // Pixels keep their actual counts when the shared shader stops
@@ -879,6 +922,7 @@ impl Renderer {
         }
         let elapsed=start.elapsed().as_secs_f64()*1000.;
         self.timings.trace_ms=elapsed;
+        self.timings.trace_deferred=!wait;
         elapsed
     }
 
@@ -1129,7 +1173,7 @@ impl Renderer {
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
-        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,..Default::default()};
+        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,..Default::default()};
         let (w, h) = (self.width, self.height);
         if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;

@@ -15,6 +15,7 @@ struct SurfaceSlot {IOSurfaceRef surface=nullptr;id<MTLTexture> texture;uint64_t
 struct StudioMetalFX {
     id<MTLFXTemporalDenoisedScaler> scaler;
     id<MTLCommandQueue> queue;
+    double gpuMilliseconds=0;
     mach_port_t surfaceReceiver=MACH_PORT_NULL;
     std::array<SurfaceSlot,3> surfaces;
 };
@@ -56,11 +57,13 @@ extern "C" bool studio_metalfx_encode(void *context,void **textures,const float 
             s.jitterOffsetX=jitterX;s.jitterOffsetY=jitterY;s.shouldResetHistory=reset;s.depthReversed=NO;
             simd_float4x4 v,p;std::memcpy(&v,view,64);std::memcpy(&p,projection,64);s.worldToViewMatrix=v;s.viewToClipMatrix=p;
             id<MTLCommandBuffer> command=[ctx->queue commandBuffer];[s encodeToCommandBuffer:command];[command commit];[command waitUntilCompleted];
+            ctx->gpuMilliseconds=(command.GPUEndTime-command.GPUStartTime)*1000.;
             return command.status==MTLCommandBufferStatusCompleted;
         }
         return false;
     }
 }
+extern "C" double studio_metalfx_gpu_ms(void *context) {return static_cast<StudioMetalFX*>(context)->gpuMilliseconds;}
 extern "C" bool studio_metalfx_send(void *context,void *rawTexture,uint64_t frame) {
     @autoreleasepool {
         auto*ctx=static_cast<StudioMetalFX*>(context);if(ctx->surfaceReceiver==MACH_PORT_NULL)return false;

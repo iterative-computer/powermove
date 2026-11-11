@@ -13,8 +13,8 @@ pub fn target_bytes(width: u32, height: u32, max_binding: u64) -> Result<u64, St
     if width == 0 || height == 0 || width > 4096 || height > 4096 || pixels > 8_847_360 {
         return Err("Studio output exceeds the GPU memory budget; reduce the output size".into());
     }
-    let bytes = pixels * 320 + 16 * 1024 * 1024;
-    if pixels * 32 > max_binding || bytes > SESSION_BUDGET_BYTES {
+    let bytes = pixels * 336 + 4096 + 16 * 1024 * 1024;
+    if pixels * 32 + 4096 > max_binding || bytes > SESSION_BUDGET_BYTES {
         return Err("Studio output exceeds the GPU memory budget; reduce the output size".into());
     }
     Ok(bytes)
