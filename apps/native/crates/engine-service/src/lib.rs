@@ -424,9 +424,9 @@ struct Shared {
     panic_frames: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     invalid_call: std::sync::atomic::AtomicBool,
-    /// Every still costs more than a refresh (drag adaptation tests).
+    /// Every frame costs more than its refresh (Auto resolution tests).
     #[cfg(test)]
-    slow_stills: std::sync::atomic::AtomicBool,
+    slow_frames: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -893,7 +893,7 @@ impl EngineService {
             #[cfg(test)]
             invalid_call: Default::default(),
             #[cfg(test)]
-            slow_stills: Default::default(),
+            slow_frames: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
@@ -1168,7 +1168,6 @@ struct Flight {
     id: u64,
     stamp: Stamp,
     spec: FrameSpec,
-    budget_ms: f64,
     submission: render::Submission,
     input: Option<f64>,
     audio_host: Option<f64>,
@@ -1180,7 +1179,6 @@ struct Work {
     stamp: Stamp,
     scene: Scene,
     spec: FrameSpec,
-    budget_ms: f64,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -1545,15 +1543,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 if !t.gpu_ok && r.last == Some((f.stamp, f.spec.time)) {
                     r.last = None;
                 }
-                if t.gpu_ok && !t.cache_hit && f.spec.moment == Moment::Playing {
-                    r.auto
-                        .record((t.completed - t.worker_start) * 1000., f.budget_ms);
-                }
                 if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
                     let cost = (t.completed - t.worker_start) * 1000.;
                     #[cfg(test)]
                     let cost = if shared
-                        .slow_stills
+                        .slow_frames
                         .load(std::sync::atomic::Ordering::Acquire)
                     {
                         f64::MAX
@@ -1938,7 +1932,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     }),
                     exact: capture,
                 },
-                budget_ms: budget * 1000.,
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -1983,7 +1976,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             stamp,
             scene,
             spec,
-            budget_ms,
             layer,
             overlays,
             provider,
@@ -2143,7 +2135,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             id,
                             stamp,
                             spec,
-                            budget_ms,
                             submission: s,
                             input,
                             audio_host,
@@ -2956,6 +2947,45 @@ mod worker_tests {
         v.retire();
     }
 
+    /// Auto never plays softer than the paused picture: however slow the
+    /// frames, playback renders at full resolution (late frames are dropped).
+    #[test]
+    fn auto_plays_slow_frames_at_full_resolution() {
+        let service = EngineService::start(pm_gpu::Gpu::new("auto-play-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        service
+            .shared
+            .slow_frames
+            .store(true, std::sync::atomic::Ordering::Release);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        v.command(TransportCommand::SetLoop {
+            range: Some(pm_protocol::common::TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::from_whole_seconds(2),
+            }),
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while seen.len() < 12 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.gpu_ok && f.moment == Moment::Playing) {
+                assert_eq!(f.scale, 1., "played frame {} reduced", seen.len());
+                assert_eq!(status.effective_quality, 1.);
+                seen.insert(f.time);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        v.retire();
+    }
+
     #[test]
     fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
         let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();
@@ -2970,7 +3000,7 @@ mod worker_tests {
         v.adapt_drags(true).unwrap();
         service
             .shared
-            .slow_stills
+            .slow_frames
             .store(true, std::sync::atomic::Ordering::Release);
         shown(&v);
         let at = Ticks::from_whole_seconds(1);
