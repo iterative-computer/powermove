@@ -9,6 +9,7 @@ fn main()->Result<(),String>{
     let height=value("--height","1080").parse::<u32>().map_err(|e|e.to_string())?;
     let start=Instant::now();let mut renderer=Renderer::new(width,height)?;let init_ms=start.elapsed().as_secs_f64()*1000.;
     let denoiser=Denoiser::new()?;
+    denoiser.set_half_resolution_guides(value("--guide-scale","1")=="2");
     for name in scenes.split(',') {
         let scene=scene::preset(name,"starlight",0.).ok_or("unknown scene")?;
         renderer.set_scene(&scene,&scene.prepare());
@@ -38,7 +39,7 @@ fn main()->Result<(),String>{
                 encoder.write_header().map_err(|e|e.to_string())?.write_image_data(&pixels).map_err(|e|e.to_string())?;
             }
             let encode_ms=encode.elapsed().as_secs_f64()*1000.;
-            println!("{}",serde_json::json!({"scene":name,"preset":preset,"width":width,"height":height,"hardware_rt":renderer.uses_hardware_rt(),"samples":renderer.samples,"init_ms":init_ms,"pipeline":renderer.timings,"oidn":filter.get(),"output_readback_ms":output_readback_ms,"png_encode_ms":encode_ms,"frame_ms":frame.elapsed().as_secs_f64()*1000.,"png_bytes":png.len()}));
+            println!("{}",serde_json::json!({"scene":name,"preset":preset,"width":width,"height":height,"hardware_rt":renderer.uses_hardware_rt(),"samples":renderer.samples,"init_ms":init_ms,"pipeline":renderer.timings,"oidn":filter.get(),"output_readback_ms":output_readback_ms,"png_encode_ms":encode_ms,"frame_ms":frame.elapsed().as_secs_f64()*1000.,"guide_scale":value("--guide-scale","1"),"png_bytes":png.len()}));
         }
     }
     Ok(())

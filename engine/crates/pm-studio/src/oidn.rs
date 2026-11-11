@@ -50,6 +50,7 @@ pub struct FilterTimings { pub albedo_ms:f64, pub normal_ms:f64, pub beauty_ms:f
 pub struct Denoiser {
     device: Device,
     timings: Cell<FilterTimings>,
+    half_guides: Cell<bool>,
     quality: Cell<i32>,
     filter: RefCell<Option<Filters>>,
 }
@@ -92,6 +93,7 @@ impl Denoiser {
         let d = Denoiser {
             device,
             timings:Cell::new(FilterTimings::default()),
+            half_guides:Cell::new(false),
             quality: Cell::new(QUALITY_HIGH),
             filter: RefCell::new(None),
         };
@@ -100,6 +102,11 @@ impl Denoiser {
     }
 
     pub fn timings(&self)->FilterTimings {self.timings.get()}
+    /// CPU fallback for bounded preview/production work. Beauty stays at full
+    /// resolution; only stochastic albedo/normal prefiltering runs at half size.
+    /// Final defaults to full-resolution guides unless the caller opts in.
+    pub fn set_half_resolution_guides(&self, enabled:bool) {self.half_guides.set(enabled);}
+
 
     /// Balanced OIDN is available for bounded movie presets. Final retains
     /// the high-quality network; both still prefilter stochastic auxiliaries.
@@ -218,25 +225,30 @@ impl Denoiser {
             }
             self.check()
         };
-        let bind = |filter: Filter, parameter: &str, ptr: *mut f32, pixel_stride: usize| unsafe {
+        let bind = |filter: Filter, parameter: &str, ptr: *mut f32, pixel_stride: usize, dims:(usize,usize)| unsafe {
             oidnSetSharedFilterImage(
                 filter,
                 name(parameter).as_ptr(),
                 ptr.cast(),
                 FORMAT_FLOAT3,
-                width,
-                height,
+                dims.0,
+                dims.1,
                 0,
                 pixel_stride * 4,
-                pixel_stride * 4 * width,
+                pixel_stride * 4 * dims.0,
             );
         };
+        let half=self.half_guides.get() && width>1 && height>1;
+        let guide_size=if half {(width.div_ceil(2),height.div_ceil(2))}else{(width,height)};
+        let reduced=half.then(||(reduce_guide(albedo,stride,width,height,false),reduce_guide(normal,stride,width,height,true)));
+        let (guide_albedo,guide_normal)=reduced.as_ref().map_or((albedo,normal),|(a,n)|(a.as_slice(),n.as_slice()));
+        let guide_stride=if half {3}else{stride};
         for (filter, parameter, input, output) in [
-            (f.albedo, "albedo", albedo, &mut f.clean_albedo),
-            (f.normal, "normal", normal, &mut f.clean_normal),
+            (f.albedo, "albedo", guide_albedo, &mut f.clean_albedo),
+            (f.normal, "normal", guide_normal, &mut f.clean_normal),
         ] {
-            bind(filter, parameter, input.as_ptr() as *mut f32, stride);
-            bind(filter, "output", output.as_mut_ptr(), 3);
+            bind(filter, parameter, input.as_ptr() as *mut f32, guide_stride,guide_size);
+            bind(filter, "output", output.as_mut_ptr(), 3,guide_size);
             unsafe {
                 oidnSetFilterInt(filter, name("quality").as_ptr(), self.quality.get());
             }
@@ -245,9 +257,14 @@ impl Denoiser {
             let ms=start.elapsed().as_secs_f64()*1000.;
             if parameter=="albedo" {timings.albedo_ms=ms;}else{timings.normal_ms=ms;}
         }
-        bind(f.beauty, "albedo", f.clean_albedo.as_mut_ptr(), 3);
-        bind(f.beauty, "normal", f.clean_normal.as_mut_ptr(), 3);
-        bind(f.beauty, "output", f.output.as_mut_ptr(), 3);
+        if half {
+            let albedo=expand_guide(&f.clean_albedo[..guide_size.0*guide_size.1*3],guide_size,width,height,false);
+            let normal=expand_guide(&f.clean_normal[..guide_size.0*guide_size.1*3],guide_size,width,height,true);
+            f.clean_albedo.copy_from_slice(&albedo);f.clean_normal.copy_from_slice(&normal);
+        }
+        bind(f.beauty, "albedo", f.clean_albedo.as_mut_ptr(), 3,(width,height));
+        bind(f.beauty, "normal", f.clean_normal.as_mut_ptr(), 3,(width,height));
+        bind(f.beauty, "output", f.output.as_mut_ptr(), 3,(width,height));
         unsafe {
             oidnSetFilterBool(f.beauty, name("hdr").as_ptr(), true);
             oidnSetFilterBool(f.beauty, name("cleanAux").as_ptr(), true);
@@ -262,7 +279,7 @@ impl Denoiser {
             // shading. Preserve a constant RGB layer instead of filtering it.
             let constant=[color[0],color[1],color[2]];
             if constant.iter().all(|v|v.is_finite()) && color.chunks_exact(stride).take(pixels).all(|p|p[..3]==constant) {continue;}
-            bind(f.beauty, "color", color.as_mut_ptr(), stride);
+            bind(f.beauty, "color", color.as_mut_ptr(), stride,(width,height));
             execute(f.beauty)?;
             for i in 0..pixels {
                 color[i * stride..i * stride + 3].copy_from_slice(&f.output[i * 3..i * 3 + 3]);
@@ -275,6 +292,31 @@ impl Denoiser {
     }
 }
 
+fn normalize_guide(p:&mut [f32]) {
+    let length=(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]).sqrt();
+    if length>1e-8 {for v in p {*v/=length;}}
+}
+fn reduce_guide(input:&[f32],stride:usize,w:usize,h:usize,normal:bool)->Vec<f32>{
+    let (rw,rh)=(w.div_ceil(2),h.div_ceil(2));let mut out=vec![0.;rw*rh*3];
+    for y in 0..rh {for x in 0..rw {
+        let pixel=&mut out[(y*rw+x)*3..][..3];let mut count=0.;
+        for sy in y*2..(y*2+2).min(h) {for sx in x*2..(x*2+2).min(w) {
+            for c in 0..3 {pixel[c]+=input[(sy*w+sx)*stride+c];}count+=1.;
+        }}
+        for v in pixel.iter_mut() {*v/=count;}if normal {normalize_guide(pixel);}
+    }}out
+}
+fn expand_guide(input:&[f32],size:(usize,usize),w:usize,h:usize,normal:bool)->Vec<f32>{
+    let (rw,rh)=size;let mut out=vec![0.;w*h*3];
+    for y in 0..h {let sy=((y as f32+0.5)*rh as f32/h as f32-0.5).clamp(0.,(rh-1) as f32);let y0=sy as usize;let y1=(y0+1).min(rh-1);let fy=sy-y0 as f32;
+        for x in 0..w {let sx=((x as f32+0.5)*rw as f32/w as f32-0.5).clamp(0.,(rw-1) as f32);let x0=sx as usize;let x1=(x0+1).min(rw-1);let fx=sx-x0 as f32;
+            let pixel=&mut out[(y*w+x)*3..][..3];
+            for c in 0..3 {let top=input[(y0*rw+x0)*3+c]*(1.-fx)+input[(y0*rw+x1)*3+c]*fx;let bottom=input[(y1*rw+x0)*3+c]*(1.-fx)+input[(y1*rw+x1)*3+c]*fx;pixel[c]=top*(1.-fy)+bottom*fy;}
+            if normal {normalize_guide(pixel);}
+        }
+    }out
+}
+
 impl Drop for Denoiser {
     fn drop(&mut self) {
         drop(self.filter.get_mut().take());
@@ -285,6 +327,19 @@ impl Drop for Denoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_resolution_guides_keep_full_size_beauty_and_survive_rebinding() {
+        let reused=Denoiser::new().unwrap();
+        for (w,h,half) in [(33,25,true),(20,16,false),(33,25,true)] {
+            let input:Vec<f32>=(0..w*h).flat_map(|i|[0.5+if i%2==0 {0.1}else{-0.1},0.4,0.3,0.25]).collect();
+            let albedo=vec![0.5;w*h*4];let normal:Vec<f32>=(0..w*h).flat_map(|_|[0.,0.,1.,0.]).collect();
+            reused.set_half_resolution_guides(half);let mut actual=input.clone();reused.run(&mut actual,&albedo,&normal,4,w,h).unwrap();
+            let fresh=Denoiser::new().unwrap();fresh.set_half_resolution_guides(half);let mut expected=input.clone();fresh.run(&mut expected,&albedo,&normal,4,w,h).unwrap();
+            assert_eq!(actual,expected);assert_eq!(actual.len(),w*h*4);assert!(actual.chunks_exact(4).all(|p|p[3]==0.25));
+            let error=|p:&[f32]|p.chunks_exact(4).map(|p|(p[0]-0.5).powi(2)).sum::<f32>();assert!(error(&actual)<error(&input)*0.3);
+        }
+    }
 
     #[test]
     fn a_constant_layer_is_exact_while_its_noisy_companion_is_filtered() {
