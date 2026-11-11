@@ -164,6 +164,15 @@ pub trait Host: 'static {
     }
     /// The viewer's Free View for Studio 3D layers; `None` is the shot.
     fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, _: &mut App) {}
+    /// The engine's surface pick at normalized composition coordinates, on
+    /// the frame on screen. `None` when there's no viewer frame to ask.
+    fn pick_surface(
+        &self,
+        _: [f32; 2],
+        _: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        None
+    }
 }
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]

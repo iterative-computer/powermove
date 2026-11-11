@@ -483,7 +483,32 @@ impl GizmoSurface {
             return false;
         };
         if self.studio.tool == Tool::Light {
-            self.studio_light(eye, at, cx);
+            // The engine's surface (models, terrain) with its true normal;
+            // the box pick when no frame can answer.
+            let uv = [
+                (at[0] / frame.size[0]) as f32,
+                (at[1] / frame.size[1]) as f32,
+            ];
+            if let Some(rx) = self.host.pick_surface(uv, cx) {
+                cx.spawn(async move |this, cx| {
+                    let reply = rx.recv().await;
+                    let _ = this.update(cx, |s, cx| match reply {
+                        Ok(Ok(reply)) => match reply.hit {
+                            Some(h) => {
+                                let f = |v: [f32; 3]| v.map(f64::from);
+                                s.studio_light_at(eye, f(h.point), normalize(f(h.normal)), cx)
+                            }
+                            None => s
+                                .host
+                                .report("Click a model to put light there.".into(), cx),
+                        },
+                        _ => s.studio_light(eye, at, cx),
+                    });
+                })
+                .detach();
+            } else {
+                self.studio_light(eye, at, cx);
+            }
             return true;
         }
         if let Some(handle) = self.studio_handle(at, frame) {
@@ -504,26 +529,72 @@ impl GizmoSurface {
             });
             return true;
         }
-        // Click to select by picking; a miss falls through to 2D picking
-        // (which clears the selection on empty canvas).
+        // Click to select. Lights have no surface, so their markers are
+        // tested here; everything else asks the engine's surface query, with
+        // the box pick as the fallback while no frame can answer.
         let scene = self.studio.scene.clone().unwrap();
+        let shift = event.modifiers.shift;
+        let lights = Scene {
+            items: scene
+                .items
+                .iter()
+                .filter(|i| i.role == Role::Light)
+                .cloned()
+                .collect(),
+            ..(*scene).clone()
+        };
+        if let Some(hit) = lights.pick(&eye.ray(at)) {
+            self.studio_select(hit.id, shift, cx);
+            return true;
+        }
+        let uv = [
+            (at[0] / frame.size[0]) as f32,
+            (at[1] / frame.size[1]) as f32,
+        ];
+        if let Some(rx) = self.host.pick_surface(uv, cx) {
+            cx.spawn(async move |this, cx| {
+                let reply = rx.recv().await;
+                let _ = this.update(cx, |s, cx| match reply {
+                    Ok(Ok(reply)) => match reply.hit {
+                        Some(hit) => s.studio_select(hit.layer, shift, cx),
+                        None if !shift => {
+                            s.queue.push_back(Job::Select(None));
+                            s.pump(cx);
+                        }
+                        None => {}
+                    },
+                    // A stale frame: the box pick answers instead.
+                    _ => {
+                        let hit = s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)));
+                        if let Some(hit) = hit {
+                            s.studio_select(hit.id, shift, cx);
+                        }
+                    }
+                });
+            })
+            .detach();
+            return true;
+        }
         let Some(hit) = scene.pick(&eye.ray(at)) else {
             return false;
         };
-
+        self.studio_select(hit.id, shift, cx);
+        true
+    }
+    /// Select a layer the pointer found; ⇧ adds or removes it.
+    fn studio_select(&mut self, id: String, shift: bool, cx: &mut Context<Self>) {
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
-        let add = event.modifiers.shift;
-        let ids = if add && self.studio.selected.contains(&hit.id) {
+        let ids = if shift && self.studio.selected.contains(&id) {
             self.studio
                 .selected
                 .iter()
-                .filter(|s| **s != hit.id)
+                .filter(|s| **s != id)
                 .cloned()
                 .collect()
         } else {
-            vec![hit.id.clone()]
+            vec![id.clone()]
         };
-        let add = add && !self.studio.selected.contains(&hit.id);
+        let add = shift && !self.studio.selected.contains(&id);
         cx.background_executor()
             .spawn(async move {
                 kernel
@@ -534,7 +605,6 @@ impl GizmoSurface {
                     .await;
             })
             .detach();
-        true
     }
     /// Light tool: aim the selected light at the point, or add a Softbox
     /// whose highlight lands there (Reflect, §6).
@@ -556,6 +626,17 @@ impl GizmoSurface {
                 .report("Click a model to put light there.".into(), cx);
             return;
         };
+        self.studio_light_at(eye, hit.point, hit.normal, cx);
+    }
+    fn studio_light_at(&mut self, eye: Eye, point: Vec3, normal: Vec3, cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        struct At {
+            point: Vec3,
+            normal: Vec3,
+        }
+        let hit = At { point, normal };
         let viewer = eye.pose.position;
         let time = self.host.time(cx);
         let light = scene

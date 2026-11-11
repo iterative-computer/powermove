@@ -722,6 +722,13 @@ impl Renderer {
             .as_ref()
             .map_or_else(Default::default, |p| p.counters())
     }
+    /// Worker-only query against the attached Studio scene. No frame render,
+    /// path-tracing samples or image readback is needed.
+    pub fn pick_studio_surface(&mut self, request: &crate::scene3d::provider::SceneRequest, x:f32, y:f32) -> Result<Option<crate::scene3d::provider::SurfaceHit>, String> {
+        let Some(settings) = self.options3d.studio else {return Ok(None)};
+        let Some(pass) = self.scene3d.provider.as_mut() else {return Ok(None)};
+        pass.pick_surface(&self.device, &self.queue, request, settings.preview,x,y)
+    }
 
     /// Runs layer effects and adjustment layers through `host` instead of
     /// the renderer's definitions; `None` goes back to them.

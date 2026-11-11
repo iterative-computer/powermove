@@ -122,10 +122,10 @@ impl Pass {
             if cfg!(debug_assertions) && std::env::var_os("STUDIO_TIMINGS").is_some() {
                 let service = self.service.as_ref().unwrap();
                 eprintln!(
-                    "STUDIO_FRAME_TIMING ticks={} size={}x{} tier={tier:?} hardware_rt={} prepare_ms={:.3} total_ms={:.3} geometry_uploads={} scene_updates={} blas_builds={} pipeline={:?}",
+                    "STUDIO_FRAME_TIMING ticks={} size={}x{} tier={tier:?} hardware_rt={} prepare_ms={:.3} total_ms={:.3} geometry_uploads={} texture_uploads={} scene_updates={} blas_builds={} pipeline={:?}",
                     request.ticks, request.width, request.height, rendered.hardware_rt,
                     rendered.timings.prepare_ms, rendered.timings.total_ms,
-                    service.geometry_uploads(), service.scene_updates(), service.blas_builds(),
+                    service.geometry_uploads(), service.texture_uploads(), service.scene_updates(), service.blas_builds(),
                     rendered.timings.pipeline,
                 );
             }
@@ -143,6 +143,9 @@ impl Pass {
     }
 }
 impl Backend for Pass {
+    fn pick_surface(&mut self, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
+        self.service.as_mut().ok_or("Studio service is not attached")?.pick_surface(self.source.as_ref(), request.clone(), tier, x,y)
+    }
     fn update_source(&mut self, source: &dyn std::any::Any) -> bool {
         let Some(source) = source.downcast_ref::<Adapter>() else {
             return false;

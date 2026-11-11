@@ -102,6 +102,7 @@ fn native_worker_live_timing_split() {
                         "prepare_ms": rendered.timings.prepare_ms, "total_ms": rendered.timings.total_ms,
                         "pipeline": rendered.timings.pipeline, "hardware_rt": rendered.hardware_rt,
                         "geometry_uploads": service.geometry_uploads(), "scene_updates": service.scene_updates(),
+                        "texture_uploads": service.texture_uploads(),
                         "blas_builds": service.blas_builds(),
                     }));
                 }
@@ -112,6 +113,9 @@ fn native_worker_live_timing_split() {
 #[test]
 #[ignore = "1080p manual timing; run under pm-build.lock with >=5 GB free"]
 fn native_worker_product_timing_split() {
+    let out = std::env::var_os("PM_STUDIO_TIMING_OUT").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("pm-studio-timing-{}", std::process::id())));
+    std::fs::create_dir_all(&out).unwrap();
     for name in ["hero", "chrome"] {
         let mut product = Product::new(name);
         let mut service = StudioService::default();
@@ -152,11 +156,17 @@ fn native_worker_product_timing_split() {
                 );
                 let readback_ms = read_start.elapsed().as_secs_f64() * 1000.;
                 assert!(pixels.chunks_exact(4).any(|p| p[3] > 0));
+                let encode_start = Instant::now();
+                crate::pm_studio_png(&out.join(format!("{name}-{preset}-{run}.png")), &pixels);
+                let png_ms = encode_start.elapsed().as_secs_f64()*1000.;
                 println!(
                     "NATIVE_TIMING {}",
-                    serde_json::json!({"scene":name,"preset":preset,"run":run,"width":1920,"height":1080,"samples":frame.samples,"hardware_rt":frame.hardware_rt,"prepare_ms":frame.timings.prepare_ms,"render_ms":frame.timings.total_ms,"pipeline":frame.timings.pipeline,"oidn":frame.timings.oidn,"oidn_init_ms":frame.timings.oidn_init_ms,"oidn_reused":frame.timings.oidn_reused,"readback_ms":readback_ms,"scene_updates":service.scene_updates(),"geometry_uploads":service.geometry_uploads()})
+                    serde_json::json!({"scene":name,"preset":preset,"run":run,"width":1920,"height":1080,"samples":frame.samples,"hardware_rt":frame.hardware_rt,"prepare_ms":frame.timings.prepare_ms,"render_ms":frame.timings.total_ms,"pipeline":frame.timings.pipeline,"oidn":frame.timings.oidn,"oidn_init_ms":frame.timings.oidn_init_ms,"oidn_reused":frame.timings.oidn_reused,"readback_ms":readback_ms,"png_encode_write_ms":png_ms,"scene_updates":service.scene_updates(),"geometry_uploads":service.geometry_uploads(),"texture_uploads":service.texture_uploads()})
                 );
             }
         }
     }
+}
+fn pm_studio_png(path: &std::path::Path, pixels: &[u8]) {
+    pm_studio3d_engine::gpu::write_png(path,1920,1080,pixels).unwrap();
 }

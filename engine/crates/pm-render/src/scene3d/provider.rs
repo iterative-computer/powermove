@@ -11,6 +11,14 @@ pub struct SceneRequest {
     pub width: u32,
     pub height: u32,
 }
+/// World-space surface in the exact scene/camera used for this request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceHit {
+    pub layer: String,
+    pub instance: u32,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Denoise {
     None,
@@ -42,6 +50,9 @@ pub trait Source: Send + Sync + std::any::Any {
     ) -> Result<Box<dyn Backend>, String>;
 }
 pub trait Backend: Send {
+    fn pick_surface(&mut self, _request: &SceneRequest, _tier: Tier, _x: f32, _y: f32) -> Result<Option<SurfaceHit>, String> {
+        Ok(None)
+    }
     /// Retain GPU resources when a new immutable document source replaces one.
     fn update_source(&mut self, _source: &dyn std::any::Any) -> bool {
         false
@@ -87,6 +98,12 @@ pub(crate) struct Pass {
     backend: Option<Box<dyn Backend>>,
 }
 impl Pass {
+    pub fn pick_surface(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<SurfaceHit>, String> {
+        if self.backend.is_none() {
+            self.backend = Some(self.source.create(device.clone(), queue.clone(), request.width, request.height)?);
+        }
+        self.backend.as_mut().unwrap().pick_surface(request,tier,x,y)
+    }
     pub fn new(source: Arc<dyn Source>) -> Self {
         Self {
             source,

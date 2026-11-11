@@ -467,6 +467,20 @@ impl Engine {
     pub fn studio_view(&mut self, view: Option<crate::studio::FreeView>) {
         self.studio_view = view;
     }
+    pub(crate) fn pick_surface(
+        &mut self,
+        scene: &Scene,
+        request: &crate::studio::SceneRequest,
+        point: [f32; 2],
+    ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>> {
+        self.sync_studio(
+            scene,
+            Ticks::new(request.ticks).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        self.renderer
+            .pick_studio_surface(request, point[0], point[1])
+            .map_err(anyhow::Error::msg)
+    }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
         let key = (
             Arc::as_ptr(&scene.doc) as usize,

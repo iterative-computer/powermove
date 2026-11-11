@@ -1506,6 +1506,23 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn pick_surface(
+        &self,
+        at: [f32; 2],
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        let c = self.0.upgrade()?;
+        let viewer = c.read(cx).viewer.as_ref()?;
+        let frame = viewer.status().frame?;
+        viewer
+            .pick_surface(
+                frame.stamp,
+                frame.time,
+                at,
+                pm_engine_service::SurfaceQueryKind::Click,
+            )
+            .ok()
+    }
     fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
         if let Some(c) = self.0.upgrade()
             && let Some(viewer) = &c.read(cx).viewer
