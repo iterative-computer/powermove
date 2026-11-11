@@ -3451,3 +3451,47 @@ fn terrain_live_and_refine_keep_the_same_exposure() {
         "Live terrain must not change its exposure when it refines"
     );
 }
+
+#[test]
+fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edits() {
+    use pm_engine_service::{EngineService, ExportEstimateState, Output, ViewerConfig};
+    let doc = document(false, 100.);
+    let original = doc.to_value();
+    let snapshot = pm_kernel::DocumentStore::new_untitled(doc.to_value().unwrap()).snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("export estimates").unwrap()).unwrap();
+    let viewer = service.viewer(ViewerConfig {
+        snapshot, composition: "test".into(), media: Default::default(),
+        output: Output { width: 64, height: 64, display: 1, headroom: 1., crop: None },
+        layer: None, rate: pm_time::Rate::FPS_30, end: None, audio: false,
+    }).unwrap();
+    let stamp = viewer.stamp().unwrap();
+    let response = viewer.estimate_studio_export(stamp, Ticks::ZERO, Size::new(1920,1080), 12).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let estimate = loop {
+        match response.try_recv() {
+            Ok(result) => break result.unwrap(),
+            Err(async_channel::TryRecvError::Empty) => {
+                assert!(std::time::Instant::now() < deadline, "estimate never settled: {:?}", viewer.status());
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => panic!("estimate worker closed: {e}"),
+        }
+    };
+    assert_eq!(estimate.presets.iter().map(|p|p.preset.as_str()).collect::<Vec<_>>(), ["draft","preview","production","final"]);
+    assert_eq!((estimate.width, estimate.height, estimate.frames), (1920,1080,12));
+    assert_eq!((estimate.calibration_width, estimate.calibration_height), (320,180));
+    assert!(estimate.extrapolated);
+    for p in &estimate.presets {
+        assert!(p.frame_ms.min > 0. && p.frame_ms.max >= p.frame_ms.min, "{p:?}");
+        assert_eq!(p.total_ms.max, p.frame_ms.max * 12.);
+        assert_eq!((p.calibration.cold_samples, p.calibration.warm_samples), (8,16));
+        assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0.);
+    }
+    assert!(matches!(viewer.status().export_estimate, ExportEstimateState::Ready { .. }));
+    assert_eq!(viewer.stamp(), Some(stamp));
+    assert_eq!(doc.to_value(), original);
+    viewer.quality(pm_engine_service::Quality::Half).unwrap();
+    assert!(matches!(viewer.status().export_estimate, ExportEstimateState::Idle));
+    assert!(viewer.estimate_studio_export(stamp,Ticks::ZERO,Size::new(64,64),1).is_err());
+    viewer.retire();
+}

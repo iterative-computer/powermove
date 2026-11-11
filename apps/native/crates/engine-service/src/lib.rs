@@ -4,6 +4,8 @@ pub mod audio;
 pub mod clock;
 pub mod color;
 pub mod compat;
+pub mod export_estimate;
+pub use export_estimate::{ExportEstimate, ExportEstimateState, PresetEstimate};
 pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
@@ -238,6 +240,8 @@ pub struct FrameReport {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    /// Explicit Studio calibration for the current immutable viewer scene.
+    pub export_estimate: ExportEstimateState,
     pub frame: Option<FrameReport>,
     pub clock: Option<ClockSample>,
     pub levels: Option<AudioLevels>,
@@ -339,6 +343,8 @@ struct View {
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
     surface_queries: VecDeque<surface::Pending>,
+    export_estimate: Option<export_estimate::Pending>,
+    export_estimate_stamp: Option<Stamp>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -920,7 +926,13 @@ impl Viewer {
             .unwrap()
             .views
             .get(&self.id)
-            .map(|v| v.status.clone())
+            .map(|v| {
+                let mut status = v.status.clone();
+                if v.export_estimate_stamp != Some(v.stamp) {
+                    status.export_estimate = ExportEstimateState::Idle;
+                }
+                status
+            })
             .unwrap_or_default()
     }
     pub fn identity(&self) -> u64 {
@@ -1123,6 +1135,8 @@ impl EngineService {
                 locked_provider: None,
                 commands: VecDeque::new(),
                 surface_queries: VecDeque::new(),
+                export_estimate: None,
+                export_estimate_stamp: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1163,6 +1177,7 @@ impl Drop for EngineService {
             state.stop = true;
             for view in state.views.values_mut() {
                 surface::cancel(view, "surface query worker stopped");
+                export_estimate::cancel(view, "export estimate worker stopped");
             }
         }
         self.shared.interactive.set(false);
@@ -1441,6 +1456,7 @@ fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc
         let now = trace::now();
         for v in state.views.values_mut() {
             surface::cancel(v, "surface query frame changed after worker restart");
+            export_estimate::cancel(v, "export estimate worker restarted");
             v.status.error = Some(if restarted {
                 format!("The viewer restarted after an internal error.\n{detail}")
             } else {
@@ -2150,6 +2166,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         );
         if changed {
             state.notify();
+        }
+        // A requested estimate never competes with viewer work, scanout or
+        // playback. Its small calibration passes check for new input between
+        // submissions, and stale results cannot enter the viewer's state.
+        if work.is_none() && flights.is_empty()
+            && !runtime.values().any(|r| r.transport.running())
+            && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty())
+            && state.views.values().any(|v| v.export_estimate.is_some())
+        {
+            drop(state);
+            export_estimate::run_one(&mut engine, &shared);
+            continue;
         }
         if let Some(Work {
             id,

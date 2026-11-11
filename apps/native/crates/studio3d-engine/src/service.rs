@@ -78,6 +78,14 @@ pub struct StudioService {
 }
 
 impl StudioService {
+    /// A calibration's next cold pass must include a fresh photon bootstrap.
+    /// Geometry and pipelines remain retained; ordinary renders reuse the map.
+    pub fn reset_caustic_map(&mut self) {
+        if let Some(r) = &mut self.renderer {
+            r.set_precomputed_caustics(false);
+            r.set_precomputed_caustics(true);
+        }
+    }
     /// Top-left normalized composition coordinates, pinhole camera, world-space
     /// point/normal. Synchronizes the immutable scene without tracing a frame.
     pub fn pick_surface(&mut self, source: &dyn SceneSource, request: SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<SurfaceHit>, String> {

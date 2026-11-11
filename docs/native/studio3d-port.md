@@ -1499,3 +1499,60 @@ Fix order for the recorded roughly 27-fps result:
 After each fix, repeat the identical corpus/viewport/scale/refresh run; do not
 claim a gain from a busier baseline or a different output resolution. No new
 presented-fps or input-p95 acceptance result was collected in this round.
+
+### Quiet-window increment: measured export estimates and chrome grain
+
+`Viewer::estimate_studio_export(stamp, time, Size, frames)` is the explicit
+asynchronous calibration command. `ViewerStatus.export_estimate` exposes Idle,
+Queued, Measuring (completed/total passes), Ready and Failed. The ready result
+contains the composition/revision/time, requested size/frame count, bounded
+calibration size, extrapolation flag, all four preset rows, per-layer warnings
+and explicit exclusions. Each row includes trace, fixed photon setup, CPU OIDN,
+guide/readback and preparation/post components, per-frame and whole-export
+minimum/maximum durations, and the raw calibration measurements. These ranges
+come from each preset's sample floor/ceiling, not a statistical confidence band.
+
+Calibration uses the composition's shot camera at at most 320×180, with 8/16-spp
+cold/warm passes for each preset. A fresh photon bootstrap is measured per
+preset while the renderer/pipelines remain retained. Pixel/sample costs are
+extrapolated; fixed photon setup and scene preparation are separate. Balanced
+half-guide filtering matches Draft/Preview/Production; Final measures full-guide
+high-quality OIDN. Encode/file I/O, other 2D effects, material-source capture,
+extra motion-blur shutter samples and animation variation are explicitly
+excluded. This is an approximate Studio render estimate, not an export deadline
+or a guaranteed completion time. Gaussian splats currently return unavailable.
+
+Requests coalesce per viewer and run only while the worker is idle, without
+playing content, pending viewer work or in-flight presentations. Calibration
+executes one pass per worker turn, giving new input priority between passes.
+Scene changes, superseding requests, restart, shutdown and retirement invalidate
+results. Status never exposes a result for an old viewer stamp. The query makes
+no document, camera, quality or Undo edits. The UI can bind the command and
+serialize the typed state; no export-sheet layout is added here.
+
+Checks: the measured headless command publishes four presets for a 1080p target
+without document edits (**2.80 s**). Three estimate unit/queue checks pass in
+**1.22 s**, including coalescing and stale-frame cancellation. All **49 native
+scene tests** pass in **18.23 s**. The native app rebuild passes in **168 s**
+after one unchanged retry for pruned shared-target dependency metadata.
+
+The noise regression now uses disjoint photon samples per emitter for its
+high-sample reference, by rotating an otherwise physically identical light
+list and rebuilding the actual map. Changing only the camera seed had reused
+the same baked caustic grain in both images. The corpus now also includes the
+actual chrome/glass/lacquer/catcher product set. Against a 4096-spp reference,
+that set reproduced Final luminance RMS **0.02339**, smooth residual RMS
+**0.00677**; more camera samples alone could not clean the fixed map.
+
+The engine now uses an area-preserving quadratic B-spline receiver kernel, a
+400-photon fine/coarse confidence transition, and 16,777,216 photons for a fixed
+map (same grid storage). The focused chrome set passes unchanged acceptance
+limits: Production luminance/smooth RMS **0.01595 / 0.00448**; Final
+**0.01579 / 0.00545**. The full original teapot/glass/chrome suite and new set
+pass in **32.78 s**, with no loosened thresholds. This remains a 192×128 noise
+regression, separate from 1080p performance/quality acceptance.
+
+The translated/tilted index-matched photon-energy check passes (**0.49 s**) and
+all **11 existing Cycles yardstick tolerances** pass against retained references.
+No Cycles fog/sky/subsurface/sheen matching claim is added. The larger fixed-map
+bootstrap cost is included in subsequent timing; Final remains uncapped.
