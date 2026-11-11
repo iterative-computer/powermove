@@ -454,6 +454,33 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
     match role {
         Some(Layer3dRole::Object) => {
             let object = node::member_checked(data, "object")?;
+            // Studio `environmentProperties(object)`: World, fog, terrain (and
+            // its ground-cover regions), scatter and material-option channels.
+            for (kind, group) in [
+                ("world", "World"),
+                ("fog", "Fog"),
+                ("terrain", "Terrain"),
+                ("scatter", "Scatter"),
+                ("materialOptions", "Material Options"),
+            ] {
+                collect_kf(
+                    &mut out,
+                    node::member(node::member(object, kind), "p"),
+                    &s(kind),
+                    &js(group),
+                );
+            }
+            let regions = node::member(node::member(object, "terrain"), "regions");
+            for (i, region) in node::for_of_or_empty(regions)?.into_iter().enumerate() {
+                if let Item::Node(region) = &region {
+                    collect_kf(
+                        &mut out,
+                        node::member(Some(region), "p"),
+                        &s(&format!("terrain.region{i}")),
+                        &js(&format!("Ground Cover {}", i + 1)),
+                    );
+                }
+            }
             let material = node::member(object, "material");
             collect_kf(
                 &mut out,
@@ -599,6 +626,11 @@ pub fn is_scene_key(key: &[u8]) -> bool {
         b"shader.",
         b"slots.",
         b"model.",
+        b"world.",
+        b"fog.",
+        b"terrain.",
+        b"scatter.",
+        b"materialOptions.",
     ]
     .iter()
     .any(|p| key.starts_with(p))
