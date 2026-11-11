@@ -1752,3 +1752,20 @@ Final, and measures fast PNG compression as native export does. Its `ready_ms`
 excludes output readback/PNG encoding; `frame_ms` includes both. This is a
 single Studio frame diagnostic, excluding animated shutter samples, native
 2D compositing, file writes and the surrounding export process.
+
+
+CPU sampling of the same product scene identified scene resolution/property
+queries as a major cost before the renderer's own `prepare_ms` timer: Gaussian
+splat detection asks for the shared resolved scene first. The kernel's native
+Studio evaluator now returns the exact `evP` constant case directly (a stored
+value with no expression or keys). Expressions, keyframes and malformed inputs
+keep the original evaluator path; world/parent/opacity evaluation is retained.
+A full-scene equivalence test compares constants to the normal expression
+`value` at three animated times. Checks: 32 kernel tests (0.26 s), 54 native
+Studio tests (11.96 s), native app build (133 s after janitor cache pruning).
+No compiler profile, RUSTFLAGS or dependency-feature settings changed.
+
+A diagnostic chrome Production run with caustics disabled still spent
+**23.423 s tracing** (256 spp, 1080p), versus **22.394 s** with the fixed photon
+map. This excludes photon-grid lookup as the leading cause of the chrome
+Production budget failure; no speculative photon-cache approximation was added.

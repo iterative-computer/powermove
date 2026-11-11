@@ -1294,6 +1294,13 @@ pub fn resolve_scene_with_camera(
             c: &serde_json::Value,
             t: f64,
         ) -> pm_scene3d::Result<serde_json::Value> {
+            // QueryContext has no channel overrides. Mirror evP's constant case
+            // without a WASM/JSON round trip for every default material/control.
+            // Animated, expressed and malformed channels retain the evaluator.
+            if c.get("expr").is_none_or(|e|e.is_null() || e.as_str()==Some(""))
+                && c.get("kf").is_none_or(|k|k.as_array().is_some_and(Vec::is_empty))
+                && let Some(value)=c.get("v")
+            { return Ok(value.clone()); }
             self.query("evP", l, t, serde_json::json!({"key":path,"prop":c}))
         }
         fn active(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<bool> {

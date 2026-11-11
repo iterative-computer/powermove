@@ -1189,3 +1189,28 @@ fn repeated_imports_are_grounded_separated_framed_and_one_undo_each() {
     assert_eq!(legacy.revision(), revision);
     assert_eq!(project(&legacy), before);
 }
+
+#[test]
+fn constant_scene_channels_match_the_expression_evaluator_with_animation() {
+    fn express_constants(v:&mut Value) {
+        match v {
+            Value::Object(m) if m.contains_key("v") && m.get("kf").is_some_and(|k|k.as_array().is_some_and(Vec::is_empty)) && m.get("expr").is_none_or(Value::is_null) => {m.insert("expr".into(),json!("value"));}
+            Value::Object(m)=>for v in m.values_mut(){express_constants(v)},
+            Value::Array(a)=>for v in a{express_constants(v)},
+            _=>{}
+        }
+    }
+    let mut s=store();
+    apply(&mut s,json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"rx":{"v":0,"kf":[{"t":0,"v":0},{"t":2,"v":90}],"expr":null}},"material":{"p":{"color":"#33AA77","roughness":{"v":0.2,"kf":[],"expr":"time * 0.1 + value"},"metalness":0.4,"emissive":"#223344"}}}}));
+    apply(&mut s,json!({"operation":"add_light","id":"key","light":{"type":"area"}}));
+    apply(&mut s,json!({"operation":"add_camera","id":"camera"}));
+    let mut expressed=project(&s);express_constants(&mut expressed);
+    let other=DocumentStore::new_untitled(to_model(&expressed));
+    for t in [0.,0.5,1.5] {
+        let direct=pm_kernel::commands::scene3d::resolve_scene(&s.snapshot(),None,t).unwrap();
+        let evaluated=pm_kernel::commands::scene3d::resolve_scene(&other.snapshot(),None,t).unwrap();
+        assert_eq!(direct.scene,evaluated.scene,"t={t}");assert_eq!(direct.model_worlds,evaluated.model_worlds);assert_eq!(direct.targets,evaluated.targets);assert_eq!(direct.opacities,evaluated.opacities);
+        let object=direct.scene["objects"].as_array().unwrap().iter().find(|o|o["id"]=="model").unwrap();
+        assert!((object["material"]["p"]["roughness"]["v"].as_f64().expect("numeric roughness")-(0.2+t*0.1)).abs()<1e-6,"{object}");
+    }
+}
