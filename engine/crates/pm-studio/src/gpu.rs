@@ -864,7 +864,10 @@ impl Renderer {
                 }
                 // Bootstrap the map before the first camera sample. Sparse
                 // first maps otherwise survive in every accumulated estimate.
-                let photon_count = if self.precompute_caustics { PHOTONS_PER_PASS * 32 } else if reset && first { PHOTONS_PER_PASS * 4 } else { PHOTONS_PER_PASS };
+                // A fixed map cannot shed grain by taking more camera samples.
+                // Bootstrap enough independent photons for the denoised still's
+                // noise floor; storage is unchanged (the same hashed grid).
+                let photon_count = if self.precompute_caustics { PHOTONS_PER_PASS * 64 } else if reset && first { PHOTONS_PER_PASS * 4 } else { PHOTONS_PER_PASS };
                 p.caustic = [self.bounds[3] / 160.0, self.photons_emitted, 1.0, photon_count as f32];
                 if self.precompute_caustics {p.dims[2]=1;}
                 self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));

@@ -1949,7 +1949,7 @@ fn deposit(p: vec3f, flux: vec3f) {
     add_f32(i + 5u, local.x); add_f32(i + 6u, local.y); add_f32(i + 7u, local.z);
   }
 }
-// Surface density uses a bilinear tent in the receiver's dominant-axis
+// Surface density uses a quadratic B-spline in the receiver's dominant-axis
 // projection. Each projected bin represents size² / |n_major| surface area.
 // Unlike a normalized 3D stencil, this partitions unity on a flat receiver:
 // translating the grid or tilting the surface cannot absorb photon energy.
@@ -1964,7 +1964,10 @@ fn gather(p: vec3f, n: vec3f, level: i32) -> vec4f {
   for (var z = -1; z <= 1; z++) { for (var y = -1; y <= 1; y++) { for (var x = -1; x <= 1; x++) {
     let cc = c + vec3i(x,y,z);
     let centre = vec3f(cc) + 0.5;
-    var kernel = max(vec3f(0.), vec3f(1.) - abs(centre - p/size));
+    let d=abs(centre-p/size);
+    // Continuous first derivatives avoid visible cell seams. The three-bin
+    // spline preserves unit area while reducing sparse-map shot noise.
+    var kernel=select(.5*max(vec3f(1.5)-d,vec3f(0.))*max(vec3f(1.5)-d,vec3f(0.)),vec3f(.75)-d*d,d<vec3f(.5));
     kernel[axis] = 1.;
     let w = kernel.x * kernel.y * kernel.z;
     if (w <= 0.) { continue; }
@@ -1985,12 +1988,15 @@ fn gather(p: vec3f, n: vec3f, level: i32) -> vec4f {
 fn caustic_at(p: vec3f, n: vec3f) -> vec3f {
   if (P.caustic.y <= 0.0) { return vec3f(0.0); }
   let fine = gather(p, n, 0);
-  if (fine.w >= 96.0) { return fine.xyz; }
+  // 400 effective photons give a 20:1 Poisson signal/noise floor. The former
+  // 96-photon transition promoted visibly grainy fine bins in chrome/glass.
+  let confidence=400.;
+  if (fine.w >= confidence) { return fine.xyz; }
   let coarse = gather(p, n, 1);
   // A sparse nonzero estimate still carries energy; dropping bins with
   // fewer than eight photons creates dark holes and temporal popping.
   if (coarse.w <= 0.0) { return vec3f(0.0); }
-  return mix(coarse.xyz, fine.xyz, fine.w / 96.0);
+  return mix(coarse.xyz, fine.xyz, smoothstep(0.,confidence,fine.w));
 }
 
 // One photon per invocation. Only paths that pass through glass or bounce off
