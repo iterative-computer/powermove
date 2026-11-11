@@ -198,6 +198,8 @@ pub struct Engine {
     scopes: Option<crate::scopes::Tap>,
     /// The disk render cache playback reads (`crate::render_cache`).
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
+    last_frame: Instant,
+    idle_released: bool,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -247,6 +249,13 @@ impl Engine {
 
     pub fn release_idle_memory(&mut self) {
         self.renderer.release_idle_targets();
+        self.idle_released = true;
+    }
+
+    pub fn maintain_memory(&mut self) {
+        if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
+            self.release_idle_memory();
+        }
     }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
@@ -359,6 +368,10 @@ impl Engine {
             .new_render_pipeline_state(&desc)
             .map_err(|s| anyhow!(s))?;
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+        renderer.apply_media_lease(pm_media::decode::service::MediaLease {
+            frame_cache: 24 << 20,
+            decoders: 32 << 20,
+        });
         renderer.set_draw_reuse(true);
         renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
@@ -399,6 +412,8 @@ impl Engine {
             scope_frames: None,
             scopes: None,
             disk: None,
+            last_frame: Instant::now(),
+            idle_released: false,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -546,6 +561,8 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         self.sync_studio(scene)?;
         self.sync_fonts();
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
@@ -586,6 +603,8 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         objc2::rc::autoreleasepool(|_| {
             self.encode_inner(scene, spec, layer, overlays, capture, trace)
         })

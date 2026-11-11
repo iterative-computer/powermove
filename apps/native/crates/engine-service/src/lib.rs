@@ -2284,7 +2284,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
-            let _ = wakes.recv_timeout(timeout);
+            engine.maintain_memory();
+            let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }
     drop(flights); // Command completion handlers hold their source leases.

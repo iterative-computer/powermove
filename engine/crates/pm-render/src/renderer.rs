@@ -1513,6 +1513,7 @@ impl Renderer {
     /// kept bottom of the last frame (`crate::frame_prefix`), and every
     /// content cache stay; the next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
+        self.media.retire_cold_sessions();
         let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
         self.pyramids.clear();
@@ -2061,6 +2062,8 @@ impl Renderer {
         // The previous frame's vector textures become evictable, and the
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
+        self.pool.begin_frame();
+        self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();
         let mut encoder = self

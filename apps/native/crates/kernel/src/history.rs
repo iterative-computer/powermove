@@ -266,6 +266,7 @@ impl History {
     /// Lowers (or raises) the byte budget and trims to it (`Memory.trim`):
     /// distant redo first, then the oldest steps; the newest step stays.
     pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        let before = self.entries.len();
         self.max_bytes = max_bytes;
         while self.total_bytes > self.max_bytes && self.entries.len() > 1 {
             if self.cursor < self.entries.len() {
@@ -275,6 +276,9 @@ impl History {
             } else {
                 self.drop_oldest();
             }
+        }
+        if self.entries.len() < before {
+            crate::memory::pressure_relief();
         }
     }
 

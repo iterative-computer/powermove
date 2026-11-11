@@ -1074,6 +1074,7 @@ pub struct MediaCache {
     /// Open video sources with the file's size and modification time when
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
+    source_seen: BTreeMap<PathBuf, std::time::Instant>,
     frames: BTreeMap<FrameKey, (Target, u64)>,
     next_texture_revision: u64,
     /// "Interpret Footage" overrides by file (section 9, per-source
@@ -1122,6 +1123,7 @@ impl MediaCache {
             images: BTreeMap::new(),
             stills: Default::default(),
             sources: BTreeMap::new(),
+            source_seen: BTreeMap::new(),
             frames: BTreeMap::new(),
             next_texture_revision: 0,
             interpretations: BTreeMap::new(),
@@ -1308,6 +1310,8 @@ impl MediaCache {
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
+        self.source_seen
+            .insert(path.to_path_buf(), std::time::Instant::now());
         self.drain_prepared();
         let stamp = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
@@ -1821,6 +1825,25 @@ impl MediaCache {
     /// What the decode service holds (frame cache, decoders, sessions).
     pub fn media_usage(&self) -> MediaUsage {
         self.service.usage()
+    }
+
+    /// Plans and their two-second look-ahead touch wanted sources. Close
+    /// decoders for clips no recent plan wants; retain only their cheap index.
+    pub(crate) fn retire_cold_sessions(&mut self) {
+        let cold: Vec<_> = self
+            .source_seen
+            .iter()
+            .filter(|(_, at)| at.elapsed() >= std::time::Duration::from_secs(2))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for path in cold {
+            self.source_seen.remove(&path);
+            if let Some((_, source)) = self.sources.get(&path) {
+                self.viewer.release(Some(source.id));
+                self.source_viewer.release(Some(source.id));
+                self.service.release(None, Some(source.id));
+            }
+        }
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture

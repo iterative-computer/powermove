@@ -158,10 +158,10 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         ServiceConfig {
-            cache_bytes: 512 << 20,
-            pool_free_bytes: 256 << 20,
+            cache_bytes: 24 << 20,
+            pool_free_bytes: 16 << 20,
             threads: 4,
-            idle_sessions: 2,
+            idle_sessions: 1,
             session_window: super::session::DEFAULT_WINDOW,
         }
     }
@@ -497,6 +497,7 @@ impl DecodeService {
                 let reader = PacketReader::new(source.path(), source.stream)?;
                 let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
                 s.set_window(self.config.session_window);
+                s.set_window_bytes(32 << 20);
                 self.open_sessions.fetch_add(1, Ordering::Relaxed);
                 s
             }

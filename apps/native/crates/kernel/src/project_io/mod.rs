@@ -626,7 +626,7 @@ pub(crate) fn from_container(
     let history = raw_history
         .as_ref()
         .and_then(|h| History::from_saved(h, open_comp.as_deref()));
-    Ok(OpenedProject {
+    let opened = OpenedProject {
         file: ProjectFile {
             path,
             format,
@@ -645,7 +645,9 @@ pub(crate) fn from_container(
         document: pm_model::Document::new(Some(canonical), 1),
         open_comp,
         history,
-    })
+    };
+    crate::memory::pressure_relief();
+    Ok(opened)
 }
 
 /// `normalizeCompositions` (main `core/validate/project.ts`): a project from

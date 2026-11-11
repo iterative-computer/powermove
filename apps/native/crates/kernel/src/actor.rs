@@ -1408,6 +1408,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply(closed);
             if closed {
                 emit(shared, KernelEvent::Closed { project });
+                crate::memory::pressure_relief();
             }
         }
         Msg::Recover {
