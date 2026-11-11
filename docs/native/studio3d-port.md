@@ -674,3 +674,47 @@ at 2 spp instead of incorrectly continuing to 6 spp. Native tests verify
 orthographic coverage remains within 4 pixels when the camera dollies from 5
 to 10 units, iris changes affect defocus, and clip planes remove out-of-range
 geometry. The GPUI app builds. Presented fps and input p95 remain unmeasured.
+
+
+### Native worker timing and retained OIDN filters
+
+`RenderedScene.timings` / `FrameTimings` now expose worker preparation, trace,
+GPU guide passes, guide readback, CPU OIDN and total synchronous render time.
+The manual `pm-studio3d-engine` timing test uses the real in-process
+`StudioService` at 1920×1080 with Metal RT, full-resolution beauty and half-size
+auxiliary prefiltering. Production uses the saved 32–256 sample/noise policy
+without a 3-second deadline. Refine uses 32 spp and balanced OIDN. Each value
+below averages two serialized runs under the shared build/render lock; debug
+profile/fingerprints were unchanged. These are headless worker measurements,
+not native presentation/input-latency acceptance or visible-noise grading.
+
+| Scene / policy | Before: render ms | Retained filters: render ms | Trace ms | OIDN total ms | GPU guides ms | Guide readback ms | Output readback ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Hero Refine 32 | 2759.2 | 2829.4 | 1104.8 | 1397.1 | 62.0 | 166.4 | 66.9 |
+| Hero Production 256 | 3728.8 | 3683.7 | 2069.5 | 1303.4 | 58.0 | 155.4 | 66.8 |
+| Chrome Refine 32 | 5258.7 | 5186.2 | 3506.4 | 1293.8 | 122.3 | 153.3 | 68.8 |
+| Chrome Production 256 | 23303.1 | 23218.1 | 21519.5 | 1320.4 | 119.4 | 153.0 | 68.7 |
+
+One OIDN device/filter set now follows each worker thread, retaining its buffers
+across document replacement, output resizing and guide-quality changes without
+sending OIDN handles between threads. Tests preserve deterministic pixels after
+those changes. The gain is modest: native OIDN/auxiliary work remains around
+1.3 s, while Chrome's tracing dominates. Two runs do not establish a stable
+speedup; Hero Refine's total increased with trace-time variance. OIDN's total
+includes guide reduction/reconstruction and buffer work, so it exceeds the
+three filter-only measurements. After retention, Hero Production's albedo /
+normal / beauty filters average 82.8 / 82.8 / 748.0 ms; Chrome Production's are
+84.1 / 82.4 / 761.2 ms. Readback is separate; encode timings remain in the
+previous engine diagnostic section.
+
+The older capped Chrome Production diagnostic stopped at 28 spp. Its 4.36 s
+half-guide result must not be compared as an equal-convergence export to these
+256-spp results. Production <=3 s and Refine <=2 s remain open; no noise target
+was weakened to improve these timings. Homebrew OIDN remains CPU-only; the
+Metal build/bundle recipe is documented above and no source build was performed.
+
+All 24 adapter and 24 native scene/export checks pass with retained filters;
+the manual timing check also passes. The GPUI app builds. Reproduce only with
+>=5 GB free, under the lock, using `STUDIO_TIMINGS=1` and
+`cargo test -p pm-studio3d-engine --test timing -- --ignored --nocapture --test-threads=1`
+from the native workspace with the documented shared target/V8 environment.

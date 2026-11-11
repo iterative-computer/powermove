@@ -12,12 +12,25 @@ pub struct LayerTexture {
     pub texture: wgpu::Texture,
 }
 
+/// Synchronous worker stage diagnostics, distinct from display presentation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameTimings {
+    pub prepare_ms: f64,
+    pub total_ms: f64,
+    pub pipeline: crate::gpu::PipelineTimings,
+    #[cfg(feature = "oidn")]
+    pub oidn: crate::oidn::FilterTimings,
+    pub oidn_init_ms: f64,
+    pub oidn_reused: bool,
+}
+
 pub struct RenderedScene {
     pub request: SceneRequest,
     pub layers: Vec<LayerTexture>,
     pub samples: u32,
     pub adapter: String,
     pub hardware_rt: bool,
+    pub timings: FrameTimings,
 }
 
 /// The existing compositor's Fast path. A host must attach it explicitly.
@@ -99,6 +112,8 @@ impl StudioService {
         tier: Tier,
         flip_y: bool,
     ) -> Result<RenderedScene, String> {
+        let frame_start = std::time::Instant::now();
+        let mut timings = FrameTimings::default();
         if request.width == 0 || request.height == 0 {
             return Err("Studio output is empty".into());
         }
@@ -304,6 +319,7 @@ impl StudioService {
         r.set_time_seed(salt);
         // Stills/deliveries stop at the error target or the sample ceiling.
         // The saved time limit remains a preview hint, never an export deadline.
+        timings.prepare_ms = frame_start.elapsed().as_secs_f64() * 1000.;
         r.trace(samples, bounces, reset, if r.live { 6 } else { 64 });
         r.set_output_mask(None, false);
         let passes = if r.live || denoise == Denoise::Guided {
@@ -317,29 +333,9 @@ impl StudioService {
         let metalfx = false;
         #[cfg(feature = "oidn")]
         if denoise == Denoise::Oidn || matches!(tier, Tier::QualityRefine { .. }) {
-            let denoiser = crate::oidn::Denoiser::new()?;
             let half_guides = quality.is_some_and(|q| q.half_resolution_guides)
                 || matches!(tier, Tier::QualityRefine { .. });
-            denoiser.set_half_resolution_guides(half_guides);
-            denoiser.set_quality(if half_guides {
-                crate::oidn::Quality::Balanced
-            } else {
-                crate::oidn::Quality::High
-            });
-            r.prepare_frame(
-                0,
-                Some(&|color, shade, albedo, normal| {
-                    denoiser.run_layers_interruptible(
-                        &mut [color, shade],
-                        albedo,
-                        normal,
-                        4,
-                        width as usize,
-                        height as usize,
-                        None,
-                    )
-                }),
-            )?;
+            prepare_oidn(r, width, height, half_guides, &mut timings)?;
         } else if !metalfx {
             r.prepare_frame(passes, None)?;
         }
@@ -419,6 +415,8 @@ impl StudioService {
                 texture,
             });
         }
+        timings.pipeline = r.timings;
+        timings.total_ms = frame_start.elapsed().as_secs_f64() * 1000.;
         self.resource_start = resource_start;
         self.previous = Some((request.clone(), key));
         self.previous_tier = Some(tier);
@@ -428,6 +426,7 @@ impl StudioService {
             samples: r.samples,
             adapter: r.adapter.clone(),
             hardware_rt: r.uses_hardware_rt(),
+            timings,
         })
     }
 
@@ -623,4 +622,51 @@ mod tests {
         input.view.basis = Some([v3(0., -1., 0.), v3(1., 0., 0.), v3(0., 0., 1.)]);
         assert!(validate(&input, &extracted).is_ok());
     }
+}
+
+#[cfg(feature = "oidn")]
+fn prepare_oidn(
+    renderer: &mut Renderer,
+    width: u32,
+    height: u32,
+    half_guides: bool,
+    timings: &mut FrameTimings,
+) -> Result<(), String> {
+    // Handles and RefCells stay on their worker. One cache follows that
+    // thread's lifetime, including immutable document/source replacement.
+    thread_local! { static DENOISER: std::cell::RefCell<Option<crate::oidn::Denoiser>> = const { std::cell::RefCell::new(None) }; }
+    DENOISER.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| "Reentrant Studio denoise")?;
+        timings.oidn_reused = slot.is_some();
+        if slot.is_none() {
+            let start = std::time::Instant::now();
+            *slot = Some(crate::oidn::Denoiser::new()?);
+            timings.oidn_init_ms = start.elapsed().as_secs_f64() * 1000.;
+        }
+        let denoiser = slot.as_ref().unwrap();
+        denoiser.set_half_resolution_guides(half_guides);
+        denoiser.set_quality(if half_guides {
+            crate::oidn::Quality::Balanced
+        } else {
+            crate::oidn::Quality::High
+        });
+        renderer.prepare_frame(
+            0,
+            Some(&|color, shade, albedo, normal| {
+                denoiser.run_layers_interruptible(
+                    &mut [color, shade],
+                    albedo,
+                    normal,
+                    4,
+                    width as usize,
+                    height as usize,
+                    None,
+                )
+            }),
+        )?;
+        timings.oidn = denoiser.timings();
+        Ok(())
+    })
 }

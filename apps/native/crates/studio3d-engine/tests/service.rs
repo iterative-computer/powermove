@@ -308,6 +308,26 @@ fn final_can_use_the_optional_oidn_device() {
             .iter()
             .all(|image| image.chunks_exact(4).any(|p| p[3] > 0 && p[0] > 0))
     );
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 1,
+        denoise: Denoise::Oidn,
+    };
+    let repeated = service.render(&source, request(), tier).unwrap();
+    assert!(repeated.timings.oidn_reused);
+    assert_eq!(images, pixels(&service, &repeated));
+    let mut resized = request();
+    resized.width = 80;
+    service
+        .render(&source, resized, Tier::QualityRefine { samples: 2 })
+        .unwrap();
+    let restored = service.render(&source, request(), tier).unwrap();
+    assert!(restored.timings.oidn_reused);
+    assert_eq!(
+        images,
+        pixels(&service, &restored),
+        "cached filters survive size and guide-quality changes"
+    );
 }
 
 struct GreyScreen {

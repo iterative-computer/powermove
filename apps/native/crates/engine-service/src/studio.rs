@@ -9,7 +9,7 @@ pub use pm_studio3d_engine::extract::{
     MeshInstance, SceneInput, SceneRequest, SceneSource, TextureMaps, Transform, View,
 };
 pub use pm_studio3d_engine::service::{
-    Denoise, FastRenderer, LayerTexture, RenderedScene, StudioService, Tier,
+    Denoise, FastRenderer, FrameTimings, LayerTexture, RenderedScene, StudioService, Tier,
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
 
