@@ -1923,6 +1923,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         objects,
         geometries,
         materials,
+        material_sources,
         textures,
         images,
         lights,
@@ -1946,6 +1947,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         objects,
         geometries,
         materials,
+        material_sources,
         textures,
         images,
         lights,
@@ -2193,6 +2195,47 @@ mod storage_tests {
     use super::*;
     use crate::model_import::glb::GlbWriter;
     use serde_json::{Map, json};
+
+    #[test]
+    fn derived_materials_keep_the_original_source_index() {
+        let mut writer = GlbWriter::default();
+        let position = writer.floats(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], true);
+        let normal = writer.floats(&[[0., 0., 1.]; 3], false);
+        let mut document = json!({
+            "asset":{"version":"2.0"}, "scenes":[{"nodes":[0]}],
+            "nodes":[{"mesh":0}], "materials":[{},{}],
+            "meshes":[{"primitives":[
+                {"attributes":{"POSITION":position},"material":1},
+                {"attributes":{"POSITION":position,"NORMAL":normal},"material":1},
+                {"attributes":{"POSITION":position},"material":0},
+                {"attributes":{"POSITION":position}}
+            ]}]
+        });
+        let bytes = writer.finish(std::mem::take(document.as_object_mut().unwrap()));
+        let model = load(&bytes).unwrap();
+        assert_eq!(model.materials.len(), model.material_sources.len());
+        let sources: Vec<_> = model
+            .traversal()
+            .into_iter()
+            .filter_map(|i| {
+                let ObjectKind::Drawable(d) = &model.objects[i].kind else {
+                    return None;
+                };
+                Some((d.material, model.material_sources[d.material]))
+            })
+            .collect();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|(_, source)| *source)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(0), None]
+        );
+        assert_ne!(
+            sources[0].0, sources[1].0,
+            "flat and smooth variants differ"
+        );
+    }
 
     #[test]
     fn glb_container_borrows_its_bin_chunk() {
