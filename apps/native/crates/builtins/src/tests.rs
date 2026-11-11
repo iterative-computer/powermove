@@ -3281,9 +3281,26 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         "final"
     );
     assert_eq!(row(&p, "3d.scene.sky").unwrap()["control"]["value"], "none");
-    // A 2D layer has no 3D section.
-    let (_, p) = publish(&mut presenter, "a");
-    assert!(titles(&p).is_empty());
+    // A 2D shape has no 3D section, only Extrude, off.
+    let (mut model, p) = publish(&mut presenter, "a");
+    assert_eq!(titles(&p), ["Extrude"]);
+    let on = row(&p, "3d.extrude.enabled").unwrap();
+    assert_eq!(on["control"]["value"], false);
+    // One click: depth from the artwork's size, a rounded bevel and four
+    // surfaces, the composition already being lit.
+    write(&presenter, &mut model, &on, json!(true));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(titles(&p), ["Extrude", "Front", "Bevel", "Side", "Back"]);
+    assert_eq!(
+        row(&p, "geo.depth").unwrap()["control"]["axes"][0]["value"],
+        32.
+    );
+    assert_eq!(
+        row(&p, "3d.extrude.bevelStyle").unwrap()["control"]["value"],
+        "convex"
+    );
+    // The face is a stored channel now, keyframeable like any property.
+    assert!(row(&p, "ms.front.roughness").is_some());
 }
 
 #[test]

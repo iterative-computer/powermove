@@ -146,6 +146,8 @@ export interface Option {
   separator?: boolean;
   keyEquivalent?: string;
   detail?: string;
+  /** A checkmark beside the row (a pull-down showing several settings). */
+  checked?: boolean;
 }
 export function PopUpButton(
   props: Omit<Bound<Json>, "options"> & {
@@ -173,6 +175,7 @@ export function PopUpButton(
             v: o.v,
             label: o.label,
             ...(o.disabled === undefined ? {} : { disabled: o.disabled }),
+            ...(o.checked ? { checked: true } : {}),
           },
         ];
       }),
@@ -240,6 +243,10 @@ export interface SegmentOption {
   disabled?: boolean;
   /** SF Symbol shown instead of the label; the label becomes the tooltip. */
   symbol?: string;
+  /** Tooltip line 1 when it differs from the label (a shortcut, say). */
+  title?: string;
+  /** Tooltip line 2: what it does, one sentence. */
+  help?: string;
 }
 export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
@@ -281,8 +288,13 @@ export function SegmentedControl(
             key: option.id,
             id: `${group}:${option.id}`,
             label: option.label,
-            ...(option.symbol
-              ? { attr: { symbol: option.symbol }, title: option.label }
+            ...(option.symbol ? { attr: { symbol: option.symbol } } : {}),
+            ...(option.symbol || option.help || option.title
+              ? {
+                  title: [option.title ?? option.label, option.help]
+                    .filter(Boolean)
+                    .join("\n"),
+                }
               : {}),
             role: "radio",
             disabled: props.disabled || option.disabled,

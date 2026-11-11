@@ -92,30 +92,8 @@ impl Properties {
                 .and_then(|id| self.failures.get(id))
                 .and_then(Value::as_str)
         {
-            // A shape the renderer can't build fails the whole 3D set: name
-            // the layer that caused it on every layer it took down.
-            let culprit = reason
-                .contains("primitive")
-                .then(|| reason.split_whitespace().next())
-                .flatten()
-                .and_then(|shape| {
-                    let root = model.published().snapshot.root()?;
-                    let comp = pm_kernel::model::comp_node(
-                        root,
-                        model.published().snapshot.open_comp().as_deref(),
-                    )?;
-                    let comp = super::data::wire(&comp.to_value());
-                    comp["layers"].as_array()?.iter().find_map(|l| {
-                        (l["d"]["data"]["object"]["source"]["primitive"] == shape)
-                            .then(|| (l["id"].clone(), l["name"].as_str().unwrap_or("").to_owned()))
-                    })
-                });
-            target["first"]["error"] = json!(match culprit {
-                Some((id, name)) if model.primary() != id.as_str() => format!(
-                    "“{name}” uses a shape that isn’t supported yet, so the 3D scene isn’t drawn. Choose another shape for “{name}”."
-                ),
-                _ => failure_copy(reason, studio.is_some()),
-            });
+            // Failures are per layer: each layer reports only its own.
+            target["first"]["error"] = json!(failure_copy(reason, studio.is_some()));
         }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
@@ -349,6 +327,8 @@ impl Properties {
                 if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
                     sections
                         .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                } else if matches!(record["type"].as_str(), Some("text" | "shape")) {
+                    sections.extend(self.extrude_sections(model, &layer, &record, time)?);
                 }
             }
             if let Some((role, env, _)) = &studio {
@@ -635,6 +615,156 @@ impl Properties {
             .clone();
         json!({"handle":handle,"channels":[id]})
     }
+    /// Text and shape extrusion: Extrude (on, depth, bevel, detail), then
+    /// Front, Bevel, Side and Back, each with its own look. A surface value
+    /// that isn't stored yet shows what it starts from and is created on the
+    /// first edit; once stored it is an ordinary keyframeable channel.
+    fn extrude_sections(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        record: &Value,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        use pm_panel_studio3d::extrude;
+        let locked = !model.editable(layer);
+        let on = extrude::enabled(record);
+        let Some(data) = extrude::data(record) else {
+            return Ok(vec![]);
+        };
+        let row = |id: &str, label: &str, animation: Value, control: Value| json!({"id":id,"label":label,"locked":locked,"animation":animation,"control":control});
+        // A stored channel: keyframeable, with its animation state.
+        let channel = |this: &mut Self,
+                       model: &mut Inspector,
+                       path: &str,
+                       label: &str,
+                       unit: &str,
+                       range: Option<(f64, f64, f64)>|
+         -> Result<Option<Value>, String> {
+            let binding = Binding::Property(PropertyId::new(layer, path));
+            let state = match model.binding_state(&binding, time) {
+                Ok(state) => state,
+                Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            let value = super::data::wire(&state.value);
+            let lease = this.lease(model, path, binding)?;
+            let control = match (range, &value) {
+                (_, Value::String(_)) => json!({"kind":"colour","binding":lease,"value":value}),
+                (Some((min, max, step)), Value::Number(_)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                _ => return Ok(None),
+            };
+            let animation = if state.key_at_playhead {
+                "key-at-playhead"
+            } else if state.animated {
+                "animated"
+            } else {
+                "static"
+            };
+            Ok(Some(row(path, label, json!(animation), control)))
+        };
+        let mut sections = vec![];
+        let mut rows = vec![];
+        let lease = self.control_lease("3d.extrude.enabled");
+        rows.push(row(
+            "3d.extrude.enabled",
+            "Extrude",
+            Value::Null,
+            json!({"kind":"toggle","binding":lease,"value":on}),
+        ));
+        let bevel = data["p"]["bevelStyle"]["v"].as_str().unwrap_or("none").to_owned();
+        if on {
+            if let Some(r) = channel(self, model, "geo.depth", "Depth", "px", Some((0., 10000., 1.)))? {
+                rows.push(r);
+            }
+            let lease = self.control_lease("3d.extrude.bevelStyle");
+            let options: Vec<Value> = extrude::BEVELS
+                .iter()
+                .map(|(v, label)| json!({"v":v,"label":label}))
+                .collect();
+            rows.push(row(
+                "3d.extrude.bevelStyle",
+                "Bevel",
+                Value::Null,
+                json!({"kind":"choice","binding":lease,"value":bevel,"options":options}),
+            ));
+            if bevel != "none" {
+                if let Some(r) = channel(self, model, "geo.bevelDepth", "Bevel Size", "px", Some((0., 1000., 0.5)))? {
+                    rows.push(r);
+                }
+                if let Some(r) = channel(self, model, "geo.holeBevelDepth", "Inner Bevel", "%", Some((0., 100., 1.)))? {
+                    rows.push(r);
+                }
+            }
+            let lease = self.control_lease("3d.extrude.quality");
+            let options: Vec<Value> = extrude::DETAIL
+                .iter()
+                .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
+                .collect();
+            rows.push(row(
+                "3d.extrude.quality",
+                "Detail",
+                Value::Null,
+                json!({"kind":"choice","binding":lease,"value":data["p"]["quality"]["v"],"options":options}),
+            ));
+        }
+        let collapsed = self.collapsed.get("3d.extrude").copied().unwrap_or(false);
+        let mut section = json!({"id":"3d.extrude","title":"Extrude","collapsed":collapsed,"rows":rows});
+        if !on {
+            section["note"] = json!("Give this layer depth, a bevel and its own surfaces. It lights like any 3D model.");
+        }
+        sections.push(section);
+        if !on {
+            return Ok(sections);
+        }
+        let sources = pm_panel_studio3d::extrude::sources(model.published(), layer)
+            .map_err(|e| e.to_string())?;
+        for (surface, title) in extrude::SURFACE_LABELS {
+            if *surface == "bevel" && bevel == "none" {
+                continue;
+            }
+            let mut rows = vec![];
+            for (key, label, range) in [
+                ("color", "Color", None),
+                ("roughness", "Roughness", Some((0., 1., 0.01))),
+                ("metallic", "Metalness", Some((0., 1., 0.01))),
+            ] {
+                let path = format!("ms.{surface}.{key}");
+                if extrude::has_override(record, surface, key)
+                    && let Some(r) = channel(self, model, &path, label, "", range)?
+                {
+                    rows.push(r);
+                    continue;
+                }
+                // Not stored yet: what it starts from, created on first edit.
+                let id = format!("3d.extrude.{surface}.{key}");
+                let lease = self.control_lease(&id);
+                let value = extrude::surface_value(record, surface, key);
+                let control = match range {
+                    None => json!({"kind":"colour","binding":lease,"value":value}),
+                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":"","step":step,"precision":2,"min":min,"max":max}]}),
+                };
+                rows.push(row(&id, label, Value::Null, control));
+            }
+            let map = &data["surfaces"][surface]["maps"]["color"];
+            let mut options = vec![json!({"v":null,"label":"None"})];
+            options.extend(sources.iter().cloned());
+            let value = extrude::source_value(map);
+            let id = format!("3d.extrude.{surface}.map.color");
+            let lease = self.control_lease(&id);
+            rows.push(row(
+                &id,
+                "Color Map",
+                Value::Null,
+                json!({"kind":"choice","binding":lease,"value":value,"options":options}),
+            ));
+            let id = format!("3d.extrude.{surface}");
+            let closed = *surface != "front";
+            let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
+            sections.push(json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows}));
+        }
+        Ok(sections)
+    }
     /// 3d-studio.md §8: Model, Material and its groups, Light, Camera, Shot
     /// and Environment, in the inspector's row grammar.
     fn scene_sections(
@@ -842,16 +972,6 @@ impl Properties {
                     let options = pm_panel_studio3d::properties::screens(model.published(), layer)
                         .map_err(|e| e.to_string())?
                         .into_iter()
-                        // The native renderer can't capture a composition onto a
-                        // surface yet, and a Screen would stop the whole 3D scene
-                        // from drawing: offer them disabled, with the reason.
-                        .map(|o| {
-                            if o["v"].is_null() || o["v"] == object["material"]["screen"] {
-                                json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]})
-                            } else {
-                                json!({"v":o["v"],"label":o["label"],"disabled":true,"detail":"Screens aren’t available in this version yet."})
-                            }
-                        })
                         .collect::<Vec<_>>();
                     // Studio finishes (3d-studio.md §8): a shelf of swatches
                     // under the Material heading, with no selected state.
@@ -903,6 +1023,10 @@ impl Properties {
                         }
                     }
                     let maps = &object["material"]["maps"];
+                    // AE 27: a layer, group or composition can be the picture
+                    // on a Color or Emissive map, live.
+                    let live = pm_panel_studio3d::extrude::sources(model.published(), layer)
+                        .map_err(|e| e.to_string())?;
                     for (slot, label) in [
                         ("color", "Color Map"),
                         ("normal", "Normal Map"),
@@ -911,12 +1035,15 @@ impl Properties {
                         ("emissive", "Emissive Map"),
                         ("ao", "Occlusion Map"),
                     ] {
-                        let value = maps[slot].clone();
+                        let value = pm_panel_studio3d::extrude::source_value(&maps[slot]);
                         let mut options = images.clone();
+                        if matches!(slot, "color" | "emissive") {
+                            options.extend(live.iter().cloned());
+                        }
                         if let Some(id) = value.as_str()
                             && !options.iter().any(|o| o["v"] == id)
                         {
-                            options.push(json!({"v":id,"label":"Missing image","disabled":true}));
+                            options.push(json!({"v":id,"label":if id.contains(':') {"Missing source"} else {"Missing image"},"disabled":true}));
                         }
                         let mut r = choice(
                             self,
@@ -925,7 +1052,7 @@ impl Properties {
                             value,
                             json!(options),
                         );
-                        if images.len() == 1 {
+                        if options.len() == 1 {
                             r["disabled"] = json!(true);
                         }
                         push(&mut groups, "Texture Maps", r);

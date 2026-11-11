@@ -68,7 +68,12 @@ impl Control {
                     .position(|o| o.get("v").unwrap_or(o) == value)
                 {
                     v.selectItemAtIndex(index as isize);
+                } else if options.iter().any(|o| o.get("checked").is_some()) {
+                    // A settings pull-down has no single value: no row is
+                    // "selected", only the checked ones are marked.
+                    v.selectItemAtIndex(-1);
                 }
+                checks(v, options);
             }
             Self::Button(v) => v.setState(if value == &Value::Bool(true) {
                 NSControlStateValueOn
@@ -353,5 +358,22 @@ fn add_items(popup: &NSPopUpButton, options: &[Value]) {
                 .or_else(|| option.as_str())
                 .unwrap_or(""),
         ));
+    }
+    checks(popup, options);
+}
+/// Rows marked `checked` show a checkmark: a pull-down that reports several
+/// settings at once (the viewer's collapsed 3D menu).
+fn checks(popup: &NSPopUpButton, options: &[Value]) {
+    if !options.iter().any(|o| o.get("checked").is_some()) {
+        return;
+    }
+    for (i, option) in options.iter().enumerate() {
+        if let Some(item) = popup.itemAtIndex(i as isize) {
+            item.setState(if option.get("checked") == Some(&Value::Bool(true)) {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
     }
 }

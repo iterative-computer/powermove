@@ -8,6 +8,9 @@ pub const CHANNEL: &str = "viewer.chrome";
 pub const COMMAND: &str = "viewer.chrome.drive";
 
 /// One instance per panel/realm generation, retired with that generation.
+/// `m.viewer_3d_collapse`: below this stage width the 3D group becomes one
+/// pull-down (3d-studio.md §2). A test keeps it equal to the token.
+pub const VIEWER_3D_COLLAPSE: f64 = 560.;
 /// An opaque ticket keeps full-width revisions and selection guards in Rust;
 /// it avoids shipping 60k selected IDs to JS for every chrome publication.
 #[derive(Default)]
@@ -29,7 +32,7 @@ impl Session {
     ) -> Result<Plan, Error> {
         let mut normalized = request.clone();
         match request.get("element").and_then(Value::as_str) {
-            Some("viewer.quality") => {}
+            Some("viewer.quality") | Some("viewer.studio.menu") | Some("viewer.studio.views") => {}
             Some("viewer.zoom") => {
                 let (element, argument) = match request.get("argument") {
                     Some(Value::String(s)) if s == "fit" => ("viewer.fit", Value::Null),
@@ -130,6 +133,13 @@ impl Session {
                 m.insert("tier", Value::from(tier));
                 m.insert("tool", read("studioTool", "move"));
                 m.insert("look", read("studioLook", "camera"));
+                m.insert("axes", read("studioAxes", "scene"));
+                m.insert("views", read("studioViews", "1"));
+                // Below the collapse width the group becomes one pull-down.
+                m.insert(
+                    "compact",
+                    Value::Bool(viewport.stage.width < VIEWER_3D_COLLAPSE),
+                );
                 Value::Object(m)
             } else {
                 Value::Null
@@ -177,5 +187,14 @@ impl Session {
             .ok_or(Error::Invalid("viewer argument"))?
             .clone();
         model.drive(id, argument, Some(viewport), caller)
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    #[test]
+    fn the_collapse_width_is_the_token() {
+        let t = pm_design::Tokens::new(Default::default(), Default::default());
+        assert_eq!(super::VIEWER_3D_COLLAPSE, t.metrics.viewer_3d_collapse as f64);
     }
 }

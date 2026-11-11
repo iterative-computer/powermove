@@ -135,10 +135,59 @@ export function ViewerPanel({
       </PopUpButton>
     </>
   );
-  // 3d-studio.md §2: Look Through, Tool, Frame and Preview, leading the
-  // bar, only while the composition has 3D layers.
-  const gap = <div role="presentation" style={{ width: token("metrics.gap") }} />;
-  const studio = m.studio ? (
+  // 3d-studio.md §2: Look Through, Tool, Axes, Frame, Views and Preview,
+  // leading the bar, only while the composition has 3D layers. Tooltips are
+  // two lines: the name (with its shortcut), then what it does.
+  const looks = [
+    { id: "camera", label: "Camera", help: "See exactly what the shot renders." },
+    { id: "free", label: "Free View", help: "Look around without changing the shot." },
+  ];
+  const tools = [
+    { id: "move", label: "Move", symbol: "move.3d", help: "Drag the selection, or one arrow for one axis." },
+    { id: "rotate", label: "Rotate", symbol: "rotate.3d", help: "Turn the selection by its rings." },
+    { id: "scale", label: "Scale", symbol: "scale.3d", help: "Resize the selection." },
+    { id: "orbit", label: "Orbit", symbol: "view.3d", help: "Drag to circle the view. Anytime: ⌥-drag." },
+    { id: "pan", label: "Pan", symbol: "hand.raised", help: "Drag to slide the view. Anytime: ⇧⌥-drag." },
+    { id: "zoom", label: "Zoom", symbol: "plus.magnifyingglass", help: "Drag to move closer. Anytime: ⌥-scroll." },
+    { id: "light", label: "Light", symbol: "lightbulb", help: "Click a model to put light there." },
+  ];
+  const views = [
+    { id: "1", label: "One View", short: "1 View", help: "One view of the scene." },
+    { id: "2", label: "Two Views", short: "2 Views", help: "Side by side, each with its own camera." },
+    { id: "4", label: "Four Views", short: "4 Views", help: "The shot, top, front and side." },
+  ];
+  const tiers = [
+    { id: "live", label: "Fast", help: "Instant preview while you work." },
+    { id: "refine", label: "Quality", help: "Path-traced; refines when you stop." },
+  ];
+  const object = m.studio?.axes === "object";
+  const studio = !m.studio ? null : m.studio.compact ? (
+    // Narrower than the group: one 3D pull-down, same items and order.
+    <PopUpButton
+      id="viewer.studio.menu"
+      data-pm-variant="inline"
+      binding="viewer.studio.menu"
+      title={"3D\nCamera, tools, axes, views and preview."}
+      label="3D"
+      display="3D"
+      value={null}
+      style={popupStyle}
+      options={[
+        ...looks.map((o) => ({ v: `look:${o.id}`, label: o.label, checked: (m.studio?.look ?? "camera") === o.id })),
+        { separator: true },
+        ...tools.map((o) => ({ v: `tool:${o.id}`, label: o.label, checked: (m.studio?.tool ?? "move") === o.id })),
+        { separator: true },
+        { v: "axes:scene", label: "Scene Axes", checked: !object },
+        { v: "axes:object", label: "Object Axes", checked: object },
+        { v: "frame", label: "Frame" },
+        { separator: true },
+        ...views.map((o) => ({ v: `views:${o.id}`, label: o.label, checked: (m.studio?.views ?? "1") === o.id })),
+        { separator: true },
+        ...tiers.map((o) => ({ v: `tier:${o.id}`, label: o.label, checked: m.studio?.tier === o.id })),
+      ]}
+      onChange={(event) => actions.drive("viewer.studio.menu", event.value)}
+    />
+  ) : (
     <div
       id="viewer.studio"
       role="group"
@@ -154,47 +203,54 @@ export function ViewerPanel({
         id="viewer.studio.look"
         label="Look Through"
         value={m.studio.look ?? "camera"}
-        options={[
-          { id: "camera", label: "Camera" },
-          { id: "free", label: "Free View" },
-        ]}
+        options={looks}
         onChange={(value) => actions.drive("viewer.studio.look", value)}
       />
       <SegmentedControl
         id="viewer.studio.tool"
         label="Tool"
         value={m.studio.tool ?? "move"}
-        options={[
-          { id: "move", label: "Move", symbol: "move.3d" },
-          { id: "rotate", label: "Rotate", symbol: "rotate.3d" },
-          { id: "scale", label: "Scale", symbol: "scale.3d" },
-          { id: "orbit", label: "Orbit", symbol: "view.3d" },
-          { id: "pan", label: "Pan", symbol: "hand.raised" },
-          { id: "zoom", label: "Zoom", symbol: "plus.magnifyingglass" },
-          { id: "light", label: "Light", symbol: "lightbulb" },
-        ]}
+        options={tools}
         onChange={(value) => actions.drive("viewer.studio.tool", value)}
+      />
+      <ToolbarItem
+        id="viewer.studio.axes"
+        label={object ? "Object Axes" : "Scene Axes"}
+        title={
+          object
+            ? "Object Axes\nHandles line up with the object. Click for the scene’s."
+            : "Scene Axes\nHandles line up with the scene. Click for the object’s."
+        }
+        metadata={{ symbol: object ? "cube" : "globe" }}
+        onClick={() => actions.drive("viewer.studio.axes", object ? "scene" : "object")}
       />
       <ToolbarItem
         id="viewer.studio.frame"
         label="Frame"
-        title="Frame (F). Fit the selection, or everything."
+        title={"Frame (F)\nFit the selection, or everything."}
         metadata={{ symbol: "viewfinder" }}
         onClick={() => actions.drive("viewer.studio.frame")}
       />
-      {gap}
+      <PopUpButton
+        id="viewer.studio.views"
+        data-pm-variant="inline"
+        binding="viewer.studio.views"
+        title={"Views\nOne view, two side by side, or four."}
+        label="Views"
+        value={m.studio.views ?? "1"}
+        style={popupStyle}
+        options={views.map((o) => ({ v: o.id, label: o.short, detail: o.help }))}
+        onChange={(event) => actions.drive("viewer.studio.views", event.value)}
+      />
       <SegmentedControl
         id="viewer.studio.tier"
         label="Preview"
         value={m.studio.tier}
-        options={[
-          { id: "live", label: "Fast" },
-          { id: "refine", label: "Quality" },
-        ]}
+        options={tiers}
         onChange={(value) => actions.drive("viewer.studio.tier", value)}
       />
     </div>
-  ) : null;
+  );
   return (
     <div
       id="viewer"

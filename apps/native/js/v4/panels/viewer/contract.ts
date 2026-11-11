@@ -19,6 +19,12 @@ export interface ViewerModel {
     tier: "live" | "refine";
     tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
     look?: "camera" | "free";
+    /** Handles follow the scene's axes or the object's own. */
+    axes?: "scene" | "object";
+    /** Panes in the viewer: one, two side by side, or four. */
+    views?: "1" | "2" | "4";
+    /** The viewer is narrower than the 3D group: show one pull-down. */
+    compact?: boolean;
   } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */

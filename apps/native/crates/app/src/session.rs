@@ -1840,6 +1840,24 @@ impl Controller {
             cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
             return true;
         }
+        match cmd.name.as_str() {
+            // View ▸ 3D: the viewer's 3D group as menu items.
+            "studio.view" => {
+                let arg = |i: usize| {
+                    cmd.args
+                        .get(i)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                let (group, value) = (arg(0), arg(1));
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
+                }
+                return true;
+            }
+            _ => {}
+        }
         if cmd.name == "studio.frame" {
             // The gizmo reads the Controller, so it runs after this update.
             if let Some(g) = self.builtins.gizmos.clone() {

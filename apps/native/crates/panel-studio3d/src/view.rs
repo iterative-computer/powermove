@@ -230,6 +230,9 @@ pub(crate) fn commands(
     if let Some(control) = id.strip_prefix("scene.") {
         return scene_commands(p, time, control, arg);
     }
+    if let Some(control) = id.strip_prefix("extrude.") {
+        return crate::extrude::commands(p, time, control, arg, &artwork_lights);
+    }
     let l = selected(p)?;
     if l["lock"] == true {
         return Err(invalid("Layer is locked"));
@@ -298,6 +301,14 @@ pub(crate) fn commands(
             maps.as_object_mut()
                 .ok_or_else(|| invalid("Invalid texture maps"))?
                 .remove(slot);
+        } else if arg
+            .as_str()
+            .is_some_and(|s| s.starts_with("layer:") || s.starts_with("comp:"))
+        {
+            if !matches!(slot, "color" | "emissive") {
+                return Err(invalid("Layers can drive Color and Emissive maps"));
+            }
+            maps[slot] = crate::extrude::source_record(&arg);
         } else {
             let asset = arg
                 .as_str()
@@ -866,15 +877,16 @@ pub fn add_layer(
         commands.push(scene(
             p,
             time,
-            // The hidden prototype is named for what it is, not "Nature".
-            json!({"operation":"add_object","id":format!("{id}s"),"name":format!("{} Source", match species {
+            // The hidden model is named for what it is, one of what the
+            // scatter repeats: "Pine Tree" under "Pine Trees".
+            json!({"operation":"add_object","id":format!("{id}s"),"name":match species {
                 "conifer" => "Pine Tree",
                 "broadleaf" => "Oak Tree",
                 "birch" => "Birch Tree",
                 "bush" => "Bush",
-                "grass" => "Grass",
+                "grass" => "Grass Tuft",
                 _ => "Rock",
-            }),"object":{"source":{"nature":species,"seed":1},"p":{"visible":false}}}),
+            },"object":{"source":{"nature":species,"seed":1},"p":{"visible":false}}}),
         ));
         commands.push(scene(
             p,
@@ -1021,6 +1033,19 @@ fn starter(layers: &[Value], id: &str) -> Vec<Value> {
     ]
 }
 
+/// Light for extruded artwork in an unlit composition: the soft sky as
+/// lighting only, so the design's own background stays, and a key light up
+/// and to the left. Nothing when the composition already has light.
+fn artwork_lights(layers: &[Value], id: &str) -> Vec<Value> {
+    let mut out = starter(layers, id);
+    out.truncate(2);
+    if let Some(world) = out.first_mut() {
+        world["world"]["p"]["visible"] = json!(false);
+        world["world"]["p"]["intensity"] = json!(0.8);
+    }
+    out
+}
+
 /// Import 3D Model…: one model layer per imported model asset, in one Undo
 /// step. `assets` pairs each asset ID with a fresh layer ID from the host.
 /// Imported glTF/FBX keep their own materials; OBJ starts on the Studio
@@ -1079,7 +1104,9 @@ pub fn scatter_options(p: &Published, scatter: &str, key: &str) -> Result<Vec<Va
             _ => env.is_none() || env == Some("terrain"),
         };
         if ok {
-            out.push(json!({"v":l["id"],"label":l["name"].as_str().unwrap_or("Model")}));
+            // Older projects named the hidden model "… Source".
+            let name = l["name"].as_str().unwrap_or("Model");
+            out.push(json!({"v":l["id"],"label":name.trim_end_matches(" Source")}));
         }
     }
     Ok(out)

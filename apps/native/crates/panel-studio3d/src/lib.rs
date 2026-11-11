@@ -1,5 +1,6 @@
 //! Worker-side panel adapter. All document edits run on pm-kernel; no JS waits,
 //! document mirror writes, renderer substitutes, or platform handles live here.
+pub mod extrude;
 mod fields;
 mod light;
 pub mod view;

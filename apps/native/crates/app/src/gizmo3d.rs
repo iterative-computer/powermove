@@ -40,9 +40,12 @@ impl Tool {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Handle {
+pub(super) enum Handle {
     Axis(usize),
+    /// Inside the object: move in the view plane.
     Plane,
+    /// The square between two axes: move in that plane (index of its normal).
+    Pair(usize),
     Ring(usize),
     Uniform,
 }
@@ -70,6 +73,8 @@ struct Drag {
     time: f64,
     /// How far a move has carried the pivot, so the handle follows.
     offset: Vec3,
+    /// The handle axes when the press began (scene or object).
+    basis: [Vec3; 3],
 }
 #[derive(Default)]
 pub struct State {
@@ -80,6 +85,10 @@ pub struct State {
     /// Looking through Free View rather than the shot (UI state `studioLook`).
     pub free_look: bool,
     pub free: Option<View>,
+    /// Handles follow the object's own axes (UI state `studioAxes`).
+    pub object_axes: bool,
+    /// The handle under the pointer, drawn in text colour (§5).
+    pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
     drag: Option<Drag>,
 }
@@ -98,13 +107,28 @@ fn dist_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     };
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
 }
-/// Points around the ring perpendicular to `axis`, radius `r`.
-fn ring(pivot: Vec3, axis: usize, r: f64, n: usize) -> Vec<Vec3> {
-    let (u, v) = match axis {
-        0 => ([0., 1., 0.], [0., 0., 1.]),
-        1 => ([0., 0., 1.], [1., 0., 0.]),
-        _ => ([1., 0., 0.], [0., 1., 0.]),
-    };
+/// The layer's own axes: the columns of Rz·Ry·Rx, the order the
+/// evaluator composes `rotation`, `rotation.y` and `rotation.x`.
+pub(super) fn object_basis(rotation: Vec3) -> [Vec3; 3] {
+    let (x, y, z) = (
+        rotation[0].to_radians(),
+        rotation[1].to_radians(),
+        rotation[2].to_radians(),
+    );
+    let (sx, cx) = x.sin_cos();
+    let (sy, cy) = y.sin_cos();
+    let (sz, cz) = z.sin_cos();
+    // R = Rz * Ry * Rx; column i is where axis i points.
+    let m = [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ];
+    std::array::from_fn(|c| [m[0][c], m[1][c], m[2][c]])
+}
+/// Points around the ring perpendicular to `basis[axis]`, radius `r`.
+fn ring(pivot: Vec3, basis: &[Vec3; 3], axis: usize, r: f64, n: usize) -> Vec<Vec3> {
+    let (u, v) = (basis[(axis + 1) % 3], basis[(axis + 2) % 3]);
     (0..=n)
         .map(|i| {
             let a = i as f64 / n as f64 * std::f64::consts::TAU;
@@ -149,6 +173,14 @@ impl State {
             })
             .cloned()
             .collect()
+    }
+    /// Handle axes: the scene's, or with Object Axes the first selected
+    /// layer's own.
+    pub(super) fn basis(&self) -> [Vec3; 3] {
+        match self.movable().first() {
+            Some(item) if self.object_axes => object_basis(item.rotation),
+            _ => AXES,
+        }
     }
     fn pivot(items: &[Item]) -> Option<Vec3> {
         if items.is_empty() {
@@ -206,6 +238,32 @@ impl GizmoSurface {
                 self.studio.free = self.studio.scene.as_ref().map(|s| s.shot);
             }
             self.studio_ui("studioLook", "free", cx);
+        }
+    }
+    /// A viewer 3D setting from View ▸ 3D (`look`, `tool`, `axes`, `views`,
+    /// `tier`) or `frame`, as the viewer bar's controls write it.
+    pub fn studio_setting(&mut self, group: &str, value: &str, cx: &mut Context<Self>) {
+        const LOOKS: &[&str] = &["camera", "free"];
+        const TOOLS: &[&str] = &["move", "rotate", "scale", "orbit", "pan", "zoom", "light"];
+        const AXES_: &[&str] = &["scene", "object"];
+        const VIEWS: &[&str] = &["1", "2", "4"];
+        const TIERS: &[&str] = &["live", "refine"];
+        let (key, allowed) = match group {
+            "frame" => return self.studio_frame(cx),
+            "look" => ("studioLook", LOOKS),
+            "tool" => ("studioTool", TOOLS),
+            "axes" => ("studioAxes", AXES_),
+            "views" => ("studioViews", VIEWS),
+            "tier" => ("studioTier", TIERS),
+            _ => return,
+        };
+        if let Some(v) = allowed.iter().find(|a| **a == value) {
+            if key == "studioLook" && *v == "free" {
+                self.studio_go_free(cx);
+                self.studio_push_view(cx);
+                return;
+            }
+            self.studio_ui(key, v, cx);
         }
     }
     /// Whether the composition shows Studio 3D layers (F frames them).
@@ -317,16 +375,77 @@ impl GizmoSurface {
             }
         };
         let active = drag.map(|d| d.handle);
+        let basis = drag.map_or_else(|| self.studio.basis(), |d| d.basis);
+        let ink = rgb(t.colors.text);
+        let hover = self.studio.hover.filter(|_| drag.is_none());
+        let tint = |h: Handle, c: [f32; 4]| if hover == Some(h) { ink } else { c };
+        // Each axis carries its letter beyond the tip, so colour isn't the
+        // only cue (§5), drawn as strokes at the minimum type size.
+        let letter = |i: usize, tip: [f64; 2], from: [f64; 2], color, push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4])| {
+            let (dx, dy) = (tip[0] - from[0], tip[1] - from[1]);
+            let l = dx.hypot(dy).max(1e-6);
+            let g = t.typography.minimum as f64 / frame.scale;
+            let o = [tip[0] + dx / l * g * 1.2, tip[1] + dy / l * g * 1.2];
+            let (hw, hh) = (g * 0.3, g * 0.4);
+            let p = |x: f64, y: f64| [o[0] + x * hw, o[1] + y * hh];
+            match i {
+                0 => {
+                    push(p(-1., -1.), p(1., 1.), color);
+                    push(p(1., -1.), p(-1., 1.), color);
+                }
+                1 => {
+                    push(p(-1., -1.), p(0., 0.), color);
+                    push(p(1., -1.), p(0., 0.), color);
+                    push(p(0., 0.), p(0., 1.), color);
+                }
+                _ => {
+                    push(p(-1., -1.), p(1., -1.), color);
+                    push(p(1., -1.), p(-1., 1.), color);
+                    push(p(-1., 1.), p(1., 1.), color);
+                }
+            }
+        };
         match self.studio.tool {
             Tool::Move | Tool::Scale => {
-                for (i, axis) in AXES.iter().enumerate() {
+                if self.studio.tool == Tool::Move {
+                    // Plane squares between each pair of axes, in the colour
+                    // of the axis they hold still, at pasteboard opacity.
+                    for k in 0..3 {
+                        if active.is_some_and(|h| h != Handle::Pair(k)) {
+                            continue;
+                        }
+                        let (a, b) = (basis[(k + 1) % 3], basis[(k + 2) % 3]);
+                        let corner = |u: f64, v: f64| {
+                            eye.project(add(pivot, add(mul(a, len * u), mul(b, len * v))))
+                                .map(|p| p.0)
+                        };
+                        let q = [
+                            corner(0.22, 0.22),
+                            corner(0.42, 0.22),
+                            corner(0.42, 0.42),
+                            corner(0.22, 0.42),
+                        ];
+                        let mut color = tint(Handle::Pair(k), colors[k]);
+                        if hover != Some(Handle::Pair(k)) {
+                            color[3] = t.metrics.pasteboard_opacity;
+                        }
+                        if q.iter().all(Option::is_some) {
+                            for e in 0..4 {
+                                push(q[e].unwrap(), q[(e + 1) % 4].unwrap(), color);
+                            }
+                        }
+                    }
+                }
+                for (i, axis) in basis.iter().enumerate() {
                     if active.is_some_and(|h| h != Handle::Axis(i)) {
                         continue;
                     }
                     let Some((tip, _)) = eye.project(add(pivot, mul(*axis, len))) else {
                         continue;
                     };
-                    push(c, tip, colors[i]);
+                    let color = tint(Handle::Axis(i), colors[i]);
+                    push(c, tip, color);
+                    letter(i, tip, c, color, &mut push);
                     if self.studio.tool == Tool::Move {
                         // Arrowhead: two short strokes back from the tip.
                         let (dx, dy) = (tip[0] - c[0], tip[1] - c[1]);
@@ -339,7 +458,7 @@ impl GizmoSurface {
                                 tip[0] - ux * s - uy * s * 0.6,
                                 tip[1] - uy * s + ux * s * 0.6,
                             ],
-                            colors[i],
+                            color,
                         );
                         push(
                             tip,
@@ -347,14 +466,14 @@ impl GizmoSurface {
                                 tip[0] - ux * s + uy * s * 0.6,
                                 tip[1] - uy * s - ux * s * 0.6,
                             ],
-                            colors[i],
+                            color,
                         );
                     } else {
-                        square(tip, colors[i], &mut push);
+                        square(tip, color, &mut push);
                     }
                 }
                 if self.studio.tool == Tool::Scale && active.is_none_or(|h| h == Handle::Uniform) {
-                    square(c, accent, &mut push);
+                    square(c, tint(Handle::Uniform, accent), &mut push);
                 }
             }
             Tool::Rotate => {
@@ -363,7 +482,8 @@ impl GizmoSurface {
                     if active.is_some_and(|h| h != Handle::Ring(i)) {
                         continue;
                     }
-                    let pts = ring(pivot, i, len, 28);
+                    let pts = ring(pivot, &basis, i, len, 28);
+                    let color = tint(Handle::Ring(i), colors[i]);
                     for k in 0..pts.len() - 1 {
                         let (Some((a, za)), Some((b, zb))) =
                             (eye.project(pts[k]), eye.project(pts[k + 1]))
@@ -374,7 +494,14 @@ impl GizmoSurface {
                         if active.is_none() && (za + zb) / 2. > pivot_depth + len * 0.05 {
                             continue;
                         }
-                        push(a, b, colors[i]);
+                        push(a, b, color);
+                    }
+                    // The letter sits beyond the ring's front-most point on
+                    // the screen-right side.
+                    if active.is_none()
+                        && let Some((p, _)) = eye.project(add(pivot, mul(basis[(i + 1) % 3], len)))
+                    {
+                        letter(i, p, c, color, &mut push);
                     }
                 }
             }
@@ -397,12 +524,24 @@ impl GizmoSurface {
                 best = Some((d, h));
             }
         };
+        let basis = self.studio.basis();
         match self.studio.tool {
             Tool::Move | Tool::Scale => {
                 if self.studio.tool == Tool::Scale {
                     take((at[0] - c[0]).hypot(at[1] - c[1]) * 0.9, Handle::Uniform);
                 }
-                for (i, axis) in AXES.iter().enumerate() {
+                if self.studio.tool == Tool::Move {
+                    for k in 0..3 {
+                        let (a, b) = (basis[(k + 1) % 3], basis[(k + 2) % 3]);
+                        if let Some((m, _)) =
+                            eye.project(add(pivot, add(mul(a, len * 0.32), mul(b, len * 0.32))))
+                        {
+                            // Inside its square counts as on it.
+                            take((at[0] - m[0]).hypot(at[1] - m[1]) * 0.8, Handle::Pair(k));
+                        }
+                    }
+                }
+                for (i, axis) in basis.iter().enumerate() {
                     if let Some((tip, _)) = eye.project(add(pivot, mul(*axis, len))) {
                         take(dist_segment(at, c, tip), Handle::Axis(i));
                     }
@@ -410,7 +549,7 @@ impl GizmoSurface {
             }
             Tool::Rotate => {
                 for i in 0..3 {
-                    let pts = ring(pivot, i, len, 28);
+                    let pts = ring(pivot, &basis, i, len, 28);
                     for k in 0..pts.len() - 1 {
                         if let (Some((a, _)), Some((b, _))) =
                             (eye.project(pts[k]), eye.project(pts[k + 1]))
@@ -530,7 +669,9 @@ impl GizmoSurface {
                 active: false,
                 time: self.host.time(cx),
                 offset: [0.; 3],
+                basis: self.studio.basis(),
             });
+            self.studio.hover = None;
             return true;
         }
         // Click to select. Lights have no surface, so their markers are
@@ -776,9 +917,10 @@ impl GizmoSurface {
         let tool = self.studio.tool;
         let mut commands = vec![];
         let mut offset = [0.; 3];
+        let basis = drag.basis;
         let screen_axis = |i: usize| -> Option<[f64; 2]> {
             let (c, _) = eye.project(drag.pivot)?;
-            let (t, _) = eye.project(add(drag.pivot, mul(AXES[i], drag.length)))?;
+            let (t, _) = eye.project(add(drag.pivot, mul(basis[i], drag.length)))?;
             Some([t[0] - c[0], t[1] - c[1]])
         };
         let along = |i: usize| -> f64 {
@@ -795,9 +937,46 @@ impl GizmoSurface {
                     if snap {
                         t = t.round();
                     }
-                    let key = ["position.x", "position.y", "position.z"][i];
-                    commands.push(set(id, key, item.position[i] + t, drag.time));
-                    offset = mul(AXES[i], t);
+                    let w = mul(basis[i], t);
+                    for (a, key) in ["position.x", "position.y", "position.z"]
+                        .iter()
+                        .enumerate()
+                    {
+                        // An axis the move doesn't touch keeps its keyframes.
+                        if w[a].abs() > 1e-9 || a == i {
+                            commands.push(set(id, key, item.position[a] + w[a], drag.time));
+                        }
+                    }
+                    offset = w;
+                }
+                (Handle::Pair(k), _) => {
+                    // Where the pointer's ray meets the plane through the
+                    // pivot that holds axis k still.
+                    let n = basis[k];
+                    let meet = |p: [f64; 2]| -> Option<Vec3> {
+                        let ray = eye.ray(p);
+                        let den = dot(ray.dir, n);
+                        if den.abs() < 1e-6 {
+                            return None;
+                        }
+                        let s = dot(sub(drag.pivot, ray.origin), n) / den;
+                        Some(add(ray.origin, mul(ray.dir, s)))
+                    };
+                    let now = [drag.origin[0] + d[0], drag.origin[1] + d[1]];
+                    let (Some(a), Some(b)) = (meet(drag.origin), meet(now)) else {
+                        continue;
+                    };
+                    let mut w = sub(b, a);
+                    if snap {
+                        w = w.map(f64::round);
+                    }
+                    for (a, key) in ["position.x", "position.y", "position.z"]
+                        .iter()
+                        .enumerate()
+                    {
+                        commands.push(set(id, key, item.position[a] + w[a], drag.time));
+                    }
+                    offset = w;
                 }
                 (Handle::Plane, _) => {
                     let upp = eye.units_per_pixel(drag.pivot);
@@ -826,7 +1005,7 @@ impl GizmoSurface {
                         * fine;
                     // Screen angles turn the other way when the axis faces us.
                     let f = normalize(sub(eye.pose.target, eye.pose.position));
-                    if dot(AXES[i], f) < 0. {
+                    if dot(basis[i], f) < 0. {
                         deg = -deg;
                     }
                     if snap {
@@ -907,6 +1086,18 @@ impl GizmoSurface {
         self.studio_push_view(cx);
         self.draw(cx);
         true
+    }
+    /// Tracks the handle under the pointer; `true` when it changed, so the
+    /// overlay redraws with that handle in text colour.
+    pub(super) fn studio_hover(&mut self, at: [f64; 2], frame: ViewFrame) -> bool {
+        let next = if self.studio.active() && !self.studio.busy() {
+            self.studio_handle(at, frame).filter(|h| *h != Handle::Plane)
+        } else {
+            None
+        };
+        let changed = next != self.studio.hover;
+        self.studio.hover = next;
+        changed
     }
     /// The cursor promises what a press does over the 3D view.
     pub(super) fn studio_cursor(&self, at: [f64; 2], frame: ViewFrame) -> Option<CursorStyle> {

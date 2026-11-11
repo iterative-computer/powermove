@@ -219,7 +219,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         crate::error_log::shared(cx).borrow_mut().push("Viewer",e);
                         format!("Viewer: {first} Details are in Window ▸ Error Log.")
                     }
-                }).or_else(||status.notice());
+                }).or_else(||failures_line(&status, v.published.as_deref())).or_else(||status.notice());
                 if line!=shown {
                     // Layers newly left out (or back): Properties marks them.
                     v.update_builtins(cx);
@@ -279,4 +279,36 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         drop(playhead);
         unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];}
     }).detach();
+}
+
+/// The status line for layers a frame leaves out, by name, pointing at
+/// where the reason is (Properties shows each layer's own, in words).
+fn failures_line(
+    status: &pm_engine_service::ViewerStatus,
+    published: Option<&pm_kernel::Published>,
+) -> Option<String> {
+    let mut ids: Vec<&str> = vec![];
+    for f in &status.layer_failures {
+        if !ids.contains(&f.layer.as_str()) {
+            ids.push(&f.layer);
+        }
+    }
+    let first = *ids.first()?;
+    let name = published
+        .and_then(|p| {
+            let root = p.snapshot.root()?;
+            let at = pm_kernel::model::find_layer(root, first)?;
+            let layer = pm_kernel::model::layer_at(root, &at)?.to_value();
+            layer
+                .get("name")
+                .and_then(pm_model::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|n| !n.is_empty());
+    Some(match (ids.len(), name) {
+        (1, Some(name)) => format!("“{name}” isn’t drawn. Select it to see why in Properties."),
+        (1, None) => "1 layer isn’t drawn. Select it to see why in Properties.".into(),
+        (n, Some(name)) => format!("“{name}” and {} more aren’t drawn. Select one to see why in Properties.", n - 1),
+        (n, None) => format!("{n} layers aren’t drawn. Select one to see why in Properties."),
+    })
 }

@@ -2059,14 +2059,26 @@ struct Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = &self.tokens;
+        // Line 1 names the thing (with its shortcut); an optional line 2,
+        // after a newline, says what it does (HIG help tags), in secondary.
+        let (name, help) = match self.title.split_once('\n') {
+            Some((name, help)) => (SharedString::from(name.to_owned()), Some(help.to_owned())),
+            None => (self.title.clone(), None),
+        };
         div()
+            .flex()
+            .flex_col()
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
-            .child(self.title.clone())
+            .max_w(px(t.metrics.value_column * 2.))
+            .child(name)
+            .when_some(help, |d, help| {
+                d.child(div().text_color(rgb(t.colors.secondary)).child(help))
+            })
     }
 }
 /// What to announce: statuses that appeared or changed since the last frame,

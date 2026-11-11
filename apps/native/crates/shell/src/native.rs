@@ -3195,6 +3195,8 @@ pub fn install_menus() {
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
     let new3d_start = commands.len();
     commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
+    let view3d_start = commands.len();
+    commands.extend(menu::view3d().into_iter().map(|i| (i.command, i.args)));
     let target = Target::new(mtm, commands, None);
     // Dynamic rows look the target up through MENU_TARGET.
     MENU_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
@@ -3287,6 +3289,18 @@ pub fn install_menus() {
                     delegate(&sub, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&sub));
                 }
+                "view3d" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, t) in menu::view3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            sub.addItem(&row(&t.label, &t.chord, view3d_start + i));
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "panels" => {
                     let dynamic = NSMenu::new(mtm);
                     delegate(&dynamic, MenuKind::Panels);
@@ -3307,7 +3321,7 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if matches!(spec.command.as_str(), "tools" | "new3d") {
+            if matches!(spec.command.as_str(), "tools" | "new3d" | "view3d") {
                 // In an auto-enabling menu an item with no action is disabled;
                 // its submenu's own action keeps the parent enabled.
                 if let Some(sub) = item.submenu() {

@@ -585,7 +585,13 @@ impl GizmoSurface {
                         .map(|s| s.items.iter().map(|i| i.id.clone()).collect())
                         .unwrap_or_default();
                     let mut poses = read_at(&p, time).unwrap_or_default();
-                    poses.retain(|pose| !three_d.contains(&pose.id) && !is_studio(&p, &pose.id));
+                    // Extruded text and shapes are drawn by the 3D renderer too:
+                    // their flat box would sit somewhere else.
+                    poses.retain(|pose| {
+                        !three_d.contains(&pose.id)
+                            && !is_studio(&p, &pose.id)
+                            && !is_extruded(&p, &pose.id)
+                    });
                     let selected = p
                         .selection
                         .layers()
@@ -600,13 +606,21 @@ impl GizmoSurface {
                             .and_then(pm_model::Value::as_str)
                             .map(str::to_owned)
                     };
-                    Some((poses, scene, selected, ui("studioTool"), ui("studioLook")))
+                    Some((
+                        poses,
+                        scene,
+                        selected,
+                        ui("studioTool"),
+                        ui("studioLook"),
+                        ui("studioAxes"),
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look) =
-                        read.unwrap_or((vec![], None, vec![], None, None));
+                    let (poses, scene, selected, tool, look, axes) =
+                        read.unwrap_or((vec![], None, vec![], None, None, None));
+                    s.studio.object_axes = axes.as_deref() == Some("object");
                     s.poses = Arc::new(poses);
                     let had = s.studio.scene.is_some();
                     let free_look = look.as_deref() == Some("free");
@@ -681,6 +695,10 @@ impl GizmoSurface {
             && self
                 .text_session()
                 .is_some_and(|s| s.contains(at, frame.scale));
+        // A 3D handle under the pointer lights up (3d-studio.md §5).
+        if matches!(tool, Tool::Select) && self.studio_hover(at, frame) {
+            self.draw(cx);
+        }
         let cursor = match tool {
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
@@ -2109,6 +2127,15 @@ impl Render for GizmoSurface {
 }
 
 /// A Studio 3D layer (model, light, camera) by its definition.
+/// A text or shape layer the 3D renderer draws with depth.
+pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .map(|l| pm_scene3d::from_model(&l.to_value()).unwrap_or_default())
+            .is_some_and(|l| pm_scene3d::extrusion::enabled(&l))
+    })
+}
 pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
     p.snapshot.root().is_some_and(|root| {
         pm_kernel::model::find_layer(root, id)

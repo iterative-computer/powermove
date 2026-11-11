@@ -307,42 +307,22 @@ impl ViewModel {
                     .as_str()
                     .ok_or(Error::Invalid("quality argument"))?,
             )?),
-            "viewer.studio.tier" => Action::StudioUi(
-                "studioTier",
-                match argument.as_str() {
-                    Some("live") => "live",
-                    Some("refine") => "refine",
-                    _ => return Err(Error::Invalid("studio tier")),
-                },
-            ),
-            "viewer.studio.tool" => Action::StudioUi(
-                "studioTool",
-                match argument.as_str() {
-                    Some("move") => "move",
-                    Some("rotate") => "rotate",
-                    Some("scale") => "scale",
-                    Some("orbit") => "orbit",
-                    Some("pan") => "pan",
-                    Some("zoom") => "zoom",
-                    Some("light") => "light",
-                    _ => return Err(Error::Invalid("studio tool")),
-                },
-            ),
-            "viewer.studio.look" => Action::StudioUi(
-                "studioLook",
-                match argument.as_str() {
-                    Some("camera") => "camera",
-                    Some("free") => "free",
-                    _ => return Err(Error::Invalid("studio look")),
-                },
-            ),
             "viewer.studio.frame" => {
                 no_arg()?;
-                Action::Host(HostAction::Command {
-                    id: "studio.frame".into(),
-                    args: vec![],
-                })
+                studio_action("frame", "")?
             }
+            // The collapsed 3D pull-down sends `group:value`.
+            "viewer.studio.menu" => {
+                let (group, value) = argument
+                    .as_str()
+                    .and_then(|s| s.split_once(':').or(Some((s, ""))))
+                    .ok_or(Error::Invalid("studio menu"))?;
+                studio_action(group, value)?
+            }
+            element if element.starts_with("viewer.studio.") => studio_action(
+                &element["viewer.studio.".len()..],
+                argument.as_str().ok_or(Error::Invalid("studio argument"))?,
+            )?,
             "viewer.controls" => {
                 no_arg()?;
                 Action::ToggleControls
@@ -780,4 +760,35 @@ impl Controller {
     pub fn published(&self) -> Option<Arc<Published>> {
         self.kernel.published(&self.project)
     }
+}
+
+/// A Studio 3D viewer setting (3d-studio.md §2): `tier` (Fast `live`,
+/// Quality `refine`), `tool`, `look`, `axes`, `views` (1, 2 or 4 panes),
+/// or `frame`.
+fn studio_action(group: &str, value: &str) -> Result<Action, Error> {
+    fn one(value: &str, allowed: &[&'static str]) -> Result<&'static str, Error> {
+        allowed
+            .iter()
+            .find(|a| **a == value)
+            .copied()
+            .ok_or(Error::Invalid("studio setting"))
+    }
+    Ok(match group {
+        "tier" => Action::StudioUi("studioTier", one(value, &["live", "refine"])?),
+        "tool" => Action::StudioUi(
+            "studioTool",
+            one(
+                value,
+                &["move", "rotate", "scale", "orbit", "pan", "zoom", "light"],
+            )?,
+        ),
+        "look" => Action::StudioUi("studioLook", one(value, &["camera", "free"])?),
+        "axes" => Action::StudioUi("studioAxes", one(value, &["scene", "object"])?),
+        "views" => Action::StudioUi("studioViews", one(value, &["1", "2", "4"])?),
+        "frame" => Action::Host(HostAction::Command {
+            id: "studio.frame".into(),
+            args: vec![],
+        }),
+        _ => return Err(Error::Invalid("studio setting")),
+    })
 }
