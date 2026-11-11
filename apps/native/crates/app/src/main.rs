@@ -15,10 +15,19 @@ fn tune_allocator() {
     unsafe extern "C" {
         fn mi_option_set(option: i32, value: std::ffi::c_long);
     }
-    // mimalloc v2 `mi_option_purge_delay` (include/mimalloc.h).
+    // mimalloc's stable `mi_option_purge_delay` (include/mimalloc.h).
     const PURGE_DELAY: i32 = 15;
     // SAFETY: a plain option store; mimalloc reads it on each later purge.
     unsafe { mi_option_set(PURGE_DELAY, 0) };
+    pm_engine_service::memory::set_allocator_relief(collect_allocator);
+}
+
+fn collect_allocator() {
+    unsafe extern "C" {
+        fn mi_collect(force: bool);
+    }
+    // SAFETY: mimalloc's process-wide collection is safe from any thread.
+    unsafe { mi_collect(true) };
 }
 
 mod after_open;

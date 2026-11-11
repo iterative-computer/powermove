@@ -19,6 +19,22 @@ pub struct CacheUsage {
     pub geometry_bytes: u64,
 }
 
+impl CacheUsage {
+    /// Resident cache categories, without counting the decoder pool twice.
+    pub fn resident_bytes(&self) -> u64 {
+        self.target_pool_bytes
+            + self.image_bytes
+            + self.converted_frame_bytes
+            + self.decoded_frame_bytes
+            + self.decoder_bytes
+            + self.surface_bytes
+            + self.text_bytes
+            + self.vector_bytes
+            + self.pyramid_bytes
+            + self.geometry_bytes
+    }
+}
+
 /// TASK_VM_INFO's stable prefix through phys_footprint (revision 1).
 #[cfg(target_os = "macos")]
 pub fn phys_footprint() -> Option<u64> {
@@ -39,5 +55,6 @@ pub fn phys_footprint() -> Option<u64> {
 }
 
 pub use pm_memory::{
-    Pressure, Registration, budget, bytes, pressure, pressure_relief, simulate_pressure, usage,
+    Pressure, Registration, budget, bytes, pressure, pressure_relief, set_allocator_relief,
+    simulate_pressure, usage,
 };

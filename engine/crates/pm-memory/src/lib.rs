@@ -179,7 +179,18 @@ fn default_budget() -> u64 {
     // driver and in-flight work. Larger machines can cache more.
     160 * MIB * (ram / (32u64 << 30)).clamp(1, 2)
 }
+static ALLOCATOR_RELIEF: OnceLock<fn()> = OnceLock::new();
+
+/// A binary using a separate allocator can collect its freed pages along
+/// with the system allocator. The callback must be thread safe and reentrant.
+pub fn set_allocator_relief(collect: fn()) {
+    let _ = ALLOCATOR_RELIEF.set(collect);
+}
+
 pub fn pressure_relief() {
+    if let Some(collect) = ALLOCATOR_RELIEF.get() {
+        collect();
+    }
     #[cfg(target_os = "macos")]
     unsafe {
         unsafe extern "C" {
