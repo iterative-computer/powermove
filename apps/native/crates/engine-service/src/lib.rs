@@ -2321,8 +2321,28 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             }
                             _ => None,
                         };
+                        // A picture that owes its refinement asks for the
+                        // refinement's answers (at the composition's scale)
+                        // right behind its own: the realm draws them while this
+                        // picture finishes, instead of after it lands.
+                        let ahead = (pending.is_some()
+                            && runtime.get(&id).is_some_and(|r| r.full_owed == Some(stamp)))
+                        .then(|| {
+                            let full = FrameSpec::paused_full_scale(&scene, &spec.output);
+                            engine.compat_needs(
+                                &scene,
+                                spec.time,
+                                FrameSpec {
+                                    scale: full,
+                                    ..spec
+                                },
+                            )
+                        });
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
                             store.request(needs);
+                            if let Some(ahead) = ahead {
+                                store.request(ahead);
+                            }
                         }
                         if let Some(recorder) = &recorder {
                             recorder.record(serde_json::json!({
@@ -3399,6 +3419,58 @@ mod worker_tests {
         assert!(
             !asked.lock().unwrap().is_empty(),
             "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A paused picture waiting for its override answers asks for its
+    /// refinement's (at the composition's scale, 4× here) right behind its
+    /// own, so they are drawn while it finishes: the moment its batch is
+    /// answered, the refinement's goes, before the refinement is tried.
+    #[test]
+    fn a_paused_picture_asks_for_its_refinements_answers_behind_its_own() {
+        let service = EngineService::start(pm_gpu::Gpu::new("prefetch-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.command(TransportCommand::Seek {
+            time: seconds(2.),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let first: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        let scale = first[0].scale;
+        assert!(
+            first
+                .iter()
+                .all(|n| n.time == seconds(2.) && n.scale == scale)
+        );
+        // Answering the picture's batch sends the queued refinement batch.
+        store.answer_all(
+            1,
+            1,
+            first
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        let ahead = asked.lock().unwrap().clone();
+        assert!(
+            !ahead.is_empty(),
+            "the refinement's answers were not asked ahead"
+        );
+        assert!(
+            ahead
+                .iter()
+                .all(|n| n.time == seconds(2.) && (n.scale - 4. * scale).abs() < 1e-9),
+            "{ahead:?}"
         );
         v.retire();
     }
