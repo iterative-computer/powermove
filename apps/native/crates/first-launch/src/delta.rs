@@ -314,7 +314,7 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
         fs::remove_dir_all(&pending)?;
     }
     hook(Event::Complete)?;
-    Ok(summary(&state, &pass))
+    Ok(summary(&native, &state, &pass))
 }
 /// Whether a capture says what its base says. Chromium rewrites its files whenever
 /// it runs, so the comparison is by what is stored in them, never by the files.
@@ -779,5 +779,5 @@ pub fn allow_folders(
     state.latest_pass_base = Some(pass.base_hash.clone());
     publish(&native, &state)?;
     hook(Event::Complete)?;
-    Ok(summary(&state, &pass))
+    Ok(summary(&native, &state, &pass))
 }

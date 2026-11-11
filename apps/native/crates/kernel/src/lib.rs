@@ -65,6 +65,7 @@ pub mod actor;
 pub mod asset_order;
 pub mod commands;
 pub mod document;
+pub mod embedded_media;
 pub mod error;
 pub mod extensions;
 pub mod fault_injection;

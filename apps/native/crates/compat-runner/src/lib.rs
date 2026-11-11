@@ -874,6 +874,51 @@ mod tests {
         assert!(painted.contains(&json!(["replaced", "synthetic-comp", true])));
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
     }
+    /// A batch indexes each composition's layers once; it finds what a scan
+    /// of the composition's layers, then the project's, finds: the first
+    /// layer with the id, and a layer an override adds mid-batch.
+    #[test]
+    fn an_answer_batch_finds_each_layer_as_a_scan_would() {
+        let (runner, _, answered, _) = raster_runner();
+        let manifest =
+            json!({"id":"pick","name":"Pick","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T,up,crop)=>{
+                   if(L.id==='adder')globalThis.__compat.realm.PM.proj.layers.push({id:'late',type:'text',name:'late',d:{text:'first'}});
+                   return L.d.text==='first'?null:base(L,s,T,up,crop);});}",
+            )
+            .unwrap();
+        runner
+            .eval("const P=__compat.realm.PM.proj;
+                   P.layers.push({id:'dup',type:'text',name:'top',d:{text:'top'}},{id:'adder',type:'text',name:'a',d:{text:'a'}},{id:'dup',type:'text',name:'second',d:{text:'first'}});
+                   P.comps.inner={id:'inner',name:'Inner',w:100,h:100,fps:30,dur:1,layers:[{id:'dup',type:'text',name:'n',d:{text:'first'}}]}")
+            .unwrap();
+        runner
+            .eval("const ask=(composition,layer)=>({composition,layer,seconds:0,scale:1});
+                   __compat.answerRasters(1,[ask('inner','dup'),ask('synthetic-comp','dup'),ask('synthetic-comp','late'),ask('synthetic-comp','adder'),ask('synthetic-comp','late'),ask('inner','late')]);")
+            .unwrap();
+        let kinds: Vec<Value> = answered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| a[1].clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                json!("hidden"),
+                json!("native"),
+                // Not in the project yet: passed through, as a scan finds nothing.
+                json!("native"),
+                json!("native"),
+                json!("hidden"),
+                json!("hidden"),
+            ]
+        );
+    }
     /// An override's own throw is deterministic; an answer the realm could
     /// not read back or deliver is not, and is reported as such so the viewer
     /// asks again instead of leaving the layer out until the next edit.

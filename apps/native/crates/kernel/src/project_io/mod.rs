@@ -50,6 +50,7 @@ use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
 pub(crate) use durable::remove_abandoned_temps;
+pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     temporary_sibling,

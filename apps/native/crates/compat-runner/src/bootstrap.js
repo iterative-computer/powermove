@@ -190,14 +190,37 @@ globalThis.__compat = {
     // as native, a null result (main draws nothing) as hidden, and a failure
     // as an error: the viewer reports the layer as not drawn, with the error,
     // and an export fails rather than draw the layer without it.
-    const layerIn = (project, composition, id) => {
-      const comps = project?.comps;
-      const nested = Array.isArray(comps)
-        ? comps.find((c) => c?.id === composition)
-        : comps?.[composition];
-      for (const list of [nested?.layers, project?.layers])
-        for (const layer of list ?? []) if (layer?.id === id) return layer;
-      return null;
+    // A need's layer: the first with its id in its composition's layers, then
+    // the project's. One batch indexes each composition once (a frame asks for
+    // every override layer, and each scan read hundreds of project views); a
+    // write that replaces or resizes the project's layers starts a new index.
+    const layerIndex = () => {
+      let project, comps, top, topLength;
+      let byComposition = new Map();
+      return (proj, composition, id) => {
+        const layers = proj?.layers;
+        if (proj !== project || proj?.comps !== comps || layers !== top || layers?.length !== topLength) {
+          project = proj;
+          comps = proj?.comps;
+          top = layers;
+          topLength = layers?.length;
+          byComposition = new Map();
+        }
+        let ids = byComposition.get(composition);
+        if (!ids) {
+          const nested = Array.isArray(comps)
+            ? comps.find((c) => c?.id === composition)
+            : comps?.[composition];
+          ids = new Map();
+          for (const list of [nested?.layers, top])
+            for (const layer of list ?? []) {
+              const key = layer?.id;
+              if (!ids.has(key)) ids.set(key, layer);
+            }
+          byComposition.set(composition, ids);
+        }
+        return ids.get(id) ?? null;
+      };
     };
     const failure = (error) => String(error?.message ?? error ?? "The override failed");
     /** `ask`: `{revision}` for the viewer; `{revision, exact}` for a one-frame
@@ -205,6 +228,7 @@ globalThis.__compat = {
      * for an export, whose own realm holds its frozen project (`export.rs`). */
     this.answerRasters = (batch, needs, ask = {}) => {
       const realm = this.realm;
+      const layerIn = layerIndex();
       const answers = needs.map((need) => {
         // This realm has not seen the viewer's revision yet: ask again.
         if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };

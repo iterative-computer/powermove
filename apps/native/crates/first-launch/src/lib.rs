@@ -651,7 +651,7 @@ fn run_inner(
         }
     }
     hook(Event::Complete)?;
-    Ok(summary(&state, &pass))
+    Ok(summary(&native, &state, &pass))
 }
 fn read_batches(cp: &Checkpoint, root: &Path) -> Result<Vec<(Snapshot, Vec<indexeddb::Record>)>> {
     cp.indexeddb
@@ -733,7 +733,22 @@ fn media(
         },
     )
 }
-fn summary(state: &State, pass: &Pass) -> Outcome {
+fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
+    // Media the original app had lost from its store but kept in a project's
+    // file are not offline: the copy reads them from that file.
+    let mut lent = std::collections::BTreeMap::new();
+    let mut offline = |e: &&migration::ClosureEntry| {
+        let Some(copy) = state.receipts.get(&e.reference.owner) else {
+            return true;
+        };
+        let ids = lent
+            .entry(copy.native.clone())
+            .or_insert_with(|| pm_kernel::embedded_media::lent(native, &copy.native));
+        !e.reference
+            .legacy_id
+            .as_ref()
+            .is_some_and(|id| ids.contains(id))
+    };
     Outcome::Complete {
         projects: state.imported_projects.len(),
         history_refusals: state.history_refusals.len(),
@@ -748,6 +763,7 @@ fn summary(state: &State, pass: &Pass) -> Outcome {
             .closure
             .iter()
             .filter(|e| e.status == migration::Status::AlreadyOffline)
+            .filter(&mut offline)
             .count(),
         // Files, not references: undo history repeats the same original.
         not_reached: pass

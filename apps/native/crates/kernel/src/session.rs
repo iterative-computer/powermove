@@ -1105,20 +1105,24 @@ impl Kernel {
                 let associated = association
                     .and_then(|m| m.get("path"))
                     .and_then(Value::as_str)
+                    .map(std::path::Path::new)
                     .and_then(|path| {
-                        project_io::open_project(std::path::Path::new(path), OpenOptions::default())
-                            .ok()
-                    })
-                    .filter(|opened| {
-                        !media_only
-                            || association
-                                .and_then(|m| m.get("savedHash"))
-                                .and_then(Value::as_str)
-                                .is_none_or(|hash| {
-                                    opened.file.version.as_ref().is_some_and(|v| v.hash == hash)
-                                })
-                    })
-                    .map(|o| o.file);
+                        if media_only {
+                            // A migrated copy: the original app's file lends
+                            // media per asset, never as a whole.
+                            let store = owned.then(|| {
+                                reader
+                                    .dir()
+                                    .parent()
+                                    .map(|p| p.join(crate::library_media::DIR))
+                            });
+                            crate::embedded_media::for_copy(path, &p, store.flatten().as_deref())
+                        } else {
+                            project_io::open_project(path, OpenOptions::default())
+                                .ok()
+                                .map(|o| o.file)
+                        }
+                    });
                 let mut target = Destination::Library(project.clone());
                 if owned
                     && !media_only
