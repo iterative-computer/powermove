@@ -1423,6 +1423,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
+        engine.govern_memory();
         engine.poll();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
@@ -2335,6 +2336,11 @@ impl Headless {
 
     pub fn release_idle_memory(&mut self) {
         self.engine.release_idle_memory();
+    }
+    pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
+        memory::simulate_pressure(pressure);
+        self.engine.govern_memory();
+        self.engine.poll();
     }
     pub fn new() -> Result<Self> {
         Ok(Self {

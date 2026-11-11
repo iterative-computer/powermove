@@ -912,6 +912,18 @@ impl TextGpu {
 
     pub fn cached_bytes(&self) -> u64 {
         self.raster_pool.bytes()
+            + self.image_bytes
+            + self.direct.bytes
+            + self
+                .chunks_retired
+                .iter()
+                .chain(&self.chunks_free)
+                .map(|t| {
+                    u64::from(t.width())
+                        * u64::from(t.height())
+                        * u64::from(t.format().block_copy_size(None).unwrap_or(16))
+                })
+                .sum::<u64>()
     }
 
     fn image(
@@ -1466,6 +1478,13 @@ impl TextGpu {
     /// Evicts least recently used rasters until the cache holds at most
     /// `bytes` (lease pressure). Discarded handles are never reused.
     pub fn trim(&mut self, bytes: u64) {
+        if self.image_bytes + self.direct.bytes > bytes {
+            self.images.clear();
+            self.image_bytes = 0;
+            self.direct.clear();
+            self.chunks_retired.clear();
+            self.chunks_free.clear();
+        }
         self.evict(bytes, false);
         for target in self.retired.drain(..) {
             self.raster_pool.release(target);

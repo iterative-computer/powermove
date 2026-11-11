@@ -980,6 +980,14 @@ fn worker(
     notifier: Weak<SyncSender<Command>>,
 ) {
     let _watchdog = WatchdogThread::new(&control, &config);
+    let pressure_sender = notifier.clone();
+    let memory = pm_memory::Registration::new(1, move |_, level| {
+        if level != pm_memory::Pressure::Normal
+            && let Some(tx) = pressure_sender.upgrade()
+        {
+            let _ = tx.try_send(Command::MemoryPressure);
+        }
+    });
     let generation = Generation {
         realm: name.clone(),
         number: next_generation(),
@@ -995,6 +1003,15 @@ fn worker(
     let mut trim_at = Some(Instant::now() + IDLE_TRIM);
     while !control.closing.load(Ordering::Acquire) {
         retained.retain(|_, live| Arc::strong_count(&live.pins) > 1);
+        let held = current
+            .as_ref()
+            .ok()
+            .map(|live| live.vm.memory())
+            .into_iter()
+            .chain(retained.values().map(|live| live.vm.memory()))
+            .map(|m| m.physical_heap_bytes as u64 + m.external_bytes as u64)
+            .sum();
+        memory.report(pm_memory::other(held));
         let wake = current.as_ref().ok().and_then(|live| live.next_wake);
         let deadline = match (wake, trim_at) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -1053,6 +1070,7 @@ fn worker(
                 for live in retained.values_mut() {
                     live.vm.trim();
                 }
+                pm_memory::pressure_relief();
             }
             Command::Wake => continue,
             Command::Measure { reply } => {

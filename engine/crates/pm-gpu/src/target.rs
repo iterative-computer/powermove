@@ -137,6 +137,7 @@ pub struct TargetPool {
     free: Vec<(Key, Target, u64)>,
     free_bytes: u64,
     frame: u64,
+    free_budget: u64,
     /// Bytes held by targets in the pool and taken from it.
     live_bytes: u64,
     created: u64,
@@ -148,6 +149,7 @@ impl Default for TargetPool {
             free: Vec::new(),
             free_bytes: 0,
             frame: 0,
+            free_budget: Self::FREE_BUDGET,
             live_bytes: 0,
             created: 0,
         }
@@ -155,6 +157,10 @@ impl Default for TargetPool {
 }
 
 impl TargetPool {
+    pub fn set_free_budget(&mut self, bytes: u64) {
+        self.free_budget = bytes.min(Self::FREE_BUDGET);
+        self.trim(self.live_bytes.saturating_sub(self.free_bytes) + self.free_budget);
+    }
     pub const FREE_BUDGET: u64 = 48 << 20;
     const MAX_IDLE_FRAMES: u64 = 30;
 
@@ -236,7 +242,7 @@ impl TargetPool {
         };
         self.free_bytes += target.bytes();
         self.free.push((key, target, self.frame));
-        while self.free_bytes > Self::FREE_BUDGET {
+        while self.free_bytes > self.free_budget || self.free.len() > 128 {
             let oldest = self
                 .free
                 .iter()

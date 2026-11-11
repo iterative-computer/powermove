@@ -1,6 +1,7 @@
 //! Cache accounting uses nominal bytes; the OS footprint includes driver and
 //! allocator storage as well. Never substitute RSS for Activity Monitor Memory.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CacheUsage {
     pub target_pool_bytes: u64,
     pub target_pool_idle: usize,
@@ -14,6 +15,8 @@ pub struct CacheUsage {
     pub surface_bytes: u64,
     pub text_bytes: u64,
     pub vector_bytes: u64,
+    pub pyramid_bytes: u64,
+    pub geometry_bytes: u64,
 }
 
 /// TASK_VM_INFO's stable prefix through phys_footprint (revision 1).
@@ -34,3 +37,7 @@ pub fn phys_footprint() -> Option<u64> {
 pub fn phys_footprint() -> Option<u64> {
     None
 }
+
+pub use pm_memory::{
+    Pressure, Registration, budget, bytes, pressure, pressure_relief, simulate_pressure, usage,
+};

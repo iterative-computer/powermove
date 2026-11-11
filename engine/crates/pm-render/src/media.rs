@@ -1120,6 +1120,7 @@ pub struct MediaCache {
     images: BTreeMap<ImageKey, Target>,
     image_seen: BTreeMap<ImageKey, u64>,
     image_budget: u64,
+    frame_budget: u64,
     pub(crate) preview_media: bool,
     pub(crate) draw_edge: Option<u32>,
     /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
@@ -1183,6 +1184,7 @@ impl MediaCache {
             images: BTreeMap::new(),
             image_seen: BTreeMap::new(),
             image_budget: 48 << 20,
+            frame_budget: 24 << 20,
             preview_media: false,
             draw_edge: None,
             stills: Default::default(),
@@ -1932,6 +1934,24 @@ impl MediaCache {
         self.recount();
     }
 
+    pub fn trim_frames(&mut self, budget: u64) {
+        self.frame_budget = budget;
+        self.free_frames.clear();
+        self.retired_frames.clear();
+        while self.frame_bytes() > budget {
+            let Some(key) = self
+                .frames
+                .keys()
+                .min_by_key(|k| self.frame_seen.get(&k.path).copied().unwrap_or(0))
+                .cloned()
+            else {
+                break;
+            };
+            self.frames.remove(&key);
+        }
+        self.recount();
+    }
+
     pub fn image_bytes(&self) -> u64 {
         self.images.values().map(Target::bytes).sum()
     }
@@ -2065,6 +2085,9 @@ impl MediaCache {
             self.free_frames.pop();
         }
         self.recount();
+        if self.frame_bytes() > self.frame_budget {
+            self.trim_frames(self.frame_budget);
+        }
     }
 }
 

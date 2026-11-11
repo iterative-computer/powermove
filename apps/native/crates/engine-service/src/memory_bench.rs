@@ -93,6 +93,20 @@ pub fn run() -> anyhow::Result<()> {
         h.preview(&scene, spec(t, Moment::Paused))?;
     }
     samples.push(sample("seeks50", &h, start));
+    if arg("pressure", "false") == "true" {
+        let before =
+            memory::phys_footprint().ok_or_else(|| anyhow::anyhow!("footprint unavailable"))?;
+        h.memory_pressure(memory::Pressure::Critical);
+        std::thread::sleep(Duration::from_secs(2));
+        let after =
+            memory::phys_footprint().ok_or_else(|| anyhow::anyhow!("footprint unavailable"))?;
+        samples.push(sample("pressure2", &h, start));
+        anyhow::ensure!(
+            after as f64 <= before as f64 * 0.70,
+            "pressure footprint did not fall 30% within 2s ({before} -> {after})"
+        );
+        h.memory_pressure(memory::Pressure::Normal);
+    }
     std::thread::sleep(Duration::from_secs(2));
     h.release_idle_memory();
     std::thread::sleep(Duration::from_secs(3));

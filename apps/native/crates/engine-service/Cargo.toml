@@ -11,6 +11,7 @@ studio-oidn = ["pm-studio/oidn"]
 native-cad-tests = ["kernel", "pm-scene3d/native-cad-tests"]
 
 [dependencies]
+pm-memory = { path = "../../../../engine/crates/pm-memory" }
 pm-studio = { path = "../../../../engine/crates/pm-studio" }
 anyhow = "1"
 async-channel = "2"

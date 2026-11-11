@@ -1357,6 +1357,13 @@ impl Renderer {
     pub fn set_image_cache_budget(&mut self, bytes: u64) {
         self.media.trim_images(bytes);
     }
+    pub fn set_converted_frame_budget(&mut self, bytes: u64) {
+        self.media.trim_frames(bytes);
+    }
+    pub fn set_target_pool_budget(&mut self, bytes: u64) {
+        self.pool.set_free_budget(bytes);
+        self.pyramids.set_budget(bytes);
+    }
     pub fn converted_frame_bytes(&self) -> u64 {
         self.media.frame_bytes()
     }

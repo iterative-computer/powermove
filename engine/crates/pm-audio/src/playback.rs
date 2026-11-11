@@ -1063,6 +1063,12 @@ impl Playback {
     pub fn memory_pressure(&self) {
         self.cache.playback_memory_pressure();
     }
+    pub fn set_cache_budget(&self, bytes: usize) {
+        self.cache.set_budget(bytes);
+    }
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.stats().bytes
+    }
 
     /// Plays `comp_id` of `doc` from now on (a new revision, or another
     /// composition). Returns the media that could not be opened.

@@ -200,6 +200,9 @@ pub struct Engine {
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
     last_frame: Instant,
     idle_released: bool,
+    memory_client: crate::memory::Registration,
+    memory_request: Arc<std::sync::atomic::AtomicU64>,
+    budgeted_surfaces: u64,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -244,24 +247,80 @@ impl Engine {
                 .sum(),
             text_bytes: self.renderer.text_cache_bytes(),
             vector_bytes: self.renderer.vector_cache_bytes(),
+            pyramid_bytes: self.renderer.pyramid_bytes(),
+            geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
+                + self.renderer.scene3d_resident().map_bytes,
         }
     }
 
     pub fn release_idle_memory(&mut self) {
+        self.renderer.clear_draw_reuse();
         self.renderer.release_idle_targets();
         self.renderer.release_idle_media();
         self.cache.clear();
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
         self.idle_released = true;
+        crate::memory::pressure_relief();
     }
 
     pub fn maintain_memory(&mut self) -> bool {
+        self.govern_memory();
         if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
             self.release_idle_memory();
             return true;
         }
         false
+    }
+
+    pub fn govern_memory(&mut self) {
+        use std::sync::atomic::Ordering;
+        let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
+        let surfaces = self.memory_usage().surface_bytes;
+        let share = self.memory_client.grant();
+        if request != u64::MAX || surfaces != self.budgeted_surfaces {
+            self.budgeted_surfaces = surfaces;
+            // In-flight surfaces are pinned. Divide only the remainder,
+            // so every independently reusable cache shares the same allowance.
+            let cache = share.saturating_sub(surfaces);
+            self.renderer
+                .apply_media_lease(pm_media::decode::service::MediaLease {
+                    frame_cache: (cache * 15 / 100) as usize,
+                    decoders: (cache / 4) as usize,
+                });
+            self.renderer.set_image_cache_budget(cache / 5);
+            self.renderer.set_converted_frame_budget(cache / 10);
+            self.renderer.set_target_pool_budget(cache / 10);
+            self.renderer.set_vector_cache_budget(cache / 20, 512);
+            self.renderer.trim(cache / 20);
+            if request != u64::MAX {
+                self.cache.clear();
+                self.pool.retain(|s| Arc::strong_count(s) > 1);
+            }
+            if crate::memory::pressure() == crate::memory::Pressure::Critical {
+                self.release_idle_memory();
+                self.renderer.trim(0);
+                self.renderer.set_image_cache_budget(share / 5);
+                crate::memory::pressure_relief();
+            }
+        }
+        let u = self.memory_usage();
+        self.memory_client
+            .report(pm_protocol::lease::LeaseCategories {
+                frame_cache: crate::memory::bytes(u.decoded_frame_bytes),
+                render_cache: crate::memory::bytes(
+                    u.pyramid_bytes
+                        + u.target_pool_bytes
+                        + u.image_bytes
+                        + u.converted_frame_bytes
+                        + u.text_bytes
+                        + u.vector_bytes,
+                ),
+                surface_pool: crate::memory::bytes(u.surface_bytes),
+                decoders: crate::memory::bytes(u.decoder_bytes),
+                geometry_3d: crate::memory::bytes(u.geometry_bytes),
+                ..Default::default()
+            });
     }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
@@ -373,6 +432,11 @@ impl Engine {
         let pipeline = metal
             .new_render_pipeline_state(&desc)
             .map_err(|s| anyhow!(s))?;
+        let memory_request = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let pending = memory_request.clone();
+        let memory_client = crate::memory::Registration::new(12, move |share, _| {
+            pending.store(share, std::sync::atomic::Ordering::Release);
+        });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.apply_media_lease(pm_media::decode::service::MediaLease {
             frame_cache: 24 << 20,
@@ -420,6 +484,9 @@ impl Engine {
             disk: None,
             last_frame: Instant::now(),
             idle_released: false,
+            memory_client,
+            memory_request,
+            budgeted_surfaces: u64::MAX,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -610,6 +677,7 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        self.govern_memory();
         self.last_frame = Instant::now();
         self.idle_released = false;
         objc2::rc::autoreleasepool(|_| {
