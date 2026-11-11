@@ -17,6 +17,7 @@ fn main(@builtin(global_invocation_id) g:vec3u) {
  if(m.x<.5){c=vec4f(encode(clamp(linear,vec3f(0.),vec3f(1.))),Q.backdrop.w);}
  if(Q.mask.x>0u&&u32(m.z+.5)!=Q.mask.x){if(m.z>.5||Q.mask.y==0u){c=vec4f(0.);}}
  if(Q.backdrop.w<.5&&m.x<.5){c=vec4f(0.);}
- textureStore(frame_image,pixel,clamp(c,vec4f(0.),vec4f(1.)));
+ let output_pixel=vec2i(i32(g.x),select(i32(g.y),i32(Q.dims.y-1u-g.y),Q.mask.z>0u));
+ textureStore(frame_image,output_pixel,clamp(c,vec4f(0.),vec4f(1.)));
  let q=vec4u(clamp(c,vec4f(0.),vec4f(1.))*255.+.5);packed[g.y*Q.dims.x+g.x]=q.x|(q.y<<8u)|(q.z<<16u)|(q.w<<24u);
 }

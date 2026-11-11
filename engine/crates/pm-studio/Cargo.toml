@@ -28,3 +28,7 @@ metalfx = []
 [[bin]]
 name = "studio-yardstick"
 required-features = ["yardstick"]
+
+[[bin]]
+name = "studio-timing"
+required-features = ["oidn"]

@@ -78,6 +78,17 @@ pub struct PresentTarget<'a> {
     pub flip_y: bool,
 }
 
+/// Synchronous diagnostic wall times. Enable STUDIO_TIMINGS for a separate
+/// guide-pass GPU completion; normal rendering does not add that barrier.
+#[derive(Clone,Copy,Debug,Default,serde::Serialize)]
+pub struct PipelineTimings {
+    pub trace_ms:f64,
+    pub guides_ms:f64,
+    pub guide_readback_ms:f64,
+    pub denoise_ms:f64,
+    pub post_ms:f64,
+}
+
 /// present.wgsl (shared with the app): one layer's pixels into a texture.
 struct Present {
     layout: wgpu::BindGroupLayout,
@@ -122,6 +133,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub adapter: String,
+    pub timings: PipelineTimings,
     width: u32,
     height: u32,
     trace: wgpu::ComputePipeline,
@@ -408,6 +420,7 @@ impl Renderer {
         });
         let r = Renderer {
             adapter,
+            timings: Default::default(),
             params: buf("params", std::mem::size_of::<Params>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             post_params: (0..9).map(|_| buf("post params", std::mem::size_of::<PostParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)).collect(),
             accum: buf("accum", pixels * 16, rw),
@@ -864,7 +877,9 @@ impl Renderer {
             if self.adaptive_enabled && self.samples >= min_samples && self.samples % 32 == 0
                 && self.sample_counts().iter().all(|&count|count <= (self.samples-4) as f32) { break; }
         }
-        start.elapsed().as_secs_f64() * 1000.0
+        let elapsed=start.elapsed().as_secs_f64()*1000.;
+        self.timings.trace_ms=elapsed;
+        elapsed
     }
 
     fn post_group(&self, slot: usize, src: usize, dst: usize) -> wgpu::BindGroup {
@@ -908,6 +923,54 @@ impl Renderer {
     pub fn present_to(&mut self, passes: u32, target: PresentTarget<'_>) -> f64 {
         self.ensure_present(target.format);
         self.post(passes, false, None, Some(target)).1
+    }
+
+    /// Resolve/filter once on the worker, retaining the composed image on GPU.
+    /// All per-layer presentations can then share this result without repeating
+    /// stochastic guide passes or OIDN. Denoiser errors reach the caller.
+    pub fn prepare_frame(&mut self, passes: u32,
+        denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>,
+    ) -> Result<f64, String> {
+        let failure = std::cell::RefCell::new(None);
+        let filter = |color: &mut [f32], shade: &mut [f32], albedo: &[f32], normal: &[f32]| {
+            let result = denoise.unwrap()(color, shade, albedo, normal);
+            if let Err(error) = &result { *failure.borrow_mut() = Some(error.clone()); }
+            result
+        };
+        let ms = self.post(passes, false, denoise.map(|_| &filter as &dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>), None).1;
+        if let Some(error) = failure.into_inner() { return Err(error); }
+        Ok(ms)
+    }
+
+    /// Present a previously prepared image into the host's shared-device target.
+    /// No readback, path tracing, denoising or history advancement occurs here.
+    pub fn present_frame(&mut self, target: PresentTarget<'_>) {
+        self.ensure_present(target.format);
+        let present = self.present.as_ref().unwrap();
+        let flags = u32::from(target.flip_y) | (u32::from(target.include_void) << 1);
+        self.queue.write_buffer(&present.params, 0, bytemuck::cast_slice(&[self.width, self.height, target.layer.map_or(0, |l|l+1), flags]));
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Studio prepared presentation"), layout: &present.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: present.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.display[self.last_display].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.gbuf.as_entire_binding() },
+            ],
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Studio prepared layer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })], ..Default::default()
+            });
+            pass.set_pipeline(&present.pipelines[&target.format]);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3,0..1);
+        }
+        self.queue.submit([encoder.finish()]);
     }
 
     fn ensure_present(&mut self, format: wgpu::TextureFormat) {
@@ -1066,6 +1129,7 @@ impl Renderer {
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
+        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,..Default::default()};
         let (w, h) = (self.width, self.height);
         if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;
@@ -1086,9 +1150,13 @@ impl Renderer {
         // resolve → display[0]; à-trous ping-pongs; compose; pack.
         run(&mut enc, &self.resolve, 1, 0, 1, &mut slot);
         if let Some(denoise) = denoise {
+            let guide_start=Instant::now();
             // Guides, then read back, denoise on the CPU and upload the result.
             if !self.shutter_guides {self.encode_guides(&mut enc,None);}
             self.queue.submit([std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default())).finish()]);
+            if std::env::var_os("STUDIO_TIMINGS").is_some() {self.wait();}
+            timings.guides_ms=guide_start.elapsed().as_secs_f64()*1000.;
+            let read_start=Instant::now();
             let pixels = (w * h) as usize;
             let mut color = self.read_f32(&self.display[0], pixels as u64 * 16);
             let aov = self.read_f32(&self.aov, pixels as u64 * 32);
@@ -1108,6 +1176,8 @@ impl Renderer {
                 normal[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8 + 4..i * 8 + 8]);
                 shade[i * 4..i * 4 + 3].fill(color[i * 4 + 3]);
             }
+            timings.guide_readback_ms=read_start.elapsed().as_secs_f64()*1000.;
+            let denoise_start=Instant::now();
             if let Err(e) = denoise(&mut color, &mut shade, &albedo, &normal) {
                 eprintln!("denoise failed, keeping the noisy frame: {e}");
             } else {
@@ -1116,6 +1186,7 @@ impl Renderer {
                 }
                 self.queue.write_buffer(&self.display[0], 0, bytemuck::cast_slice(&color));
             }
+            timings.denoise_ms=denoise_start.elapsed().as_secs_f64()*1000.;
         }
         let mut cur = 0;
         if self.live || self.quality_temporal {
@@ -1159,7 +1230,9 @@ impl Renderer {
             self.wait();
             self.last_display=cur;
             self.advance_history();
-            return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
+            timings.post_ms=start.elapsed().as_secs_f64()*1000.;
+            self.timings=timings;
+            return (Vec::new(), timings.post_ms);
         }
         run(&mut enc, &self.pack, cur, 1 - cur, 1, &mut slot);
         if !readback {
@@ -1167,7 +1240,9 @@ impl Renderer {
             self.wait();
             self.last_display=cur;
             self.advance_history();
-            return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
+            timings.post_ms=start.elapsed().as_secs_f64()*1000.;
+            self.timings=timings;
+            return (Vec::new(), timings.post_ms);
         }
         enc.copy_buffer_to_buffer(&self.packed, 0, &self.readback, 0, (w * h * 4) as u64);
         self.queue.submit([enc.finish()]);
@@ -1179,6 +1254,8 @@ impl Renderer {
         self.readback.unmap();
         self.last_display=cur;
         self.advance_history();
+        timings.post_ms=gpu_ms;
+        self.timings=timings;
         (pixels, gpu_ms)
     }
 

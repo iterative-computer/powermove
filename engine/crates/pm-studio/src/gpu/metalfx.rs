@@ -60,6 +60,9 @@ pub(super) struct MetalFX {
     empty_layout: wgpu::BindGroupLayout,
     valid: bool,
 }
+// SAFETY: the retained Metal device/queue/scaler may move between threads.
+// Encoding remains exclusive through &mut Renderer; no concurrent scaler use.
+unsafe impl Send for MetalFX {}
 impl Drop for MetalFX {
     fn drop(&mut self) {
         unsafe { studio_metalfx_destroy(self.context) };
@@ -451,12 +454,23 @@ impl Renderer {
     /// Native-only denoise+upscale. On failure the host keeps the portable Live
     /// pipeline; Refine and Final continue through OIDN.
     pub fn finish_metalfx(
-        &mut self,
-        ow: u32,
-        oh: u32,
-        reuse: bool,
-        surface_id: Option<u64>,
-    ) -> Result<(Vec<u8>, f64), String> {
+        &mut self, ow:u32, oh:u32, reuse:bool, surface_id:Option<u64>,
+    )->Result<(Vec<u8>,f64),String>{
+        self.finish_metalfx_impl(ow,oh,reuse,surface_id,false,false)
+    }
+
+    /// In-process output for shared-device native viewers. Pixels stay on GPU.
+    /// The returned scratch texture is valid until the next finish; copy it into
+    /// the compositor's retained layer texture before rendering another layer.
+    pub fn finish_metalfx_texture(&mut self, ow:u32, oh:u32, reuse:bool, flip_y:bool)
+        ->Result<(wgpu::Texture,f64),String>{
+        let (_,ms)=self.finish_metalfx_impl(ow,oh,reuse,None,true,flip_y)?;
+        Ok((self.metalfx.as_ref().unwrap().frame_image.clone(),ms))
+    }
+
+    fn finish_metalfx_impl(&mut self, ow:u32, oh:u32, reuse:bool,
+        surface_id:Option<u64>, texture_only:bool, flip_y:bool,
+    )->Result<(Vec<u8>,f64),String>{
         let start = Instant::now();
         self.last_surface = None;
         if self
@@ -609,7 +623,7 @@ impl Renderer {
             mask: [
                 self.output_layer.map_or(0, |l| l + 1),
                 u32::from(self.output_include_void),
-                0,
+                u32::from(flip_y),
                 0,
             ],
             backdrop: self.backdrop,
@@ -651,6 +665,12 @@ impl Renderer {
             pass.set_pipeline(&fx.pack);
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(ow.div_ceil(8), oh.div_ceil(8), 1);
+        }
+        if texture_only {
+            self.queue.submit([enc.finish()]);
+            self.metalfx.as_mut().unwrap().valid=true;
+            if !reuse {self.advance_history();}
+            return Ok((Vec::new(),start.elapsed().as_secs_f64()*1000.));
         }
         if let Some(frame) = surface_id {
             self.queue.submit([enc.finish()]);

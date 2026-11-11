@@ -44,8 +44,12 @@ unsafe extern "C" {
 #[derive(Clone, Copy)]
 pub enum Quality { Fast, Balanced, High }
 
+#[derive(Clone,Copy,Debug,Default,serde::Serialize)]
+pub struct FilterTimings { pub albedo_ms:f64, pub normal_ms:f64, pub beauty_ms:f64, pub total_ms:f64 }
+
 pub struct Denoiser {
     device: Device,
+    timings: Cell<FilterTimings>,
     quality: Cell<i32>,
     filter: RefCell<Option<Filters>>,
 }
@@ -87,12 +91,15 @@ impl Denoiser {
         unsafe { oidnCommitDevice(device) };
         let d = Denoiser {
             device,
+            timings:Cell::new(FilterTimings::default()),
             quality: Cell::new(QUALITY_HIGH),
             filter: RefCell::new(None),
         };
         d.check()?;
         Ok(d)
     }
+
+    pub fn timings(&self)->FilterTimings {self.timings.get()}
 
     /// Balanced OIDN is available for bounded movie presets. Final retains
     /// the high-quality network; both still prefilter stochastic auxiliaries.
@@ -152,6 +159,8 @@ impl Denoiser {
         height: usize,
         cancel: Option<(&AtomicU64, u64)>,
     ) -> Result<(), String> {
+        let full_start=std::time::Instant::now();
+        let mut timings=FilterTimings::default();
         let pixels = width
             .checked_mul(height)
             .ok_or("invalid denoising dimensions")?;
@@ -231,7 +240,10 @@ impl Denoiser {
             unsafe {
                 oidnSetFilterInt(filter, name("quality").as_ptr(), self.quality.get());
             }
+            let start=std::time::Instant::now();
             execute(filter)?;
+            let ms=start.elapsed().as_secs_f64()*1000.;
+            if parameter=="albedo" {timings.albedo_ms=ms;}else{timings.normal_ms=ms;}
         }
         bind(f.beauty, "albedo", f.clean_albedo.as_mut_ptr(), 3);
         bind(f.beauty, "normal", f.clean_normal.as_mut_ptr(), 3);
@@ -244,6 +256,7 @@ impl Denoiser {
             // scene radiance, before the renderer's display exposure/tone map.
             oidnSetFilterFloat(f.beauty, name("inputScale").as_ptr(), f32::NAN);
         }
+        let beauty_start=std::time::Instant::now();
         for color in colors {
             // Closed rooms and visible skies often have exactly unit catcher
             // shading. Preserve a constant RGB layer instead of filtering it.
@@ -255,6 +268,9 @@ impl Denoiser {
                 color[i * stride..i * stride + 3].copy_from_slice(&f.output[i * 3..i * 3 + 3]);
             }
         }
+        timings.beauty_ms=beauty_start.elapsed().as_secs_f64()*1000.;
+        timings.total_ms=full_start.elapsed().as_secs_f64()*1000.;
+        self.timings.set(timings);
         Ok(())
     }
 }
