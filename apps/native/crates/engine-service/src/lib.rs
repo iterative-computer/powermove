@@ -3002,6 +3002,61 @@ mod worker_tests {
         assert_eq!(status.effective_quality, 1., "Full");
     }
 
+    /// A crop that is the whole canvas (Fit, whose window the shell can round
+    /// a pixel narrower than its canvas) renders at the composition's size
+    /// like no crop; a zoomed-in window keeps its scale.
+    #[test]
+    fn a_whole_canvas_crop_is_fit_and_a_zoomed_one_keeps_its_scale() {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let scene = Scene {
+            doc: snapshot.document.clone(),
+            comp: snapshot.open_comp().unwrap(),
+            media: Default::default(),
+            content: 0,
+        };
+        let output = |crop| Output {
+            width: 160,
+            height: 90,
+            display: 1,
+            headroom: 1.,
+            crop,
+        };
+        let whole = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 160,
+            canvas_height: 90,
+        });
+        let zoomed = Some(crate::policy::Crop {
+            x: 40,
+            y: 20,
+            canvas_width: 640,
+            canvas_height: 360,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(None)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(whole)), 4.);
+        // Fit rounded a pixel narrow (the shell's 1265 on 1266).
+        let narrow = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 161,
+            canvas_height: 90,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(narrow)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(zoomed)), 1.);
+    }
+
     /// A capture taken during a reduced drag (explicit Half quality, a
     /// scrub) reads an exact frame: paused, full resolution, final resampler.
     #[test]

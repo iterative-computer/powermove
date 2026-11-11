@@ -60,7 +60,16 @@ impl FrameSpec {
     /// crop) and frames of other moments keep their scale. Bounded at 4×
     /// the drawable.
     pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
-        if output.crop.is_some() || output.width == 0 || output.height == 0 {
+        // A crop that is the whole canvas is no crop: at Fit the shell's
+        // window can come out a pixel narrower than its canvas by rounding
+        // (a 1265 × 712 drawable on a 1266 × 712 canvas).
+        let zoomed = output.crop.is_some_and(|c| {
+            c.x != 0
+                || c.y != 0
+                || c.canvas_width.abs_diff(output.width) > 1
+                || c.canvas_height.abs_diff(output.height) > 1
+        });
+        if zoomed || output.width == 0 || output.height == 0 {
             return 1.;
         }
         let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
