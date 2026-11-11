@@ -23,7 +23,7 @@ inspector section.
 | Increase Contrast + Reduce Transparency | ✅ `after-12-*` (cube dark, World light) |
 | Before/after pairs | ✅ `before-0*` / `after-*` |
 | Interaction states that change appearance | ✅ hover (swatch tooltip), pressed/selected (Fast/Quality, pop-up menus), error, open/closed disclosure. Keyboard focus ring on the new controls not captured: ❌ |
-| Keyboard walkthrough | Round 2: done, see Round 2 · Keyboard (K1/K2 fail app-wide) |
+| Keyboard walkthrough | Round 2 found K1/K2 app-wide; fixed in round 3 (see Round 3 · Keyboard) |
 | `cargo test -p pm-design`; no token literals added to views | ✅ no token literals in views (swatch colours are content, per §8) |
 
 ## 1. Tokens and colour
@@ -135,17 +135,62 @@ app-wide (not 3D-specific), see K1.**
 | Pop-up order | ⚠️ native pop-ups (Screen, Zoom, Preview resolution) appear at the end of the window's AX children, not inside their rows. App-wide |
 | Gizmos | ✅ not exposed, as §5 says; every transform is reachable from Properties |
 
+## Round 3 (extrusion, layers as materials, views, polish, keyboard) · 2026-11-11
+
+Evidence (outside Git): `/tmp/pm-shots/na-studio3d-ui/round3/` with
+`captions.md`. The before shots come from merge 7aeeb8a4e (Sol's items 3–7),
+built once before the round-3 code; the afters come from ec51f5791.
+
+**Result: passes for the surfaces in scope. K1/K2 are fixed app-wide.
+Open items are below.**
+
+### Correction to round 2's K1
+
+Round 2 drove Tab with `cliclick kp:tab`, which never arrives as a Tab key
+event. With a real Tab (System Events key code 48), focus did move, but
+only between panel containers and splitters, never into a control. So the
+defect was real, and the diagnosis is now exact. Every v4 view tracked a
+plain `FocusHandle`. A tracked handle's own `tab_stop`/`tab_index` decide
+tab order (GPUI ignores the element's), so no kit control was ever a tab
+stop.
+
+### Keyboard (checklist §6)
+
+| Item | Result |
+|---|---|
+| K1 · Tab reaches every control in order | ✅ fixed: v4 handles carry the node's `tabIndex`. `-1` stays focusable but out of the order (a segmented control's other segments). Regression test `tab_reaches_kit_controls_and_skips_roving_segments` |
+| K2 · Focus ring visible | ✅ fixed: the shell marks its Tab/Ctrl-Tab as keyboard input (`Window::note_keyboard_input`, a small vendored-GPUI addition), so `focus_visible_style` draws. The shell's Tab test asserts it |
+| Space / Return on a focused control | ✅ Space toggles Scene / Object Axes |
+| Arrows inside a focused segmented control | ❌ the arrow reaches GPUI (no nudge), but the kit's keydown doesn't change the segment. App-wide; next for the kit/v4 owner |
+| Native pop-ups (Views, Fit, Auto, Properties pop-ups) in the Tab order | ⚠️ AppKit controls sit outside GPUI focus; Tab passes them. They're reachable with VoiceOver and the mouse |
+
+### Surfaces
+
+| Item | Result |
+|---|---|
+| Extrude (text and shapes) | ✅ one click: depth is about a third of the type size (or the shape's smaller side), with a rounded bevel. The four surfaces start from the layer's colour: Front satin, Bevel brighter and partly metallic, Side and Back darker. An unlit composition also gets a key light and a sky that only lights. Labels: Extrude, Depth, Bevel (None / Angular / Rounded / Inset), Bevel Size, Inner Bevel, Detail (Draft / Standard / High); then Front, Bevel, Side, Back, each with Color, Roughness, Metalness and Color Map. Stored values are keyframeable; values not yet stored show what they start from. One Undo: `Extrude` |
+| Layers and groups as materials (AE 27) | ✅ Color and Emissive maps list the composition's 2D layers and groups, and other compositions, on models and on each extrusion surface. Screen is enabled again (capture works). The source stays visible in the 2D comp, as in AE |
+| 1, 2 and 4 views | ✅ the main viewer is pane 1 (Look Through, tools, gizmos, Preview). The other panes are embedded viewers, each with a corner pull-down for its camera (Shot Camera, Top, Front, Right, Left, Back, Bottom) and Fast or Quality. Two views add Top; four add Top, Front and Right. Views never edit the shot or Undo |
+| Viewer polish | ✅ Scene / Object Axes (toolbar, menu, pull-down); axis letters; plane squares (drag in a plane); hover turns a handle to text colour; two-line tooltips; View ▸ 3D; the collapsed `3D` pull-down with a checkmark per setting; the Light panel |
+| Light panel (§6) | ⚠️ built with Add, kind, name and kind, and Brightness / Size / Distance / Spread (one Undo each). Deviations: it uses the kit's number wells, because the kit has no `NSSlider`, so dragging is linear rather than log. There's no Aim segment (clicks aim as Reflect), and no enter/exit spring |
+| Status capsule (§3) | ❌ not built: the engine reports no refine sample progress, and the spec asks for a real ring. Handed to Sol |
+| Copy | ✅ the status line names the layer ("“Rounded” isn’t drawn. Select it to see why in Properties."), not the engine reason. "Pine Tree", not "Pine Tree Source" |
+| Finish shelf | ✅ shaded spheres ship (round 2's after-05a was captured before that change) |
+
 ## Open items
 
-1. Shell keyboard: K1 (Tab traversal) and K2 (focus-visible modality), above.
-2. Viewer polish: Scene/Object Axes toggle, axis letters, plane handles, hover
-   hints on parts, tooltips' second line (§2), View ▸ 3D menu, the collapsed
-   `3D` pull-down below `m.viewer_3d_collapse`, the status capsule
-   (Refining · n %, Clean) and the Light panel (§6).
-3. Waiting on engine data (Sol's queue): per-layer failure isolation, text
-   extrusion (Front, Bevel, Side, Back), layers/groups as materials, 1/2/4
-   views, the black studio backdrop, import placement; then Screen materials
-   can be re-enabled.
-4. Engine findings: fog darkens the foreground in Quality; the shadow catcher
-   draws a black void (Set Up Studio's seamless set); Fast draws terrain
-   darker than Quality.
+1. Arrow keys inside focused segmented controls; native pop-ups in the Tab
+   order (kit/v4 owner).
+2. Status capsule: needs refine progress (samples done / target) in
+   `ViewerStatus` (engine lane).
+3. Light panel: an `NSSlider` kit component (log ranges), the Aim segment
+   (Reflect / Direct / Orbit), and the enter/exit motion.
+4. Views: the extra panes take no navigation or selection yet (they're
+   reference views). View ▸ 3D has no checkmarks yet; the bar and the
+   pull-down have them.
+5. Extruded layers: 3D handles in the viewer (they lose the flat box but
+   have no gizmo yet); per-surface Emission and Opacity rows.
+6. Export: switch the 3D estimate to Sol's export time-estimate state when
+   it lands.
+7. Engine notes: one box face shows a live map mirrored; a dense "Fast" Front
+   view shows speckle on extruded faces.

@@ -1525,6 +1525,10 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 | Light tool | Click a model: adds a softbox aimed there (`Add Softbox`) or re-aims the selected light (`Aim Light`) | `add_light` / `update_light` with position and target from the pick |
 | Arrow nudges | 0.1 scene units a press, 1 with ⇧, up is up | `nudgeSelection` writes `position.x/y` in scene units for 3D layers |
 | Defaults (review notes) | First shape in an unlit scene gets sky, key softbox and floor; Pine Trees etc. frame as a postcard; Finish swatches are shaded spheres; Scatter rows are Object / Surface pickers | `starter()`, `overview_camera`, `landscape_sky`, `finish_swatch`, `scatter.model|surface` → `update_scatter` |
+| Extrude (round 3) | Properties ▸ Extrude on text and shape layers: one click for depth, a rounded bevel and Front / Bevel / Side / Back; per-surface Color, Roughness, Metalness and Color Map | `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`; `geo.*` and `ms.SURFACE.*` channels (`pm_panel_studio3d::extrude`) |
+| Layers as materials | Color and Emissive maps list 2D layers, groups and compositions; Screen is enabled again | `update_object` maps `{layerId}` / `{compositionId}`; menu values `layer:<id>` and `comp:<id>` |
+| 1/2/4 views | Views pop-up, View ▸ 3D and the collapsed `3D` pull-down. Pane 1 is the editor viewer; the others are embedded viewers with a camera and preview pull-down each | UI `studioViews`; shell `viewer_split` and `viewer_tiles`; `Viewer::studio_pane` with `ViewCamera::Orthographic` framed on the scene's bounds (`app/src/studio_panes.rs`) |
+| Light panel | Add with the kind to add, the light's name and kind, and Brightness / Size / Distance / Spread | `light::projection` on the viewer model; `studio.light` → `light.adjust.*`; UI `studioLightKind`, `studioLightAdd` |
 
 ### Plumbing added for the UI
 
@@ -1584,11 +1588,13 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 
 ### Still open for the designer
 
-- Viewer polish: Scene/Object Axes, axis letters and plane handles, hover
-  hints, tooltips' second line, View ▸ 3D, the collapsed `3D` pull-down, the
-  status capsule and the §6 Light panel.
-- Keyboard: Tab traversal and focus-visible rings fail app-wide (shell); see
-  `design/reviews/na-studio3d-ui.md` K1/K2.
-- After the engine lane's items land: text extrusion (Front, Bevel, Side,
-  Back), layers/groups as materials, 1/2/4 views, Screen materials,
-  per-layer failure rows, import placement.
+- Status capsule (§3): needs refine progress (samples done / target) in
+  `ViewerStatus`.
+- Light panel: log sliders (the kit has no `NSSlider`), the Aim segment, and
+  motion. Views: navigation and selection in the extra panes.
+- 3D handles for extruded text and shapes.
+- Export: adopt the export time-estimate state when it lands.
+- Engine notes from round 3: one cube face shows a live map mirrored (box
+  UVs); Fast shows speckle on extruded faces in an orthographic Front view.
+- See `design/reviews/na-studio3d-ui.md` § Round 3 for the keyboard fix
+  (v4 tab stops, focus-visible) and what's left there.
