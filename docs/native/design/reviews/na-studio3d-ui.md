@@ -23,7 +23,7 @@ inspector section.
 | Increase Contrast + Reduce Transparency | ✅ `after-12-*` (cube dark, World light) |
 | Before/after pairs | ✅ `before-0*` / `after-*` |
 | Interaction states that change appearance | ✅ hover (swatch tooltip), pressed/selected (Fast/Quality, pop-up menus), error, open/closed disclosure. Keyboard focus ring on the new controls not captured: ❌ |
-| Keyboard walkthrough | ❌ not recorded. New controls are kit controls (PopUpButton, SegmentedControl with arrow keys, ToolbarItem actions, Checkbox), so they inherit kit focus; not verified live |
+| Keyboard walkthrough | Round 2: done, see Round 2 · Keyboard (K1/K2 fail app-wide) |
 | `cargo test -p pm-design`; no token literals added to views | ✅ no token literals in views (swatch colours are content, per §8) |
 
 ## 1. Tokens and colour
@@ -65,8 +65,7 @@ the `Scale %` label on the three-axis row); no all-caps.
 
 ## 6. Keyboard
 
-❌ Not walked through (see §0). Segmented control supports arrow keys; pop-ups
-and checkboxes are system-standard.
+See Round 2 · Keyboard.
 
 ## 7. Copy
 
@@ -84,18 +83,69 @@ N/A — no new animation.
 
 ✅ Increase Contrast strengthens swatch, well and segment borders. Every new
 control has a role and label (swatches are labelled actions with tooltips;
-the layer error is `role="status"`). Information never by colour alone. ❌
-VoiceOver rotor not recorded.
+the layer error is `role="status"`). Information never by colour alone. VoiceOver: see Round 2.
 
-## Open items (not built tonight)
+## Round 2 (viewer 3D interaction, keyboard and VoiceOver) · 2026-11-11
 
-1. Viewer 3D toolbar beyond Fast | Quality (Camera/Free View, transform and
-   navigation tools, Frame), gizmos, the Light tool and Light panel (lights
-   by pointing), and the Refining/Clean status capsule. A CPU ray query exists
-   in `pm-geom3d::query`; the engine's GPU `pick_surface` is not routed
-   through the viewer worker.
-2. Text/shape extrusion (Front, Bevel, Side, Back), layers/groups as material
-   sources and 1/2/4 views: no native document data or commands yet.
-3. Engine: one bad layer blanks the whole 3D set; the seamless studio set
-   draws as a black void; imports land at the origin (no floor drop or studio
-   set on import, which needs the scene import archive in the app).
+Evidence (outside Git): `/tmp/pm-shots/na-studio3d-ui/round2/` with
+`captions.md`, keyboard frames in `kb/`, accessibility trees `ax-tree.txt`
+(before) and `ax-tree-after.txt`.
+
+Scope: the viewer's 3D group (§2: Camera | Free View, Move, Rotate, Scale,
+Orbit, Pan, Zoom, Light, Frame, Fast | Quality), navigation (§4), gizmos
+(§5), the Light tool's click-to-light (§6), selection by the engine's
+surface pick, and the round-1 review notes (postcard Pine Trees, scatter
+pickers, Finish spheres, lit first shape).
+
+**Result: passes for pointer and VoiceOver; keyboard Tab traversal fails
+app-wide (not 3D-specific), see K1.**
+
+### Interaction
+
+| Item | Result |
+|---|---|
+| Click selects what's drawn | ✅ engine `pick_surface` on the displayed frame, including in Free View (the pick worker uses the same view). Lights fall back to a bounds pick. Empty click deselects |
+| Navigation never edits the shot | ✅ ⌥-drag / middle-drag orbit, ⇧⌥-drag pan, ⌥-scroll zoom, ⇧ fine; the first gesture switches to Free View; no Undo entry |
+| Gizmos per §5 | ✅ projected bounds, axis colours X/Y/Z, Move arrows, Rotate rings with back halves hidden, Scale tips; only the active handle during a drag; ⌃ snaps, ⇧ fine, Esc restores. Undo `Move/Rotate/Scale 3D Layer(s)`. ⚠️ axis letters at the tips and plane squares not drawn yet |
+| Light tool | ✅ click a model adds a softbox there (`Add Softbox`) or re-aims the selected light (`Aim Light`), clamped above the floor, rounded values. ❌ the §6 Light panel (Aim mode, sliders, kind) not built |
+| Frame | ✅ toolbar Frame and F fit the selection, or everything |
+| Arrow nudges | ✅ fixed: 3D layers move 0.1 scene units, 1 with ⇧, up is up (was a whole metre per press) |
+
+### Keyboard (checklist §6)
+
+| Item | Result |
+|---|---|
+| Ctrl-Tab / Ctrl-⇧-Tab between panels with a visible ring | ✅ Project → Viewer → Properties → Timeline → Effects |
+| K1 · Full Keyboard Access: Tab reaches every control | ❌ **app-wide**. With Full Keyboard Access on, Tab from a focused panel, or from an editing number field, leaves focus where it is (AX focus stays on the panel; screenshots show no ring move). The shell's key monitor sends `shellFocusNext`, which calls `window.focus_next`, but focus doesn't move in the running app. The shell unit test that cycles stops passes, so the live tab-stop map differs from the test's. Owner: shell lane |
+| K2 · Focus ring drawn on controls | ❌ follows from K1, plus: the shell swallows Tab before GPUI sees it, so GPUI's input modality stays "mouse" and `focus_visible_style` rings never draw even when focus does move. Fix in the shell: mark keyboard modality when it handles Tab (needs a small setter in vendored GPUI) |
+| Segmented controls: arrows move the choice | ✅ in the kit (`ArrowLeft/Right/Home/End`); not reachable by keyboard until K1 is fixed |
+| Arrow keys go to the focused control, else nudge | ⚠️ arrows reach a control only while the shell's `keyboard_control_focus` is set; one of three presses was lost during the nudge test |
+| Esc cancels the innermost transient | ✅ a gizmo drag restores its values; navigation restores the starting view |
+
+### VoiceOver (checklist §9, AX tree and AXPress)
+
+| Item | Result |
+|---|---|
+| Viewer 3D group | ✅ `AXGroup «3D»` › `AXRadioGroup «Look Through»` (Camera, Free View), `«Tool»` (Move … Light), `AXButton «Frame»`, `«Preview»` (Fast, Quality) |
+| Checked state | ✅ fixed: v4 views now forward AccessKit's toggled state to GPUI, so radio buttons and keyframe toggles read selected/unselected app-wide (they had no value before) |
+| Operable without a pointer | ✅ AXPress on Quality, Light, Frame, a Finish swatch (Polished Steel) and the Coat and Glass disclosure all acted, and the tree updated |
+| Copy read aloud | ✅ fixed `1 layer selected` (was `1 layers`) and `Cube, 3D shape layer` (was `3d`). Finish swatches are named buttons; transform wells read `Position X`, `Rotation X = 0 degrees`; ⚠️ `Scale % X` reads the percent sign as part of the label |
+| Disclosure expanded state | ❌ AccessKit 0.26's macOS adapter maps disclosure triangles to plain buttons and has no expanded attribute, so VoiceOver can't say collapsed/expanded. Library limitation; the Effects tree works around it by putting the state in the row label |
+| Off-screen rows | ⚠️ Layer rows (Parent, Track Matte, 3D, Solo, Visible, Motion Blur) expose only their labels while scrolled out of view: their native controls exist only on screen. App-wide panel behaviour |
+| Pop-up order | ⚠️ native pop-ups (Screen, Zoom, Preview resolution) appear at the end of the window's AX children, not inside their rows. App-wide |
+| Gizmos | ✅ not exposed, as §5 says; every transform is reachable from Properties |
+
+## Open items
+
+1. Shell keyboard: K1 (Tab traversal) and K2 (focus-visible modality), above.
+2. Viewer polish: Scene/Object Axes toggle, axis letters, plane handles, hover
+   hints on parts, tooltips' second line (§2), View ▸ 3D menu, the collapsed
+   `3D` pull-down below `m.viewer_3d_collapse`, the status capsule
+   (Refining · n %, Clean) and the Light panel (§6).
+3. Waiting on engine data (Sol's queue): per-layer failure isolation, text
+   extrusion (Front, Bevel, Side, Back), layers/groups as materials, 1/2/4
+   views, the black studio backdrop, import placement; then Screen materials
+   can be re-enabled.
+4. Engine findings: fog darkens the foreground in Quality; the shadow catcher
+   draws a black void (Set Up Studio's seamless set); Fast draws terrain
+   darker than Quality.

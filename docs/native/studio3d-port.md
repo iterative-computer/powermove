@@ -1125,6 +1125,12 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 | Composition | 3D Scene: Sky and Render Quality (Draft, Preview, Production, Final) with a note of samples, bounces and caustics | `set_world`, `set_render_quality` |
 | Export sheet | `3D Quality` row (`Composition · <preset>` or a per-export preset); the summary ends `3D <preset>, about <time>` | option `studioQuality` → `ExportRequest.studio_quality`; estimate from the M5 worker timings above |
 | Timeline | Kind badges per §1: model `cube` on blue, light `lightbulb` and camera `camera` on gray | the layer's `definition` |
+| Viewer 3D group (round 2) | Camera / Free View · Move, Rotate, Scale, Orbit, Pan, Zoom, Light · Frame · Fast / Quality, shown only with 3D layers | UI state `studioLook`, `studioTool`, `studioTier`; `studio.frame` command; F frames in a studio comp |
+| Selection and gizmos | Click selects what's drawn (engine pick), empty click deselects; projected bounds and Move/Rotate/Scale handles; ⌃ snap, ⇧ fine, Esc restores; Undo `Move/Rotate/Scale 3D Layer(s)` | `Viewer::pick_surface` (Click) on the displayed frame; drags are gesture `Step`s of ordinary transform channels |
+| Navigation | ⌥-drag/middle-drag orbit, ⇧⌥-drag pan, ⌥-scroll zoom; the first gesture switches to Free View; no Undo | transient `FreeView{eye,target,zoom}` → `Viewer::studio_view`, never written to the document |
+| Light tool | Click a model: adds a softbox aimed there (`Add Softbox`) or re-aims the selected light (`Aim Light`) | `add_light` / `update_light` with position and target from the pick |
+| Arrow nudges | 0.1 scene units a press, 1 with ⇧, up is up | `nudgeSelection` writes `position.x/y` in scene units for 3D layers |
+| Defaults (review notes) | First shape in an unlit scene gets sky, key softbox and floor; Pine Trees etc. frame as a postcard; Finish swatches are shaded spheres; Scatter rows are Object / Surface pickers | `starter()`, `overview_camera`, `landscape_sky`, `finish_swatch`, `scatter.model|surface` → `update_scatter` |
 
 ### Plumbing added for the UI
 
@@ -1140,6 +1146,14 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   submenu's own action; this also re-enables View ▸ Tools, which was disabled.
 - Viewer chrome: `viewer.studio.tier` (`live` | `refine`) writes `studioTier`;
   the bar shows Fast | Quality only with 3D layers (§2 item 5).
+- `engine-service`: `studio::FreeView` and `Viewer::studio_view(Option<FreeView>)`
+  render the transient view; it is part of the studio content and cache keys,
+  and `surface.rs` applies it to picks so clicks match what's shown.
+- `pm_panel_studio3d::viewport`: CPU scene/eye model (projection, rays, box
+  pick, framing) for gizmo geometry and the bounds-pick fallback;
+  `app/src/gizmo3d.rs` draws the handles as viewer overlay lines.
+- v4 views forward AccessKit `toggled` to GPUI (`aria_toggled`), so radio
+  buttons and toggles report checked to VoiceOver everywhere.
 - Panel facts carry the viewer's `layerFailures`; panels republish when the
   status line changes. Inspector: disclosure replies are applied (groups
   previously never opened), section `note`, `finishes`, hidden rows and a
@@ -1165,17 +1179,21 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   specific names (`Add Pine Trees`, `Import Bottle.obj`, `Finish: Gold`,
   `3D Quality: Final`, `Add Shot: Push-In`).
 
+### Engine findings from round 2
+
+- Fog (`fogDensity` on the world) darkens the foreground to near black in
+  Quality, so the landscape defaults use no fog.
+- The shadow catcher draws a black void; the first-shape starter uses a
+  plain Floor plane instead.
+- Fast (Live) draws terrain noticeably darker than Quality.
+
 ### Still open for the designer
 
-- The rest of the viewer 3D toolbar (§2: Camera/Free View, transform and
-  navigation tools, Frame), gizmos (§5), the Light tool panel (§6) and the
-  status capsule (§3: Refining · n %, Clean). These need picking, projected
-  gizmo geometry and worker refine progress. Per §3, Live is never shown.
-- Import 3D Model… is built on the media import worker (glTF, GLB, OBJ,
-  FBX) and adds model layers at the origin. The spec's floor drop and studio
-  set on import need the `import::prepare` → `Scene3dCommand::Import` route
-  (scene import archive) in the app.
-- Text/shape extrusion (Front/Bevel/Side/Back), layers and groups as material
-  sources, 1/2/4 views and per-layer error rows have no native document data
-  or commands yet (extrusion schema, live source capture and multiple views
-  are G/P rows above).
+- Viewer polish: Scene/Object Axes, axis letters and plane handles, hover
+  hints, tooltips' second line, View ▸ 3D, the collapsed `3D` pull-down, the
+  status capsule and the §6 Light panel.
+- Keyboard: Tab traversal and focus-visible rings fail app-wide (shell); see
+  `design/reviews/na-studio3d-ui.md` K1/K2.
+- After the engine lane's items land: text extrusion (Front, Bevel, Side,
+  Back), layers/groups as materials, 1/2/4 views, Screen materials,
+  per-layer failure rows, import placement.
