@@ -260,11 +260,35 @@ impl Default for EnvironmentMap {
 impl EnvironmentMap {
     /// HDR/RGBE, EXR and grayscale/PNG sources use the same linear float contract.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
-        let image = image::ImageReader::open(path)
+        Self::load_with_dimensions(path).map(|(map, _)| map)
+    }
+    /// Admission retains source dimensions even when the lighting map is capped.
+    pub fn load_with_dimensions(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(Self, [u32; 2]), String> {
+        let decoded = image::ImageReader::open(path)
+            .map_err(|e| e.to_string())?
+            .with_guessed_format()
             .map_err(|e| e.to_string())?
             .decode()
-            .map_err(|e| e.to_string())?
-            .to_rgb32f();
+            .map_err(|e| e.to_string())?;
+        let dimensions = [decoded.width(), decoded.height()];
+        let floating = matches!(
+            decoded,
+            image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_)
+        );
+        let mut image = decoded.into_rgb32f();
+        if !floating {
+            for p in image.pixels_mut() {
+                for value in &mut p.0 {
+                    *value = if *value <= 0.04045 {
+                        *value / 12.92
+                    } else {
+                        ((*value + 0.055) / 1.055).powf(2.4)
+                    };
+                }
+            }
+        }
         // Bound both the HDR pixels and their CDF on a 16 GB machine. The
         // prepared packet also contains geometry and instance rows.
         let scale = (2048. / image.width() as f32)
@@ -288,7 +312,7 @@ impl EnvironmentMap {
             ..Self::default()
         };
         map.validate()?;
-        Ok(map)
+        Ok((map, dimensions))
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0
@@ -571,6 +595,46 @@ pub fn light_power(l: &GpuLight) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_image_paths_decode_by_content_and_keep_linear_hdr_values() {
+        let root = std::env::temp_dir().join(format!("pm-studio-env-image-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let png = root.join("retained-ldr.bin");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([128, 128, 128]))
+            .save_with_format(&png, image::ImageFormat::Png)
+            .unwrap();
+        let map = EnvironmentMap::load(&png).unwrap();
+        assert!(
+            (map.pixels[0].x - 0.2158605).abs() < 0.00001,
+            "sRGB PNG must become linear radiance"
+        );
+        let hdr = root.join("retained-hdr.bin");
+        std::fs::write(
+            &hdr,
+            b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n\x80\x40\x20\x83",
+        )
+        .unwrap();
+        let map = EnvironmentMap::load(&hdr).unwrap();
+        assert_eq!(
+            map.pixels[0],
+            v3(4., 2., 1.),
+            "floating HDR must keep energy above one"
+        );
+        let large = root.join("large.bin");
+        image::RgbImage::from_pixel(2050, 2, image::Rgb([0, 0, 0]))
+            .save_with_format(&large, image::ImageFormat::Png)
+            .unwrap();
+        let (map, dimensions) = EnvironmentMap::load_with_dimensions(&large).unwrap();
+        assert_eq!(dimensions, [2050, 2]);
+        assert_eq!(map.width, 2048);
+    }
     #[test]
     fn sky_is_finite_nonnegative_and_sun_is_small() {
         for name in [

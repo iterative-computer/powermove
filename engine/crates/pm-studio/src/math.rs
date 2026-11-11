@@ -2,7 +2,12 @@
 
 use std::ops::{Add, Div, Index, Mul, Neg, Sub};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+// Stable, packed RGB triples for host image transfers and exact cache keys.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize,
+    bytemuck::Pod, bytemuck::Zeroable,
+)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
