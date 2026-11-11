@@ -391,6 +391,8 @@ impl Effects {
         self.missing_ids.clear();
         self.entries.clear();
         self.watchdog.reset();
+        self.prewarm = Default::default();
+        self.uniforms = Default::default();
     }
 
     /// The definition set an export job or Collect Project embeds.

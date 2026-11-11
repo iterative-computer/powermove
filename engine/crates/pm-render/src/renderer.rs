@@ -1548,6 +1548,40 @@ impl Renderer {
         self.binds.clear();
     }
 
+    /// Recording has submitted every reference from this frame. Its working
+    /// set may exceed a standing cache grant; stop retaining that excess now.
+    /// Command buffers own the resources their GPU work still needs.
+    pub fn trim_submitted_frame_caches(&mut self) {
+        self.vector.trim(self.vector.max_bytes());
+        self.text_gpu.trim(crate::text::gpu::CACHE_BYTES);
+    }
+
+    /// A document closed. Release content caches and worker ownership,
+    /// including media indexes and prefetched input that idle trimming keeps.
+    /// Submitted commands retain their own GPU resources until completion.
+    pub fn release_project_memory(&mut self) {
+        self.clear_draw_reuse();
+        self.trim(0);
+        self.media = MediaCache::new(&self.device);
+        self.vector = crate::vector::cache::VectorCache::new();
+        self.scene3d = Scene3dRenderer::default();
+        self.options3d.studio = None;
+        self.evaluator.reset();
+        self.text = crate::text::TextContext::default();
+        self.text_gpu.clear();
+        let runner = self.shaders.fallback_runner;
+        self.shaders = Default::default();
+        self.shaders.fallback_runner = runner;
+        self.effects.fallback = Default::default();
+        self.effects.fallback.runner = runner;
+        self.effects.assets = Default::default();
+        self.effects.effect_types = Default::default();
+        self.clear_definitions();
+        self.compat = None;
+        self.svg_warned.clear();
+        self.missing_effects.clear();
+    }
+
     /// Native SVG fallback diagnostic for the most recently resolved SVG.
     /// The reason names the unsupported feature or resource/device limit;
     /// it never requires an editor window or host raster request.
