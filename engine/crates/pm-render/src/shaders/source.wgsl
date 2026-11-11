@@ -241,6 +241,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= dims.x || id.y >= dims.y) {
         return;
     }
+    let xy = vec2<i32>(id.xy);
     let input_dims = textureDimensions(luma);
     // Keep the exact path's original arithmetic. Preview conversion alone
     // supplies a smaller destination and samples at its pixel centres.
