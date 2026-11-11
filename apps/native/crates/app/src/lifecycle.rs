@@ -644,6 +644,7 @@ impl Controller {
                     if let Some(popout) = v.popout.take() {
                         popout.shutdown();
                     }
+                    v.close_studio_panes();
                     v.session = None;
                     v.published = None;
                     v.media_refresh.reset();

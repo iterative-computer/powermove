@@ -552,7 +552,9 @@ impl PopoutView {
             let p = layer.as_ptr() as *mut AnyObject;
             let _: () = msg_send![objc2::class!(CATransaction), begin];
             let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
-            let _: () = msg_send![p, setFrame: bounds];
+            // The view's backing layer: its frame is in the superview's
+            // space (the popout's view fills its window; a pane doesn't).
+            let _: () = msg_send![p, setFrame: self.frame()];
             let _: () = msg_send![p, setContentsScale: scale];
             // CGSize and NSSize share a layout on 64-bit macOS.
             let drawable = NSSize::new(
@@ -579,6 +581,10 @@ pub struct Popout {
     link: Option<pm_engine_service::layers::DisplayLink>,
     /// Last transport state mirrored from the editor: (playing, media ticks).
     pub mirrored: Option<(bool, i64)>,
+    /// A pane inside the editor window (Studio 3D views), not a window.
+    embedded: bool,
+    /// The pane's camera and preview pull-down (embedded panes only).
+    pub menu: Option<Retained<objc2_app_kit::NSPopUpButton>>,
 }
 impl Popout {
     pub fn open(
@@ -647,9 +653,79 @@ impl Popout {
                 binding: None,
                 link: None,
                 mirrored: None,
+                embedded: false,
+                menu: None,
             },
             rx,
         ))
+    }
+    /// A pane in `window`'s content, above the editor's GPUI view: one of the
+    /// Studio 3D views, with its own layer, display link and viewer.
+    pub fn embed(device: &metal::DeviceRef, window: &NSWindow) -> anyhow::Result<Self> {
+        let mtm = MainThreadMarker::new().unwrap();
+        let layer = metal::MetalLayer::new();
+        pm_engine_service::layers::configure_layer(mtm, &layer, device)?;
+        let (closed, _) = async_channel::bounded(1);
+        let view: Retained<PopoutView> = unsafe {
+            msg_send![super(PopoutView::alloc(mtm).set_ivars(ViewIvars {
+                layer: layer.clone(),
+                closed,
+            })), initWithFrame: NSRect::new(NSPoint::ZERO, NSSize::new(16., 9.))]
+        };
+        unsafe {
+            let _: () = msg_send![&*view, setLayer: layer.as_ptr() as *mut AnyObject];
+        }
+        view.setWantsLayer(true);
+        view.setHidden(true);
+        let content = window
+            .contentView()
+            .ok_or_else(|| anyhow::anyhow!("no content view"))?;
+        content.addSubview(&view);
+        Ok(Self {
+            window: objc2::Message::retain(window),
+            view,
+            layer,
+            viewer: Default::default(),
+            output: Default::default(),
+            binding: None,
+            link: None,
+            mirrored: None,
+            embedded: true,
+            menu: None,
+        })
+    }
+    /// Places an embedded pane: `[x, y, w, h]` in content points, top-left
+    /// origin, as the shell lays out the viewer.
+    pub fn place(&self, rect: [f64; 4]) {
+        let Some(content) = self.window.contentView() else {
+            return;
+        };
+        let h = content.bounds().size.height;
+        let y = if content.isFlipped() {
+            rect[1]
+        } else {
+            h - rect[1] - rect[3]
+        };
+        let frame = NSRect::new(
+            NSPoint::new(rect[0], y),
+            NSSize::new(rect[2].max(1.), rect[3].max(1.)),
+        );
+        if self.view.frame() != frame || self.view.isHidden() {
+            self.view.setFrame(frame);
+            self.view.setHidden(false);
+            self.view.fit();
+        }
+        if let Some(menu) = &self.menu {
+            let size = menu.fittingSize();
+            let inset = 6.;
+            menu.setFrame(NSRect::new(
+                NSPoint::new(inset, frame.size.height - size.height - inset),
+                size,
+            ));
+        }
+    }
+    pub fn view(&self) -> &NSView {
+        &self.view
     }
     /// Binds output/display-link feeds to the current viewer (call after
     /// creating or replacing it).
@@ -722,7 +798,10 @@ impl Popout {
         unsafe {
             objc2_foundation::NSNotificationCenter::defaultCenter().removeObserver(&self.view);
         }
-        if self.window.isVisible() {
+        if self.embedded {
+            // A pane leaves the editor window; the window stays.
+            self.view.removeFromSuperview();
+        } else if self.window.isVisible() {
             self.window.close();
         }
     }

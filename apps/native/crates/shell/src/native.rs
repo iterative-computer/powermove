@@ -1059,6 +1059,11 @@ pub struct Host {
     backdrop: Retained<NSVisualEffectView>,
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
+    /// Studio 3D views: 1, 2 or 4 panes. With more than one, `viewer_rect`
+    /// is the first pane and `viewer_tiles` holds every pane (the host
+    /// places the others' views), in content coordinates, top-left origin.
+    pub viewer_split: Cell<u8>,
+    pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
     pub canvas_focus: Cell<bool>,
@@ -1248,6 +1253,8 @@ impl Host {
             backdrop,
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
+            viewer_split: Cell::new(1),
+            viewer_tiles: Rc::default(),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             canvas_focus: Cell::new(false),

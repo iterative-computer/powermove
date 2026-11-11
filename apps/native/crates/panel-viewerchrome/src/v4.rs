@@ -138,7 +138,14 @@ impl Session {
                 // Below the collapse width the group becomes one pull-down.
                 m.insert(
                     "compact",
-                    Value::Bool(viewport.stage.width < VIEWER_3D_COLLAPSE),
+                    // The bar spans every pane: 2 and 4 views are two columns.
+                    Value::Bool({
+                        let columns = match model.ui.viewer.get("studioViews").and_then(Value::as_str) {
+                            Some("2" | "4") => 2.,
+                            _ => 1.,
+                        };
+                        viewport.stage.width * columns < VIEWER_3D_COLLAPSE
+                    }),
                 );
                 Value::Object(m)
             } else {

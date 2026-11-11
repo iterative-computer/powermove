@@ -104,6 +104,11 @@ pub struct Controller {
     pub guides: bool,
     pub skimming: crate::skimming::Skimming,
     pub popout: Option<crate::viewer2::Popout>,
+    /// Studio 3D views beyond the first (3d-studio.md §2).
+    pub studio_panes: Vec<crate::studio_panes::Pane>,
+    pub studio_pane_targets: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
+    pub studio_pane_sender: Option<async_channel::Sender<(usize, isize)>>,
+    pub studio_pane_scene: Option<(u64, Option<Arc<pm_panel_studio3d::viewport::Scene>>)>,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
@@ -516,6 +521,10 @@ impl Controller {
             guides: false,
             skimming: Default::default(),
             popout: None,
+            studio_panes: vec![],
+            studio_pane_targets: vec![],
+            studio_pane_sender: None,
+            studio_pane_scene: None,
             main_output: Default::default(),
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
@@ -700,6 +709,7 @@ impl Controller {
         {
             self.message = format!("Popout viewer: {e}");
         }
+        self.publish_studio_panes(&p);
         {
             let _span = crate::diag::span("refresh.mirror");
             if let Some(m) = &mut self.mirror {

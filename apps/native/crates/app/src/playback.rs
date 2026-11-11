@@ -232,7 +232,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
-                if let Some(clock)=status.clock { v.sync_popout(&clock); }
+                if let Some(clock)=status.clock { v.sync_popout(&clock); v.sync_studio_pane_clock(&clock); }
+                v.sync_studio_panes(cx);
                 if let Some(clock)=status.clock {
                     let playing=clock.state==pm_protocol::clock::TransportState::Playing;
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);

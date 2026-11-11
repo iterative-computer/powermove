@@ -664,13 +664,27 @@ impl Controller {
         }
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
-            let stage = [bounds.w as f64, body_h as f64];
+            // With Studio 3D views the main viewer is the first pane.
+            let split = self.host.borrow().viewer_split.get();
+            let (body_w, body_h) = if split > 1 {
+                let r = pm_shell::layout::Rect {
+                    x: 0.,
+                    y: 0.,
+                    w: bounds.w,
+                    h: body_h,
+                };
+                let first = pm_shell::layout::view_tiles(r, split, t.metrics.border * 2.)[0];
+                (first.w, first.h)
+            } else {
+                (bounds.w, body_h)
+            };
+            let stage = [body_w as f64, body_h as f64];
             if self.view.stage != stage {
                 // The chrome's Fit readout and zoom steps measure this slot.
                 self.view.stage = stage;
                 cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
             }
-            let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
+            let fit = crate::panels::fit_scale(body_w, body_h, self.dimensions, t.metrics.inset);
             let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
             if self.view.scale.replace(scale) != scale
                 && let Some(gizmos) = &self.builtins.gizmos
