@@ -1,6 +1,6 @@
 //! Powermove Studio's isolated, headless native process. No Electron/Node dependency.
 mod budget;
-mod fbx;
+use pm_import_fbx as fbx;
 mod packed;
 mod protocol;
 mod scene;

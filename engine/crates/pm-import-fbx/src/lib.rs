@@ -1,4 +1,5 @@
-//! Untrusted FBX is read in a disposable native worker, never in the UI process.
+//! FBX conversion shared by Electron and native Studio. Hosts run this on a
+//! worker with an 8 MiB stack, never in a UI callback. No external file reads.
 //! The durable result is ordinary glTF: parts, PBR materials, skins and baked TRS.
 use serde_json::{Value, json};
 use std::collections::HashMap;

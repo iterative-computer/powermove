@@ -2153,6 +2153,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-import-fbx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "ufbx",
+]
+
+[[package]]
 name = "pm-media"
 version = "0.1.0"
 dependencies = [
@@ -2296,10 +2305,10 @@ dependencies = [
  "bytemuck",
  "glam",
  "libc",
+ "pm-import-fbx",
  "pm-studio",
  "serde",
  "serde_json",
- "ufbx",
 ]
 
 [[package]]
