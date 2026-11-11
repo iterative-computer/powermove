@@ -118,6 +118,9 @@ pub struct MeshInstance {
     /// Geometry is immutable; the same Arc reuses its BLAS after motion.
     pub mesh: Arc<Mesh>,
     pub material: usize,
+    /// Local face-material IDs map through this palette. None retains the
+    /// engine's absolute scene-material IDs; empty face data uses `material`.
+    pub material_palette: Option<Arc<Vec<usize>>>,
     pub world: Transform,
 }
 
@@ -190,15 +193,23 @@ fn build(mesh: Arc<Mesh>) -> Result<Blas, String> {
         .positions
         .iter()
         .chain(&mesh.normals)
+        .chain(&mesh.colors)
         .any(|p| ![p.x, p.y, p.z].iter().all(|x| x.is_finite()))
         || mesh.uvs.iter().flatten().any(|x| !x.is_finite())
     {
         return Err("non-finite Studio geometry".into());
     }
+    if (!mesh.colors.is_empty() && mesh.colors.len() != mesh.positions.len())
+        || (!mesh.triangle_materials.is_empty()
+            && mesh.triangle_materials.len() != mesh.indices.len())
+        || mesh.triangle_materials.iter().any(|&m| m >= 16_777_216)
+    {
+        return Err("Invalid Studio vertex colors or face materials".into());
+    }
     let mut corners = Vec::new();
     let mut raw = Vec::new();
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for t in &mesh.indices {
+    for (face_index, t) in mesh.indices.iter().enumerate() {
         if t.iter().any(|&i| i as usize >= mesh.positions.len()) {
             return Err("Studio triangle index out of bounds".into());
         }
@@ -211,14 +222,27 @@ fn build(mesh: Arc<Mesh>) -> Result<Blas, String> {
         let uv = t.map(|i| mesh.uvs.get(i as usize).copied().unwrap_or([0.; 2]));
         raw.push(GpuTri {
             n: t.map(|i| {
-                mesh.normals
-                    .get(i as usize)
-                    .copied()
-                    .unwrap_or(face)
-                    .to4(0.)
+                mesh.normals.get(i as usize).copied().unwrap_or(face).to4(
+                    mesh.colors
+                        .get(i as usize)
+                        .map_or(f32::from_bits(0xffffffff), |c| {
+                            let b = c
+                                .to_array()
+                                .map(|v| (v.clamp(0., 1.) * 255.).round() as u32);
+                            f32::from_bits(b[0] | b[1] << 8 | b[2] << 16 | 255 << 24)
+                        }),
+                )
             }),
             uv01: [uv[0][0], uv[0][1], uv[1][0], uv[1][1]],
-            uv2m: [uv[2][0], uv[2][1], 0., 0.],
+            uv2m: [
+                uv[2][0],
+                uv[2][1],
+                mesh.triangle_materials
+                    .get(face_index)
+                    .copied()
+                    .unwrap_or(0) as f32,
+                0.,
+            ],
             tangent: crate::packing::tangent(p, uv),
             uv01_secondary: [0.; 4],
             uv2_secondary: [0.; 4],
@@ -246,7 +270,7 @@ impl Extractor {
         let mut used = Vec::new();
         let mut boxes = Vec::new();
         let mut transforms = Vec::new();
-        let materials = input
+        let mut materials = input
             .materials
             .clone()
             .unwrap_or_else(|| input.scene.gpu_materials());
@@ -266,6 +290,43 @@ impl Extractor {
             }
             if instance.material >= materials.len() || instance.layer.is_empty() {
                 return Err("Studio instance has no material or layer ID".into());
+            }
+            let binding = (
+                Arc::as_ptr(&instance.mesh) as usize,
+                instance.material,
+                instance.material_palette.clone(),
+            );
+            if !uploaded.contains_key(&binding) {
+                let face_material = |local: usize| -> Result<usize, String> {
+                    let m = if instance.mesh.triangle_materials.is_empty() {
+                        instance.material
+                    } else if let Some(palette) = &instance.material_palette {
+                        *palette
+                            .get(local)
+                            .ok_or("Studio face material has no palette entry")?
+                    } else {
+                        local
+                    };
+                    if m >= materials.len() || m >= 16_777_216 {
+                        return Err("Studio face material out of bounds".into());
+                    }
+                    Ok(m)
+                };
+                let slots = instance
+                    .mesh
+                    .triangle_materials
+                    .iter()
+                    .copied()
+                    .chain(
+                        std::iter::once(0).filter(|_| instance.mesh.triangle_materials.is_empty()),
+                    )
+                    .map(face_material)
+                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                if !instance.mesh.colors.is_empty() {
+                    for slot in slots {
+                        materials[slot].policy[1] = (materials[slot].policy[1] as u32 | 16) as f32;
+                    }
+                }
             }
             let mut rows = instance.world.rows()?;
             let key = Arc::as_ptr(&instance.mesh) as usize;
@@ -303,7 +364,6 @@ impl Extractor {
             rows[4][3] = ((id + 1) * 2) as f32;
             rows[5][3] = 0.;
             transforms.push(rows);
-            let binding = (key, instance.material);
             if let Some(&(root, geometry_index, triangle_offset)) = uploaded.get(&binding) {
                 placement_inputs.push((geometry_index, triangle_offset, instance.world));
                 roots.push(root);
@@ -322,7 +382,13 @@ impl Extractor {
             positions.extend_from_slice(&b.positions);
             tris.extend(b.tris.iter().map(|t| {
                 let mut t = *t;
-                t.uv2m[2] = instance.material as f32;
+                t.uv2m[2] = if instance.mesh.triangle_materials.is_empty() {
+                    instance.material
+                } else if let Some(palette) = &instance.material_palette {
+                    palette[t.uv2m[2] as usize]
+                } else {
+                    t.uv2m[2] as usize
+                } as f32;
                 t
             }));
             blases.extend(b.nodes.iter().map(|n| {

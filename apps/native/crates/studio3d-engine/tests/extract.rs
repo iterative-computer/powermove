@@ -30,6 +30,7 @@ fn instance(mesh: Arc<Mesh>, layer: &str) -> MeshInstance {
         mesh,
         layer: layer.into(),
         material: 0,
+        material_palette: None,
         world: Transform::default(),
     }
 }
@@ -204,4 +205,61 @@ fn removed_geometry_releases_the_cache() {
     input.instances.clear();
     extractor.extract(&input).unwrap();
     assert_eq!(Arc::strong_count(&mesh), 1);
+}
+
+#[test]
+fn native_preserves_face_materials_and_linear_vertex_colors() {
+    let mut input = input();
+    let mut mesh = (*triangle()).clone();
+    mesh.triangle_materials = vec![1];
+    mesh.colors = vec![v3(1., 0.5, 0.); 3];
+    input.instances.push(instance(Arc::new(mesh), "nature"));
+    let e = Extractor::default().extract(&input).unwrap();
+    assert_eq!(e.prepared.tris[0].uv2m[2], 1.);
+    assert_eq!(e.prepared.tris[0].n[0][3].to_bits(), 0xff0080ff);
+    assert_ne!(e.prepared.materials[1].policy[1] as u32 & 16, 0);
+}
+
+#[test]
+fn local_palettes_rebind_without_rebuilding_and_reject_invalid_slots() {
+    let mut input = input();
+    let mut mesh = (*triangle()).clone();
+    mesh.triangle_materials = vec![1];
+    let mesh = Arc::new(mesh);
+    input.instances = vec![instance(mesh.clone(), "a"), instance(mesh, "b")];
+    input.instances[0].material_palette = Some(Arc::new(vec![1, 0]));
+    input.instances[1].material_palette = Some(Arc::new(vec![0, 1]));
+    let mut extractor = Extractor::default();
+    let e = extractor.extract(&input).unwrap();
+    assert_eq!(extractor.builds, 1);
+    assert_eq!(
+        e.prepared
+            .tris
+            .iter()
+            .map(|t| t.uv2m[2])
+            .collect::<Vec<_>>(),
+        [0., 1.]
+    );
+    input.instances[1].material_palette = Some(Arc::new(vec![1, 0]));
+    assert_eq!(extractor.extract(&input).unwrap().prepared.tris.len(), 1);
+    assert_eq!(extractor.builds, 1);
+    input.instances[1].material_palette = Some(Arc::new(vec![0]));
+    assert!(extractor.extract(&input).err().unwrap().contains("palette"));
+    input.instances[1].material_palette = Some(Arc::new(vec![0, usize::MAX]));
+    assert!(extractor.extract(&input).is_err());
+}
+
+#[test]
+fn malformed_vertex_and_face_arrays_are_refused() {
+    for case in 0..3 {
+        let mut mesh = (*triangle()).clone();
+        match case {
+            0 => mesh.colors = vec![Vec3::ZERO],
+            1 => mesh.triangle_materials = vec![0, 1],
+            _ => mesh.colors = vec![v3(f32::NAN, 0., 0.); 3],
+        }
+        let mut input = input();
+        input.instances.push(instance(Arc::new(mesh), "invalid"));
+        assert!(Extractor::default().extract(&input).is_err());
+    }
 }

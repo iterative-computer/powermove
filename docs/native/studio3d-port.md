@@ -537,3 +537,16 @@ and visibility changes invalidate the cache. All **12 native scene/export**
 checks pass; the HDRI check fills the viewport in Live and Final from a retained
 path with no image extension. The GPUI app builds. These checks do not establish
 image-source capture parity, no-visible-noise acceptance or presented fps.
+
+### Shared terrain/nature geometry prerequisite
+
+The native extractor now preserves per-face materials and packed linear vertex
+colors from the pinned engine. Local material palettes bind one immutable mesh
+to different scene materials while reusing its geometry cache. Repeated scatter
+bindings validate the palette once per extraction. Invalid color/face lengths,
+non-finite colors and out-of-range palette entries fail before upload.
+
+The previous loss was reproduced with a colored, multi-material mesh. All 22
+adapter checks pass, including palette rebinding, invalid input and GPU layer
+regressions. The native app builds. Terrain/nature node translation follows in
+a separate increment; this change alone does not enable those nodes.

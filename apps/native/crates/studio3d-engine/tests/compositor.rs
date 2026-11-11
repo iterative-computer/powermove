@@ -31,6 +31,7 @@ impl SceneSource for Source {
                     layer: layer.into(),
                     mesh: self.0.clone(),
                     material: 0,
+                    material_palette: None,
                     world,
                 }
             })

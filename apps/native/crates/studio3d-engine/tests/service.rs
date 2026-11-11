@@ -58,6 +58,7 @@ impl SceneSource for Source {
                     layer: (*id).into(),
                     mesh: self.mesh.clone(),
                     material: 0,
+                    material_palette: None,
                     world,
                 }
             })
@@ -390,6 +391,7 @@ fn changing_instance_capacity_reallocates_gpu_buffers_safely() {
                     layer: format!("copy-{i}"),
                     mesh: self.source.mesh.clone(),
                     material: 0,
+                    material_palette: None,
                     world: Transform::default(),
                 });
             }

@@ -552,6 +552,7 @@ impl SceneSource for DocumentSource {
                         layer: id.into(),
                         mesh,
                         material: materials.len() - 1,
+                        material_palette: None,
                         world: Transform(
                             pm_scene3d::render::gltf::math::multiply(&world, &part.world)
                                 .map(|v| v as f32),
@@ -567,6 +568,7 @@ impl SceneSource for DocumentSource {
                     layer: id.into(),
                     mesh: self.mesh(&object["source"])?,
                     material: materials.len() - 1,
+                    material_palette: None,
                     world: Transform(world.map(|v| v as f32)),
                 });
             }
