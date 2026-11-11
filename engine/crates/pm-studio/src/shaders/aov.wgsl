@@ -59,7 +59,7 @@ fn aovs(@builtin(global_invocation_id) gid:vec3u){
   let rows=count/columns;
   for(var k=0u;k<count;k++){
     let jitter=(vec2f(f32(k%columns),f32(k/columns))+rnd2())/vec2f(f32(columns),f32(rows));
-    let ray=camera_ray(vec2f(gid.xy)+jitter);
+    let ray=camera_ray(vec2f(gid.xy)+film_jitter(jitter));
     let guide=denoising_guide(ray[0],ray[1]);
     // Negative depth marks any near-specular coverage: temporal history
     // must not reproject refracted detail using the front surface.

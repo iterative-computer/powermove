@@ -67,7 +67,9 @@ def build(out, samples):
     scene.render.threads = 2
     scene.render.resolution_x, scene.render.resolution_y = meta['size']
     scene.render.resolution_percentage = 100
-    scene.render.filter_size = 0.01  # Studio uses box/pixel jitter, not a wide reconstruction filter.
+    # Match Studio's linear-HDR reconstruction footprint, including silhouettes.
+    scene.cycles.pixel_filter_type = 'BLACKMAN_HARRIS'
+    scene.render.filter_size = 1.5
     scene.render.film_transparent = data['shadow_catcher'] or not meta['map']['visible']
     scene.view_settings.view_transform = 'Standard'
     scene.view_settings.look = 'None'

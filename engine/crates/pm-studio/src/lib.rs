@@ -13,6 +13,7 @@ pub mod scatter;
 pub mod geometry;
 pub mod corpus;
 pub mod gpu;
+pub mod film;
 pub mod math;
 pub mod mesh;
 pub mod nature;
