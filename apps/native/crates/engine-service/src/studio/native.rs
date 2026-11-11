@@ -19,6 +19,8 @@ mod environment;
 mod geometry;
 #[path = "imported.rs"]
 mod imported;
+#[path = "maps.rs"]
+mod maps;
 #[path = "material_policy.rs"]
 mod material_policy;
 #[path = "scatter.rs"]
@@ -33,6 +35,7 @@ pub struct DocumentSource {
     quality_override: Option<(String, Value)>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
+    material_images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
     vertex_attributes:
         Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
@@ -74,6 +77,7 @@ impl DocumentSource {
             quality_override: None,
             environment_maps: Mutex::default(),
             height_maps: Mutex::default(),
+            material_images: Mutex::default(),
             vertex_attributes: Mutex::default(),
             scatter_placements: Mutex::default(),
         }
@@ -460,15 +464,12 @@ impl SceneSource for DocumentSource {
                 );
             }
 
-            if object["material"]["maps"]
-                .as_object()
-                .is_some_and(|m| m.values().any(|v| !v.is_null()))
-                || !object["slots"].as_array().is_none_or(Vec::is_empty)
+            if !object["slots"].as_array().is_none_or(Vec::is_empty)
                 || object["material"]
                     .get("screen")
                     .is_some_and(|v| !v.is_null())
             {
-                return Err("Studio material maps/slots/screens require resolved resources".into());
+                return Err("Studio material slots/screens require resolved layer capture".into());
             }
             let p = &object["material"]["p"];
             let m = Material {
@@ -502,6 +503,12 @@ impl SceneSource for DocumentSource {
                 for material in palette {
                     let mut gpu = material.gpu();
                     gpu.extra[2] = n(p, "opacity", 1.);
+                    self.bind_material_maps(
+                        &object["material"],
+                        &mut gpu,
+                        &mut map_layers,
+                        &mut map_indices,
+                    )?;
                     materials.push(gpu);
                     scene.materials.push(material);
                 }
@@ -556,8 +563,16 @@ impl SceneSource for DocumentSource {
                             };
                             Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
                         })?;
-                    } else if object["material"]["doubleSided"] == false {
-                        gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                    } else {
+                        self.bind_material_maps(
+                            &object["material"],
+                            &mut gpu,
+                            &mut map_layers,
+                            &mut map_indices,
+                        )?;
+                        if object["material"]["doubleSided"] == false {
+                            gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                        }
                     }
                     materials.push(gpu);
                     let mesh = self.cached_mesh(
@@ -612,6 +627,12 @@ impl SceneSource for DocumentSource {
                 scene.materials.push(m);
                 let mut gpu = m.gpu();
                 gpu.extra[2] = n(p, "opacity", 1.);
+                self.bind_material_maps(
+                    &object["material"],
+                    &mut gpu,
+                    &mut map_layers,
+                    &mut map_indices,
+                )?;
                 if object["material"]["doubleSided"] == false {
                     gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
                 }

@@ -1737,3 +1737,84 @@ fn imported_physical_maps_keep_uv_sampling_optics_and_shared_pixels() {
             .any(|p| p[0] > 0. && p[3] > 0.)
     );
 }
+
+fn mapped_document(source: Value) -> Arc<pm_model::Document> {
+    let old = environment_geometry_document(
+        json!({"source":{"primitive":"plane","parameters":{"width":2,"height":2}},"material":{"p":{"color":"#FFFFFF"},"maps":{"color":source,"emissive":"paint","roughness":"paint","metalness":"paint","normal":"paint","ao":"paint"}},"materialOptions":{"p":{"acceptsLights":false}}}),
+        json!({}),
+    );
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    project["assets"]["paint"] = json!({"id":"paint","kind":"image","format":"png","name":"Paint"});
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+#[test]
+fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paint.bin");
+    std::fs::write(
+        &path,
+        include_bytes!("../../../../../engine/fixtures/still-red.png"),
+    )
+    .unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("paint".into(), path);
+    let doc = mapped_document(json!("paint"));
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let scene_request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let input = source.scene(&scene_request).unwrap();
+    assert_eq!(input.maps.as_ref().unwrap().layers.len(), 1);
+    let material = &input.materials.as_ref().unwrap()[input.instances[0].material];
+    assert_eq!(material.maps, [0., 0., -1., 0.]);
+    assert_eq!(material.maps2, [0., 0., 0., 1.]);
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0.1 && p[0] > 4. * p[1] && p[3] > 0.9)
+            .count()
+            > 100
+    );
+    let missing = studio::DocumentSource::new(doc, Default::default())
+        .scene(&scene_request)
+        .err()
+        .unwrap();
+    assert!(
+        missing.contains("Material image is not loaded"),
+        "{missing}"
+    );
+    let live = mapped_document(json!({"layerId":"missing-artwork"}));
+    let live_request = studio::SceneRequest {
+        revision: live.revision(),
+        ..scene_request
+    };
+    let error = studio::DocumentSource::new(live, media)
+        .scene(&live_request)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("Live layer/group material capture"),
+        "{error}"
+    );
+}

@@ -84,13 +84,7 @@ impl Resource {
             .images
             .get(texture.image)
             .ok_or_else(|| Error("Missing model image".into()))?;
-        let image = image::load_from_memory(&image.bytes)
-            .map_err(|e| Error(format!("Model image: {e}")))?
-            .into_rgba8();
-        Ok(
-            image::imageops::resize(&image, 1024, 1024, image::imageops::FilterType::Triangle)
-                .into_raw(),
-        )
+        Ok((*texture_rgba(&image.bytes)?).clone())
     }
     pub fn parts(&self, time: f64) -> Result<Vec<Part>> {
         if !time.is_finite() {
@@ -296,4 +290,35 @@ pub fn geometry_key(g: &Geometry) -> String {
         h.update(value.to_le_bytes());
     }
     format!("{:x}", h.finalize())
+}
+
+/// The shared native map array uses raw RGBA8 1024² images. Key cached pixels
+/// by content, so relink/replacement under the same asset ID cannot go stale.
+pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
+    use sha2::{Digest, Sha256};
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<([u8; 32], Arc<Vec<u8>>)>>> =
+        std::sync::OnceLock::new();
+    let key: [u8; 32] = Sha256::digest(bytes).into();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| Error("Map image cache poisoned".into()))?;
+    if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
+        let entry = cache.remove(i);
+        let pixels = entry.1.clone();
+        cache.push(entry);
+        return Ok(pixels);
+    }
+    let image = image::load_from_memory(bytes)
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .into_rgba8();
+    let pixels = Arc::new(
+        image::imageops::resize(&image, 1024, 1024, image::imageops::FilterType::Triangle)
+            .into_raw(),
+    );
+    cache.push((key, pixels.clone()));
+    if cache.len() > 16 {
+        cache.remove(0);
+    }
+    Ok(pixels)
 }

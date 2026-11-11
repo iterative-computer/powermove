@@ -767,3 +767,25 @@ missing-map sentinels, unlit map selection and unsupported UV sets. These checks
 do not establish every glTF extension/asset combination or minification-filter
 parity. Authored image maps and live layer/group material capture remain separate
 adapters, followed by sparse intrinsic/material/part overrides.
+
+### Authored image-backed material maps
+
+The six authored map slots now resolve durable image asset IDs on the worker:
+Color, Emissive, Roughness, Metalness, Normal and AO. Primitive, terrain/nature
+and imported meshes using the authored material bind the same raw 1024² RGBA8
+map array. Separate roughness/metalness/AO channels retain their shader semantics;
+color/emission decode sRGB exactly once and color alpha reaches transport.
+
+Imported and authored pixels now share one content-keyed decoded-image cache,
+bounded to 16 images / 64 MiB. Source replacement with changed image bytes cannot
+reuse old pixels. The native source also bounds its asset-ID lookup cache to
+16 entries. Import byte limits and the 256-map GPU array cap remain enforced.
+Live layer/group/composition sources report their explicit capture gap.
+
+All **27 native scene/export** and **22 import/image** checks pass; the GPUI app
+builds. The new test binds all six slots from an extensionless retained PNG to
+one image layer and renders the expected self-lit red material. It checks
+missing-image and live-capture errors. Content reuse, changed-image invalidation,
+retained alpha and malformed image rejection have a separate image regression.
+Authoring remains ordinary `update_object` material.maps data and channel ops;
+existing PMV/Undo/MCP routing is unchanged. No UI was added.

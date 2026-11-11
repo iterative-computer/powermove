@@ -385,3 +385,17 @@ fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
     assert!(weak.upgrade().is_none());
     assert!(Resource::load("model.glb", &bytes).is_ok());
 }
+
+#[test]
+fn material_pixels_cache_by_content_and_preserve_alpha_on_replacement() {
+    let red = include_bytes!("../../../../../engine/fixtures/still-red.png");
+    let alpha = include_bytes!("../../../../../engine/fixtures/still-alpha.png");
+    let first = pm_scene3d::render::texture_rgba(red).unwrap();
+    let repeated = pm_scene3d::render::texture_rgba(&red.to_vec()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+    let replaced = pm_scene3d::render::texture_rgba(alpha).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &replaced));
+    assert!(replaced.chunks_exact(4).any(|p| p[3] < 255));
+    assert_eq!(first.len(), 1024 * 1024 * 4);
+    assert!(pm_scene3d::render::texture_rgba(b"bad image").is_err());
+}

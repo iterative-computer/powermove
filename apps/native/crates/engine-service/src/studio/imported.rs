@@ -8,37 +8,18 @@ pub(super) fn image(
     resource: &pm_scene3d::render::Resource,
     texture: usize,
 ) -> Result<Arc<Vec<u8>>, String> {
-    static CACHE: std::sync::OnceLock<Mutex<Vec<((String, usize), Arc<Vec<u8>>)>>> =
-        std::sync::OnceLock::new();
     let pm_scene3d::import::Model::Gltf(model) = &resource.model else {
         return Err("Imported maps require glTF".into());
     };
-    let image = model
+    let texture = model
         .textures
         .get(texture)
-        .ok_or("Missing imported texture")?
-        .image;
-    let key = (resource.key.clone(), image);
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| "Imported image cache poisoned")?;
-    if !resource.key.is_empty() {
-        if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
-            let entry = cache.remove(i);
-            let pixels = entry.1.clone();
-            cache.push(entry);
-            return Ok(pixels);
-        }
-    }
-    let pixels = Arc::new(resource.texture(texture).map_err(|e| e.to_string())?);
-    if !resource.key.is_empty() {
-        cache.push((key, pixels.clone()));
-        if cache.len() > 16 {
-            cache.remove(0);
-        }
-    }
-    Ok(pixels)
+        .ok_or("Missing imported texture")?;
+    let image = model
+        .images
+        .get(texture.image)
+        .ok_or("Missing imported image")?;
+    pm_scene3d::render::texture_rgba(&image.bytes).map_err(|e| e.to_string())
 }
 
 pub(super) fn pack(
