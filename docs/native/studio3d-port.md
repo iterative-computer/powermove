@@ -1584,7 +1584,7 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   Quality, so the landscape defaults use no fog.
 - The shadow catcher draws a black void; the first-shape starter uses a
   plain Floor plane instead.
-- Fast (Live) draws terrain noticeably darker than Quality.
+- Fast (Live) draws terrain noticeably darker than Quality. (Fixed by 3077a4128.)
 
 ### Still open for the designer
 
