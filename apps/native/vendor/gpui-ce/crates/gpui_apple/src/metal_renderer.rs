@@ -596,6 +596,23 @@ impl MetalRenderer {
             return;
         };
         let requirements = scene.render_plan().requirements();
+        // A simpler scene must give back the previous scene's full-window
+        // targets. Submitted command buffers retain textures until complete.
+        if !requirements.uses_path_target {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        }
+        if !requirements.uses_offscreen_target {
+            self.scene_color_texture = None;
+        }
+        if !requirements.uses_blur_target {
+            self.blur_ping_texture = None;
+            self.blur_pong_texture = None;
+        }
+        if requirements.backdrop_filter_count == 0 || requirements.isolated_target_count == 0 {
+            self.backdrop_snapshot_texture = None;
+        }
+        self.group_textures.truncate(requirements.isolated_target_count);
         let full_w = size.width.0 as u64;
         let full_h = size.height.0 as u64;
 

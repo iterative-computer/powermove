@@ -55,6 +55,8 @@ mod figma_paste;
 mod first_run;
 mod generated_panel;
 mod gizmo;
+#[cfg(all(test, target_os = "macos"))]
+mod gpui_memory_tests;
 mod keyframe_sheets;
 
 mod agent_speech;
