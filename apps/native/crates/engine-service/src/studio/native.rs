@@ -1069,7 +1069,7 @@ impl SceneSource for DocumentSource {
                 shadows: e["shadows"] != false,
                 ambient,
                 orthographic_span: match choice {
-                    super::ViewCamera::Orthographic { span, .. } => Some(*span as f32),
+                    super::ViewCamera::Orthographic { span, .. } => Some(*span as f32 * 0.5),
                     _ => (c["projection"] == "orthographic").then(|| 3. / zoom),
                 },
                 clip_planes: Some(match choice {

@@ -3017,7 +3017,7 @@ fn studio_view_cameras_select_named_layers_and_all_six_orthographic_axes() {
             },
         );
         let input = source.scene(&req).unwrap();
-        assert_eq!(input.view.orthographic_span, Some(4.));
+        assert_eq!(input.view.orthographic_span, Some(2.));
         assert_eq!(input.scene.camera.f_stop, 0.);
         let hit = service
             .pick_surface(&source, req.clone(), studio::Tier::QualityLive, 0.5, 0.5)
