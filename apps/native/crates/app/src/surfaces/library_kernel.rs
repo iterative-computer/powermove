@@ -394,10 +394,12 @@ fn changed(reply: ShellReply) -> Result<(), Failure> {
 fn kernel_failure(failure: KernelFailure) -> Failure {
     // KernelFailure::Storage carries diagnostic text only. Never parse it or
     // leak it to product copy. The kernel owner must add typed IO classification.
-    Failure::Service(match failure {
+    let detail = failure.to_string();
+    let code = match failure {
         KernelFailure::NoProject(_) => ServiceErrorCode::NotFound,
         _ => ServiceErrorCode::Unavailable,
-    })
+    };
+    Failure::Kernel { code, detail }
 }
 fn library_failure(error: LibraryError) -> Failure {
     Failure::Service(match error {

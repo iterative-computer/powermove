@@ -676,6 +676,12 @@ impl Controller {
                         }
                         cx.notify();
                     } else if let Some(handle) = v.close_window {
+                        // The integrated close guard owns this, after the
+                        // kernel close succeeds. A cancelled/failed close must
+                        // leave the restored window session intact.
+                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+                            shell.update(cx, |s, _| s.forget_session());
+                        }
                         v.mcp.closing.store(false, Ordering::Release);
                         cx.defer(move |cx| {
                             let _ = handle.update(cx, |_, w, _| w.remove_window());

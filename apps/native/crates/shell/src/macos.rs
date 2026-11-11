@@ -251,6 +251,7 @@ fn open_editor_window(
                 .try_global::<integration::AppIntegration>()
                 .map(|g| g.0.clone())
                 .map(|factory| factory(host.clone(), window, cx));
+            let integrated = integration.is_some();
             let editor = cx.new(|cx| {
                 let mut editor = view::Editor::new(t, Some(host), cx);
                 if let Some(i) = &integration {
@@ -273,12 +274,16 @@ fn open_editor_window(
                     .detach();
                 v.persist_session();
             });
-            // A window the user closes leaves the session; quitting keeps them all.
-            let closing = editor.downgrade();
-            window.on_window_should_close(cx, move |_, cx| {
-                let _ = closing.update(cx, |v, _| v.forget_session());
-                true
-            });
+            // GPUI has one should-close callback, not a list. The integrated
+            // app installed its durability/save guard in the factory above.
+            // Replacing it here orphaned the project's kernel session.
+            if !integrated {
+                let closing = editor.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    let _ = closing.update(cx, |v, _| v.forget_session());
+                    true
+                });
+            }
             let weak = editor.downgrade();
             let handle = window.window_handle();
             cx.spawn(async move |cx| {

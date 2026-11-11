@@ -2060,3 +2060,30 @@ unverified trace experiments, full-HD chrome acceptance, the complete regression
 suite/Cycles yardstick after the final engine choice, and quiet final native
 performance measurements. All test app windows launched by this lane are closed
 (this round used headless workers only).
+
+#### Lifecycle after UI round 4
+
+Integrated UI round 4 (`d72d3ab2c`) before validating lifecycle and export.
+The shell installed its unconditional close callback after the application's
+save/durability callback. GPUI retains one callback, so the close button removed
+the window without closing its kernel session. A subsequent Quit closed the
+remaining visible project but could not release the library. Reproduced with
+two copied project windows and the exact library-release error. The shell now
+retains the application's callback; the application forgets the window session
+only after its durable close succeeds.
+
+A separate reopen defect affected file-only library entries whose intact file
+was under `recovery-files`. The open route excluded backing files even when no
+library body remained, then looked for a journal that a successful close had
+already retired. Such entries now open their actual file with normal locking
+and recovery. Recovery copies that retain a library body continue to use it,
+including changes newer than their media backing file. Library failures retain
+their kernel diagnostic in the existing local Error Log.
+
+Verification so far: native app build passed; three kernel lifecycle/recovery
+regressions passed; the Error Log regression passed. An explicitly supplied
+disposable walkthrough profile opens with 12 accepted undo-history entries.
+The recovered portable copy preserves the document, history and embedded media
+byte for byte, with all container checksums verified. The original profile is
+untouched. The real shell close-callback regression and final running-app
+verification are pending; no new performance acceptance is claimed yet.
