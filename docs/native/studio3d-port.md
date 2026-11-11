@@ -31,6 +31,10 @@ Baseline evidence: `scene3d/src/{schema,operations,service}.rs`,
 The schema registers only model/light/camera, the extractor supports four
 basic map bindings, and the old renderer facade is not the pinned engine.
 
+**Checkpoint:** only this handoff has landed. The whole-engine replacement and
+native adapter remain incomplete and have not been committed. The checkout
+retains the original native renderer. No new native capability is claimed.
+
 ## Main capability inventory
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
@@ -78,6 +82,7 @@ basic map bindings, and the old renderer facade is not the pinned engine.
 | Video/image-sequence export, nested composition and motion-blur sampling | U (pinned engine; native adapter pending) | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
 | Extension api.scene3d and revision-guarded edit_3d/get_3d_scene | U (pinned engine; native adapter pending) | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Validation, budgets, undo/redo, serialization and asset bundles | U (pinned engine; native adapter pending) | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+
 ## Material-source parity with main reviews #187 / #188
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
@@ -94,6 +99,7 @@ basic map bindings, and the old renderer facade is not the pinned engine.
 | Comp navigation clocks | U (pinned engine; native adapter pending) | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Imported paint alpha | U (pinned engine; native adapter pending) | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | Path visual bounds | U (pinned engine; native adapter pending) | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+
 ## Requested AE 27.0 checklist
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
@@ -117,6 +123,7 @@ basic map bindings, and the old renderer facade is not the pinned engine.
 | FBX with embedded animation | U (pinned engine; native adapter pending) | G | U | U | G | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | 2D layers casting shadows onto 3D | U (pinned engine; native adapter pending) | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Render passes | U (pinned engine; native adapter pending) | G | U | U | G | Tier, quality, progress, result → render/export requests; saved quality pending |
+
 ## Studio features to retain
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
@@ -176,6 +183,53 @@ retained asset references and inverse patches. No alternate document writer.
 Upstream diagnostic measurements in the pinned `docs/studio/native-host.md`
 are not native-app acceptance. No performance or Cycles-equivalence claim is
 made from them.
+
+### Pinned-engine preflight
+
+The unmodified pinned renderer compiled with `oidn,metalfx,yardstick` in the
+shared debug target. Before the run was interrupted, **45 library checks**
+passed in **3.29 s**, and **2 AE material/light checks** passed in **0.19 s**;
+zero failures were reported in those completed targets. This is engine-only
+evidence, not native-adapter, full-suite or performance acceptance.
+
+The bounded Cycles regression completed these comparisons before interruption
+during `env-landscape`. The overall regression has **no pass result**.
+
+| Scene | Mean ΔE00 | SSIM |
+| --- | ---: | ---: |
+| hero | 1.227 | 0.9933 |
+| edge | 2.436 | 0.9841 |
+| macro | 1.317 | 0.9225 |
+| back | 0.314 | 0.9901 |
+| chrome | 2.223 | 0.8669 |
+| materials | 3.659 | 0.9162 |
+| caustics | 2.796 | 0.7992 |
+| wet | 0.793 | 0.9511 |
+| env-room | 5.851 | 0.3613 |
+| env-street | 4.849 | 0.6156 |
+
+The installed Homebrew OIDN **2.5.1** supplies its CPU device library and no
+Metal device library. GPU OIDN therefore needs a separately verified Metal
+build/bundle. No OIDN timing split or native frame timing was measured.
+
+### Integration findings for continuation
+
+The pinned host moved to `hosts/studio-electron`; importing the old path would
+retain the wrong helper. Native-only extraction/service/splat/status/swatch
+modules must move outside `engine/crates/pm-studio`. A generic GPU backend seam
+in pm-render can keep that dependency direction clean: immutable document
+source → worker backend → per-layer texture → normal compositor.
+
+The pinned shader changed its instance policy words: row 4.w packs a layer
+override and vertex-color flag; row 5.w controls primary visibility. The old
+native extractor used them for material/layer IDs. Reusing those bytes would
+silently render the wrong material or hide geometry. Adapt triangle material
+bindings, UV1/physical-map records, instancing metadata and the world trailer;
+verify hardware and portable paths against the same scene.
+
+The shared GPU device currently does not request optional Metal ray-query
+features/limits. MetalFX's existing host API also reads pixels or sends a Mach
+surface; native needs an in-process GPU texture return. Neither gap is closed.
 
 ## Reproduction and designer handoff
 
