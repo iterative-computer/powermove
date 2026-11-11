@@ -884,3 +884,49 @@ PMV reopen, post-reopen Undo/Redo and agent readback. The GPUI app builds
 (42.68 s, unchanged profile/features). Part offsets remain explicitly unsupported; complete
 Electron-project render equivalence still needs the outstanding capture,
 extrusion, mixed-depth and broader import cases.
+
+## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
+
+Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay
+outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
+
+### Built
+
+| Area | What the person sees | Data / command |
+| --- | --- | --- |
+| Layer ▸ Add 3D Layer (menu bar, viewer context menu) | Cube … Icosphere · Softbox, Spotlight, Bulb, Sun, Camera · Sky, Fog Volume, Terrain · Pine/Oak/Birch Trees, Bushes, Grass, Rocks. One Undo `Add <thing>`; the new layer is selected | `Scene3dCommand::Apply` with `add_object`, `add_light`, `add_camera`, `set_world`, `add_fog`, `add_terrain`, `add_scatter` and a host layer ID (`pm_panel_studio3d::properties::add_layer`) |
+| Sensible defaults | Terrain is natural, eroded ground; nature scatters onto the selected surface or terrain and adds a terrain when there is none; a new landscape with no camera gets an overview camera | the same Apply commands in one transaction |
+| Properties header | `Cube · 3D Shape`, `Key · Softbox`, `World · Sky`, `Pine Trees · Scatter`; no 2D alignment strip, canvas size, masks or effects on 3D layers | `studio` flag on the inspector target |
+| 3D transform | Position, Rotation and Scale % with X/Y/Z | `position.*`, `rotation.*`, `scale.*` channels |
+| World | Lighting (Physical Sky / HDRI / None), Preset, Show in Camera, Sun Height/Direction/Strength/Size, Haze, Clouds, Ground, Brightness, Rotation, closed Atmosphere group | `set_world` (`mode`, `preset`, `p.visible`); `world.*` channels |
+| Fog, Terrain, Scatter | Shape; Natural Ground, Ridged Peaks, Height, Feature Size, Erosion, Size and Ground groups; Scatters / On, Count, Density, Seed, Variation, Placement | `update_fog`, `update_terrain`; `fog.*`, `terrain.*`, `scatter.*` channels |
+| Material | Finish shelf (11 swatches, no selected state, Undo `Finish: <name>`), Screen, PBR rows, Texture Maps from imported images, Material Options (Casts Shadows On/Off/Only, Accepts Shadows, Accepts Lights, Appears in Reflections) | `apply_material`, `update_object` maps, `set_material_options` |
+| Composition | 3D Scene: Sky and Render Quality (Draft, Preview, Production, Final) with a note of samples, bounces and caustics | `set_world`, `set_render_quality` |
+| Export sheet | `3D Quality` row (`Composition · <preset>` or a per-export preset); the summary ends `3D <preset>, about <time>` | option `studioQuality` → `ExportRequest.studio_quality`; estimate from the M5 worker timings above |
+| Timeline | Kind badges per §1: model `cube` on blue, light `lightbulb` and camera `camera` on gray | the layer's `definition` |
+
+### Plumbing added for the UI
+
+- `engine/crates/pm-eval/src/address.rs`: Studio's `environmentProperties`
+  (World, fog, terrain and regions, scatter, material options) are addressable
+  property keys, as in the pinned source's `layer3DProperties`. Without it,
+  Properties could not read, write or keyframe those channels.
+- `pm_panel_studio3d::properties`: `add_layer`, `scene_summary`,
+  `export_quality`, `estimate_seconds_per_frame`, `about`, `environment`,
+  `finishes`. `view::commands` handles `scene.quality`, `scene.sky`, `world.*`,
+  `fog.shape`, `terrain.*` and `options.*` with specific Undo names.
+- Shell: the `new3d` submenu. Submenu parents in auto-enabling menus keep the
+  submenu's own action; this also re-enables View ▸ Tools, which was disabled.
+
+### Still open for the designer
+
+- Viewer 3D toolbar (§2), gizmos (§5), Light tool panel (§6) and the status
+  capsule (§3). `studioTier` exists now, but automatic idle Refine, picking and
+  projected gizmo geometry are needed first. Per §3, Live is never shown as a
+  status.
+- Import 3D Model…: needs the NSOpenPanel → `import::prepare` worker →
+  `Scene3dCommand::Import` route in the app.
+- Text/shape extrusion (Front/Bevel/Side/Back), layers and groups as material
+  sources, 1/2/4 views and per-layer error rows have no native document data
+  or commands yet (extrusion schema, live source capture and multiple views
+  are G/P rows above).
