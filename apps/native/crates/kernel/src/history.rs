@@ -1,8 +1,8 @@
 //! Undo/redo records.
 //!
 //! One [`HistoryRecord`] per committed transaction or finished gesture. A
-//! record holds the *forward* operations and the *inverse* operations
-//! captured when it was committed. Undo applies the inverse as a **new,
+//! record holds compact canonical bytes for the *forward* and *inverse* operations
+//! captured when it was committed, decoding only for a scoped use. Undo applies the inverse as a **new,
 //! increasing document revision** (never a rewind), so render, audio and
 //! query readers that follow revisions see an ordinary edit.
 //!
@@ -48,6 +48,126 @@ pub struct ExternalRef {
     pub cleanup: bool,
 }
 
+/// Immutable canonical JSON, compressed only when that saves space. No decoded
+/// cache: a scan or save must not permanently expand the entire undo stack.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactJson {
+    data: Arc<[u8]>,
+    compressed: bool,
+    len: usize,
+    old_3d: bool,
+    exact: Option<Arc<Value>>,
+    entries: Option<Arc<[CompactJson]>>,
+}
+impl CompactJson {
+    pub fn new(value: &Value) -> Self {
+        let mut stored = Self::text(pm_model::json::to_canonical_string(value));
+        // Runtime edits can contain non-finite numbers or signed zero. JSON
+        // normalizes those, so retain their exact form in this rare case.
+        if needs_exact(value) {
+            stored.exact = Some(Arc::new(value.clone()));
+        }
+        stored
+    }
+    /// Preserve a plain history entry by entry: large envelopes serialize on
+    /// workers instead of imposing a second serial whole-history pass on open.
+    pub(crate) fn history(value: &Value) -> Self {
+        let Some(entries) = value.get("entries").and_then(Value::as_array) else {
+            return Self::new(value);
+        };
+        let mut metadata = Map::new();
+        for (key, value) in value.as_object().unwrap().iter() {
+            if key.as_str() != Some("entries") {
+                metadata.insert(key.clone(), value.clone());
+            }
+        }
+        let entries = pm_model::parallel::map(entries.len(), |i| Self::new(&entries[i]));
+        let mut stored = Self::new(&Value::Object(metadata));
+        stored.entries = Some(entries.into());
+        stored
+    }
+    fn text(text: String) -> Self {
+        let len = text.len();
+        let old_3d = text.contains("powermove.3d.");
+        let packed = zstd::bulk::compress(text.as_bytes(), 1).expect("history compression");
+        let compressed = packed.len() < len;
+        let data = if compressed {
+            packed
+        } else {
+            text.into_bytes()
+        };
+        Self {
+            data: data.into(),
+            compressed,
+            len,
+            old_3d,
+            exact: None,
+            entries: None,
+        }
+    }
+    pub fn value(&self) -> Value {
+        if let Some(value) = &self.exact {
+            return (**value).clone();
+        }
+        let bytes = if self.compressed {
+            zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes")
+        } else {
+            self.data.to_vec()
+        };
+        let mut value = pm_model::json::parse_file_text(&bytes).expect("canonical history JSON");
+        if let Some(entries) = &self.entries {
+            value.as_object_mut().unwrap().insert(
+                "entries",
+                Value::Array(entries.iter().map(Self::value).collect()),
+            );
+        }
+        value
+    }
+}
+
+fn needs_exact(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => !n.is_finite() || (*n == 0.0 && n.is_sign_negative()),
+        Value::Array(items) => items.iter().any(needs_exact),
+        Value::Object(map) => map.iter().any(|(_, v)| needs_exact(v)),
+        _ => false,
+    }
+}
+
+/// Operations whose decoded lifetime is scoped to an undo, redo or scan.
+#[derive(Clone, Debug)]
+pub struct StoredOps(CompactJson);
+impl PartialEq for StoredOps {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_vec() == other.to_vec()
+    }
+}
+impl From<Vec<Op>> for StoredOps {
+    fn from(ops: Vec<Op>) -> Self {
+        Self(CompactJson::new(&ops_to_value(&ops)))
+    }
+}
+impl StoredOps {
+    pub(crate) fn may_have_old_3d(&self) -> bool {
+        self.0.old_3d
+    }
+    pub fn to_vec(&self) -> Vec<Op> {
+        pm_model::ops::ops_from_value(&self.value()).expect("validated history operations")
+    }
+    fn value(&self) -> Value {
+        self.0.value()
+    }
+    pub fn iter(&self) -> std::vec::IntoIter<Op> {
+        self.to_vec().into_iter()
+    }
+    pub fn len(&self) -> usize {
+        self.iter().count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// One undoable step.
 #[derive(Clone, Debug)]
 pub struct HistoryRecord {
@@ -58,15 +178,16 @@ pub struct HistoryRecord {
     pub label: String,
     pub origin: Origin,
     /// Operations that redo the step from the state right after undo.
-    pub forward: Arc<[Op]>,
+    pub forward: StoredOps,
     /// Operations that undo the step from the state right after it.
-    pub inverse: Arc<[Op]>,
+    pub inverse: StoredOps,
     /// Leaf-patch form (`forward`, `backward`) for the saved file, present
     /// when `forward`/`inverse` contain structural operations.
-    pub(crate) saved: Option<Arc<(Vec<Patch>, Vec<Patch>)>>,
+    pub(crate) saved: Option<CompactJson>,
     /// The document revision the step was committed at (0 when imported).
     pub revision: u64,
-    /// Serialized size, for the byte budget.
+    /// Canonical serialized size, for the compatible trimming budget. Normal
+    /// records occupy no more payload bytes than this after compression.
     pub bytes: usize,
     /// `Some` for an external (closure) entry: no operations, undone by its
     /// realm. Never exported (the old `export()` kept document entries only).
@@ -87,7 +208,7 @@ impl HistoryRecord {
                     Value::Array(f.iter().map(Patch::to_value).collect()),
                     Value::Array(b.iter().map(Patch::to_value).collect()),
                 ),
-                None => (ops_to_value(&self.forward), ops_to_value(&self.inverse)),
+                None => (self.forward.value(), self.inverse.value()),
             };
             let form = Value::Array(vec![forward, backward]);
             pm_model::hash::sha256_hex(pm_model::json::to_canonical_string(&form).as_bytes())
@@ -103,7 +224,16 @@ impl HistoryRecord {
     /// saves as operations, and its entry costs what it changed.
     pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
-            return Some((saved.0.clone(), saved.1.clone()));
+            let value = saved.value();
+            let sides = value.as_array().expect("patch pair");
+            let patches = |v: &Value| {
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| Patch::from_value(p).unwrap())
+                    .collect()
+            };
+            return Some((patches(&sides[0]), patches(&sides[1])));
         }
         let leaves = |ops: &[Op]| {
             ops.iter()
@@ -113,7 +243,10 @@ impl HistoryRecord {
                 })
                 .collect::<Option<Vec<_>>>()
         };
-        Some((leaves(&self.forward)?, leaves(&self.inverse)?))
+        Some((
+            leaves(&self.forward.to_vec())?,
+            leaves(&self.inverse.to_vec())?,
+        ))
     }
 }
 
@@ -361,7 +494,12 @@ impl History {
             origin,
             forward: forward.into(),
             inverse: inverse.into(),
-            saved: saved.map(Arc::new),
+            saved: saved.map(|(f, b)| {
+                CompactJson::new(&Value::Array(vec![
+                    Value::Array(f.iter().map(Patch::to_value).collect()),
+                    Value::Array(b.iter().map(Patch::to_value).collect()),
+                ]))
+            }),
             revision,
             bytes,
             external: None,
@@ -497,15 +635,8 @@ impl History {
             self.total_bytes -= r.bytes;
         }
         self.cursor = self.entries.len();
-        let forward: Vec<Op> = tail
-            .iter()
-            .flat_map(|r| r.forward.iter().cloned())
-            .collect();
-        let inverse: Vec<Op> = tail
-            .iter()
-            .rev()
-            .flat_map(|r| r.inverse.iter().cloned())
-            .collect();
+        let forward: Vec<Op> = tail.iter().flat_map(|r| r.forward.iter()).collect();
+        let inverse: Vec<Op> = tail.iter().rev().flat_map(|r| r.inverse.iter()).collect();
         // Whole-value forms join only when every step has one.
         let saved = if tail.iter().any(|r| r.saved.is_some()) {
             tail.iter()
@@ -582,13 +713,9 @@ impl History {
             records.iter().filter(|r| r.is_document()).collect()
         }
         fn merged(run: &[&HistoryRecord], step: &HistoryRecord) -> bool {
-            let forward: Vec<Op> = run.iter().flat_map(|r| r.forward.iter().cloned()).collect();
-            let inverse: Vec<Op> = run
-                .iter()
-                .rev()
-                .flat_map(|r| r.inverse.iter().cloned())
-                .collect();
-            if *step.forward == *forward && *step.inverse == *inverse {
+            let forward: Vec<Op> = run.iter().flat_map(|r| r.forward.iter()).collect();
+            let inverse: Vec<Op> = run.iter().rev().flat_map(|r| r.inverse.iter()).collect();
+            if step.forward.to_vec() == forward && step.inverse.to_vec() == inverse {
                 return true;
             }
             let forms: Option<Vec<_>> = run.iter().map(|r| r.saved_form()).collect();
@@ -725,8 +852,16 @@ impl History {
     /// [`from_saved`](Self::from_saved) with the reason for a refusal
     /// (generic wording; never quotes the history's content).
     pub fn import(saved: &Value, open_comp: Option<&str>) -> Result<History, String> {
-        let unpacked = unpack(saved).ok_or("invalid history dictionary")?;
-        let map = unpacked.as_object().ok_or("history is not an object")?;
+        // Plain histories can be read in place. `unpack` clones its input;
+        // doing that here used to copy a complete large JSON tree on open.
+        let unpacked;
+        let source = if saved.get("format").and_then(Value::as_str) == Some(DICTIONARY_FORMAT) {
+            unpacked = unpack(saved).ok_or("invalid history dictionary")?;
+            &unpacked
+        } else {
+            saved
+        };
+        let map = source.as_object().ok_or("history is not an object")?;
         if map.get("version") != Some(&Value::Number(1.0)) {
             return Err("history version is not 1".into());
         }
@@ -758,8 +893,8 @@ impl History {
                 id: next_token(),
                 label,
                 origin: Origin::Interface,
-                forward: forward.into(),
-                inverse: backward.into(),
+                forward,
+                inverse: backward,
                 saved: None,
                 revision: 0,
                 bytes,
@@ -787,7 +922,7 @@ fn import_entry(
     entry: &Value,
     root_relative: bool,
     open_comp: Option<&str>,
-) -> Result<(String, Vec<Op>, Vec<Op>, usize), String> {
+) -> Result<(String, StoredOps, StoredOps, usize), String> {
     let e = entry
         .as_object()
         .ok_or("a history entry is not an object")?;
@@ -796,6 +931,62 @@ fn import_entry(
         .and_then(Value::as_str)
         .ok_or("a history entry has no label")?
         .to_owned();
+    if !root_relative && !needs_exact(entry) {
+        let operations = |side: &str| -> Result<StoredOps, String> {
+            let items = e
+                .get(side)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("a history entry has no {side} list"))?;
+            let mut text = String::from("[");
+            for (i, item) in items.iter().enumerate() {
+                let source = item
+                    .as_object()
+                    .ok_or_else(|| format!("a {side} patch is malformed"))?;
+                let mut shape = Map::new();
+                for (key, value) in source.iter() {
+                    shape.insert(
+                        key.clone(),
+                        if key.as_str() == Some("value") {
+                            Value::Null
+                        } else {
+                            value.clone()
+                        },
+                    );
+                }
+                let op = Op::from_value(&Value::Object(shape))
+                    .map_err(|_| format!("a {side} patch is malformed"))?;
+                if !valid_path(op.path()) {
+                    return Err(format!("a {side} patch has an invalid path"));
+                }
+                let normalized = op.to_value();
+                let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
+                members.sort_by(|(a, _), (b, _)| a.cmp(b));
+                if i > 0 {
+                    text.push(',');
+                }
+                text.push('{');
+                for (j, (key, value)) in members.into_iter().enumerate() {
+                    if j > 0 {
+                        text.push(',');
+                    }
+                    pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
+                    text.push(':');
+                    let value = if key.as_str() == Some("value") {
+                        source.get("value").unwrap_or(value)
+                    } else {
+                        value
+                    };
+                    pm_model::json::write_canonical(value, &mut text);
+                }
+                text.push('}');
+            }
+            text.push(']');
+            Ok(StoredOps(CompactJson::text(text)))
+        };
+        let (forward, backward) = (operations("forward")?, operations("backward")?);
+        let bytes = forward.0.len + backward.0.len;
+        return Ok((label, forward, backward, bytes));
+    }
     let operations = |side: &str| -> Result<Vec<Op>, String> {
         e.get(side)
             .and_then(Value::as_array)
@@ -825,7 +1016,9 @@ fn import_entry(
         forward = f.into_iter().map(Op::Leaf).collect();
         backward = b.into_iter().map(Op::Leaf).collect();
     }
-    let bytes = ops_bytes(&forward) + ops_bytes(&backward);
+    let forward = StoredOps::from(forward);
+    let backward = StoredOps::from(backward);
+    let bytes = forward.0.len + backward.0.len;
     Ok((label, forward, backward, bytes))
 }
 
@@ -851,7 +1044,7 @@ impl HistorySnapshot {
                 let list = |p: Vec<Patch>| Value::Array(p.iter().map(Patch::to_value).collect());
                 let (forward, backward) = match r.saved_form() {
                     Some((forward, backward)) => (list(forward), list(backward)),
-                    None => (ops_to_value(&r.forward), ops_to_value(&r.inverse)),
+                    None => (r.forward.value(), r.inverse.value()),
                 };
                 let mut e = Map::new();
                 e.insert("label", Value::from(r.label.as_str()));
@@ -964,6 +1157,81 @@ mod tests {
             None,
             1,
         )
+    }
+
+    #[test]
+    fn compact_records_replay_squash_trim_and_save_identically() {
+        let mut h = History::new();
+        let mark = h.mark();
+        for i in 1..=4 {
+            let patch = |n| {
+                Op::Leaf(Patch {
+                    path: vec![PathPart::Key("x".into())],
+                    exists: true,
+                    value: Some(Value::Number(n as f64)),
+                })
+            };
+            h.push(
+                format!("Step {i}"),
+                Origin::Interface,
+                vec![patch(i)],
+                vec![patch(i - 1)],
+                None,
+                i as u64,
+            );
+        }
+        let saved = h.snapshot().to_saved();
+        let identity = h.identity();
+        let mut h = History::import(&saved, None).unwrap();
+        assert_eq!(identity, h.identity());
+        assert_eq!(
+            pm_model::json::to_canonical_string(&saved),
+            pm_model::json::to_canonical_string(&h.snapshot().to_saved())
+        );
+        let mut doc = pm_model::Document::new(Some(parse(r#"{"x":4}"#).unwrap()), 1);
+        for expected in (0..4).rev() {
+            doc.apply_ops_at(&h.peek_undo().unwrap().inverse.to_vec(), doc.revision() + 1)
+                .unwrap();
+            h.mark_undone();
+            assert_eq!(
+                doc.root().unwrap().to_value().get("x"),
+                Some(&Value::Number(expected as f64))
+            );
+        }
+        for expected in 1..=4 {
+            doc.apply_ops_at(&h.peek_redo().unwrap().forward.to_vec(), doc.revision() + 1)
+                .unwrap();
+            h.mark_redone();
+            assert_eq!(
+                doc.root().unwrap().to_value().get("x"),
+                Some(&Value::Number(expected as f64))
+            );
+        }
+        h.squash_since(&mark, "Combined").unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.peek_undo().unwrap().inverse.len(), 4);
+        let roundtrip = History::import(&h.snapshot().to_saved_packed(), None).unwrap();
+        assert_eq!(h.identity(), roundtrip.identity());
+        h.set_max_bytes(0);
+        assert_eq!(h.len(), 1, "latest oversized edit stays");
+    }
+
+    #[test]
+    fn compact_operations_preserve_runtime_number_bits() {
+        for number in [-0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let ops = StoredOps::from(vec![Op::Leaf(Patch {
+                path: vec![],
+                exists: true,
+                value: Some(Value::Number(number)),
+            })]);
+            let Op::Leaf(patch) = ops.to_vec().remove(0) else {
+                panic!()
+            };
+            assert_eq!(
+                patch.value.unwrap().as_f64().unwrap().to_bits(),
+                number.to_bits()
+            );
+        }
     }
 
     #[test]
