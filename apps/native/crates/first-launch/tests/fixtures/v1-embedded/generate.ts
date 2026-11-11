@@ -39,16 +39,39 @@ mkdirSync(out, { recursive: true });
 // - Embedded-pmv3.pmv: PMV3 (browser download), items without a checksum.
 // - Converted-pmv3.pmv: PMV3 whose asset was converted on import, so its
 //   fingerprint names the chosen file, not the stored bytes.
-async function save(file: string, w: number, h: number, format: 'pmv4' | 'pmv3', converted = false) {
-  const image = png(w, h);
-  const fp = await fingerprint(converted ? png(w + 1, h) : image);
-  const asset = { id: 'gradient', name: 'Gradient.png', kind: 'image', type: 'image/png', w, h, fingerprint: fp, storageKey: `media:${fp}` };
-  const proj = { id: 'v1-embedded', name: 'Embedded media', w: 640, h: 360, fps: 30, dur: 2, bg: '#202020',
-    layers: [{ id: 'picture', type: 'image', name: 'Gradient', from: 0, dur: 2, d: { asset: 'gradient', fit: 'contain', w: 1, h: 1 } }],
-    assets: { gradient: asset }, comps: {} };
+// - Mislabeled-pmv3.pmv: PMV3 whose asset records a size other than its item's.
+// - Replaced.pmv: the entry holds the asset as first imported; the file was
+//   saved after its media were replaced under the same id and then deleted,
+//   so only undo holds either record and the item is the replacement's bytes.
+type Options = { converted?: boolean; sizeDelta?: number; replaced?: boolean };
+async function save(file: string, w: number, h: number, format: 'pmv4' | 'pmv3', { converted = false, sizeDelta, replaced = false }: Options = {}) {
+  const make = async (w: number, h: number) => {
+    const image = png(w, h);
+    const fp = await fingerprint(converted ? png(w + 1, h) : image);
+    const asset: any = { id: 'gradient', name: 'Gradient.png', kind: 'image', type: 'image/png', w, h, fingerprint: fp, storageKey: `media:${fp}` };
+    if (sizeDelta !== undefined) asset.size = image.length + sizeDelta;
+    return { image, asset };
+  };
+  const first = await make(w, h);
+  const project = (assets: any, layers = true) => ({ id: 'v1-embedded', name: 'Embedded media', w: 640, h: 360, fps: 30, dur: 2, bg: '#202020',
+    layers: layers ? [{ id: 'picture', type: 'image', name: 'Gradient', from: 0, dur: 2, d: { asset: 'gradient', fit: 'contain', w: 1, h: 1 } }] : [],
+    assets, comps: {} });
+  const proj = project({ gradient: first.asset });
+  let saved = proj, history: any = null, image = first.image;
+  if (replaced) {
+    const next = await make(w / 2, h / 2);
+    const at = ['assets', 'gradient'];
+    saved = project({}, false);
+    history = { version: 1, paths: 'composition', index: 1, entries: [
+      { label: 'Replace Media', forward: [{ path: at, exists: true, value: next.asset }], backward: [{ path: at, exists: true, value: first.asset }] },
+      { label: 'Delete', forward: [{ path: at, exists: false }, { path: ['layers'], exists: true, value: [] }],
+        backward: [{ path: at, exists: true, value: next.asset }, { path: ['layers'], exists: true, value: proj.layers }] },
+    ] };
+    image = next.image;
+  }
   // app.ts saveProject(): the serialized envelope and savedHash = projectFingerprint(projectJSON).
-  const projectJSON = await stringifyAsync(proj);
-  const json = Buffer.from(`{"v":"1.2.0","proj":${projectJSON},"history":null,"ws":null}`);
+  const projectJSON = await stringifyAsync(saved);
+  const json = Buffer.from(`{"v":"1.2.0","proj":${projectJSON},"history":${JSON.stringify(history)},"ws":null}`);
   if (format === 'pmv3') {
     writeFileSync(path.join(out, file), encodeProjectContainer(JSON.parse(json.toString()), [{ id: 'gradient', type: 'image/png', data: image }]));
   } else {
@@ -60,11 +83,14 @@ async function save(file: string, w: number, h: number, format: 'pmv4' | 'pmv3',
     for (const id of upload.required) await upload.write(id, image);
     await upload.finish();
   }
-  const savedHash = await projectFingerprint(projectJSON);
+  // The library entry: what the copy holds (for Replaced.pmv, the state before).
+  const savedHash = await projectFingerprint(await stringifyAsync(proj));
   writeFileSync(path.join(out, `${file}.json`), JSON.stringify({ project: { v: '1.2.0', proj }, savedHash, baselineHash: savedHash }, null, 1) + '\n');
   console.log(JSON.stringify({ file, savedHash, fileSha256: createHash('sha256').update(await Bun.file(path.join(out, file)).bytes()).digest('hex') }));
 }
 await save('Embedded.pmv', 320, 180, 'pmv4');
 await save('Other.pmv', 160, 90, 'pmv4');
 await save('Embedded-pmv3.pmv', 320, 180, 'pmv3');
-await save('Converted-pmv3.pmv', 320, 180, 'pmv3', true);
+await save('Converted-pmv3.pmv', 320, 180, 'pmv3', { converted: true });
+await save('Mislabeled-pmv3.pmv', 320, 180, 'pmv3', { sizeDelta: 1 });
+await save('Replaced.pmv', 320, 180, 'pmv4', { replaced: true });

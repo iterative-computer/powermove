@@ -317,3 +317,19 @@ fn the_migration_counts_media_the_file_lends_as_available() {
     };
     assert_eq!(count("Embedded.pmv") + 1, count("Other.pmv"));
 }
+
+/// The copy holds the asset as first imported; the original's file was saved
+/// after its media were replaced under the same id and then deleted, so the
+/// file's undo history names both records and its item is the replacement's
+/// bytes. Which record the item is can't be told: it stays offline rather
+/// than show the replacement for the original.
+#[test]
+fn an_item_undo_history_cannot_bind_to_one_record_stays_offline() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let file = root.join("Embedded.pmv");
+    fs::copy(fixture("Replaced.pmv"), &file).unwrap();
+    let (config, id) = migrated(&root, "Replaced.pmv", &file, |_| {});
+    let kernel = open(&config, &id);
+    assert_eq!(bytes(&kernel, &root), None);
+}

@@ -6,6 +6,11 @@
 //! own record of that asset, and whose bytes the file's checksum proves (or,
 //! in a format without one, the asset's sampled fingerprint). Bytes the
 //! library's Media Store holds win, so a save never copies them again.
+//!
+//! A file that no longer holds the asset itself (deleted, kept for undo) binds
+//! its item to an undo record only when that history names one identity for
+//! the id: two (a replace, then a delete) leave which one the bytes are
+//! ambiguous, so they stay offline.
 use crate::{
     History,
     library::LibraryProject,
@@ -70,6 +75,14 @@ fn candidates(
     }
 }
 
+/// The one record the file's item can be the bytes of: the file's current
+/// asset, else its undo history's only identity for the id (none when the
+/// history names several: the item could be any of them).
+fn bound(mut records: Vec<Identity>) -> Option<Identity> {
+    let first = records.pop()?;
+    records.iter().all(|r| *r == first).then_some(first)
+}
+
 /// The media of the file at `path` this library copy may use, as an untitled
 /// file's table, or `None` when it lends none (or is unreadable, or fails its
 /// checksums).
@@ -89,7 +102,7 @@ pub(crate) fn for_copy(
     let ids: Vec<String> = file.media.iter().map(|e| e.id.to_string()).collect();
     for id in ids {
         let entry = file.media.get(&id).unwrap();
-        let theirs = candidates(
+        let theirs = bound(candidates(
             file_root
                 .and_then(|r| r.get("assets"))
                 .and_then(|a| a.get(&id))
@@ -108,7 +121,7 @@ pub(crate) fn for_copy(
                     .remove(&id)
                     .unwrap_or_default()
             },
-        );
+        ));
         let ours = candidates(
             lib_assets
                 .and_then(|a| a.get(&id))
@@ -127,9 +140,9 @@ pub(crate) fn for_copy(
                     .unwrap_or_default()
             },
         );
-        let same = ours.iter().find(|o| theirs.contains(o));
+        let same = theirs.filter(|t| ours.contains(t));
         let keep = same.is_some_and(|asset| {
-            proven(entry, asset)
+            proven(entry, &asset)
                 && !store.is_some_and(|store| {
                     crate::library_media::holds(
                         &id,
