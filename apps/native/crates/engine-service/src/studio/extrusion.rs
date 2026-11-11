@@ -200,7 +200,7 @@ impl DocumentSource {
                     gpu.spec[0] = m.roughness.max(0.002);
                     gpu.extra[2] = n(properties, "opacity", 100.) / 100.;
                     gpu.policy[0] = n(properties, "ambientResponse", 100.) / 100.;
-                    self.bind_material_maps(material, &mut gpu, maps, indices)?;
+                    self.bind_material_maps(request, id, material, &mut gpu, maps, indices)?;
                     gpu.validate()?;
                     palette.push(materials.len());
                     materials.push(gpu);

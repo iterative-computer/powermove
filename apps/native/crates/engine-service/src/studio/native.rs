@@ -25,6 +25,8 @@ mod imported;
 mod intrinsic;
 #[path = "maps.rs"]
 mod maps;
+#[path = "material_capture.rs"]
+mod material_capture;
 #[path = "material_policy.rs"]
 mod material_policy;
 #[path = "scatter.rs"]
@@ -32,7 +34,14 @@ mod scatter;
 
 pub struct DocumentSource {
     text: Mutex<pm_render::text::TextContext>,
-    extruded: Mutex<Vec<(String,Arc<pm_scene3d::extrusion::Extrusion>)>>,
+    capture_id: u64,
+    capture_fonts: Option<pm_render::text::host::RenderFonts>,
+    capture_font_factory:
+        Option<Arc<dyn Fn() -> Box<dyn pm_render::text::TextFonts> + Send + Sync>>,
+    capture_definitions: pm_protocol::definitions::DefinitionSetSnapshot,
+    capture_bindings: Mutex<Option<material_capture::Bindings>>,
+    capture_plans: Mutex<HashMap<(String, String), Arc<material_capture::Plan>>>,
+    extruded: Mutex<Vec<(String, Arc<pm_scene3d::extrusion::Extrusion>)>>,
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
     meshes: Mutex<HashMap<String, Arc<Mesh>>>,
@@ -45,7 +54,7 @@ pub struct DocumentSource {
     vertex_attributes:
         Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
-    failures: Mutex<Option<(SceneRequest,Vec<pm_render::LayerFailure>)>>,
+    failures: Mutex<Option<(SceneRequest, Vec<pm_render::LayerFailure>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -71,7 +80,14 @@ impl DocumentSource {
         self.snapshot.revision
     }
     pub fn new(document: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) -> Self {
+        static NEXT_CAPTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            capture_id: NEXT_CAPTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            capture_fonts: None,
+            capture_font_factory: None,
+            capture_definitions: Default::default(),
+            capture_bindings: Mutex::default(),
+            capture_plans: Mutex::default(),
             text: Mutex::default(),
             extruded: Mutex::default(),
             snapshot: pm_kernel::Snapshot {
@@ -92,11 +108,37 @@ impl DocumentSource {
             failures: Mutex::default(),
         }
     }
-    pub fn with_text_fonts(self, fonts:Box<dyn pm_render::text::TextFonts>) -> Self {
-        self.text.lock().expect("new text context").set_fonts(Some(fonts));self
+    pub fn with_text_fonts(self, fonts: Box<dyn pm_render::text::TextFonts>) -> Self {
+        self.text
+            .lock()
+            .expect("new text context")
+            .set_fonts(Some(fonts));
+        self
     }
-    pub fn with_native_fonts(self, fonts:Option<&pm_render::text::host::RenderFonts>) -> Self {
-        if let Some(fonts)=fonts {self.with_text_fonts(Box::new(pm_render::text::host::EngineFonts::new(&fonts.broker,&fonts.health)))}else{self}
+    pub fn with_native_fonts(mut self, fonts: Option<&pm_render::text::host::RenderFonts>) -> Self {
+        self.capture_fonts = fonts.cloned();
+        if let Some(fonts) = fonts {
+            self.with_text_fonts(Box::new(pm_render::text::host::EngineFonts::new(
+                &fonts.broker,
+                &fonts.health,
+            )))
+        } else {
+            self
+        }
+    }
+    pub fn with_capture_font_factory(
+        mut self,
+        factory: Arc<dyn Fn() -> Box<dyn pm_render::text::TextFonts> + Send + Sync>,
+    ) -> Self {
+        self.capture_font_factory = Some(factory);
+        self
+    }
+    pub fn with_capture_definitions(
+        mut self,
+        definitions: pm_protocol::definitions::DefinitionSetSnapshot,
+    ) -> Self {
+        self.capture_definitions = definitions;
+        self
     }
     /// Resolve one export's override without editing the saved composition.
     pub fn with_quality_override(
@@ -268,8 +310,8 @@ impl DocumentSource {
             meshes.insert(key, mesh.clone());
             return Ok(mesh);
         }
-        let mesh=build()?;
-        pm_studio3d_engine::extract::validate_mesh(&mesh,None)?;
+        let mesh = build()?;
+        pm_studio3d_engine::extract::validate_mesh(&mesh, None)?;
         let mesh = Arc::new(mesh);
         let mut cache = shared
             .lock()
@@ -284,6 +326,17 @@ impl DocumentSource {
     }
 }
 impl pm_studio3d_engine::compositor::Source for DocumentSource {
+    fn needs_materials(&self, request: &SceneRequest) -> Result<bool, String> {
+        Ok(!self.material_references(request)?.is_empty())
+    }
+    fn prepare_materials(
+        &self,
+        renderer: &mut pm_render::Renderer,
+        request: &SceneRequest,
+        tier: Tier,
+    ) -> Result<bool, String> {
+        self.capture_materials(renderer, request, tier)
+    }
     fn splat_layers(
         &self,
         request: &SceneRequest,
@@ -300,12 +353,16 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
             let Some(asset) = object["source"]["assetId"].as_str() else {
                 continue;
             };
-            let Ok(resource) = self.resource(asset) else {continue};
+            let Ok(resource) = self.resource(asset) else {
+                continue;
+            };
             let pm_scene3d::import::Model::Splats(data) = &resource.model else {
                 continue;
             };
             let id = object["id"].as_str().ok_or("Splat layer has no ID")?;
-            let Ok((center,radius)) = data.normalization() else {continue};
+            let Ok((center, radius)) = data.normalization() else {
+                continue;
+            };
             let math = pm_scene3d::render::gltf::math::compose(
                 center.map(|v| -v),
                 [0., 0., 0., 1.],
@@ -355,21 +412,33 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
     }
 }
 impl SceneSource for DocumentSource {
-    fn layer_failures(&self, request:&SceneRequest) -> Result<Vec<pm_render::LayerFailure>,String> {
-        Ok(self.failures.lock().map_err(|_|"Studio failure cache poisoned")?.as_ref().filter(|(key,_)|key==request).map_or_else(Vec::new,|(_,f)|f.clone()))
+    fn layer_failures(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Vec<pm_render::LayerFailure>, String> {
+        Ok(self
+            .failures
+            .lock()
+            .map_err(|_| "Studio failure cache poisoned")?
+            .as_ref()
+            .filter(|(key, _)| key == request)
+            .map_or_else(Vec::new, |(_, f)| f.clone()))
     }
     fn auxiliary_layers(
         &self,
         request: &SceneRequest,
     ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
-        let failures=self.layer_failures(request)?;
-        let resolved=self.resolve(request)?;
-        let mut layers:Vec<_>=resolved.scene["objects"]
+        let failures = self.layer_failures(request)?;
+        let resolved = self.resolve(request)?;
+        let mut layers: Vec<_> = resolved.scene["objects"]
             .as_array()
             .ok_or("Missing Studio objects")?
             .iter()
             .filter(|o| {
-                !failures.iter().any(|f|o["id"]==f.layer) && (o.get("world").is_some() || o.get("fog").is_some() || o.get("scatter").is_some())
+                !failures.iter().any(|f| o["id"] == f.layer)
+                    && (o.get("world").is_some()
+                        || o.get("fog").is_some()
+                        || o.get("scatter").is_some())
             })
             .map(|o| pm_studio3d_engine::extract::AuxiliaryLayer {
                 id: o["id"].as_str().unwrap().into(),
@@ -379,9 +448,19 @@ impl SceneSource for DocumentSource {
                     && o["world"]["mode"] != "none",
             })
             .collect();
-        for layer in resolved.scene["extrusions"].as_array().into_iter().flatten(){
-            if layer["threeD"]==true && layer["extrusion"]["enabled"]==true && !failures.iter().any(|f|layer["id"]==f.layer){
-                layers.push(pm_studio3d_engine::extract::AuxiliaryLayer{id:layer["id"].as_str().ok_or("Extrusion has no ID")?.into(),include_void:false});
+        for layer in resolved.scene["extrusions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if layer["threeD"] == true
+                && layer["extrusion"]["enabled"] == true
+                && !failures.iter().any(|f| layer["id"] == f.layer)
+            {
+                layers.push(pm_studio3d_engine::extract::AuxiliaryLayer {
+                    id: layer["id"].as_str().ok_or("Extrusion has no ID")?.into(),
+                    include_void: false,
+                });
             }
         }
         Ok(layers)
@@ -460,9 +539,15 @@ impl SceneSource for DocumentSource {
             extra_lights: vec![],
             layers: None,
         };
-        let mut failures=vec![];
+        let mut failures = vec![];
         let mut instances = vec![];
-        environment::apply(&r, &mut scene, &request.composition, &mut failures, &|source| self.environment_image(source))?;
+        environment::apply(
+            &r,
+            &mut scene,
+            &request.composition,
+            &mut failures,
+            &|source| self.environment_image(source),
+        )?;
         let mut materials: Vec<GpuMaterial> = vec![];
         let mut map_layers = vec![];
         let mut map_indices = HashMap::new();
@@ -471,293 +556,329 @@ impl SceneSource for DocumentSource {
             .ok_or("Studio scene has no objects")?
         {
             let id = object["id"].as_str().ok_or("Studio object has no ID")?;
-            let checkpoint=(instances.len(), materials.len(), scene.materials.len(), map_layers.len());
-            let contribution=(|| -> Result<(),String> {
-            if object.get("world").is_some() || object.get("fog").is_some() {
-                return Ok(());
-            }
-            if object.get("scatter").is_some() {
-                return Ok(());
-            }
-            if object
-                .get("parts")
-                .and_then(Value::as_object)
-                .is_some_and(|p| !p.is_empty())
-            {
-                return Err("Studio part-offset document adapter is not connected yet".into());
-            }
-
-            if !object["slots"].as_array().is_none_or(Vec::is_empty)
-                || object["material"]
-                    .get("screen")
-                    .is_some_and(|v| !v.is_null())
-            {
-                return Err("Studio material slots/screens require resolved layer capture".into());
-            }
-            let p = &object["material"]["p"];
-            let m = Material {
-                metallic: n(p, "metalness", 0.1),
-                coat: n(p, "clearcoat", 0.),
-                coat_roughness: n(p, "clearcoatRoughness", 0.03),
-                transmission: n(p, "transmission", 0.),
-                ior: n(p, "ior", 1.5),
-                specular: n(p, "specular", 1.),
-                emission: color(p, "emissive", "#000000") * n(p, "emissiveIntensity", 1.),
-                sheen: n(p, "sheen", 0.),
-                film_nm: n(p, "iridescence", 0.),
-                dispersion: n(p, "dispersion", 0.),
-                droplets: n(p, "droplets", 0.),
-                anisotropy: n(p, "anisotropy", 0.),
-                subsurface: n(p, "subsurface", 0.),
-                ..Material::dielectric(color(p, "color", "#C7C4FF"), n(p, "roughness", 0.4))
-            };
-            let world = *r
-                .model_worlds
-                .get(id)
-                .ok_or("Studio object has no evaluated world transform")?;
-            if object.get("terrain").is_some() || object["source"].get("nature").is_some() {
-                let (mesh, palette) = if object.get("terrain").is_some() {
-                    self.terrain_mesh(object, m, &scene.camera)?
-                } else {
-                    self.nature_mesh(&object["source"], 0)?
-                };
-                let first = materials.len();
-                let indices = Arc::new((first..first + palette.len()).collect());
-                for (slot, mut material) in palette.into_iter().enumerate() {
-                    let mut gpu = material.gpu();
-                    gpu.extra[2] = n(p, "opacity", 1.);
-                    self.bind_material_maps(
-                        &object["material"],
-                        &mut gpu,
-                        &mut map_layers,
-                        &mut map_indices,
-                    )?;
-                    if object.get("terrain").is_none() || slot == 0 {
-                        let emission = material.emission;
-                        intrinsic::apply(
-                            object,
-                            None,
-                            &mut material,
-                            &mut gpu,
-                            emission,
-                            1.,
-                            false,
-                        );
-                    }
-                    materials.push(gpu);
-                    scene.materials.push(material);
-                }
-                instances.push(MeshInstance {
-                    layer: id.into(),
-                    mesh,
-                    material: first,
-                    material_palette: Some(indices),
-                    attributes: None,
-                    primary_visible: true,
-                    world: Transform(world.map(|v| v as f32)),
-                });
-            } else if let Some(asset) = object["source"]["assetId"].as_str() {
-                let resource = self.resource(asset)?;
-                if let pm_scene3d::import::Model::Splats(data)=&resource.model {
-                    data.normalization().map_err(|e|e.to_string())?;
+            let checkpoint = (
+                instances.len(),
+                materials.len(),
+                scene.materials.len(),
+                map_layers.len(),
+            );
+            let contribution = (|| -> Result<(), String> {
+                if object.get("world").is_some() || object.get("fog").is_some() {
                     return Ok(());
                 }
-                for part in resource
-                    .parts(request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64)
-                    .map_err(|e| e.to_string())?
+                if object.get("scatter").is_some() {
+                    return Ok(());
+                }
+                if object
+                    .get("parts")
+                    .and_then(Value::as_object)
+                    .is_some_and(|p| !p.is_empty())
                 {
-                    let source_material = (object["useSourceMaterials"] == true)
-                        .then_some(part.material.as_ref())
-                        .flatten();
-                    let mut selected = source_material.map_or(m, imported_material);
-                    let mut gpu = selected.gpu();
-                    gpu.extra[2] =
-                        source_material.map_or(n(p, "opacity", 1.), |m| m.opacity as f32);
-                    if let Some(material) = source_material {
-                        imported::pack(material, &mut gpu, |texture_index| {
-                            let pm_scene3d::import::Model::Gltf(model) = &resource.model else {
-                                return Err("Imported maps require a glTF resource".into());
-                            };
-                            let texture = model
-                                .textures
-                                .get(texture_index)
-                                .ok_or("Imported map texture is missing")?;
-                            // One image layer; each physical slot keeps its own sampler.
-                            let key = (resource.key.clone(), texture.image);
-                            let index = if let Some(index) = map_indices.get(&key) {
-                                *index
-                            } else {
-                                if map_layers.len() >= 256 {
-                                    return Err("Studio map array exceeds 256 layers".into());
-                                }
-                                let pixels = imported::image(&resource, texture_index)?;
-                                let index = map_layers.len();
-                                map_layers.push((*pixels).clone());
-                                map_indices.insert(key, index);
-                                index
-                            };
-                            Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
-                        })?;
+                    return Err("Studio part-offset document adapter is not connected yet".into());
+                }
+
+                if !object["slots"].as_array().is_none_or(Vec::is_empty) {
+                    return Err("Studio material slots require their native slot adapter".into());
+                }
+                let p = &object["material"]["p"];
+                let m = Material {
+                    metallic: n(p, "metalness", 0.1),
+                    coat: n(p, "clearcoat", 0.),
+                    coat_roughness: n(p, "clearcoatRoughness", 0.03),
+                    transmission: n(p, "transmission", 0.),
+                    ior: n(p, "ior", 1.5),
+                    specular: n(p, "specular", 1.),
+                    emission: color(p, "emissive", "#000000") * n(p, "emissiveIntensity", 1.),
+                    sheen: n(p, "sheen", 0.),
+                    film_nm: n(p, "iridescence", 0.),
+                    dispersion: n(p, "dispersion", 0.),
+                    droplets: n(p, "droplets", 0.),
+                    anisotropy: n(p, "anisotropy", 0.),
+                    subsurface: n(p, "subsurface", 0.),
+                    ..Material::dielectric(color(p, "color", "#C7C4FF"), n(p, "roughness", 0.4))
+                };
+                let world = *r
+                    .model_worlds
+                    .get(id)
+                    .ok_or("Studio object has no evaluated world transform")?;
+                if object.get("terrain").is_some() || object["source"].get("nature").is_some() {
+                    let (mesh, palette) = if object.get("terrain").is_some() {
+                        self.terrain_mesh(object, m, &scene.camera)?
                     } else {
-                        if object["material"]["doubleSided"] == false {
-                            gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
-                        }
-                    }
-                    let basic = source_material
-                        .is_some_and(|m| m.kind == pm_scene3d::render::gltf::MaterialType::Basic);
-                    let index = if source_material.is_some() {
-                        part.source_material
-                    } else {
-                        Some(0)
+                        self.nature_mesh(&object["source"], 0)?
                     };
-                    let overrides = maps::overrides(object, index, basic);
-                    self.bind_material_maps(
-                        &overrides,
-                        &mut gpu,
-                        &mut map_layers,
-                        &mut map_indices,
-                    )?;
-                    let mut emission_color = source_material.map_or_else(
-                        || color(p, "emissive", "#000000"),
-                        |m| {
-                            v3(
-                                m.emissive[0] as f32,
-                                m.emissive[1] as f32,
-                                m.emissive[2] as f32,
-                            )
-                        },
-                    );
-                    let mut emission_intensity = source_material
-                        .map_or(n(p, "emissiveIntensity", 1.), |m| {
-                            m.emissive_intensity as f32
-                        });
-                    if source_material.is_some() {
-                        if overrides["maps"].get("color").is_some() {
-                            selected.base = Vec3::splat(1.);
-                            gpu.base[..3].fill(1.);
+                    let first = materials.len();
+                    let indices = Arc::new((first..first + palette.len()).collect());
+                    for (slot, mut material) in palette.into_iter().enumerate() {
+                        let mut gpu = material.gpu();
+                        gpu.extra[2] = n(p, "opacity", 1.);
+                        self.bind_material_maps(
+                            request,
+                            id,
+                            &maps::overrides(object, Some(0), false),
+                            &mut gpu,
+                            &mut map_layers,
+                            &mut map_indices,
+                        )?;
+                        if object.get("terrain").is_none() || slot == 0 {
+                            let emission = material.emission;
+                            intrinsic::apply(
+                                object,
+                                None,
+                                &mut material,
+                                &mut gpu,
+                                emission,
+                                1.,
+                                false,
+                            );
                         }
-                        if overrides["maps"].get("emissive").is_some() {
-                            emission_color = Vec3::splat(1.);
-                            emission_intensity = emission_intensity.max(1.);
-                            selected.emission = emission_color * emission_intensity;
-                            gpu.emit[..3].fill(emission_intensity);
-                        }
+                        maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                        materials.push(gpu);
+                        scene.materials.push(material);
                     }
-                    intrinsic::apply(
-                        object,
-                        index,
-                        &mut selected,
-                        &mut gpu,
-                        emission_color,
-                        emission_intensity,
-                        basic,
-                    );
-                    scene.materials.push(selected);
-                    materials.push(gpu);
-                    let mesh = self.cached_mesh(
-                        format!("asset:{}", pm_scene3d::render::geometry_key(&part.geometry)),
-                        || Ok(convert_mesh(&part.geometry)),
-                    )?;
                     instances.push(MeshInstance {
                         layer: id.into(),
                         mesh,
+                        material: first,
+                        material_palette: Some(indices),
+                        attributes: None,
+                        primary_visible: true,
+                        world: Transform(world.map(|v| v as f32)),
+                    });
+                } else if let Some(asset) = object["source"]["assetId"].as_str() {
+                    let resource = self.resource(asset)?;
+                    if let pm_scene3d::import::Model::Splats(data) = &resource.model {
+                        data.normalization().map_err(|e| e.to_string())?;
+                        return Ok(());
+                    }
+                    for part in resource
+                        .parts(request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64)
+                        .map_err(|e| e.to_string())?
+                    {
+                        let source_material = (object["useSourceMaterials"] == true)
+                            .then_some(part.material.as_ref())
+                            .flatten();
+                        let mut selected = source_material.map_or(m, imported_material);
+                        let mut gpu = selected.gpu();
+                        gpu.extra[2] =
+                            source_material.map_or(n(p, "opacity", 1.), |m| m.opacity as f32);
+                        if let Some(material) = source_material {
+                            imported::pack(material, &mut gpu, |texture_index| {
+                                let pm_scene3d::import::Model::Gltf(model) = &resource.model else {
+                                    return Err("Imported maps require a glTF resource".into());
+                                };
+                                let texture = model
+                                    .textures
+                                    .get(texture_index)
+                                    .ok_or("Imported map texture is missing")?;
+                                // One image layer; each physical slot keeps its own sampler.
+                                let key = (resource.key.clone(), texture.image);
+                                let index = if let Some(index) = map_indices.get(&key) {
+                                    *index
+                                } else {
+                                    if map_layers.len() >= 256 {
+                                        return Err("Studio map array exceeds 256 layers".into());
+                                    }
+                                    let pixels = imported::image(&resource, texture_index)?;
+                                    let index = map_layers.len();
+                                    map_layers.push((*pixels).clone());
+                                    map_indices.insert(key, index);
+                                    index
+                                };
+                                Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
+                            })?;
+                        } else {
+                            if object["material"]["doubleSided"] == false {
+                                gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                            }
+                        }
+                        let basic = source_material.is_some_and(|m| {
+                            m.kind == pm_scene3d::render::gltf::MaterialType::Basic
+                        });
+                        let index = if source_material.is_some() {
+                            part.source_material
+                        } else {
+                            Some(0)
+                        };
+                        let overrides = maps::overrides(object, index, basic);
+                        self.bind_material_maps(
+                            request,
+                            id,
+                            &overrides,
+                            &mut gpu,
+                            &mut map_layers,
+                            &mut map_indices,
+                        )?;
+                        let mut emission_color = source_material.map_or_else(
+                            || color(p, "emissive", "#000000"),
+                            |m| {
+                                v3(
+                                    m.emissive[0] as f32,
+                                    m.emissive[1] as f32,
+                                    m.emissive[2] as f32,
+                                )
+                            },
+                        );
+                        let mut emission_intensity = source_material
+                            .map_or(n(p, "emissiveIntensity", 1.), |m| {
+                                m.emissive_intensity as f32
+                            });
+                        if source_material.is_some() {
+                            if overrides["maps"].get("color").is_some() {
+                                selected.base = Vec3::splat(1.);
+                                gpu.base[..3].fill(1.);
+                            }
+                            if overrides["maps"].get("emissive").is_some() {
+                                emission_color = Vec3::splat(1.);
+                                emission_intensity = emission_intensity.max(1.);
+                                selected.emission = emission_color * emission_intensity;
+                                gpu.emit[..3].fill(emission_intensity);
+                            }
+                        }
+                        intrinsic::apply(
+                            object,
+                            index,
+                            &mut selected,
+                            &mut gpu,
+                            emission_color,
+                            emission_intensity,
+                            basic,
+                        );
+                        maps::screen(object, index, &mut selected, &mut gpu, basic);
+                        scene.materials.push(selected);
+                        materials.push(gpu);
+                        let mesh = self.cached_mesh(
+                            format!("asset:{}", pm_scene3d::render::geometry_key(&part.geometry)),
+                            || Ok(convert_mesh(&part.geometry)),
+                        )?;
+                        instances.push(MeshInstance {
+                            layer: id.into(),
+                            mesh,
+                            material: materials.len() - 1,
+                            material_palette: None,
+                            attributes: {
+                                let flat_shading = source_material.is_some_and(|m| m.flat_shading);
+                                let attrs = &part.attributes;
+                                if attrs.colors.is_empty()
+                                    && attrs.secondary_uvs.is_empty()
+                                    && !flat_shading
+                                {
+                                    None
+                                } else {
+                                    let key = (
+                                        Arc::as_ptr(&attrs.colors) as usize,
+                                        Arc::as_ptr(&attrs.secondary_uvs) as usize,
+                                        flat_shading,
+                                    );
+                                    let mut cache = self
+                                        .vertex_attributes
+                                        .lock()
+                                        .map_err(|_| "Studio vertex cache poisoned")?;
+                                    Some(if let Some(attrs) = cache.get(&key) {
+                                        attrs.clone()
+                                    } else {
+                                        let attrs = pm_studio3d_engine::extract::VertexAttributes {
+                                            colors: attrs.colors.clone(),
+                                            secondary_uvs: attrs.secondary_uvs.clone(),
+                                            flat_shading,
+                                        }
+                                        .shared()?;
+                                        cache.insert(key, attrs.clone());
+                                        attrs
+                                    })
+                                }
+                            },
+                            primary_visible: true,
+                            world: Transform(
+                                pm_scene3d::render::gltf::math::multiply(&world, &part.world)
+                                    .map(|v| v as f32),
+                            ),
+                        });
+                    }
+                } else {
+                    let mut material = m;
+                    let mut gpu = material.gpu();
+                    gpu.extra[2] = n(p, "opacity", 1.);
+                    if object["material"]["doubleSided"] == false {
+                        gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
+                    }
+                    self.bind_material_maps(
+                        request,
+                        id,
+                        &maps::overrides(object, Some(0), false),
+                        &mut gpu,
+                        &mut map_layers,
+                        &mut map_indices,
+                    )?;
+                    intrinsic::apply(
+                        object,
+                        Some(0),
+                        &mut material,
+                        &mut gpu,
+                        color(p, "emissive", "#000000"),
+                        n(p, "emissiveIntensity", 1.),
+                        false,
+                    );
+                    maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                    scene.materials.push(material);
+                    materials.push(gpu);
+                    instances.push(MeshInstance {
+                        layer: id.into(),
+                        mesh: self.mesh(&object["source"])?,
                         material: materials.len() - 1,
                         material_palette: None,
-                        attributes: {
-                            let flat_shading = source_material.is_some_and(|m| m.flat_shading);
-                            let attrs = &part.attributes;
-                            if attrs.colors.is_empty()
-                                && attrs.secondary_uvs.is_empty()
-                                && !flat_shading
-                            {
-                                None
-                            } else {
-                                let key = (
-                                    Arc::as_ptr(&attrs.colors) as usize,
-                                    Arc::as_ptr(&attrs.secondary_uvs) as usize,
-                                    flat_shading,
-                                );
-                                let mut cache = self
-                                    .vertex_attributes
-                                    .lock()
-                                    .map_err(|_| "Studio vertex cache poisoned")?;
-                                Some(if let Some(attrs) = cache.get(&key) {
-                                    attrs.clone()
-                                } else {
-                                    let attrs = pm_studio3d_engine::extract::VertexAttributes {
-                                        colors: attrs.colors.clone(),
-                                        secondary_uvs: attrs.secondary_uvs.clone(),
-                                        flat_shading,
-                                    }
-                                    .shared()?;
-                                    cache.insert(key, attrs.clone());
-                                    attrs
-                                })
-                            }
-                        },
+                        attributes: None,
                         primary_visible: true,
-                        world: Transform(
-                            pm_scene3d::render::gltf::math::multiply(&world, &part.world)
-                                .map(|v| v as f32),
-                        ),
+                        world: Transform(world.map(|v| v as f32)),
                     });
                 }
-            } else {
-                let mut material = m;
-                let mut gpu = material.gpu();
-                gpu.extra[2] = n(p, "opacity", 1.);
-                if object["material"]["doubleSided"] == false {
-                    gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
-                }
-                self.bind_material_maps(
-                    &maps::overrides(object, Some(0), false),
-                    &mut gpu,
-                    &mut map_layers,
-                    &mut map_indices,
-                )?;
-                intrinsic::apply(
-                    object,
-                    Some(0),
-                    &mut material,
-                    &mut gpu,
-                    color(p, "emissive", "#000000"),
-                    n(p, "emissiveIntensity", 1.),
-                    false,
-                );
-                scene.materials.push(material);
-                materials.push(gpu);
-                instances.push(MeshInstance {
-                    layer: id.into(),
-                    mesh: self.mesh(&object["source"])?,
-                    material: materials.len() - 1,
-                    material_palette: None,
-                    attributes: None,
-                    primary_visible: true,
-                    world: Transform(world.map(|v| v as f32)),
-                });
-            }
 
-                for material in &materials[checkpoint.1..] {material.validate()?;}
+                for material in &materials[checkpoint.1..] {
+                    material.validate()?;
+                }
                 for instance in &instances[checkpoint.0..] {
                     instance.world.validate()?;
-                    if instance.attributes.as_ref().is_some_and(|a|(!a.colors.is_empty() && a.colors.len()!=instance.mesh.positions.len()) || (!a.secondary_uvs.is_empty() && a.secondary_uvs.len()!=instance.mesh.positions.len())) {
+                    if instance.attributes.as_ref().is_some_and(|a| {
+                        (!a.colors.is_empty() && a.colors.len() != instance.mesh.positions.len())
+                            || (!a.secondary_uvs.is_empty()
+                                && a.secondary_uvs.len() != instance.mesh.positions.len())
+                    }) {
                         return Err("Invalid Studio imported vertex attributes".into());
                     }
                 }
                 Ok(())
             })();
-            if let Err(message)=contribution {
+            if let Err(message) = contribution {
                 instances.truncate(checkpoint.0);
                 materials.truncate(checkpoint.1);
                 scene.materials.truncate(checkpoint.2);
                 map_layers.truncate(checkpoint.3);
-                map_indices.retain(|_,index|*index<checkpoint.3);
-                failures.push(pm_render::LayerFailure {composition:request.composition.clone(),layer:id.into(),message});
+                map_indices.retain(|_, index| *index < checkpoint.3);
+                failures.push(pm_render::LayerFailure {
+                    composition: request.composition.clone(),
+                    layer: id.into(),
+                    message,
+                });
             }
         }
-        scatter::apply(self, &r, &scene, &mut instances, &request.composition, &mut failures)?;
+        scatter::apply(
+            self,
+            &r,
+            &scene,
+            &mut instances,
+            &request.composition,
+            &mut failures,
+        )?;
         material_policy::apply(&r, &mut instances, &mut scene, &mut materials)?;
-        self.add_extrusions(request,&mut scene,&mut instances,&mut materials,&mut map_layers,&mut map_indices,&mut failures)?;
+        self.add_extrusions(
+            request,
+            &mut scene,
+            &mut instances,
+            &mut materials,
+            &mut map_layers,
+            &mut map_indices,
+            &mut failures,
+        )?;
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for instance in &instances {
             let (a, z) = instance.mesh.bounds();
@@ -786,69 +907,82 @@ impl SceneSource for DocumentSource {
             if val(&p["visible"]) == false {
                 continue;
             }
-            let id=light["id"].as_str().ok_or("Light has no ID")?;
-            let checkpoint=(scene.lights.len(),scene.extra_lights.len(),ambient);
-            let result=(|| -> Result<(),String> {
             let id = light["id"].as_str().ok_or("Light has no ID")?;
-            let at = r
-                .light_worlds
-                .get(id)
-                .map_or_else(|| xyz(p), |m| v3(m[12] as f32, m[13] as f32, m[14] as f32));
-            let aim = r.targets.get(id).map_or_else(
-                || point(p, "target"),
-                |p| v3(p[0] as f32, p[1] as f32, p[2] as f32),
-            );
-            let radiance = color(p, "color", "#FFFFFF") * n(p, "intensity", 3.);
-            let direction = (aim - at).normalize();
-            match light["type"].as_str().unwrap_or("sun") {
-                "area" => {
-                    let side = if direction.cross(Vec3::Y).length() < 0.001 {
-                        v3(1., 0., 0.)
-                    } else {
-                        direction.cross(Vec3::Y).normalize()
-                    };
-                    scene.lights.push(Softbox {
-                        center: at,
-                        u: side * (n(p, "width", 2.) / 2.),
-                        v: direction.cross(side) * (n(p, "height", 1.2) / 2.),
-                        radiance,
-                    });
+            let checkpoint = (scene.lights.len(), scene.extra_lights.len(), ambient);
+            let result = (|| -> Result<(), String> {
+                let id = light["id"].as_str().ok_or("Light has no ID")?;
+                let at = r
+                    .light_worlds
+                    .get(id)
+                    .map_or_else(|| xyz(p), |m| v3(m[12] as f32, m[13] as f32, m[14] as f32));
+                let aim = r.targets.get(id).map_or_else(
+                    || point(p, "target"),
+                    |p| v3(p[0] as f32, p[1] as f32, p[2] as f32),
+                );
+                let radiance = color(p, "color", "#FFFFFF") * n(p, "intensity", 3.);
+                let direction = (aim - at).normalize();
+                match light["type"].as_str().unwrap_or("sun") {
+                    "area" => {
+                        let side = if direction.cross(Vec3::Y).length() < 0.001 {
+                            v3(1., 0., 0.)
+                        } else {
+                            direction.cross(Vec3::Y).normalize()
+                        };
+                        scene.lights.push(Softbox {
+                            center: at,
+                            u: side * (n(p, "width", 2.) / 2.),
+                            v: direction.cross(side) * (n(p, "height", 1.2) / 2.),
+                            radiance,
+                        });
+                    }
+                    "sun" | "parallel" => scene.extra_lights.push(GpuLight::sun(
+                        -direction,
+                        1.5_f32.to_radians(),
+                        radiance
+                            * (1.
+                                / (2. * std::f32::consts::PI * (1. - 1.5_f32.to_radians().cos()))),
+                    )),
+                    "point" => scene.extra_lights.push(GpuLight::sphere(
+                        at,
+                        radius,
+                        radiance * (1. / (std::f32::consts::PI * radius * radius)),
+                    )),
+                    "spot" => scene.extra_lights.push(GpuLight::spot(
+                        at,
+                        radius,
+                        direction,
+                        n(p, "angle", 45.).to_radians().cos(),
+                        (n(p, "angle", 45.) * (1. - n(p, "penumbra", 0.4)))
+                            .to_radians()
+                            .cos(),
+                        radiance * (1. / (std::f32::consts::PI * radius * radius)),
+                    )),
+                    "ambient" => {
+                        ambient = ambient + radiance;
+                    }
+                    "environment" => {}
+                    _ => return Err("Unsupported Studio light".into()),
                 }
-                "sun" | "parallel" => scene.extra_lights.push(GpuLight::sun(
-                    -direction,
-                    1.5_f32.to_radians(),
-                    radiance
-                        * (1. / (2. * std::f32::consts::PI * (1. - 1.5_f32.to_radians().cos()))),
-                )),
-                "point" => scene.extra_lights.push(GpuLight::sphere(
-                    at,
-                    radius,
-                    radiance * (1. / (std::f32::consts::PI * radius * radius)),
-                )),
-                "spot" => scene.extra_lights.push(GpuLight::spot(
-                    at,
-                    radius,
-                    direction,
-                    n(p, "angle", 45.).to_radians().cos(),
-                    (n(p, "angle", 45.) * (1. - n(p, "penumbra", 0.4)))
-                        .to_radians()
-                        .cos(),
-                    radiance * (1. / (std::f32::consts::PI * radius * radius)),
-                )),
-                "ambient" => {
-                    ambient = ambient + radiance;
+                for light in &scene.lights[checkpoint.0..] {
+                    light.validate()?;
                 }
-                "environment" => {}
-                _ => return Err("Unsupported Studio light".into()),
-            }
-                for light in &scene.lights[checkpoint.0..] {light.validate()?;}
-                for light in &scene.extra_lights[checkpoint.1..] {light.validate()?;}
-                if ambient.to_array().iter().any(|v|!v.is_finite() || *v<0.) {return Err("Invalid ambient light".into());}
+                for light in &scene.extra_lights[checkpoint.1..] {
+                    light.validate()?;
+                }
+                if ambient.to_array().iter().any(|v| !v.is_finite() || *v < 0.) {
+                    return Err("Invalid ambient light".into());
+                }
                 Ok(())
             })();
-            if let Err(message)=result {
-                scene.lights.truncate(checkpoint.0);scene.extra_lights.truncate(checkpoint.1);ambient=checkpoint.2;
-                failures.push(pm_render::LayerFailure {composition:request.composition.clone(),layer:id.into(),message});
+            if let Err(message) = result {
+                scene.lights.truncate(checkpoint.0);
+                scene.extra_lights.truncate(checkpoint.1);
+                ambient = checkpoint.2;
+                failures.push(pm_render::LayerFailure {
+                    composition: request.composition.clone(),
+                    layer: id.into(),
+                    message,
+                });
             }
         }
         let basis = r.camera_up.map(|up| {
@@ -863,7 +997,10 @@ impl SceneSource for DocumentSource {
         } else {
             0.
         };
-        *self.failures.lock().map_err(|_|"Studio failure cache poisoned")?=Some((request.clone(),failures));
+        *self
+            .failures
+            .lock()
+            .map_err(|_| "Studio failure cache poisoned")? = Some((request.clone(), failures));
         Ok(SceneInput {
             scene,
             instances,

@@ -9,6 +9,17 @@ pub use pm_render::scene3d::provider::{Counters, Settings};
 use std::sync::Arc;
 
 pub trait Source: SceneSource {
+    fn needs_materials(&self, _request: &SceneRequest) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn prepare_materials(
+        &self,
+        _renderer: &mut pm_render::Renderer,
+        _request: &SceneRequest,
+        _tier: Tier,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
     /// Authored camera/environment quality; immutable for this request.
     fn final_samples(&self, request: &SceneRequest) -> Result<u32, String>;
     fn splat_layers(&self, _request: &SceneRequest) -> Result<Vec<crate::splats::Layer>, String> {
@@ -23,6 +34,7 @@ struct Pass {
     splats: Option<crate::splats::Rasterizer>,
     splat_cache: Option<(SceneRequest, Vec<crate::splats::Layer>)>,
     failures: Vec<pm_render::LayerFailure>,
+    capture: Option<pm_render::Renderer>,
 }
 impl Pass {
     pub fn new(source: Arc<dyn Source>) -> Self {
@@ -34,6 +46,7 @@ impl Pass {
             splats: None,
             splat_cache: None,
             failures: vec![],
+            capture: None,
         }
     }
     pub fn replace_source(&mut self, source: Arc<dyn Source>) {
@@ -67,6 +80,35 @@ impl Pass {
             blas_builds: self.service.as_ref().map_or(0, StudioService::blas_builds),
         }
     }
+    fn prepare_materials(&mut self, request: &SceneRequest, tier: Tier) -> Result<(), String> {
+        if !self.source.needs_materials(request)? {
+            self.capture = None;
+            return Ok(());
+        }
+        let service = self
+            .service
+            .as_ref()
+            .ok_or("Studio service is not attached")?;
+        let capture = self.capture.get_or_insert_with(|| {
+            pm_render::Renderer::new(
+                service.device().unwrap().clone(),
+                service.queue().unwrap().clone(),
+            )
+        });
+        capture.set_studio_source(
+            Some(Arc::new(Adapter(self.source.clone()))),
+            Settings {
+                revision: request.revision,
+                preview: tier,
+                ..Default::default()
+            },
+        );
+        if self.source.prepare_materials(capture, request, tier)? {
+            self.cached = None;
+            self.splat_cache = None;
+        }
+        Ok(())
+    }
     fn render_texture(
         &mut self,
         layer: &str,
@@ -74,6 +116,7 @@ impl Pass {
         tier: Tier,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<wgpu::Texture, String> {
+        self.prepare_materials(request, tier)?;
         let service = self.service.as_ref().unwrap();
         let device = service.device().unwrap();
         let queue = service.queue().unwrap();
@@ -93,7 +136,13 @@ impl Pass {
             .find(|s| s.id == layer)
         {
             for failure in self.source.layer_failures(request)? {
-                if !self.failures.iter().any(|f|f.composition==failure.composition && f.layer==failure.layer) {self.failures.push(failure);}
+                if !self
+                    .failures
+                    .iter()
+                    .any(|f| f.composition == failure.composition && f.layer == failure.layer)
+                {
+                    self.failures.push(failure);
+                }
             }
             let color = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Studio splat compositor layer"),
@@ -130,9 +179,16 @@ impl Pass {
                 let service = self.service.as_ref().unwrap();
                 eprintln!(
                     "STUDIO_FRAME_TIMING ticks={} size={}x{} tier={tier:?} hardware_rt={} prepare_ms={:.3} total_ms={:.3} geometry_uploads={} texture_uploads={} scene_updates={} blas_builds={} pipeline={:?}",
-                    request.ticks, request.width, request.height, rendered.hardware_rt,
-                    rendered.timings.prepare_ms, rendered.timings.total_ms,
-                    service.geometry_uploads(), service.texture_uploads(), service.scene_updates(), service.blas_builds(),
+                    request.ticks,
+                    request.width,
+                    request.height,
+                    rendered.hardware_rt,
+                    rendered.timings.prepare_ms,
+                    rendered.timings.total_ms,
+                    service.geometry_uploads(),
+                    service.texture_uploads(),
+                    service.scene_updates(),
+                    service.blas_builds(),
                     rendered.timings.pipeline,
                 );
             }
@@ -141,9 +197,15 @@ impl Pass {
         }
         let scene = &self.cached.as_ref().unwrap().1;
         for failure in &scene.failures {
-            if !self.failures.iter().any(|f|f.composition==failure.composition && f.layer==failure.layer) {self.failures.push(failure.clone());}
+            if !self
+                .failures
+                .iter()
+                .any(|f| f.composition == failure.composition && f.layer == failure.layer)
+            {
+                self.failures.push(failure.clone());
+            }
         }
-        if let Some(failure)=scene.failures.iter().find(|f|f.layer==layer) {
+        if let Some(failure) = scene.failures.iter().find(|f| f.layer == layer) {
             return Err(failure.message.clone());
         }
         let texture = &scene
@@ -156,9 +218,21 @@ impl Pass {
     }
 }
 impl Backend for Pass {
-    fn layer_failures(&self) -> &[pm_render::LayerFailure] { &self.failures }
-    fn pick_surface(&mut self, request: &SceneRequest, tier: Tier, x:f32, y:f32) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
-        self.service.as_mut().ok_or("Studio service is not attached")?.pick_surface(self.source.as_ref(), request.clone(), tier, x,y)
+    fn layer_failures(&self) -> &[pm_render::LayerFailure] {
+        &self.failures
+    }
+    fn pick_surface(
+        &mut self,
+        request: &SceneRequest,
+        tier: Tier,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
+        self.prepare_materials(request, tier)?;
+        self.service
+            .as_mut()
+            .ok_or("Studio service is not attached")?
+            .pick_surface(self.source.as_ref(), request.clone(), tier, x, y)
     }
     fn update_source(&mut self, source: &dyn std::any::Any) -> bool {
         let Some(source) = source.downcast_ref::<Adapter>() else {

@@ -95,13 +95,13 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Angular/concave/convex bevels, inner hole bevel depth | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front/Bevel/Side/Back independent materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | PBR color/roughness/metalness/emission/opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Color/normal/roughness/metalness/emissive/AO image maps | Native retained-image and indexed replacement checks | Connected image sources; live capture pending | Tested sparse records | Tested | Tested | Read maps/source material IDs → `update_object` material.maps or sourceMaterials; live sources pending |
+| Color/normal/roughness/metalness/emissive/AO image maps | Native retained-image and indexed replacement checks | Image and bounded live source captures connected | Tested sparse records | Tested | Tested | Read maps/source material IDs → `update_object` material.maps or sourceMaterials; capture failures reported per layer |
 | Source materials versus whole-model overrides | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Material opacity/roughness/metallic/emission color/intensity/ambient response | Native sparse values, source IDs and rendered emission checked | Connected | Tested PMV | Tested Undo/Redo | Tested | `update_object` patch `materialProperties` / `sourceMaterialProperties`; `mi.*` / `mi.index.*` channel edits |
-| Live composition textures on named model materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Live layer material sources in same composition | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Layer material source timing, masks, effects; transform/opacity excluded | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material source missing/loading/relink/undo/save lifecycle | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Live composition textures on named model materials | Native composition capture; per-receiver clocks and sparse source-material bindings checked | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Live layer material sources in same composition | Native hidden layer/group captures checked; source canvas ignores root transform/opacity | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Layer material source timing, masks, effects; transform/opacity excluded | Native masks/effects owner space, descendant visibility and source clocks checked | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material source missing/loading/relink/undo/save lifecycle | Per-receiver errors, source/file invalidation and PMV/Undo checked; relink UI verification pending | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Sun/parallel, point and spot lights | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light distance/decay, spot angle/penumbra and visibility | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light cast-shadow toggle, model cast/receive-shadow toggles | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -123,14 +123,14 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Groups as Base Color or Emissive | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Cycles and local links | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Stable group source canvas | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Safe group capture | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Groups as Base Color or Emissive | Native bounded subtree capture with hidden root; masks/effects and stable canvas checked | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Cycles and local links | Native recursive source/precomp/matte/effect graph validation; per-receiver failure | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Stable group source canvas | Native duration/frame-grid/key-time union with bounded evaluation cache | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Safe group capture | Native nested-precomp 3D-descendant rejection checked | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Capture budgets | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Texture sharing/replacement | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Static capture reuse | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Static capture reuse | Source-only keys and receiver-specific clocks checked across immutable adapters | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Evaluated bounds and bounds null | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Comp navigation clocks | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Imported paint alpha | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
@@ -1195,3 +1195,56 @@ The full **37 native scene/export tests pass in 40.76 s**, including shape
 fill/stroke extrusion, empty text, per-layer isolation, picking and existing
 material/environment/import regressions. The final native app build passes in
 **31.29 s**. Evidence stays outside Git in the lane's extrusion test/build logs.
+
+### UI dependency 4 — native layer/group/composition material captures
+
+The typed Studio compositor source now prepares texture dependencies before
+rendering or surface picking. Its retained capture renderer shares the viewer's
+wgpu device and ordinary native compositor; the app needs no Electron host.
+`material.maps.color` / `.emissive`, indexed `sourceMaterials`, and extrusion
+surface maps accept `{layerId}` (local artwork/group) or `{compositionId}`.
+`material.screen` emits its composition with white gain and the saved emission
+intensity. Existing `update_object` and `set_surface_material_map` commands own
+these saved records and their ordinary kernel Undo/Redo. No UI was added.
+
+Layer capture excludes the source root's transform and opacity, draws a hidden
+root, and preserves descendant visibility, timing, transforms, opacity, masks,
+effects and nested compositions. Groups use one source-local canvas unioned over
+the group's duration, frame grid and property keys. Empty groups stay transparent.
+Missing sources, 3D descendants (also in nested precomps), receiver feedback,
+matte/effect dependency cycles and excessive nesting become per-receiver errors.
+They do not blank healthy 3D layers. Sources are read without editing the document.
+
+Composition maps sample the receiver's source clock, floor to the source frame
+grid and clamp to its duration. Local layer/group maps use composition time.
+The cache fingerprints supplying graphs, dependency clocks, asset/file versions,
+fonts, effect definitions and color settings. Static pixels survive playback and
+receiver-only edits; entrances/exits and source edits invalidate them. Matching
+source images share texture-array storage, including color/emissive reuse. The
+existing eighteen-slot imported-map replacement retains UV/sampling metadata.
+
+Capture admission rejects more than 4,194,304 pixels before allocation. Retained
+pixels are LRU bounded to 128 MiB; the generic capture API accepts a zero cache
+budget and participates in renderer trimming. Native maps currently request
+1024²: camera/UV-driven resolution buckets and wiring the app-wide preview cache
+allowance remain follow-up work. Animated capture currently reads straight RGBA
+back to the CPU before the Studio array upload; static capture avoids this after
+the first frame. GPU-direct material capture needs performance measurement.
+Sparse named/source-material overrides work; the separate authored `slots` array
+still needs its native adapter. These limits do not establish full material
+performance/close-up parity with the Electron reference.
+
+UI reads the saved source address and `ViewerStatus.layer_failures`; commands
+remain `update_object` (maps, screen or indexed `sourceMaterials`) and
+`set_surface_material_map` for Front/Bevel/Side/Back. A failed source can be
+replaced or cleared through those same commands. Screen choices can use this
+native capture path once the UI lane consumes this increment.
+
+Checks: **42 native Metal scene/export tests** pass in **10.75 s**, including
+five material-capture regressions. They cover hidden groups, stable duration
+canvas, mask/effect coordinates, child visibility, source-only reuse across
+adapters, receiver clocks, screen emission, nested 3D/cycle rejection, zero
+retention and oversized admission. **30 native kernel scene tests** pass in
+**0.27 s**, including material-source Undo/Redo and PMV reopening. The GPUI app
+build passes in **24.26 s**. These are functional checks, not new fps or export
+budget measurements.

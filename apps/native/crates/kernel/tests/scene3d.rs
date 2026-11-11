@@ -1014,3 +1014,14 @@ fn extrusion_surfaces_channels_undo_and_pmv_roundtrip() {
     assert!(layer(&reopened,"title")["d"]["extrusion"]["surfaces"]["back"]["properties"].get("roughness").is_none());
     reopened.undo().unwrap();assert_eq!(project(&reopened),authored);
 }
+
+#[test]
+fn live_material_source_records_undo_and_reopen_without_rewriting_sources() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"art","name":"Art","type":"group","on":false,"from":0,"dur":10,"p":{}},{"id":"paint","name":"Paint","type":"solid","group":"art","on":true,"from":0,"dur":10,"p":{},"d":{"w":32,"h":32,"color":"#FF0000"}}]})));
+    apply(&mut s,json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
+    let before=project(&s);let source=layer(&s,"art");
+    s.execute(command(json!({"operation":"update_object","target":"model","patch":{"material":{"screen":"screen","maps":{"color":{"layerId":"art"}}},"sourceMaterials":{"1":{"emissive":{"compositionId":"screen"}}}}})),Origin::Mcp).unwrap();
+    let saved=project(&s);assert_eq!(layer(&s,"art"),source);assert_eq!(layer(&s,"model")["d"]["data"]["object"]["material"]["maps"]["color"],json!({"layerId":"art"}));
+    s.undo().unwrap();assert_eq!(project(&s),before);s.redo().unwrap();assert_eq!(project(&s),saved);
+    let mut dir=common::TempDir::new("live-material");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("material.pmv");common::save_as(&mut s,&path).unwrap();let mut opened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());assert_eq!(project(&opened),saved);opened.undo().unwrap();assert_eq!(project(&opened),before);opened.redo().unwrap();assert_eq!(project(&opened),saved);
+}

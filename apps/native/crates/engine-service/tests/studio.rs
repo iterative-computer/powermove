@@ -65,123 +65,273 @@ fn request() -> RenderRequest {
 }
 #[test]
 fn viewer_surface_query_returns_layer_point_normal_and_rejects_stale_frames() {
-    use pm_engine_service::{EngineService, ViewerConfig, Output, SurfaceQueryKind};
-    let project=document(false,100.).to_value().unwrap();
-    let snapshot=pm_kernel::DocumentStore::new_untitled(project).snapshot();
-    let service=EngineService::start(pm_gpu::Gpu::new("viewer surface query").unwrap()).unwrap();
-    let viewer=service.viewer(ViewerConfig {
-        snapshot, composition:"test".into(), media:Default::default(),
-        output:Output {width:64,height:64,display:1,headroom:1.,crop:None},
-        layer:None, rate:pm_time::Rate::FPS_30, end:None, audio:false,
-    }).unwrap();
-    let stamp=viewer.stamp().unwrap();
-    let receive=viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).unwrap();
-    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(20);
-    let reply=loop {
+    use pm_engine_service::{EngineService, Output, SurfaceQueryKind, ViewerConfig};
+    let project = document(false, 100.).to_value().unwrap();
+    let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("viewer surface query").unwrap()).unwrap();
+    let viewer = service
+        .viewer(ViewerConfig {
+            snapshot,
+            composition: "test".into(),
+            media: Default::default(),
+            output: Output {
+                width: 64,
+                height: 64,
+                display: 1,
+                headroom: 1.,
+                crop: None,
+            },
+            layer: None,
+            rate: pm_time::Rate::FPS_30,
+            end: None,
+            audio: false,
+        })
+        .unwrap();
+    let stamp = viewer.stamp().unwrap();
+    let receive = viewer
+        .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let reply = loop {
         match receive.try_recv() {
-            Ok(reply)=>break reply.unwrap(),
-            Err(async_channel::TryRecvError::Empty)=>{
-                assert!(std::time::Instant::now()<deadline,"surface query did not settle");
+            Ok(reply) => break reply.unwrap(),
+            Err(async_channel::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "surface query did not settle"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            Err(e)=>panic!("surface query closed: {e}"),
+            Err(e) => panic!("surface query closed: {e}"),
         }
     };
-    assert_eq!(reply.stamp,stamp);
-    assert_eq!(reply.time,Ticks::ZERO);
-    let hit=reply.hit.unwrap();
-    assert_eq!(hit.layer,"mirror");
-    assert!(hit.point[0].abs()<0.01 && hit.point[1].abs()<0.01 && hit.point[2]>0.9);
-    assert!(hit.normal[2]>0.9);
+    assert_eq!(reply.stamp, stamp);
+    assert_eq!(reply.time, Ticks::ZERO);
+    let hit = reply.hit.unwrap();
+    assert_eq!(hit.layer, "mirror");
+    assert!(hit.point[0].abs() < 0.01 && hit.point[1].abs() < 0.01 && hit.point[2] > 0.9);
+    assert!(hit.normal[2] > 0.9);
     viewer.quality(pm_engine_service::Quality::Half).unwrap();
-    assert!(viewer.pick_surface(stamp,Ticks::ZERO,[0.5,0.5],SurfaceQueryKind::Click).is_err());
-    assert!(viewer.pick_surface(viewer.stamp().unwrap(),Ticks::ZERO,[f32::NAN,0.5],SurfaceQueryKind::Hover).is_err());
+    assert!(
+        viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+            .is_err()
+    );
+    assert!(
+        viewer
+            .pick_surface(
+                viewer.stamp().unwrap(),
+                Ticks::ZERO,
+                [f32::NAN, 0.5],
+                SurfaceQueryKind::Hover
+            )
+            .is_err()
+    );
 }
 fn isolation_project() -> Value {
-    let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
-    let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
-    let good=layers.iter_mut().find(|l|l["id"]=="mirror").unwrap();
-    good["d"]["data"]["object"]["material"]["p"]["metalness"]=json!(0);
-    good["d"]["data"]["object"]["material"]["p"]["color"]=json!("#000000");
-    good["d"]["data"]["object"]["material"]["p"]["emissive"]=json!("#00FF00");
-    good["d"]["data"]["object"]["material"]["p"]["emissiveIntensity"]=json!(1);
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let good = layers.iter_mut().find(|l| l["id"] == "mirror").unwrap();
+    good["d"]["data"]["object"]["material"]["p"]["metalness"] = json!(0);
+    good["d"]["data"]["object"]["material"]["p"]["color"] = json!("#000000");
+    good["d"]["data"]["object"]["material"]["p"]["emissive"] = json!("#00FF00");
+    good["d"]["data"]["object"]["material"]["p"]["emissiveIntensity"] = json!(1);
     project
 }
 #[test]
 fn a_broken_model_does_not_blank_its_healthy_sibling() {
-    let mut project=isolation_project();
-    let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
-    let good=layers.iter().find(|l|l["id"]=="mirror").unwrap();
-    let mut broken=good.clone();broken["id"]=json!("broken");
-    broken["d"]["data"]["object"]["source"]=json!({"assetId":"missing-model"});
+    let mut project = isolation_project();
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let good = layers.iter().find(|l| l["id"] == "mirror").unwrap();
+    let mut broken = good.clone();
+    broken["id"] = json!("broken");
+    broken["d"]["data"]["object"]["source"] = json!({"assetId":"missing-model"});
     layers.push(broken);
-    let doc=Arc::new(pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document.as_ref().clone());
-    let gpu=pm_gpu::Gpu::new("isolated Studio failure").unwrap();
-    let mut renderer=Renderer::new(gpu.device,gpu.queue);
-    studio::attach(&mut renderer,doc.clone(),&Default::default());
-    let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
-    assert_eq!(frame.failures.len(),1,"{:?}",frame.failures);
-    assert_eq!(frame.failures[0].layer,"broken");
+    let doc = Arc::new(
+        pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document
+        .as_ref()
+        .clone(),
+    );
+    let gpu = pm_gpu::Gpu::new("isolated Studio failure").unwrap();
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    studio::attach(&mut renderer, doc.clone(), &Default::default());
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert_eq!(frame.failures.len(), 1, "{:?}", frame.failures);
+    assert_eq!(frame.failures[0].layer, "broken");
     assert!(frame.failures[0].message.contains("geometry is not loaded"));
-    let pixels=renderer.read_rgba(&frame).unwrap();
-    assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[1]>p[0]*2. && p[3]>0.5).count()>40,"healthy green geometry must remain visible");
-    project["comps"]["test"]["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="broken");
-    let repaired=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
-    studio::attach(&mut renderer,repaired.clone(),&Default::default());
-    let frame=renderer.render(&repaired,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
-    assert!(frame.failures.is_empty(),"replacing a bad contribution must clear its failure: {:?}",frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[1] > 0.1 && p[1] > p[0] * 2. && p[3] > 0.5)
+            .count()
+            > 40,
+        "healthy green geometry must remain visible"
+    );
+    project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|l| l["id"] != "broken");
+    let repaired = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    studio::attach(&mut renderer, repaired.clone(), &Default::default());
+    let frame = renderer
+        .render(
+            &repaired,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(
+        frame.failures.is_empty(),
+        "replacing a bad contribution must clear its failure: {:?}",
+        frame.failures
+    );
 }
 #[test]
 fn failed_material_images_roll_back_their_atlas_and_keep_healthy_geometry() {
     use studio::SceneSource;
-    let dir=tempfile::tempdir().unwrap();
-    let path=dir.path().join("paint.png");
-    pm_studio3d_engine::gpu::write_png(&path,1,1,&[255,255,255,255]).unwrap();
-    let mut media=pm_export::render::MediaPaths::default();media.paths.insert("paint".into(),path);
-    for maps in [json!({"color":"paint","normal":"missing-image"}),json!({"color":{"layerId":"unready-source"}})] {
-        let mut project=isolation_project();
-        let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
-        let mut bad=layers.iter().find(|l|l["id"]=="mirror").unwrap().clone();bad["id"]=json!("bad-image");
-        bad["d"]["data"]["object"]["material"]["maps"]=maps;
-        layers.insert(0,bad);
-        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
-        let source=studio::DocumentSource::new(doc.clone(),media.clone());
-        let req=studio::SceneRequest {composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
-        let input=source.scene(&req).unwrap();
-        assert_eq!(input.instances.len(),1);
-        assert!(input.maps.is_none(),"failed image layers must not retain atlas slots");
-        assert_eq!(source.layer_failures(&req).unwrap()[0].layer,"bad-image");
-        let mut renderer=Renderer::headless().unwrap();studio::attach(&mut renderer,doc.clone(),&media);
-        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
-        assert_eq!(frame.failures.len(),1,"{:?}",frame.failures);
-        assert_eq!(frame.failures[0].layer,"bad-image");
-        let pixels=renderer.read_rgba(&frame).unwrap();
-        assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[3]>0.5).count()>40);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paint.png");
+    pm_studio3d_engine::gpu::write_png(&path, 1, 1, &[255, 255, 255, 255]).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("paint".into(), path);
+    for maps in [
+        json!({"color":"paint","normal":"missing-image"}),
+        json!({"color":{"layerId":"unready-source"}}),
+    ] {
+        let mut project = isolation_project();
+        let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+        let mut bad = layers.iter().find(|l| l["id"] == "mirror").unwrap().clone();
+        bad["id"] = json!("bad-image");
+        bad["d"]["data"]["object"]["material"]["maps"] = maps;
+        layers.insert(0, bad);
+        let doc = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document;
+        let source = studio::DocumentSource::new(doc.clone(), media.clone());
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        let input = source.scene(&req).unwrap();
+        assert_eq!(input.instances.len(), 1);
+        assert!(
+            input.maps.is_none(),
+            "failed image layers must not retain atlas slots"
+        );
+        assert_eq!(source.layer_failures(&req).unwrap()[0].layer, "bad-image");
+        let mut renderer = Renderer::headless().unwrap();
+        studio::attach(&mut renderer, doc.clone(), &media);
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert_eq!(frame.failures.len(), 1, "{:?}", frame.failures);
+        assert_eq!(frame.failures[0].layer, "bad-image");
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[1] > 0.1 && p[3] > 0.5)
+                .count()
+                > 40
+        );
     }
 }
 #[test]
 fn failed_world_and_scatter_dependencies_leave_the_rest_of_the_scene_visible() {
-    use pm_scene3d::{service::new_layer,schema::Role};
-    for scatter in [false,true] {
-        let mut project=isolation_project();
-        let comp=project["comps"]["test"].clone();
-        let data=if scatter {json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"broken","surface":"mirror","p":{"count":1}}}})}
-            else {json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"hdri","source":"missing-hdri"}}})};
-        let node=new_layer(&comp,"failed-node","Failed node",Role::Object,data,json!({}),true,None,0.).unwrap();
-        let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    use pm_scene3d::{schema::Role, service::new_layer};
+    for scatter in [false, true] {
+        let mut project = isolation_project();
+        let comp = project["comps"]["test"].clone();
+        let data = if scatter {
+            json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"broken","surface":"mirror","p":{"count":1}}}})
+        } else {
+            json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"hdri","source":"missing-hdri"}}})
+        };
+        let node = new_layer(
+            &comp,
+            "failed-node",
+            "Failed node",
+            Role::Object,
+            data,
+            json!({}),
+            true,
+            None,
+            0.,
+        )
+        .unwrap();
+        let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
         if scatter {
-            let mut bad=layers.iter().find(|l|l["id"]=="mirror").unwrap().clone();bad["id"]=json!("broken");
-            bad["d"]["data"]["object"]["source"]=json!({"assetId":"missing-model"});layers.push(bad);
+            let mut bad = layers.iter().find(|l| l["id"] == "mirror").unwrap().clone();
+            bad["id"] = json!("broken");
+            bad["d"]["data"]["object"]["source"] = json!({"assetId":"missing-model"});
+            layers.push(bad);
         }
         layers.push(node);
-        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
-        let mut renderer=Renderer::headless().unwrap();studio::attach(&mut renderer,doc.clone(),&Default::default());
-        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
-        assert_eq!(frame.failures.len(),if scatter {2}else{1},"{:?}",frame.failures);
-        assert!(frame.failures.iter().any(|f|f.layer=="failed-node"));
-        assert!(frame.failures.iter().all(|f|f.layer!="mirror"));
-        let pixels=renderer.read_rgba(&frame).unwrap();
-        assert!(pixels.chunks_exact(4).filter(|p|p[1]>0.1 && p[3]>0.5).count()>40);
+        let doc = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document;
+        let mut renderer = Renderer::headless().unwrap();
+        studio::attach(&mut renderer, doc.clone(), &Default::default());
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            frame.failures.len(),
+            if scatter { 2 } else { 1 },
+            "{:?}",
+            frame.failures
+        );
+        assert!(frame.failures.iter().any(|f| f.layer == "failed-node"));
+        assert!(frame.failures.iter().all(|f| f.layer != "mirror"));
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[1] > 0.1 && p[3] > 0.5)
+                .count()
+                > 40
+        );
     }
 }
 
@@ -348,11 +498,11 @@ fn missing_revision_and_resources_fail_visibly() {
     let source = studio::DocumentSource::new(broken.clone(), Default::default());
     let mut request = r.clone();
     request.revision = broken.revision();
-    let input=source.scene(&request).unwrap();
-    assert!(input.instances.iter().all(|i|i.layer!="mirror"));
-    let failures=source.layer_failures(&request).unwrap();
-    assert_eq!(failures.len(),1);
-    assert_eq!(failures[0].layer,"mirror");
+    let input = source.scene(&request).unwrap();
+    assert!(input.instances.iter().all(|i| i.layer != "mirror"));
+    let failures = source.layer_failures(&request).unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].layer, "mirror");
     assert!(failures[0].message.contains("geometry is not loaded"));
 }
 
@@ -2177,9 +2327,11 @@ fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
             .count()
             > 100
     );
-    let source=studio::DocumentSource::new(doc,Default::default());
+    let source = studio::DocumentSource::new(doc, Default::default());
     source.scene(&scene_request).unwrap();
-    let missing=source.layer_failures(&scene_request).unwrap()[0].message.clone();
+    let missing = source.layer_failures(&scene_request).unwrap()[0]
+        .message
+        .clone();
     assert!(
         missing.contains("Material image is not loaded"),
         "{missing}"
@@ -2189,9 +2341,11 @@ fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
         revision: live.revision(),
         ..scene_request
     };
-    let source=studio::DocumentSource::new(live,media);
+    let source = studio::DocumentSource::new(live, media);
     source.scene(&live_request).unwrap();
-    let error=source.layer_failures(&live_request).unwrap()[0].message.clone();
+    let error = source.layer_failures(&live_request).unwrap()[0]
+        .message
+        .clone();
     assert!(
         error.contains("Live layer/group material capture"),
         "{error}"
@@ -2236,68 +2390,589 @@ fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_
     assert_eq!(doc.to_value(), before);
 }
 
-fn extrusion_test_fonts()->Box<dyn pm_render::text::TextFonts>{
+fn extrusion_test_fonts() -> Box<dyn pm_render::text::TextFonts> {
     use pm_text::font::*;
     struct Face(FaceInfo);
-    impl FontResolver for Face{
-        fn face(&self,_:FaceId)->&FaceInfo{&self.0}
-        fn family(&mut self,_:&str,_:&FontDesc)->Option<FaceId>{Some(0)}
-        fn standard(&mut self,_:&FontDesc)->Option<FaceId>{Some(0)}
-        fn fallback_for_char(&mut self,_:&FontDesc,_:u32,_:FaceId,_:bool)->Option<FaceId>{None}
-        fn last_resort(&mut self,_:&FontDesc)->Option<FaceId>{Some(0)}
-        fn variable_face(&mut self,_:&str)->Option<FaceId>{Some(0)}
+    impl FontResolver for Face {
+        fn face(&self, _: FaceId) -> &FaceInfo {
+            &self.0
+        }
+        fn family(&mut self, _: &str, _: &FontDesc) -> Option<FaceId> {
+            Some(0)
+        }
+        fn standard(&mut self, _: &FontDesc) -> Option<FaceId> {
+            Some(0)
+        }
+        fn fallback_for_char(
+            &mut self,
+            _: &FontDesc,
+            _: u32,
+            _: FaceId,
+            _: bool,
+        ) -> Option<FaceId> {
+            None
+        }
+        fn last_resort(&mut self, _: &FontDesc) -> Option<FaceId> {
+            Some(0)
+        }
+        fn variable_face(&mut self, _: &str) -> Option<FaceId> {
+            Some(0)
+        }
     }
-    let data=FontBytes::new(include_bytes!("../../../../../engine/crates/pm-text/tests/fixtures/Geist-Variable.ttf").to_vec());
-    let facts=FaceFacts::of(data.as_slice(),0);
-    let face=FaceInfo{data,index:0,blob:"Geist".into(),coords:vec![],synthetic_bold:false,synthetic_italic:false,custom:true,web:None,synthesized_hyphens:[None;2],postscript_name:"Geist".into(),typeface_key:"Geist".into(),fallback_key:None,facts};
+    let data = FontBytes::new(
+        include_bytes!("../../../../../engine/crates/pm-text/tests/fixtures/Geist-Variable.ttf")
+            .to_vec(),
+    );
+    let facts = FaceFacts::of(data.as_slice(), 0);
+    let face = FaceInfo {
+        data,
+        index: 0,
+        blob: "Geist".into(),
+        coords: vec![],
+        synthetic_bold: false,
+        synthetic_italic: false,
+        custom: true,
+        web: None,
+        synthesized_hyphens: [None; 2],
+        postscript_name: "Geist".into(),
+        typeface_key: "Geist".into(),
+        fallback_key: None,
+        facts,
+    };
     Box::new(pm_eval::text_measure::CompatMeasure::new(Face(face)))
 }
 #[test]
-fn text_extrusion_reaches_native_geometry_four_surfaces_and_the_compositor(){
+fn text_extrusion_reaches_native_geometry_four_surfaces_and_the_compositor() {
     use studio::SceneSource;
-    let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
-    let comp=&mut project["comps"]["test"];
-    comp["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="mirror");
-    let mut data=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":10,"bevelDepth":2,"bevelStyle":"convex"}})).unwrap();
-    for (i,surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate(){data["surfaces"][surface]=json!({"maps":{},"properties":{"color":"#FF0000","emissionColor":"#FF0000","emissionIntensity":1,"roughness":0.2+i as f64*0.1}});}
-    data=pm_scene3d::extrusion::parse(&data).unwrap();
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let comp = &mut project["comps"]["test"];
+    comp["layers"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|l| l["id"] != "mirror");
+    let mut data = pm_scene3d::extrusion::parse(
+        &json!({"enabled":true,"p":{"depth":10,"bevelDepth":2,"bevelStyle":"convex"}}),
+    )
+    .unwrap();
+    for (i, surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate() {
+        data["surfaces"][surface] = json!({"maps":{},"properties":{"color":"#FF0000","emissionColor":"#FF0000","emissionIntensity":1,"roughness":0.2+i as f64*0.1}});
+    }
+    data = pm_scene3d::extrusion::parse(&data).unwrap();
     comp["layers"].as_array_mut().unwrap().push(json!({"id":"title","name":"Title","type":"text","on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":32,"kf":[]},"position.y":{"v":32,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"text":"O","font":"Geist","size":30,"color":"#0000FF","extrusion":data}}));
-    let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
-    let source=studio::DocumentSource::new(doc.clone(),Default::default()).with_text_fonts(extrusion_test_fonts());
-    let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
-    let scene=source.scene(&req).unwrap();
-    assert!(source.layer_failures(&req).unwrap().is_empty(),"{:?}",source.layer_failures(&req).unwrap());
-    let title=scene.instances.iter().find(|i|i.layer=="title").expect("extruded glyph");
-    assert_eq!(title.material_palette.as_ref().unwrap().len(),4);
-    for index in 0..4 {assert!(title.mesh.triangle_materials.contains(&index),"surface {index}");}
-    assert!(title.mesh.positions.iter().any(|p|p.z==-10.));
-    let again=source.scene(&req).unwrap();let other=again.instances.iter().find(|i|i.layer=="title").unwrap();
-    assert!(Arc::ptr_eq(&title.mesh,&other.mesh));assert!(Arc::ptr_eq(title.attributes.as_ref().unwrap(),other.attributes.as_ref().unwrap()));
-    let mut renderer=Renderer::headless().unwrap();renderer.set_text_fonts(Some(extrusion_test_fonts()));
-    renderer.set_studio_source(Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(source)))),pm_render::scene3d::provider::Settings{revision:doc.revision(),..Default::default()});
-    let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
-    assert!(frame.failures.is_empty(),"{:?}",frame.failures);
-    let pixels=renderer.read_rgba(&frame).unwrap();let red=pixels.chunks_exact(4).filter(|p|p[0]>0.1 && p[0]>p[2]*2. && p[3]>0.5).count();
-    assert!(red>30,"the extruded surface must render red, rather than the flat blue paint ({red} pixels)");
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let source = studio::DocumentSource::new(doc.clone(), Default::default())
+        .with_text_fonts(extrusion_test_fonts());
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let scene = source.scene(&req).unwrap();
+    assert!(
+        source.layer_failures(&req).unwrap().is_empty(),
+        "{:?}",
+        source.layer_failures(&req).unwrap()
+    );
+    let title = scene
+        .instances
+        .iter()
+        .find(|i| i.layer == "title")
+        .expect("extruded glyph");
+    assert_eq!(title.material_palette.as_ref().unwrap().len(), 4);
+    for index in 0..4 {
+        assert!(
+            title.mesh.triangle_materials.contains(&index),
+            "surface {index}"
+        );
+    }
+    assert!(title.mesh.positions.iter().any(|p| p.z == -10.));
+    let again = source.scene(&req).unwrap();
+    let other = again.instances.iter().find(|i| i.layer == "title").unwrap();
+    assert!(Arc::ptr_eq(&title.mesh, &other.mesh));
+    assert!(Arc::ptr_eq(
+        title.attributes.as_ref().unwrap(),
+        other.attributes.as_ref().unwrap()
+    ));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(extrusion_test_fonts()));
+    renderer.set_studio_source(
+        Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(
+            source,
+        )))),
+        pm_render::scene3d::provider::Settings {
+            revision: doc.revision(),
+            ..Default::default()
+        },
+    );
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    let red = pixels
+        .chunks_exact(4)
+        .filter(|p| p[0] > 0.1 && p[0] > p[2] * 2. && p[3] > 0.5)
+        .count();
+    assert!(
+        red > 30,
+        "the extruded surface must render red, rather than the flat blue paint ({red} pixels)"
+    );
 }
 
 #[test]
-fn shape_extrusion_and_empty_text_use_the_shared_native_scene(){
+fn shape_extrusion_and_empty_text_use_the_shared_native_scene() {
     use studio::SceneSource;
-    for empty in [false,true]{
-        let mut project:Value=serde_json::from_str(&pm_model::json::to_canonical_string(&document(false,100.).to_value().unwrap())).unwrap();
-        let comp=&mut project["comps"]["test"];comp["layers"].as_array_mut().unwrap().retain(|l|l["id"]!="mirror");
-        let mut content=if empty{json!({"text":" ","font":"Geist","size":30,"color":"#FFFFFF"})}else{json!({"shape":"rect","w":24,"h":20,"radius":0,"smoothing":0,"stroke":2,"strokeColor":"#00FF00","color":"#0000FF"})};
+    for empty in [false, true] {
+        let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+            &document(false, 100.).to_value().unwrap(),
+        ))
+        .unwrap();
+        let comp = &mut project["comps"]["test"];
+        comp["layers"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|l| l["id"] != "mirror");
+        let mut content = if empty {
+            json!({"text":" ","font":"Geist","size":30,"color":"#FFFFFF"})
+        } else {
+            json!({"shape":"rect","w":24,"h":20,"radius":0,"smoothing":0,"stroke":2,"strokeColor":"#00FF00","color":"#0000FF"})
+        };
         content["extrusion"]=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":8,"bevelStyle":"angular","bevelDepth":1},"surfaces":{"front":{"properties":{"emissionColor":"#FF0000","emissionIntensity":1}}}})).unwrap();
         comp["layers"].as_array_mut().unwrap().push(json!({"id":"art","name":"Art","type":if empty{"text"}else{"shape"},"on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":32,"kf":[]},"position.y":{"v":32,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":content}));
-        let doc=pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap()).snapshot().document;
-        let source=studio::DocumentSource::new(doc.clone(),Default::default()).with_text_fonts(extrusion_test_fonts());
-        let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
-        let scene=source.scene(&req).unwrap();assert!(source.layer_failures(&req).unwrap().is_empty(),"{:?}",source.layer_failures(&req).unwrap());
-        assert_eq!(scene.instances.is_empty(),empty);
-        let mut renderer=Renderer::headless().unwrap();renderer.set_text_fonts(Some(extrusion_test_fonts()));renderer.set_studio_source(Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(source)))),pm_render::scene3d::provider::Settings{revision:doc.revision(),..Default::default()});
-        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();assert!(frame.failures.is_empty(),"{:?}",frame.failures);
-        let pixels=renderer.read_rgba(&frame).unwrap();
-        if empty{assert!(pixels.chunks_exact(4).all(|p|p[3]<0.001));}else{assert!(pixels.chunks_exact(4).filter(|p|p[0]>0.1 && p[3]>0.5).count()>30);}
+        let doc = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document;
+        let source = studio::DocumentSource::new(doc.clone(), Default::default())
+            .with_text_fonts(extrusion_test_fonts());
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        let scene = source.scene(&req).unwrap();
+        assert!(
+            source.layer_failures(&req).unwrap().is_empty(),
+            "{:?}",
+            source.layer_failures(&req).unwrap()
+        );
+        assert_eq!(scene.instances.is_empty(), empty);
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_text_fonts(Some(extrusion_test_fonts()));
+        renderer.set_studio_source(
+            Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(
+                source,
+            )))),
+            pm_render::scene3d::provider::Settings {
+                revision: doc.revision(),
+                ..Default::default()
+            },
+        );
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        if empty {
+            assert!(pixels.chunks_exact(4).all(|p| p[3] < 0.001));
+        } else {
+            assert!(
+                pixels
+                    .chunks_exact(4)
+                    .filter(|p| p[0] > 0.1 && p[3] > 0.5)
+                    .count()
+                    > 30
+            );
+        }
+    }
+}
+
+#[test]
+fn material_capture_uses_hidden_local_sources_and_stable_group_bounds() {
+    use pm_render::MaterialCaptureRequest;
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let comp = &mut project["comps"]["test"];
+    comp["fps"] = json!(4);
+    comp["layers"].as_array_mut().unwrap().extend([
+        json!({"id":"art","name":"Art","type":"group","on":false,"from":0,"dur":1,"p":{"position.x":{"v":5000,"kf":[]},"opacity":{"v":0,"kf":[]}}}),
+        json!({"id":"paint","name":"Paint","type":"solid","group":"art","on":true,"from":0,"dur":1,"p":{"position.x":{"v":0,"kf":[{"t":0,"v":0},{"t":1,"v":40}]},"opacity":{"v":100,"kf":[]}},"d":{"w":16,"h":16,"color":"#FF0000"}}),
+    ]);
+    for layer in comp["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .filter(|l| l["id"] == "art" || l["id"] == "paint")
+    {
+        for (key, value) in [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("skew", 0.),
+            ("opacity", 100.),
+        ] {
+            if layer["p"].get(key).is_none() {
+                layer["p"][key] = json!({"v":value,"kf":[]});
+            }
+        }
+    }
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let before = doc.to_value();
+    let mut renderer = Renderer::headless().unwrap();
+    let assets = pm_render::MapResolver::default();
+    let mut req = MaterialCaptureRequest {
+        composition: "test".into(),
+        layer: Some("art".into()),
+        time: Ticks::ZERO,
+        width: 64,
+        height: 32,
+        source_key: "art-v1".into(),
+        frame_key: "0".into(),
+        cache_bytes: 128 * 1024 * 1024,
+        final_output: false,
+    };
+    let a = renderer.capture_material(&doc, &req, &assets).unwrap();
+    assert!(
+        a.pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 200 && p[3] > 200)
+            .count()
+            > 60,
+        "hidden root must still supply its child's paint"
+    );
+    let cached = renderer.capture_material(&doc, &req, &assets).unwrap();
+    assert!(Arc::ptr_eq(&a, &cached));
+    assert_eq!(renderer.material_capture_stats().cache_hits, 1);
+    req.time = Ticks::new(pm_protocol::common::TICKS_PER_SECOND).unwrap();
+    req.frame_key = "1".into();
+    let b = renderer.capture_material(&doc, &req, &assets).unwrap();
+    let center = |p: &[u8]| {
+        let mut sum = 0.;
+        let mut count = 0.;
+        for (i, p) in p.chunks_exact(4).enumerate() {
+            if p[3] > 200 {
+                sum += (i % 64) as f64;
+                count += 1.;
+            }
+        }
+        sum / count
+    };
+    assert!(
+        center(&b.pixels) > center(&a.pixels) + 20.,
+        "an animated group must move inside one fixed canvas"
+    );
+    req.cache_bytes = 0;
+    renderer.capture_material(&doc, &req, &assets).unwrap();
+    assert_eq!(renderer.material_capture_stats().retained_bytes, 0);
+    assert_eq!(
+        doc.to_value(),
+        before,
+        "capture must not edit the source document"
+    );
+    let captures = renderer.material_capture_stats().captures;
+    req.width = 16384;
+    req.height = 16384;
+    assert!(
+        renderer
+            .capture_material(&doc, &req, &assets)
+            .unwrap_err()
+            .to_string()
+            .contains("pixel and memory budget")
+    );
+    assert_eq!(renderer.material_capture_stats().captures, captures);
+}
+
+fn source_art(id: &str, kind: &str, group: Option<&str>, color: &str) -> Value {
+    let mut layer = json!({"id":id,"name":id,"type":kind,"on":true,"from":0,"dur":1,"p":{},"d":{"w":32,"h":32,"color":color}});
+    for (key, value) in [
+        ("position.x", 0.),
+        ("position.y", 0.),
+        ("anchor.x", 0.),
+        ("anchor.y", 0.),
+        ("scale.x", 100.),
+        ("scale.y", 100.),
+        ("rotation", 0.),
+        ("skew", 0.),
+        ("opacity", 100.),
+    ] {
+        layer["p"][key] = json!({"v":value,"kf":[]});
+    }
+    if let Some(group) = group {
+        layer["group"] = json!(group);
+    }
+    layer
+}
+fn captured_project(source: Value) -> Value {
+    let doc = environment_geometry_document(
+        json!({"source":{"primitive":"plane","parameters":{"width":2,"height":2}},"material":{"p":{"color":"#FFFFFF"},"maps":{"color":source}},"materialOptions":{"p":{"acceptsLights":false}}}),
+        json!({}),
+    );
+    let mut project = pm_scene3d::from_model(&doc.to_value().unwrap()).unwrap();
+    let mut group = source_art("art", "group", None, "#FFFFFF");
+    group["on"] = json!(false);
+    group["p"]["opacity"]["v"] = json!(0);
+    group["p"]["position.x"]["v"] = json!(9000);
+    project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .extend([group, source_art("paint", "solid", Some("art"), "#FF0000")]);
+    project
+}
+fn project_document(project: &Value) -> Arc<pm_model::Document> {
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(project))
+        .snapshot()
+        .document
+}
+#[test]
+fn material_capture_binds_hidden_groups_reuses_pixels_and_tracks_only_source_edits() {
+    use pm_studio3d_engine::compositor::Source;
+    use studio::SceneSource;
+    let mut project = captured_project(json!({"layerId":"art"}));
+    let doc = project_document(&project);
+    let before = doc.to_value();
+    let mut renderer = Renderer::headless().unwrap();
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(doc.clone(), Default::default());
+    assert!(
+        source
+            .prepare_materials(&mut renderer, &req, studio::Tier::QualityLive)
+            .unwrap()
+    );
+    let input = source.scene(&req).unwrap();
+    assert!(source.layer_failures(&req).unwrap().is_empty());
+    let pixels = &input.maps.as_ref().unwrap().layers[0];
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 240 && p[1] < 10 && p[3] > 240)
+            .count()
+            > 900_000
+    );
+    assert_eq!(renderer.material_capture_stats().captures, 1);
+    assert!(
+        !source
+            .prepare_materials(&mut renderer, &req, studio::Tier::QualityLive)
+            .unwrap()
+    );
+    assert_eq!(renderer.material_capture_stats().captures, 1);
+    // Receiver transforms, time and fresh immutable adapters do not redraw still artwork.
+    project["comps"]["test"]["layers"][2]["p"]["position.x"]["v"] = json!(0.25);
+    let moved = project_document(&project);
+    let next = studio::DocumentSource::new(moved.clone(), Default::default());
+    let next_req = studio::SceneRequest {
+        revision: moved.revision(),
+        ticks: pm_protocol::common::TICKS_PER_SECOND / 2,
+        ..req.clone()
+    };
+    next.prepare_materials(&mut renderer, &next_req, studio::Tier::QualityLive)
+        .unwrap();
+    assert_eq!(renderer.material_capture_stats().captures, 1);
+    project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "paint")
+        .unwrap()["d"]["color"] = json!("#00FF00");
+    let edited = project_document(&project);
+    let next = studio::DocumentSource::new(edited.clone(), Default::default());
+    let next_req = studio::SceneRequest {
+        revision: edited.revision(),
+        ..next_req
+    };
+    next.prepare_materials(&mut renderer, &next_req, studio::Tier::QualityLive)
+        .unwrap();
+    let input = next.scene(&next_req).unwrap();
+    assert!(
+        input.maps.as_ref().unwrap().layers[0]
+            .chunks_exact(4)
+            .any(|p| p[1] > 240 && p[0] < 10)
+    );
+    assert_eq!(renderer.material_capture_stats().captures, 2);
+    assert_eq!(doc.to_value(), before);
+    // The actual native compositor adapter prepares captures before tracing.
+    studio::attach(&mut renderer, doc.clone(), &Default::default());
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0.1 && p[0] > 4. * p[1] && p[3] > 0.9)
+            .count()
+            > 100
+    );
+}
+#[test]
+fn material_capture_rejects_cycles_nested_3d_and_missing_sources_per_receiver() {
+    use pm_studio3d_engine::compositor::Source;
+    use studio::SceneSource;
+    let mut renderer = Renderer::headless().unwrap();
+    for (source, case, expected) in [
+        (json!({"layerId":"terrain"}), "cycle", "cycle"),
+        (json!({"compositionId":"test"}), "whole", "cycle"),
+        (json!({"layerId":"missing"}), "missing", "missing"),
+        (json!({"layerId":"art"}), "nested", "3D descendants"),
+    ] {
+        let mut project = captured_project(source);
+        if case == "nested" {
+            let mut precomp = source_art("nested", "precomp", Some("art"), "#000000");
+            precomp["d"] = json!({"comp":"other"});
+            project["comps"]["test"]["layers"]
+                .as_array_mut()
+                .unwrap()
+                .push(precomp);
+            project["comps"]["other"] = project["comps"]["test"].clone();
+            project["comps"]["other"]["id"] = json!("other");
+            project["comps"]["other"]["layers"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|l| l["id"] == "terrain");
+        }
+        let doc = project_document(&project);
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        let source = studio::DocumentSource::new(doc, Default::default());
+        source
+            .prepare_materials(&mut renderer, &req, studio::Tier::QualityLive)
+            .unwrap();
+        let input = source.scene(&req).unwrap();
+        assert!(input.instances.is_empty(), "{case}");
+        let failures = source.layer_failures(&req).unwrap();
+        assert_eq!(failures.len(), 1, "{case}: {failures:?}");
+        assert!(
+            failures[0].message.contains(expected),
+            "{case}: {failures:?}"
+        );
+    }
+}
+#[test]
+fn material_capture_screen_clock_uses_each_receiver_and_static_source_edges() {
+    use pm_studio3d_engine::compositor::Source;
+    use studio::SceneSource;
+    let mut project = captured_project(json!({"layerId":"art"}));
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let index = layers.iter().position(|l| l["id"] == "terrain").unwrap();
+    layers[index]["d"]["data"]["object"]["materialOptions"]["p"]["acceptsLights"] = json!(true);
+    layers[index]["d"]["data"]["object"]["material"] =
+        json!({"screen":"screen","p":{"color":"#FFFFFF"}});
+    let mut second = layers[index].clone();
+    second["id"] = json!("second");
+    second["from"] = json!(0.5);
+    layers.push(second);
+    let mut red = source_art("red", "solid", None, "#FF0000");
+    red["dur"] = json!(0.5);
+    let mut green = source_art("green", "solid", None, "#00FF00");
+    green["from"] = json!(0.5);
+    green["dur"] = json!(0.5);
+    project["comps"]["screen"] = json!({"id":"screen","w":32,"h":32,"fps":30,"dur":1,"backgroundFill":{"type":"none"},"layers":[red,green]});
+    let doc = project_document(&project);
+    let mut renderer = Renderer::headless().unwrap();
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: pm_protocol::common::TICKS_PER_SECOND * 3 / 4,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(doc, Default::default());
+    source
+        .prepare_materials(&mut renderer, &req, studio::Tier::QualityLive)
+        .unwrap();
+    let input = source.scene(&req).unwrap();
+    assert!(source.layer_failures(&req).unwrap().is_empty());
+    let maps = &input.maps.as_ref().unwrap().layers;
+    assert_eq!(maps.len(), 2);
+    assert!(
+        maps.iter()
+            .any(|p| p.chunks_exact(4).any(|p| p[0] > 240 && p[1] < 10))
+    );
+    assert!(
+        maps.iter()
+            .any(|p| p.chunks_exact(4).any(|p| p[1] > 240 && p[0] < 10))
+    );
+    assert_eq!(renderer.material_capture_stats().captures, 2);
+    let next = studio::SceneRequest {
+        ticks: pm_protocol::common::TICKS_PER_SECOND * 7 / 8,
+        ..req
+    };
+    source
+        .prepare_materials(&mut renderer, &next, studio::Tier::QualityLive)
+        .unwrap();
+    assert_eq!(
+        renderer.material_capture_stats().captures,
+        2,
+        "still source intervals reuse across receiver clocks"
+    );
+}
+
+#[test]
+fn material_capture_preserves_source_masks_effects_and_child_visibility() {
+    for root in ["paint","art"] {
+        let mut project=captured_project(json!({"layerId":"art"}));
+        let layers=project["comps"]["test"]["layers"].as_array_mut().unwrap();
+        let layer=layers.iter_mut().find(|l|l["id"]==root).unwrap();
+        layer["on"]=json!(false);layer["p"]["opacity"]["v"]=json!(0);layer["p"]["position.x"]["v"]=json!(5000);
+        // A child stays inside the source group's local canvas.
+        if root=="art"{layer["p"]["position.x"]["v"]=json!(9000);}
+        layer["masks"]=json!([{"id":"cut","shape":"rect","mode":"add","on":true,"p":{"x":{"v":8,"kf":[]},"y":{"v":16,"kf":[]},"w":{"v":16,"kf":[]},"h":{"v":32,"kf":[]},"rotation":{"v":0,"kf":[]},"feather":{"v":0,"kf":[]}}}]);
+        layer["fx"]=json!([{"id":"invert","type":"invert","version":2,"on":true,"p":{}}]);
+        if root=="art"{let mut hidden=source_art("hidden","solid",Some("art"),"#FFFFFF");hidden["on"]=json!(false);layers.insert(0,hidden);}
+        let doc=project_document(&project);let mut renderer=Renderer::headless().unwrap();renderer.set_main_effects_for_document(&doc).unwrap();
+        let frame=renderer.capture_material(&doc,&pm_render::MaterialCaptureRequest{composition:"test".into(),layer:Some(root.into()),time:Ticks::ZERO,width:32,height:32,source_key:root.into(),frame_key:"still".into(),cache_bytes:0,final_output:true},&pm_render::MapResolver::default()).unwrap();
+        let left=&frame.pixels[(16*32+8)*4..][..4];let right=&frame.pixels[(16*32+24)*4..][..4];assert!(left[0]<10 && left[1]>240 && left[2]>240 && left[3]>240,"{root}: {left:?}");assert!(right[3]<10,"{root}: {right:?}");
     }
 }
