@@ -1029,13 +1029,28 @@ fn write_media(
             length,
             sha256,
         } => {
-            if !version.is_unchanged()? {
-                return Err(media_err(format!(
+            let changed = || {
+                media_err(format!(
                     "its project file {} changed since it was opened",
                     version.path.display()
-                )));
+                ))
+            };
+            if !version.is_unchanged()? {
+                return Err(changed());
             }
+            #[cfg(test)]
+            source_hooks::hit(&source_hooks::BEFORE_OPEN);
             let src = File::open(&version.path).map_err(|e| io_err(&version.path, e))?;
+            // The handle copied from must be the file as verified, and stay it
+            // until the copy ends: an item without a checksum (PMV3) has
+            // nothing else to prove its bytes.
+            let held = |src: &File| -> Result<bool, ProjectIoError> {
+                let meta = src.metadata().map_err(|e| io_err(&version.path, e))?;
+                Ok(durable::stat_of(&meta).same_file(&version.stat))
+            };
+            if !held(&src)? {
+                return Err(changed());
+            }
             copy_range(
                 &src,
                 *offset,
@@ -1046,6 +1061,11 @@ fn write_media(
                 &media_err,
                 temp,
             )?;
+            #[cfg(test)]
+            source_hooks::hit(&source_hooks::AFTER_COPY);
+            if !held(&src)? || !version.is_unchanged()? {
+                return Err(changed());
+            }
             (*length, sha256.as_deref())
         }
         MediaSource::File {
@@ -1096,4 +1116,153 @@ fn copy_range(
         done += n as u64;
     }
     Ok(())
+}
+
+/// Test-only points in an embedded source copy, where a test changes the
+/// source file as another app would.
+#[cfg(test)]
+mod source_hooks {
+    use std::cell::RefCell;
+    pub(super) type Hook = RefCell<Option<Box<dyn FnOnce()>>>;
+    thread_local! {
+        pub(super) static BEFORE_OPEN: Hook = const { RefCell::new(None) };
+        pub(super) static AFTER_COPY: Hook = const { RefCell::new(None) };
+    }
+    pub(super) fn hit(hook: &'static std::thread::LocalKey<Hook>) {
+        if let Some(f) = hook.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+}
+
+#[cfg(test)]
+mod embedded_source_tests {
+    use super::*;
+
+    /// A fresh folder for one test, removed when dropped.
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new(name: &str) -> Dir {
+            let dir =
+                std::env::temp_dir().join(format!("pm-save-source-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Dir(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A PMV3 file (items have no checksum) whose one item is `data`.
+    fn pmv3(path: &Path, data: &[u8]) {
+        let header = format!(
+            r#"{{"document":{{"proj":{{"id":"p","name":"P","w":10,"h":10,"fps":30,"dur":1,"layers":[],"assets":{{"a":{{"id":"a","kind":"image"}}}}}}}},"media":[{{"id":"a","type":"application/octet-stream","offset":0,"length":{}}}]}}"#,
+            data.len()
+        );
+        let mut bytes = b"PMV3\n".to_vec();
+        bytes.extend((header.len() as u32).to_le_bytes());
+        bytes.extend(header.as_bytes());
+        bytes.extend(data);
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// A hook point and what another app does there.
+    type Armed = (
+        &'static std::thread::LocalKey<source_hooks::Hook>,
+        Box<dyn FnOnce()>,
+    );
+
+    /// Copies item `a` of `path` as a save would, with `hook` armed.
+    fn copy(path: &Path, hook: Option<Armed>) -> Result<Vec<u8>, ProjectIoError> {
+        let opened =
+            super::super::open_project(path, super::super::OpenOptions::default()).unwrap();
+        let entry = opened.file.media.get("a").unwrap().clone();
+        assert!(matches!(
+            &entry.source,
+            MediaSource::Embedded { sha256: None, .. }
+        ));
+        if let Some((point, f)) = hook {
+            point.with(|h| *h.borrow_mut() = Some(f));
+        }
+        let dir = path.parent().unwrap();
+        let temp = dir.join("out.tmp");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp)
+            .unwrap();
+        let mut out = Out {
+            w: BufWriter::new(&file),
+            offset: 0,
+            written: 0,
+            whole: Sha256::new(),
+            limit: None,
+        };
+        let mut buf = vec![0; 1 << 16];
+        let result = write_media(&entry, &mut out, &mut buf, &temp);
+        drop(out);
+        result.map(|_| fs::read(&temp).unwrap())
+    }
+
+    #[test]
+    fn an_unchanged_source_copies_its_item() {
+        let dir = Dir::new("unchanged");
+        let path = dir.path().join("v1.pmv");
+        pmv3(&path, b"original bytes");
+        assert_eq!(copy(&path, None).unwrap(), b"original bytes");
+    }
+
+    /// Another app replaces the file between the version check and the open.
+    #[test]
+    fn a_source_replaced_before_it_opens_is_not_copied() {
+        let dir = Dir::new("replaced");
+        let path = dir.path().join("v1.pmv");
+        pmv3(&path, b"original bytes");
+        let other = dir.path().join("other.pmv");
+        pmv3(&other, b"replaced bytes");
+        let (from, to) = (other.clone(), path.clone());
+        let result = copy(
+            &path,
+            Some((
+                &source_hooks::BEFORE_OPEN,
+                Box::new(move || fs::rename(from, to).unwrap()),
+            )),
+        );
+        assert!(
+            matches!(result, Err(ProjectIoError::Media { .. })),
+            "{result:?}"
+        );
+    }
+
+    /// Another app rewrites the item in place while it is being copied.
+    #[test]
+    fn a_source_changed_during_the_copy_is_not_kept() {
+        let dir = Dir::new("changed");
+        let path = dir.path().join("v1.pmv");
+        pmv3(&path, b"original bytes");
+        let target = path.clone();
+        let result = copy(
+            &path,
+            Some((
+                &source_hooks::AFTER_COPY,
+                Box::new(move || {
+                    let mut f = File::options().write(true).open(&target).unwrap();
+                    f.seek(SeekFrom::End(-5)).unwrap();
+                    f.write_all(b"XXXXX").unwrap();
+                }),
+            )),
+        );
+        assert!(
+            matches!(result, Err(ProjectIoError::Media { .. })),
+            "{result:?}"
+        );
+    }
 }
