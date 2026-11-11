@@ -1,0 +1,25 @@
+[package]
+name = "pm-studio3d-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-studio = { path = "../../../../engine/crates/pm-studio" }
+pm-render = { path = "../../../../engine/crates/pm-render" }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+
+[features]
+default = ["oidn", "metalfx"]
+oidn = ["pm-studio/oidn"]
+metalfx = ["pm-studio/metalfx"]
+
+[dev-dependencies]
+pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
+serde_json = "1"
+pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pollster = "0.4"

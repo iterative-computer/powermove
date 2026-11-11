@@ -1,7 +1,8 @@
 //! Immutable kernel → Studio geometry/resource adapter. Geometry is cached by
 //! complete immutable source bytes, separately from animated world transforms.
 use super::*;
-use pm_studio::{
+use pm_studio3d_engine::MaterialExt;
+use pm_studio3d_engine::{
     math::{Vec3, srgb_hex, v3},
     mesh::Mesh,
     scene::{Camera, GpuLight, GpuMaterial, Material, Scene, Softbox},
@@ -181,11 +182,11 @@ impl DocumentSource {
         Ok(mesh)
     }
 }
-impl pm_render::scene3d::provider::Source for DocumentSource {
+impl pm_studio3d_engine::compositor::Source for DocumentSource {
     fn splat_layers(
         &self,
         request: &SceneRequest,
-    ) -> Result<Vec<pm_studio::splats::Layer>, String> {
+    ) -> Result<Vec<pm_studio3d_engine::splats::Layer>, String> {
         let resolved = self.resolve(request)?;
         let mut layers = vec![];
         for object in resolved.scene["objects"]
@@ -222,12 +223,12 @@ impl pm_render::scene3d::provider::Source for DocumentSource {
                 &pm_scene3d::render::gltf::math::multiply(&scale, &math),
             );
             let scene = self.scene(request)?;
-            layers.push(pm_studio::splats::Layer {
+            layers.push(pm_studio3d_engine::splats::Layer {
                 id: id.into(),
                 data: Arc::new(
                     data.splats
                         .iter()
-                        .map(|g| pm_studio::splats::Gaussian {
+                        .map(|g| pm_studio3d_engine::splats::Gaussian {
                             center: g.center,
                             covariance: g.covariance,
                             rgba: g.rgba,
@@ -275,6 +276,12 @@ impl SceneSource for DocumentSource {
         let ep = &e["p"];
         let env = color(ep, "ambientColor", "#FFFFFF") * n(ep, "ambient", 0.5);
         let mut scene = Scene {
+            meters_per_unit: 0.1,
+            world: Default::default(),
+            instances: vec![],
+            scatters: vec![],
+            terrains: vec![],
+            displacements: vec![],
             objects: vec![],
             materials: vec![],
             lights: vec![],
@@ -285,7 +292,7 @@ impl SceneSource for DocumentSource {
                 f_stop: n(cp, "fStop", 0.),
                 focus: (n(cp, "focusDistance", 0.) > 0.)
                     .then(|| eye + (target - eye).normalize() * n(cp, "focusDistance", 0.)),
-                focal_mm: 0.12 / (n(cp, "fov", 45.).to_radians() / 2.).tan(),
+                focal_mm: 12. / (n(cp, "fov", 45.).to_radians() / 2.).tan(),
             },
             backdrop: Vec3::ZERO,
             environment: (env, env * 0.675),
@@ -551,6 +558,7 @@ fn convert_mesh(g: &pm_scene3d::render::Geometry) -> Mesh {
         .chunks_exact(3)
         .map(|t| [t[0], t[1], t[2]])
         .collect(),
+        ..Default::default()
     }
 }
 fn imported_material(m: &pm_scene3d::render::gltf::Material) -> Material {
