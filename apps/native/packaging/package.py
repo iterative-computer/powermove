@@ -84,6 +84,9 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
         "CFBundleIdentifier": IDS[channel], "CFBundleExecutable": "powermove-native",
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version,
         "CFBundleVersion": build, "LSMinimumSystemVersion": "14.0",
+        # The system allocator otherwise keeps freed large blocks (V8, codecs)
+        # resident for minutes; see apps/native/crates/app/src/main.rs.
+        "LSEnvironment": {"MallocLargeCache": "0"},
         "LSApplicationCategoryType": "public.app-category.graphics-design",
         "NSAccentColorName": "AccentColor", "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication", "CFBundleIconFile": "icon.icns",

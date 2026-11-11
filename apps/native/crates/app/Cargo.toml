@@ -65,6 +65,7 @@ pm-panel-agentpanel = { path = "../panel-agentpanel" }
 objc2-user-notifications = "0.3"
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 pm-panel-timeline = { path = "../panel-timeline" }
+mimalloc = { version = "0.1", default-features = false }
 
 [[test]]
 name = "text_commands"
