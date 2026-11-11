@@ -37,8 +37,9 @@ texture, with portable temporal filtering as fallback. Refine/Final share one
 resolved/denoised image across per-layer compositor targets. Viewer, headless
 capture and windowless export use the same native seam. The newer document
 contract and quality bridge are integrated after their targeted checks and the
-GPUI binary build passed. World sky/HDRI/atmosphere and transformed fog now render. Terrain, scatter and
-nature still need translation and report explicit unsupported errors.
+GPUI binary build passed. World sky/HDRI/atmosphere, transformed fog, terrain
+regions/erosion and all six nature species now render. Scatter still needs
+translation and reports an explicit unsupported error.
 
 ## Main capability inventory
 
@@ -151,7 +152,8 @@ nature still need translation and report explicit unsupported errors.
 Sky/sun/HDRI and atmosphere, fog volumes, terrain regions/thermal erosion,
 seeded scatter/instances, procedural plants/grass/rocks and distance LOD exist
 in the pinned engine. Native authoring, channels, actor operations, readback, persistence and inverse
-patches now exist. Renderer translation and external source loading remain gaps.
+patches now exist. World/HDRI/fog and terrain/nature have native renderer
+translation; scatter, hidden prototypes and live source capture remain gaps.
 The kernel is the only document writer.
 
 ## Ordered plan
@@ -469,8 +471,8 @@ intermediates are removed from this lane's evidence after scoring, while logs,
 summary metrics and comparison PNGs remain outside Git.
 
 The port remains incomplete. World sky/atmosphere/fog translation is now implemented (see the next checkpoint).
-Terrain/scatter/nature and sparse material/part records remain authored/saved
-while their native renderer translation is unfinished. Live environment capture
+Terrain/nature translation is now implemented (see the later checkpoint).
+Scatter and sparse material/part renderer translation remain unfinished. Live environment capture
 and full cross-composition source-cycle analysis remain pending. Remaining gates include
 material source capture, extended imported maps, iris/orthographic transport,
 quality shutter samples and automatic idle Refine, complete Electron scene
@@ -550,3 +552,40 @@ The previous loss was reproduced with a colored, multi-material mesh. All 22
 adapter checks pass, including palette rebinding, invalid input and GPU layer
 regressions. The native app builds. Terrain/nature node translation follows in
 a separate increment; this change alone does not enable those nodes.
+
+
+### Terrain and nature worker translation
+
+`479dc67bc` is an engine-only compatibility fix: signed saved heights retain
+negative elevations, retained image paths decode by content, and image heights
+use the pinned scene contract's encoded-RGB luminance and endpoint sampling.
+These bugs were reproduced before fixing them. The shared renderer/host/import
+suite passes **126 checks**, including all **11 Cycles scenes**.
+
+Native terrain now uses the shared heightfield generator, material regions,
+natural ground, blended roughness/metalness, detail, thermal erosion and bounded
+camera-adaptive grid selection. Height image assets resolve through the frozen
+media catalog; eight decoded grids are retained per source. Immutable mesh keys
+include decoded heights so a replaced asset cannot reuse an old terrain mesh.
+Region triangles bind through local palettes; natural ground carries linear
+vertex colors and its procedural surface record. Transforms use the ordinary
+native world evaluation. Nature sources use the pinned seeded conifer,
+broadleaf, birch, bush, grass and rock generators and their two material slots.
+Scatter-specific LOD and hidden prototypes remain pending.
+
+**15 native scene/export checks** pass (14 together plus the new retained-height
+check), including signed grids/regions, eroded colored ground, stable geometry
+reuse, all six species, retained image replacement and terrain coverage in Live
+and Final. The GPUI app builds. No panel/layout changes were made.
+
+| Capability | Engine | Document / kernel | Persistence | Undo | MCP / UI hook |
+| --- | --- | --- | --- | --- | --- |
+| Terrain grid, signed heights and image source | Shared generator; native translated | `add_terrain`, `update_terrain`, channels | Existing PMV checks | Existing inverse-op checks | `edit_3d`; terrain/height-source data and same commands |
+| Regions, blend and natural ground | Shared palettes; native translated | Region records/channels | Stored | Stored edits reversible | `edit_3d`; region material/range records → `update_terrain` |
+| Detail, erosion and adaptive density | Shared generator; native translated | Terrain channels | Stored | Stored edits reversible | `edit_3d`; terrain p → ordinary property writes or `update_terrain` |
+| Six seeded nature prototypes | Shared geometry; standalone native translated | Object `source.nature`/`seed` | Stored | Stored edits reversible | `edit_3d`; source data → `add_object`, `update_object` |
+| Scatter, shared instances and LOD | Shared engine present; native pending | Model/surface references/channels | Stored | Stored edits reversible | `edit_3d`; `add_scatter`, `update_scatter` |
+
+Layer/composition height captures remain explicit unsupported errors. Whole
+Electron-project parity and the native environment performance gates remain
+unverified; the small tests establish transport and state behavior only.

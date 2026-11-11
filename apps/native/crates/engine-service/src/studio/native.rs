@@ -15,6 +15,8 @@ use std::{
 
 #[path = "environment.rs"]
 mod environment;
+#[path = "geometry.rs"]
+mod geometry;
 
 pub struct DocumentSource {
     snapshot: pm_kernel::Snapshot,
@@ -24,6 +26,7 @@ pub struct DocumentSource {
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
+    height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -61,6 +64,7 @@ impl DocumentSource {
             resolved: Mutex::default(),
             quality_override: None,
             environment_maps: Mutex::default(),
+            height_maps: Mutex::default(),
         }
     }
     /// Resolve one export's override without editing the saved composition.
@@ -427,12 +431,8 @@ impl SceneSource for DocumentSource {
             if object.get("world").is_some() || object.get("fog").is_some() {
                 continue;
             }
-            if ["terrain", "scatter"]
-                .iter()
-                .any(|key| object.get(*key).is_some())
-                || object["source"].get("nature").is_some()
-            {
-                return Err("Studio environment document adapter is not connected yet".into());
+            if object.get("scatter").is_some() {
+                return Err("Studio scatter document adapter is not connected yet".into());
             }
             if [
                 "materialProperties",
@@ -485,7 +485,28 @@ impl SceneSource for DocumentSource {
                 .model_worlds
                 .get(id)
                 .ok_or("Studio object has no evaluated world transform")?;
-            if let Some(asset) = object["source"]["assetId"].as_str() {
+            if object.get("terrain").is_some() || object["source"].get("nature").is_some() {
+                let (mesh, palette) = if object.get("terrain").is_some() {
+                    self.terrain_mesh(object, m, &scene.camera)?
+                } else {
+                    self.nature_mesh(&object["source"], 0)?
+                };
+                let first = materials.len();
+                let indices = Arc::new((first..first + palette.len()).collect());
+                for material in palette {
+                    let mut gpu = material.gpu();
+                    gpu.extra[2] = n(p, "opacity", 1.);
+                    materials.push(gpu);
+                    scene.materials.push(material);
+                }
+                instances.push(MeshInstance {
+                    layer: id.into(),
+                    mesh,
+                    material: first,
+                    material_palette: Some(indices),
+                    world: Transform(world.map(|v| v as f32)),
+                });
+            } else if let Some(asset) = object["source"]["assetId"].as_str() {
                 let resource = self.resource(asset)?;
                 if matches!(resource.model, pm_scene3d::import::Model::Splats(_)) {
                     continue;

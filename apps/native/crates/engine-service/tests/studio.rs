@@ -715,19 +715,16 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
     });
 }
 
-#[test]
-fn pending_terrain_translation_fails_explicitly_instead_of_drawing_a_plane() {
-    use studio::SceneSource;
+fn environment_geometry_document(object: Value, props: Value) -> Arc<pm_model::Document> {
     let old = document(false, 100.);
     let mut project = pm_scene3d::from_model(&old.root().unwrap().to_value()).unwrap();
-    let comp = &project["comps"]["test"];
-    let world = pm_scene3d::service::new_layer(
-        comp,
+    let layer = pm_scene3d::service::new_layer(
+        &project["comps"]["test"],
         "terrain",
-        "Terrain",
+        "Environment geometry",
         pm_scene3d::schema::Role::Object,
-        json!({"object":{"source":{"primitive":"plane"},"terrain":{}}}),
-        json!({}),
+        json!({"object":object}),
+        props,
         true,
         None,
         0.,
@@ -736,27 +733,121 @@ fn pending_terrain_translation_fails_explicitly_instead_of_drawing_a_plane() {
     project["comps"]["test"]["layers"]
         .as_array_mut()
         .unwrap()
-        .push(world);
-    let doc = Arc::new(
-        pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
-            .snapshot()
-            .document
-            .as_ref()
-            .clone(),
+        .retain(|l| l["id"] != "mirror");
+    project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .push(layer);
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+fn environment_input(doc: Arc<pm_model::Document>) -> studio::SceneInput {
+    use studio::SceneSource;
+    let r = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    studio::DocumentSource::new(doc, Default::default())
+        .scene(&r)
+        .unwrap()
+}
+#[test]
+fn terrain_signed_heights_regions_erosion_and_natural_colors_reach_native() {
+    let terrain = json!({"p":{"resolution":2,"width":4,"depth":4,"amplitude":4},"heights":[-0.5,0,0.5,-0.5,0,0.5,-0.5,0,0.5],"regions":[{"p":{"minHeight":0,"maxHeight":3,"color":"#FF0000","roughness":0.3,"metalness":0.6}}]});
+    let object = json!({"source":{"primitive":"plane"},"terrain":terrain});
+    let doc = environment_geometry_document(object.clone(), json!({"position.x":3}));
+    let input = environment_input(doc.clone());
+    let instance = &input.instances[0];
+    assert_eq!(input.instances.len(), 1);
+    assert_eq!(instance.mesh.indices.len(), 8);
+    assert_eq!(instance.mesh.positions[0].y, -2.);
+    assert_eq!(instance.world.0[12], 3.);
+    assert!(
+        instance.mesh.triangle_materials.contains(&0)
+            && instance.mesh.triangle_materials.contains(&1)
     );
-    let revision = doc.revision();
-    let source = studio::DocumentSource::new(doc, Default::default());
-    let error = source
-        .scene(&studio::SceneRequest {
-            composition: "test".into(),
-            revision,
-            ticks: 0,
-            width: 64,
-            height: 64,
-        })
-        .err()
+    let palette = instance.material_palette.as_ref().unwrap();
+    assert_eq!(
+        input.materials.as_ref().unwrap()[palette[1]].base,
+        [1., 0., 0., 0.6]
+    );
+    let second = environment_input(doc);
+    assert!(Arc::ptr_eq(&instance.mesh, &second.instances[0].mesh));
+    let mut colored = object;
+    colored["terrain"]["p"]["natural"] = json!(true);
+    colored["terrain"]["p"]["blend"] = json!(0.2);
+    colored["terrain"]["p"]["erosion"] = json!(4);
+    let input = environment_input(environment_geometry_document(colored, json!({})));
+    let instance = &input.instances[0];
+    assert_eq!(instance.mesh.colors.len(), 9);
+    assert_ne!(instance.mesh.positions[0].y, -2.);
+    assert_eq!(
+        input.materials.as_ref().unwrap()[instance.material].policy[3],
+        1.
+    );
+    let extracted = pm_studio3d_engine::extract::Extractor::default()
+        .extract(&input)
         .unwrap();
-    assert!(error.contains("environment document adapter"), "{error}");
+    assert_ne!(
+        extracted.prepared.materials[instance.material].policy[1] as u32 & 16,
+        0
+    );
+}
+#[test]
+fn terrain_renders_in_native_viewer_and_final_without_a_proxy_plane() {
+    let doc = environment_geometry_document(
+        json!({"source":{"primitive":"plane"},"terrain":{"p":{"width":2,"depth":2,"resolution":2,"amplitude":0}}}),
+        json!({"rotation.x":90}),
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    let final_pixels = draw(&mut renderer, doc.clone());
+    assert!(final_pixels.chunks_exact(4).filter(|p| p[3] > 0.).count() > 500);
+    let mut live = request();
+    live.export = false;
+    live.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &live,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0.)
+            .count()
+            > 500
+    );
+}
+#[test]
+fn all_six_nature_species_use_shared_seeded_geometry_and_local_materials() {
+    for species in ["conifer", "broadleaf", "birch", "bush", "grass", "rock"] {
+        let input = environment_input(environment_geometry_document(
+            json!({"source":{"nature":species,"seed":41}}),
+            json!({}),
+        ));
+        assert_eq!(input.instances.len(), 1);
+        let mesh = &input.instances[0].mesh;
+        assert!(!mesh.indices.is_empty(), "{species}");
+        assert!(mesh.triangle_materials.iter().all(|i| *i < 2));
+        assert_eq!(
+            input.instances[0].material_palette.as_ref().unwrap().len(),
+            2
+        );
+        pm_studio3d_engine::extract::Extractor::default()
+            .extract(&input)
+            .unwrap();
+    }
 }
 
 #[test]
@@ -1063,4 +1154,56 @@ fn retained_hdr_environment_preserves_energy_and_renders_in_live_and_final() {
             "retained HDRI must fill the World output in Live and Final"
         );
     }
+}
+
+#[test]
+fn retained_height_assets_cache_decodes_and_invalidate_geometry_on_replacement() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = [
+        dir.path().join("height-a.bin"),
+        dir.path().join("height-b.bin"),
+    ];
+    for (path, pixel) in paths.iter().zip([[128, 64, 32, 128], [64, 32, 16, 128]]) {
+        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n".to_vec();
+        bytes.extend(pixel);
+        std::fs::write(path, bytes).unwrap();
+    }
+    let old = environment_geometry_document(
+        json!({"source":{"primitive":"plane"},"terrain":{"heightSource":"height","p":{"resolution":2,"amplitude":4}}}),
+        json!({}),
+    );
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    project["assets"]["height"] =
+        json!({"id":"height","kind":"image","name":"height.hdr","format":"hdr"});
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = |path| {
+        let mut media = pm_export::render::MediaPaths::default();
+        media.paths.insert("height".into(), path);
+        studio::DocumentSource::new(doc.clone(), media)
+    };
+    let a = source(paths[0].clone());
+    let first = a.scene(&request).unwrap();
+    let repeat = a.scene(&request).unwrap();
+    assert!(Arc::ptr_eq(
+        &first.instances[0].mesh,
+        &repeat.instances[0].mesh
+    ));
+    let expected = 4. * (0.2126 * 0.5 + 0.7152 * 0.25 + 0.0722 * 0.125);
+    assert!((first.instances[0].mesh.positions[0].y - expected).abs() < 1e-6);
+    let second = source(paths[1].clone()).scene(&request).unwrap();
+    assert!(!Arc::ptr_eq(
+        &first.instances[0].mesh,
+        &second.instances[0].mesh
+    ));
+    assert!((second.instances[0].mesh.positions[0].y - expected * 0.5).abs() < 1e-6);
 }
