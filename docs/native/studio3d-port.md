@@ -789,3 +789,25 @@ missing-image and live-capture errors. Content reuse, changed-image invalidation
 retained alpha and malformed image rejection have a separate image regression.
 Authoring remains ordinary `update_object` material.maps data and channel ops;
 existing PMV/Undo/MCP routing is unchanged. No UI was added.
+
+### Production defaults and legacy sample commands
+
+Two mismatches were reproduced and fixed. The native worker now resolves absent
+saved quality to the pinned source's Production defaults (32–256 samples,
+0.03 noise target, 8 bounces, caustics and denoise). Reading/rendering an older
+composition leaves its serialized document unchanged. This supersedes the
+initial port's legacy fixed-sample fallback; an old camera sample count alone
+is not the composition's selected quality policy.
+
+Legacy `set_environment.patch.samples` commands now write the corresponding
+custom quality sample ceiling/floor in the same kernel transaction as the
+camera environment data, matching the source command. One Undo/Redo restores
+both records exactly; invalid counts leave content and revision unchanged.
+Explicit saved presets and per-export overrides keep precedence. Still/export
+rendering retains the noise target/sample ceiling with no preview time cap.
+
+The native regression fixtures now request their tiny 4-sample policies
+explicitly. All **28 native scene/export**, **27 kernel scene**, **18 document**,
+**3 scene service**, **8 schema unit** and **2 source-contract** checks pass;
+the GPUI app builds. The Production performance/no-visible-noise acceptance
+gates remain open; applying the correct default is not a speedup claim.

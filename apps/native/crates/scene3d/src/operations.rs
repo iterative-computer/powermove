@@ -242,6 +242,22 @@ pub fn plan(
         .as_array()
         .ok_or_else(|| Error("Composition has no layers".into()))?;
     let mut actions = vec![];
+    // Legacy sample-count commands and composition policy are one atomic edit,
+    // as on Studio's source branch. Reads of old documents keep Production's
+    // default without rewriting their serialized camera data.
+    if operation == "set_environment" && args["patch"].get("samples").is_some() {
+        let samples = args["patch"]["samples"]
+            .as_f64()
+            .filter(|v| v.is_finite() && v.fract() == 0. && (1. ..=4096.).contains(v))
+            .ok_or_else(|| Error("Invalid Studio sample count".into()))?;
+        let current = crate::quality::get(comp)?;
+        let quality = crate::quality::resolve(
+            &current,
+            &json!({"maxSamples":samples,"minSamples":current["minSamples"].as_f64().unwrap().min(samples)}),
+        )?;
+        actions.push(Action::RenderQuality { quality });
+    }
+
     if operation == "create" && args.get("scene").is_some() {
         let scene = schema::parse_scene(args["scene"].clone())?;
         let mut mapping = std::collections::HashMap::new();

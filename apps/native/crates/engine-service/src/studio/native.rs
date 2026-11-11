@@ -362,16 +362,17 @@ impl SceneSource for DocumentSource {
         request: &SceneRequest,
     ) -> Result<Option<pm_studio3d_engine::extract::FinalQuality>, String> {
         let resolved = self.resolve(request)?;
-        let Some(value) = self
+        let value = self
             .quality_override
             .as_ref()
             .filter(|(id, _)| id == &request.composition)
             .map(|(_, q)| q)
-            .or_else(|| resolved.scene.get("studioQuality"))
-        else {
-            return Ok(None);
-        };
-        let q = pm_scene3d::quality::validate(value.clone()).map_err(|e| e.to_string())?;
+            .or_else(|| resolved.scene.get("studioQuality"));
+        let q = match value {
+            Some(value) => pm_scene3d::quality::validate(value.clone()),
+            None => pm_scene3d::quality::preset("production"),
+        }
+        .map_err(|e| e.to_string())?;
         Ok(Some(
             pm_studio3d_engine::extract::FinalQuality {
                 min_samples: q["minSamples"].as_u64().unwrap() as u32,

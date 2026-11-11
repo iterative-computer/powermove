@@ -12,6 +12,12 @@ use std::sync::Arc;
 fn document(card: bool, opacity: f64) -> Arc<pm_model::Document> {
     use pm_scene3d::{schema::Role, service::new_layer};
     let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"backgroundFill":{"type":"none"},"layers":[]});
+    // Tiny deterministic transport fixtures choose their sample policy explicitly.
+    comp["studioQuality"] = pm_scene3d::quality::resolve(
+        &pm_scene3d::quality::preset("production").unwrap(),
+        &json!({"minSamples":4,"maxSamples":4,"noiseThreshold":0,"caustics":false}),
+    )
+    .unwrap();
     let layer = |id, role, data, props| {
         new_layer(&comp, id, id, role, data, props, true, None, 0.).unwrap()
     };
@@ -1817,4 +1823,42 @@ fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {
         error.contains("Live layer/group material capture"),
         "{error}"
     );
+}
+
+#[test]
+fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_data() {
+    use studio::SceneSource;
+    let old = document(false, 100.);
+    let mut legacy = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    legacy["comps"]["test"]
+        .as_object_mut()
+        .unwrap()
+        .remove("studioQuality");
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&legacy))
+        .snapshot()
+        .document;
+    let before = doc.to_value();
+    let request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(doc.clone(), Default::default());
+    let quality = source
+        .final_quality(&request)
+        .unwrap()
+        .expect("source default is Production");
+    assert_eq!(
+        (
+            quality.min_samples,
+            quality.max_samples,
+            quality.max_bounces
+        ),
+        (32, 256, 8)
+    );
+    assert_eq!(quality.noise_threshold, 0.03);
+    assert!(quality.denoise && quality.caustics);
+    assert_eq!(doc.to_value(), before);
 }

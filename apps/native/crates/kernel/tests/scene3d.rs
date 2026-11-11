@@ -913,3 +913,34 @@ fn sky_presets_write_source_defaults_and_quality_combines_preset_with_patch() {
     assert_eq!(q["maxSamples"], 8);
     assert_eq!(q["maxBounces"], 4);
 }
+
+#[test]
+fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"add_camera","id":"cam"}));
+    let before = project(&s);
+    apply(
+        &mut s,
+        json!({"operation":"set_environment","patch":{"samples":12}}),
+    );
+    let after = project(&s);
+    let q = &after["comps"]["C"]["studioQuality"];
+    assert_eq!(q["maxSamples"], 12);
+    assert_eq!(q["minSamples"], 12);
+    assert_eq!(q["preset"], "custom");
+    assert_eq!(layer(&s, "cam")["d"]["data"]["environment"]["samples"], 12);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), after);
+    let revision = s.revision();
+    assert!(
+        s.execute(
+            command(json!({"operation":"set_environment","patch":{"samples":0}})),
+            Origin::Interface
+        )
+        .is_err()
+    );
+    assert_eq!(s.revision(), revision);
+    assert_eq!(project(&s), after);
+}
