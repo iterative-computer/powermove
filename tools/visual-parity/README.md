@@ -8,10 +8,10 @@ the repository.
 # 1. Clone the v1 profile (never use a live one); strip locks, MCP descriptors and secrets.
 cp -cR "$HOME/Library/Application Support/powermove" "$S/v1-clone"   # then remove Singleton*, mcp, cloud, env, Cookies*, "Local State"
 # 2. v1 frames: hidden background-test app (Node only; Bun cannot host Playwright's Electron driver).
-node tools/visual-parity/v1-frames.mjs --profile "$S/v1-clone" --project Paper.pmv --out "$S/paper" --step 2 --times 13:11,12:08
+node tools/visual-parity/v1-frames.mjs --profile "$S/v1-clone" --project <project>.pmv --out "$S/<project>" --step 2 --times 13:11,12:08
 # 3. V2 frames: the lane app (pm-gui launch with --electron-profile <another clone> to migrate it,
 #    profile folder named com.zellzoi.powermove.native-beta) has the project open; the app's MCP renders.
-node tools/visual-parity/v2-frames.mjs --app <lane>/Powermove.app --profile <V2 profile> --project Paper.pmv --out "$S/paper"
+node tools/visual-parity/v2-frames.mjs --app <lane>/Powermove.app --profile <V2 profile> --project <project>.pmv --out "$S/<project>"
 # 4. Optional: the paused viewer as a person sees it (the lane app shows the project; --rect is
 #    the viewer canvas in the native-resolution window screenshot). Capture v1 at the viewer's
 #    render size (--width) into its own directory to compare viewer with viewer.
