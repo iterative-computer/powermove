@@ -173,7 +173,7 @@ struct Blas {
 #[derive(Default)]
 pub struct Extractor {
     cache: HashMap<usize, Blas>,
-    world_cache: Option<(String, Vec<[f32; 4]>)>,
+    world_cache: Option<(Vec<u8>, Vec<[f32; 4]>)>,
     pub builds: u64,
 }
 
@@ -363,15 +363,32 @@ impl Extractor {
         }
         // The physical sky bake is independent of camera and object motion.
         // Retain its trailer until the exact world/light input changes.
-        if input.scene.world.hdri.is_none() {
-            let key = format!("{:?}{lights:?}", input.scene.world);
-            if self.world_cache.as_ref().is_none_or(|(old, _)| *old != key) {
-                self.world_cache = Some((key, input.scene.world.pack(&lights)));
-            }
-            sdata.extend_from_slice(&self.world_cache.as_ref().unwrap().1);
-        } else {
-            sdata.extend(input.scene.world.pack(&lights));
+        let world = &input.scene.world;
+        let mut key = format!(
+            "{:?}{:?}{:?}{:?}{lights:?}",
+            world.sky, world.atmosphere, world.volumes, world.adaptive
+        )
+        .into_bytes();
+        if let Some(map) = &world.hdri {
+            key.extend_from_slice(
+                format!(
+                    "map:{:?}",
+                    (
+                        map.width,
+                        map.height,
+                        map.rotation,
+                        map.intensity,
+                        map.visible
+                    )
+                )
+                .as_bytes(),
+            );
+            key.extend_from_slice(bytemuck::cast_slice(&map.pixels));
         }
+        if self.world_cache.as_ref().is_none_or(|(old, _)| *old != key) {
+            self.world_cache = Some((key, world.pack(&lights)));
+        }
+        sdata.extend_from_slice(&self.world_cache.as_ref().unwrap().1);
         if boxes.is_empty() {
             lo = Vec3::ZERO;
             hi = Vec3::ZERO;

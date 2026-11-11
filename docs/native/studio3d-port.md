@@ -37,8 +37,8 @@ texture, with portable temporal filtering as fallback. Refine/Final share one
 resolved/denoised image across per-layer compositor targets. Viewer, headless
 capture and windowless export use the same native seam. The newer document
 contract and quality bridge are integrated after their targeted checks and the
-GPUI binary build passed. World sky/atmosphere and transformed fog now render. HDRI sources, terrain,
-scatter and nature still need translation and report explicit unsupported errors.
+GPUI binary build passed. World sky/HDRI/atmosphere and transformed fog now render. Terrain, scatter and
+nature still need translation and report explicit unsupported errors.
 
 ## Main capability inventory
 
@@ -226,7 +226,7 @@ in pm-render can keep that dependency direction clean: immutable document
 source → worker backend → per-layer texture → normal compositor.
 
 The pinned shader changed its instance policy words: row 4.w packs a layer
-override and vertex-color flag; row 5.w controls primary visibility. The old
+override and instance-color flag; row 5.w controls primary visibility. The old
 native extractor used them for material/layer IDs. Reusing those bytes would
 silently render the wrong material or hide geometry. Adapt triangle material
 bindings, UV1/physical-map records, instancing metadata and the world trailer;
@@ -340,7 +340,7 @@ The actor remains the sole author; planned structural staging is validated at
 the end of each compound edit, before publication.
 
 Still required for full scene parity: wire new scene nodes and
-hidden prototypes into native extraction; HDRI source loading; terrain and
+hidden prototypes into native extraction; live environment capture; terrain and
 scatter/LOD translation; material source capture and all
 imported maps; iris/orthographic transport; quality motion-blur sample integration and automatic
 paused Refine scheduling; broader imported animation/map parity; render passes;
@@ -470,8 +470,8 @@ summary metrics and comparison PNGs remain outside Git.
 
 The port remains incomplete. World sky/atmosphere/fog translation is now implemented (see the next checkpoint).
 Terrain/scatter/nature and sparse material/part records remain authored/saved
-while their native renderer translation is unfinished. HDRI source decoding and
-full cross-composition source-cycle analysis remain pending. Remaining gates include
+while their native renderer translation is unfinished. Live environment capture
+and full cross-composition source-cycle analysis remain pending. Remaining gates include
 material source capture, extended imported maps, iris/orthographic transport,
 quality shutter samples and automatic idle Refine, complete Electron scene
 round trips, pixel filtering/extra edge sampling/enamel/no-visible-noise grading,
@@ -508,3 +508,32 @@ empty geometry scene's full-viewport sky in Live and Final, transparent hidden W
 outputs, rotated/scaled volume extents, visible world edits, deterministic
 restoration and geometry reuse. The remaining unsupported-node guard now covers
 terrain. These pixel checks do not establish the 60 fps or input-latency gates.
+
+
+### Retained HDRI resources
+
+`219a984df` fixes the shared environment loader: retained `.bin` paths decode
+from their contents, integer images become linear radiance, and HDR/RGBE/EXR
+floating values retain their energy above one. The loader caps lighting maps
+at 2048×1024 while its admission probe returns the original image dimensions.
+Owned floating buffers avoid an unnecessary full HDR image clone. RGB vectors
+have a defined packed layout for exact host image transfers/cache keys.
+
+Native World and environment-light sources now resolve durable image asset IDs
+through the frozen media catalog. The worker keeps up to four decoded maps
+within 96 MiB, applies intensity/rotation/camera visibility, and invalidates its
+packed world trailer by exact pixel/settings bytes. This avoids rebaking the
+same HDRI distribution on camera motion. Native MCP `import_media` recognizes
+HDR/RGBE (`.hdr`) and EXR, probes them with this loader on its worker, and admits
+the original bytes through the normal media command. File chooser presentation
+remains with the designer. Layer/composition environment captures remain open.
+
+The `.bin` rejection was reproduced before fixing it. Loader checks prove the
+PNG midpoint becomes 0.2158605 linear, RGBE values [4,2,1] stay above one, and a
+2050-pixel source retains that admission width while its lighting map is capped
+to 2048. The full renderer/host suite passes **124 checks**, including all 11
+Cycles comparisons. The native adapter passes **19 checks**; exact HDRI pixel
+and visibility changes invalidate the cache. All **12 native scene/export**
+checks pass; the HDRI check fills the viewport in Live and Final from a retained
+path with no image extension. The GPUI app builds. These checks do not establish
+image-source capture parity, no-visible-noise acceptance or presented fps.

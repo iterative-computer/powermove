@@ -569,6 +569,8 @@ fn media_type(path: &Path) -> Option<(&'static str, String)> {
     }
     let extension = path.extension()?.to_str()?.to_lowercase();
     let mime = match extension.as_str() {
+        "hdr" => return Some(("image", "image/vnd.radiance".into())),
+        "exr" => return Some(("image", "image/x-exr".into())),
         "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",
         "obj" => "model/obj",
@@ -637,13 +639,24 @@ impl MediaImporter for EngineJobs {
                 "Replace media with a file of the same kind.",
             ));
         }
-        let probe = (kind != "model")
+        let environment = matches!(mime.as_str(), "image/vnd.radiance" | "image/x-exr");
+        let image_size = environment
+            .then(|| pm_engine_service::studio::probe_environment(path))
+            .transpose()
+            .map_err(|e| {
+                Error::invalid(format!("This environment image could not be read: {e}"))
+            })?;
+        let probe = (kind != "model" && !environment)
             .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
             .transpose()
             .map_err(|_| Error::invalid("This file could not be read as media."))?;
         let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
-        let width = video.map(|video| f64::from(video.width));
-        let height = video.map(|video| f64::from(video.height));
+        let width = image_size
+            .map(|d| f64::from(d[0]))
+            .or_else(|| video.map(|video| f64::from(video.width)));
+        let height = image_size
+            .map(|d| f64::from(d[1]))
+            .or_else(|| video.map(|video| f64::from(video.height)));
         let duration = probe
             .as_ref()
             .and_then(|probe| seconds(probe.duration_us))

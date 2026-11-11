@@ -13,6 +13,12 @@ pub use pm_studio3d_engine::service::{
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
 
+/// Worker-only HDR/RGBE/EXR admission probe; preserve the original dimensions.
+pub fn probe_environment(path: &std::path::Path) -> Result<[u32; 2], String> {
+    pm_studio3d_engine::environment::EnvironmentMap::load_with_dimensions(path)
+        .map(|(_, dimensions)| dimensions)
+}
+
 #[cfg(feature = "kernel")]
 mod native;
 #[cfg(feature = "kernel")]

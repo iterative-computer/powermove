@@ -23,6 +23,7 @@ pub struct DocumentSource {
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
+    environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -59,6 +60,7 @@ impl DocumentSource {
             resources: Mutex::default(),
             resolved: Mutex::default(),
             quality_override: None,
+            environment_maps: Mutex::default(),
         }
     }
     /// Resolve one export's override without editing the saved composition.
@@ -157,6 +159,41 @@ impl DocumentSource {
             pm_scene3d::render::Resource::load(name, &bytes).map_err(|e| e.to_string())?;
         resources.insert(id.into(), resource.clone());
         Ok(resource)
+    }
+    fn environment_image(
+        &self,
+        source: &Value,
+    ) -> Result<pm_studio3d_engine::environment::EnvironmentMap, String> {
+        let id = source
+            .as_str()
+            .ok_or("Live layer/composition environment capture is not connected yet")?;
+        let path = self
+            .media
+            .paths
+            .get(id)
+            .ok_or_else(|| format!("World image is not loaded: {id}"))?;
+        let mut cache = self
+            .environment_maps
+            .lock()
+            .map_err(|_| "World image cache poisoned")?;
+        if let Some(index) = cache.iter().position(|(key, _)| key == id) {
+            let entry = cache.remove(index);
+            let image = (*entry.1).clone();
+            cache.push(entry);
+            return Ok(image);
+        }
+        let image = Arc::new(pm_studio3d_engine::environment::EnvironmentMap::load(path)?);
+        cache.push((id.into(), image.clone()));
+        while cache.len() > 4
+            || cache
+                .iter()
+                .map(|(_, m)| m.pixels.len() * std::mem::size_of::<Vec3>())
+                .sum::<usize>()
+                > 96 * 1024 * 1024
+        {
+            cache.remove(0);
+        }
+        Ok((*image).clone())
     }
     fn mesh(&self, source: &Value) -> Result<Arc<Mesh>, String> {
         let key = serde_json::to_string(source).map_err(|e| e.to_string())?;
@@ -378,7 +415,7 @@ impl SceneSource for DocumentSource {
             layers: None,
         };
         let mut instances = vec![];
-        environment::apply(&r, &mut scene)?;
+        environment::apply(&r, &mut scene, &|source| self.environment_image(source))?;
         let mut materials: Vec<GpuMaterial> = vec![];
         let mut map_layers = vec![];
         let mut map_indices = HashMap::new();

@@ -58,6 +58,27 @@ fn motion_reuses_blas_and_rebuilds_world_bounds() {
 }
 
 #[test]
+fn world_cache_tracks_exact_hdr_pixels_and_settings() {
+    use pm_studio3d_engine::environment::EnvironmentMap;
+    let mut input = input();
+    input.scene.world.hdri = Some(EnvironmentMap {
+        width: 2,
+        height: 1,
+        pixels: vec![v3(4., 2., 1.), v3(1., 2., 4.)],
+        ..Default::default()
+    });
+    let mut extractor = Extractor::default();
+    let before = extractor.extract(&input).unwrap().prepared.sdata;
+    assert_eq!(extractor.extract(&input).unwrap().prepared.sdata, before);
+    input.scene.world.hdri.as_mut().unwrap().pixels[0].x = 8.;
+    assert_ne!(extractor.extract(&input).unwrap().prepared.sdata, before);
+    input.scene.world.hdri.as_mut().unwrap().pixels[0].x = 4.;
+    assert_eq!(extractor.extract(&input).unwrap().prepared.sdata, before);
+    input.scene.world.hdri.as_mut().unwrap().visible = false;
+    assert_ne!(extractor.extract(&input).unwrap().prepared.sdata, before);
+}
+
+#[test]
 fn material_and_layer_assignment_do_not_rebuild_geometry() {
     let mesh = triangle();
     let mut input = input();

@@ -989,3 +989,78 @@ fn world_edits_update_pixels_and_reuse_surface_geometry() {
         "restored World is deterministic"
     );
 }
+
+#[test]
+fn retained_hdr_environment_preserves_energy_and_renders_in_live_and_final() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retained-image.bin");
+    std::fs::write(
+        &path,
+        b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n\x80\x40\x20\x83",
+    )
+    .unwrap();
+    assert_eq!(studio::probe_environment(&path).unwrap(), [1, 1]);
+    let old = environment_document(true, false);
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    project["assets"]["hdri"] =
+        json!({"id":"hdri","kind":"image","name":"studio.hdr","format":"hdr"});
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    layers.retain(|l| l["id"] != "fog");
+    for l in layers {
+        if l["id"] == "world" {
+            l["d"]["data"]["object"]["world"]["mode"] = json!("hdri");
+            l["d"]["data"]["object"]["world"]["source"] = json!("hdri");
+            l["d"]["data"]["object"]["world"]["p"]["intensity"]["v"] = json!(2);
+        }
+    }
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("hdri".into(), path);
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+    let map = input.scene.world.hdri.unwrap();
+    assert_eq!(map.pixels[0].x, 4.);
+    assert_eq!(map.intensity, 2.);
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    for export in [true, false] {
+        let mut request = request();
+        request.export = export;
+        request.output_kind = if export {
+            OutputKind::Final
+        } else {
+            OutputKind::Preview
+        };
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert!(
+            renderer
+                .read_rgba(&frame)
+                .unwrap()
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0.9 && p[0] > p[1] && p[1] > p[2])
+                .count()
+                > 4000,
+            "retained HDRI must fill the World output in Live and Final"
+        );
+    }
+}

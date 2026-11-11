@@ -5,6 +5,7 @@ use pm_studio3d_engine::environment::{AdaptiveSampling, Atmosphere, Sky, Volume,
 pub(super) fn apply(
     r: &pm_scene3d::service::ResolvedScene,
     scene: &mut Scene,
+    image: &dyn Fn(&Value) -> Result<pm_studio3d_engine::environment::EnvironmentMap, String>,
 ) -> Result<(), String> {
     let objects = r.scene["objects"]
         .as_array()
@@ -42,7 +43,13 @@ pub(super) fn apply(
                     visible: val(&p["visible"]) != false,
                 })
             }
-            "hdri" => return Err("Studio HDRI source decoding is not connected yet".into()),
+            "hdri" => {
+                let mut map = image(&node["source"])?;
+                map.intensity = n(p, "intensity", 1.) * multiplier;
+                map.rotation = n(p, "rotation", 0.);
+                map.visible = val(&p["visible"]) != false;
+                scene.world.hdri = Some(map);
+            }
             "none" => {}
             _ => return Err("Invalid Studio World mode".into()),
         }
