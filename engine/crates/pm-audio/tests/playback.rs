@@ -3550,6 +3550,45 @@ fn stopped_preparation_does_not_redecode_evicted_blocks() {
     assert!(after.bytes <= 4 << 20);
 }
 
+#[test]
+fn closing_playback_releases_preparation_and_source_cache() {
+    let _device_owner = isolated_device_owner();
+    let dir = temp_dir("closed-playback-cache");
+    let path = dir.join("tone.wav");
+    let signal = tone(SR, 1.0, 997.0, 0.1);
+    write_wav(&path, SR, &[signal.clone(), signal]);
+    let cache = SourceCache::new(4 << 20, 2);
+    let closed = Arc::downgrade(&cache);
+    let (playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        Default::default(),
+        SR,
+        2,
+        0,
+    )
+    .unwrap();
+    playback
+        .set_project(
+            Arc::new(project(
+                30.,
+                1.,
+                &[audio("v", "s", 0., 1., r#", "speed":1.5"#, "")],
+                &[],
+                "",
+            )),
+            "C",
+            &|_: &str| Some(path.clone()),
+        )
+        .unwrap();
+    until(|| !playback.prepared_starts().is_empty());
+    assert!(cache.stats().bytes > 0);
+    drop(side);
+    drop(playback);
+    drop(cache);
+    until(|| closed.upgrade().is_none());
+}
+
 /// A6.3: both decoded (warm) and initially cold sources prepare every voice
 /// while paused, including a distinct work-area start. Play and a paused
 /// seek use those exact vocoder histories with no source wait or lost sample.
