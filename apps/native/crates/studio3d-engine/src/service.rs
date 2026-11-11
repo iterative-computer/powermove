@@ -38,6 +38,7 @@ pub struct RenderedScene {
 struct PreparedScene {
     quality: Option<crate::extract::FinalQuality>,
     denoise: Denoise,
+    live_guided: bool,
     reset: bool,
     width: u32,
     height: u32,
@@ -179,6 +180,13 @@ impl StudioService {
         let auxiliary = source.auxiliary_layers(&request)?;
         let extracted = self.extractor.extract(&input)?;
         validate(&input, &extracted)?;
+        // The MetalFX denoised scaler biases low-albedo, procedurally colored
+        // ground dark at Live's half resolution, even with matching guides.
+        // Our linear temporal/edge-aware filter preserves its exposure. Use
+        // that existing GPU path for these scenes; product sets keep MetalFX.
+        let live_guided = extracted.prepared.materials.iter().any(|m| {
+            m.policy[3] == 1. && (m.policy[1] as u32 & 16) != 0
+        });
         // Compare exact bytes, including resources, instead of trusting a revision
         // or a lossy/partial scene key. No stale frame survives a material edit.
         let (mut key, resource_start) = content(&input, &extracted);
@@ -320,7 +328,7 @@ impl StudioService {
             }
         }
         Ok(PreparedScene {
-            quality, denoise, reset, width, height, outputs, key, resource_start,
+            quality, denoise, live_guided, reset, width, height, outputs, key, resource_start,
             adaptive: input.scene.world.adaptive, layers: extracted.layers,
             failures,
         })
@@ -340,7 +348,7 @@ impl StudioService {
             let input = source.scene(&request)?;
             return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
         }
-        let PreparedScene { quality, denoise, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
+        let PreparedScene { quality, denoise, live_guided, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
             self.prepare_scene(source, request.clone(), tier)?;
         let r = self.renderer.as_mut().unwrap();
         r.live = tier == Tier::QualityLive;
@@ -381,7 +389,7 @@ impl StudioService {
             0
         };
         #[cfg(all(feature = "metalfx", target_os = "macos"))]
-        let mut metalfx = r.live;
+        let mut metalfx = r.live && r.metalfx_enabled && !live_guided;
         #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
         let metalfx = false;
         #[cfg(feature = "oidn")]

@@ -393,6 +393,14 @@ impl Renderer {
 mod resize_tests {
     use super::*;
     #[test]
+    fn disabled_metalfx_refuses_cpu_and_texture_outputs_without_allocating_a_scaler() {
+        let mut renderer = Renderer::new(16, 16).unwrap();
+        renderer.metalfx_enabled = false;
+        assert!(renderer.finish_metalfx(32, 32, false, None).is_err());
+        assert!(renderer.finish_metalfx_texture(32, 32, false, false).is_err());
+        assert!(renderer.metalfx.is_none());
+    }
+    #[test]
     fn resized_specular_distance_reads_the_current_guide_textures() {
         let Ok(renderer) = Renderer::new(64, 36) else { return };
         if !renderer.metalfx_enabled { return; }
@@ -474,6 +482,9 @@ impl Renderer {
     )->Result<(Vec<u8>,f64),String>{
         let start = Instant::now();
         self.last_surface = None;
+        if !self.metalfx_enabled {
+            return Err("MetalFX is disabled or unavailable; use portable denoising".into());
+        }
         if self
             .metalfx
             .as_ref()

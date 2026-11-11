@@ -1393,6 +1393,113 @@ and **51 engine unit checks** pass, and all **11 Cycles yardstick tolerances**
 pass using the existing validated references. The native app build passes in
 **21.04 s**.
 
+### Round-two engine finding — Fast terrain exposure
+
+The designer's Fast/Quality choices select native Live/Refine. A rolling,
+procedurally colored terrain lit by the legacy ambient environment reproduced
+the shift: centre luminance was **0.30512 / 0.33660** at 64×64 and
+**0.31893 / 0.33687** at 256×256 (Live/Refine). The existing portable GPU
+temporal/edge-aware filter kept the same terrain within roughly 1–2% of Refine.
+MetalFX's denoised scaling caused this particular dark bias; changing its
+automatic exposure did not solve it. Native color/guide jitter was already
+aligned by the Rust shader adapter and is unchanged.
+
+Live now selects the existing linear temporal filter when a scene contains
+procedurally colored terrain (the prepared ground-material marker). Other
+product scenes retain MetalFX denoised scaling. Refine/Final, scene lighting,
+authored terrain colors and the saved quality policy are unchanged. This is a
+scene-wide denoiser fallback: mixed terrain/product scenes currently use the
+portable path together, rather than mixing incompatible per-layer histories.
+Its upscale follows the compositor's existing sampling path. Future MetalFX
+re-evaluation can replace this policy after the same exposure checks pass.
+
+The in-process MetalFX output APIs also now respect their disabled/unavailable
+capability flag. This makes the diagnostic fallback effective and prevents a
+host from constructing an unsupported scaler. Normal native rendering chooses
+the fallback before calling MetalFX; direct engine callers receive an error.
+
+At 256×256 the fixed rolling-ground result is **0.33988 / 0.33687 / 0.33761**
+(Live/Refine/Final); at 64×64 it is **0.34008 / 0.33660 / 0.33788**.
+The regression checks plain and natural terrain, ambient and sky lighting, at
+both sizes, requiring Live to stay within **5%** of Refine and Final. All
+**48 native scene/export checks** pass in **17.52 s**; the same terrain check
+passes with Metal RT disabled (**4.13 s**) and MetalFX disabled (**4.45 s**).
+**29 native Studio checks** and **52 engine unit checks** pass, including the
+direct MetalFX capability guard. The native app rebuild passes in **179 s**.
+No presented-fps or 1080p quality claim follows from this small-image regression.
+
+### Unverified quiet-window performance handoff
+
+The measurement driver is `apps/native/scripts/studio3d-quiet-perf.py`. It is
+prepared for the next quiet window and has not been exercised on screen yet.
+Use a freshly built dev bundle that includes the shader compiler and the UI
+navigation lane, and an animated **1920×1080, 60-fps** product composition.
+Build/package beforehand under the shared lock, with the existing native
+profile, features and target. Close other workloads before measuring. The
+script checks storage and USER_ACTIVE, copies the corpus into its own temporary
+folder, uses a disposable profile, warms for eight seconds, records 60 seconds
+of Live playback, then records 30 seconds of actual native pointer/key input.
+The operator or UI automation drives viewer navigation during that last phase;
+the script does not substitute command timestamps for NSEvent timestamps.
+
+Exact command (replace the bundle/corpus paths with the retained quiet-window
+fixtures; the output directory must be new):
+
+```sh
+nice -n 10 flock /tmp/pm-build.lock python3 \
+  apps/native/scripts/studio3d-quiet-perf.py \
+  --app /tmp/pm-shots/na-studio3d/quiet-bundle/Powermove.app/Contents/MacOS/powermove-native \
+  --project /tmp/pm-shots/na-studio3d/quiet-corpus/product-1080p-60.pmv \
+  --out /tmp/pm-shots/na-studio3d/quiet-baseline \
+  --seconds 60 --input-seconds 30
+```
+
+Set the bundle's usual FFmpeg/OIDN library environment before invocation if
+needed. Evidence includes the executable SHA-256, full native presentation trace,
+Studio stage timings, process logs and `summary.json`. The summary uses real
+`presentedTime`, counts every presentation gap of at least 100 ms, and matches
+each distinct native input timestamp to its first successful presentation.
+Fewer than 100 distinct presented inputs invalidates input acceptance. Repeated
+static frames intentionally do not count as presented Live frames; use the
+animated fixture. Cold opening/compilation is separate from this warmed gate.
+The script and its phase handling must be verified before treating its first
+output as acceptance evidence.
+
+Fix order for the recorded roughly 27-fps result:
+
+1. Reproduce with this trace on the combined native/UI head. Attribute CPU
+   evaluation/capture preparation, trace, guides, MetalFX wall/GPU, compositor,
+   drawable wait and WindowServer delay. Record actual output dimensions and
+   render scale. Require >=60 presented fps, no >=100-ms gap and input p95 <=50 ms.
+2. Prepare material-source graphs once per frame/request/tier, rather than once
+   per compositor output; preserve file/font/clock invalidation and fresh picks.
+   Check the existing full-scene trace and overlay invalidation caches next.
+3. Wire the existing `Renderer::queue_live_trace` path into the native service
+   so trace and guides do not have an unnecessary CPU completion boundary.
+   Keep the synchronization before borrowing Metal textures, and retain the
+   portable path. Verify pixels and both surface lifetimes before timing again.
+4. Address the measured MetalFX stage (earlier about 11.8 ms GPU at the measured
+   viewer dimensions): repeated guide rays/specular distance, duplicate full
+   images/layer copies, queue barriers and input/output resolution policy. Use
+   measured budgets; coordinate any visible resolution policy with the designer.
+5. Only then tune native presentation scheduling/drawable acquisition. Do not
+   re-present identical paused content or feed observed WindowServer lag back
+   into requested presentation times. Audit slow input against event, actor,
+   publication, worker, GPU and actual display timestamps.
+6. Re-run headless 1080p Draft/Production/Final splits with unchanged convergence
+   targets and separately measured readback/encode. Draft budget is 1 s/frame,
+   Production 3 s/frame; Final is uncapped. Homebrew OIDN remains CPU-only; use
+   the existing half-guide path, with no Metal OIDN source build in tight storage.
+7. In the same quiet window, alternate **two fixed projects** in one app process
+   for at least ten A/B cycles after warmup. Sample RSS/physical footprint and
+   Metal allocated bytes at the same settled points. Require a flat trend;
+   exclude the growing-catalog test and do not sum overlapping unified-memory
+   resident and GPU totals. Preserve per-cycle logs for the memory lane.
+
+After each fix, repeat the identical corpus/viewport/scale/refresh run; do not
+claim a gain from a busier baseline or a different output resolution. No new
+presented-fps or input-p95 acceptance result was collected in this round.
+
 ## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
 
 Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay
