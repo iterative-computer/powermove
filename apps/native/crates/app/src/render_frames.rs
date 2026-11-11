@@ -37,9 +37,8 @@ pub(crate) fn serve_background(
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
-    engine
-        .render_cache()
-        .set_background_host(Some(pm_engine_service::render_cache::BackgroundHost {
+    engine.render_cache().set_background_host(Some(
+        pm_engine_service::render_cache::BackgroundHost {
             executable,
             pin: std::sync::Arc::new(move |doc_id, session| {
                 if let Some(jobs) = windows.of(doc_id) {
@@ -47,7 +46,8 @@ pub(crate) fn serve_background(
                 }
             }),
             busy: std::sync::Arc::new(pm_engine_service::jobs::exports_running),
-        }));
+        },
+    ));
 }
 
 /// Wakes when the render bar changes.

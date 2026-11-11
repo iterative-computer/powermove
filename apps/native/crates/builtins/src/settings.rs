@@ -170,9 +170,8 @@ impl Backend {
         let mut rows: Vec<Value> = choices
             .iter()
             .map(|r| {
-                let or = |key: &str, default: &str| {
-                    r[key].as_str().map_or(json!(default), |v| json!(v))
-                };
+                let or =
+                    |key: &str, default: &str| r[key].as_str().map_or(json!(default), |v| json!(v));
                 json!({"id":r["id"],"section":or("section","media"),"group":or("group","Proxies"),
                     "label":r["label"],"control":or("control","choice"),"value":r["value"],
                     "options":r["options"],"detail":r["detail"],

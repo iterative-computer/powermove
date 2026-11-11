@@ -164,7 +164,10 @@ impl Preferences {
             "Background Rendering",
             "While you're away, render parts that can't play in real time, so they play smoothly at full quality.",
             serde_json::json!(self.background_render),
-            vec![(serde_json::json!(true), "On"), (serde_json::json!(false), "Off")],
+            vec![
+                (serde_json::json!(true), "On"),
+                (serde_json::json!(false), "Off"),
+            ],
         )];
         if self.background_render {
             rows.push((
@@ -216,7 +219,10 @@ impl Preferences {
             }
             "media.backgroundDelay" => {
                 let seconds: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
-                if !BACKGROUND_DELAYS.iter().any(|(choice, _)| *choice == seconds) {
+                if !BACKGROUND_DELAYS
+                    .iter()
+                    .any(|(choice, _)| *choice == seconds)
+                {
                     return Err("Invalid setting value".into());
                 }
                 self.background_delay_s = seconds;

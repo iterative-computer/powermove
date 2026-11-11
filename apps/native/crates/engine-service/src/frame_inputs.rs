@@ -60,8 +60,9 @@ pub(crate) fn frame_digests(
     }
     let layers = resolved.layers();
     let seconds = |n: i64| {
-        rate.frame_start(n)
-            .map_or(0., |t| t as f64 / pm_protocol::common::TICKS_PER_SECOND as f64)
+        rate.frame_start(n).map_or(0., |t| {
+            t as f64 / pm_protocol::common::TICKS_PER_SECOND as f64
+        })
     };
     let frame = seconds(1) - seconds(0);
     if let Inputs::Whole = inputs(layers, root) {
@@ -76,7 +77,10 @@ pub(crate) fn frame_digests(
     }
     let index = Index::new(layers, root);
     let mut named = Named::new(root);
-    let digests: Vec<[u8; 32]> = layers.iter().map(pm_model::hash::canonical_digest).collect();
+    let digests: Vec<[u8; 32]> = layers
+        .iter()
+        .map(pm_model::hash::canonical_digest)
+        .collect();
     let mut out = Vec::with_capacity(count.max(0) as usize);
     let mut last: Option<(Vec<usize>, [u8; 32])> = None;
     for n in 0..count {
@@ -392,7 +396,10 @@ mod tests {
     /// nothing at all.
     #[test]
     fn an_edit_changes_only_the_frames_its_layer_draws() {
-        let a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        let a = project(serde_json::json!([
+            layer("L1", 0., 1.),
+            layer("L2", 2., 1.)
+        ]));
         let mut b = a.clone();
         b["layers"][1]["p"]["opacity"]["v"] = 50.into();
         assert_eq!(changed(&a, &b), frames(59..91));
@@ -438,7 +445,10 @@ mod tests {
     /// frame.
     #[test]
     fn couplings_beyond_names_change_every_frame() {
-        let a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        let a = project(serde_json::json!([
+            layer("L1", 0., 1.),
+            layer("L2", 2., 1.)
+        ]));
         let mut b = a.clone();
         b["bg"] = "#ffffff".into();
         assert_eq!(changed(&a, &b).len(), 120);

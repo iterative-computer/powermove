@@ -2193,11 +2193,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         }
                         // A playing frame drawn whole at full resolution:
                         // its cost tells background rendering what plays.
-                        let costed = (spec.moment == Moment::Playing
-                            && spec.scale >= 1.
-                            && !s.stand_ins)
-                            .then(|| shared.disk.frame_id(&scene, spec.time))
-                            .flatten();
+                        let costed =
+                            (spec.moment == Moment::Playing && spec.scale >= 1. && !s.stand_ins)
+                                .then(|| shared.disk.frame_id(&scene, spec.time))
+                                .flatten();
                         flights.push_back(Flight {
                             id,
                             stamp,

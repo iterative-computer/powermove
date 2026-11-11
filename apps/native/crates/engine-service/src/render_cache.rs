@@ -178,7 +178,9 @@ impl Frames {
     }
     /// The frame showing at `time`.
     fn at(&self, time: Ticks) -> i64 {
-        self.rate.frame_of(time.get()).clamp(0, (self.count - 1).max(0))
+        self.rate
+            .frame_of(time.get())
+            .clamp(0, (self.count - 1).max(0))
     }
     fn id(&self, n: i64) -> Option<FrameId> {
         self.fingerprint?;
@@ -835,10 +837,7 @@ impl DiskFrames {
         if frames.is_empty() {
             return Ok(0);
         }
-        let order: Vec<(i64, FrameId)> = frames
-            .iter()
-            .map(|(n, f)| (*n, f.key.graph))
-            .collect();
+        let order: Vec<(i64, FrameId)> = frames.iter().map(|(n, f)| (*n, f.key.graph)).collect();
         let (source, size, rate) = (frames_now.source.clone(), frames_now.size, frames_now.rate);
         let serial = state.fill.serial + 1;
         state.fill = Fill {
@@ -935,7 +934,11 @@ impl DiskFrames {
             .map(|r| r.background);
         let fill = {
             let state = self.inner.state.lock().unwrap();
-            (state.fill.generation, state.fill.error.is_some(), state.fill.ended)
+            (
+                state.fill.generation,
+                state.fill.error.is_some(),
+                state.fill.ended,
+            )
         };
         match running {
             Some(true) => {
@@ -954,29 +957,33 @@ impl DiskFrames {
         let (Some(host), true, true) = (host, allowed, idle) else {
             return;
         };
-        if fill.1
-            && fill.0 == generation
-            && fill.2.is_some_and(|at| at.elapsed() < RETRY_AFTER)
-        {
+        if fill.1 && fill.0 == generation && fill.2.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
             return;
         }
         let planned = {
             let state = self.inner.state.lock().unwrap();
-            ready(&state).ok().filter(|f| f.identity.tone.is_none()).map(|frames| {
-                (
-                    plan(frames, &state.known, state.playhead),
-                    frames.budget_us(),
-                    frames.source.doc_id,
-                )
-            })
+            ready(&state)
+                .ok()
+                .filter(|f| f.identity.tone.is_none())
+                .map(|frames| {
+                    (
+                        plan(frames, &state.known, state.playhead),
+                        frames.budget_us(),
+                        frames.source.doc_id,
+                    )
+                })
         };
         let Some((frames, budget, doc_id)) = planned.filter(|p| !p.0.is_empty()) else {
             return;
         };
         let pin = host.pin.clone();
-        let _ = self.launch(frames, Some(budget), &host.executable, activity, |session| {
-            pin(doc_id, session)
-        });
+        let _ = self.launch(
+            frames,
+            Some(budget),
+            &host.executable,
+            activity,
+            |session| pin(doc_id, session),
+        );
     }
 
     /// Keep Rendered: the rendered frames in `[from, to)` are pinned against
@@ -1160,7 +1167,11 @@ fn plan(frames: &Frames, known: &Known, playhead: Option<Ticks>) -> Vec<(i64, Ca
             } else {
                 2
             };
-            let distance = if b > p { (a - p).max(0) } else { 2 * (p - b + 1) };
+            let distance = if b > p {
+                (a - p).max(0)
+            } else {
+                2 * (p - b + 1)
+            };
             (tier, distance, a)
         })
         .collect();
@@ -1828,7 +1839,14 @@ mod tests {
         ready(&disk);
         let time = write_frame(&disk, 30);
         assert!(read_eventually(&disk, &scene, time).is_some());
-        assert!(disk.observe(&scene, &[], None, Some("Pq".into()), 1, Ticks::new(0).unwrap()));
+        assert!(disk.observe(
+            &scene,
+            &[],
+            None,
+            Some("Pq".into()),
+            1,
+            Ticks::new(0).unwrap()
+        ));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_none());
         assert!(disk.observe(&scene, &[], Some(3), None, 1, Ticks::new(0).unwrap()));
@@ -2024,11 +2042,22 @@ mod tests {
     }
     fn job_binary() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
-        exe.parent().unwrap().parent().unwrap().join("pm-engine-service")
+        exe.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pm-engine-service")
     }
     fn present(disk: &DiskFrames) -> BTreeSet<i64> {
         let state = disk.inner.state.lock().unwrap();
-        state.frames.as_ref().unwrap().present.iter().copied().collect()
+        state
+            .frames
+            .as_ref()
+            .unwrap()
+            .present
+            .iter()
+            .copied()
+            .collect()
     }
 
     /// An edit misses only the frames it changed: a frame drawn from
@@ -2103,18 +2132,28 @@ mod tests {
                     .step_by(step as usize)
                     .map(|a| state.known.need(frames, a, (a + step).min(frames.count)))
                     .collect();
-                (needs.iter().filter(|n| **n == Need::Light).count(), needs.len())
+                (
+                    needs.iter().filter(|n| **n == Need::Light).count(),
+                    needs.len(),
+                )
             };
             if known == chunks - 1 && !disk.bars().running {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(30), "{known} of {chunks}");
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "{known} of {chunks}"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(present(&disk), (45..60).collect());
         let fills = disk.inner.state.lock().unwrap().fill.serial;
         std::thread::sleep(Duration::from_millis(600));
-        assert_eq!(disk.inner.state.lock().unwrap().fill.serial, fills, "nothing left");
+        assert_eq!(
+            disk.inner.state.lock().unwrap().fill.serial,
+            fills,
+            "nothing left"
+        );
     }
 
     /// Any viewer activity pauses a background fill at once (no frame
