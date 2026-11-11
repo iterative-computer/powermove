@@ -1085,8 +1085,11 @@ struct Runtime {
     /// Transient refusals in a row (fonts, GPU watchdog); retries back off
     /// the same way, so a frame that keeps failing never renders at full rate.
     refusals: u32,
-    /// When the frames started being refused as transient, while they are.
+    /// When the frames started being refused as transient, or drawn with
+    /// override layers from an earlier frame, while they are.
     waiting_since: Option<f64>,
+    /// When the capture asked for started waiting for its exact frame.
+    capture_waiting: Option<f64>,
     prepared: f64,
     lookahead: Lookahead,
 }
@@ -1243,6 +1246,15 @@ fn drawable_retry(misses: u32) -> f64 {
 }
 /// A frame refused as transient this long is reported while it is retried.
 const WAITING_SHOWN_SECONDS: f64 = 3.0;
+/// A capture waiting this long for its exact frame fails, saying why.
+const CAPTURE_WAIT_SECONDS: f64 = 10.0;
+/// The viewer's note while extension layers keep showing an earlier frame.
+fn late_note(layers: usize) -> String {
+    match layers {
+        1 => "Still waiting: 1 extension layer shows an earlier frame.".into(),
+        n => format!("Still waiting: {n} extension layers show an earlier frame."),
+    }
+}
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
@@ -1588,6 +1600,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .take()
                     .filter(|r| r.stamp == f.stamp && r.time == f.spec.time)
                     .and_then(|r| r.pixels);
+                // Captured pixels are delivered only from an exact frame: a
+                // paused, full-resolution picture with no stand-in and no
+                // disk frame. Anything else is asked again.
+                let readback = f.submission.readback.as_ref().filter(|_| {
+                    let exact = f.spec.exact
+                        && f.spec.moment == Moment::Paused
+                        && f.spec.scale >= 1.
+                        && !f.submission.stand_ins
+                        && t.disk != 2;
+                    if !exact {
+                        v.capture = true;
+                        v.dirty = true;
+                    }
+                    exact
+                });
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.spec.time,
@@ -1603,14 +1630,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         .then_some((t.completed - t.worker_start) * 1000.),
                     input_host_seconds: f.input,
                     audio_host_seconds: f.audio_host,
-                    pixels: f
-                        .submission
-                        .readback
-                        .as_ref()
-                        .map(|_| f.submission.pixels())
-                        .or(kept),
+                    pixels: readback.map(|_| f.submission.pixels()).or(kept),
                 });
-                if f.submission.readback.is_some() {
+                if readback.is_some() {
                     v.capture_owed = false;
                 }
             }
@@ -1726,6 +1748,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     drawable_misses: 0,
                     refusals: 0,
                     waiting_since: None,
+                    capture_waiting: None,
                     prepared: 0.,
                     lookahead: Lookahead::default(),
                 }
@@ -1917,17 +1940,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 spec: FrameSpec {
                     time,
                     output: v.config.output,
-                    moment,
-                    // A capture reads the exact picture: Auto never adapts it.
-                    scale: v.quality.scale(
-                        &r.auto,
-                        if capture || (moment == Moment::Scrub && !v.adapt_drags) {
-                            Moment::Paused
-                        } else {
-                            moment
-                        },
-                    ),
-                    decode_deadline: playing.then(|| {
+                    // A capture reads the exact picture: a paused frame at full
+                    // resolution whatever the moment and quality, drawn only
+                    // from exact answers (no stand-in, cache or disk frame of
+                    // another moment).
+                    moment: if capture { Moment::Paused } else { moment },
+                    scale: if capture {
+                        1.
+                    } else {
+                        v.quality.scale(
+                            &r.auto,
+                            if moment == Moment::Scrub && !v.adapt_drags {
+                                Moment::Paused
+                            } else {
+                                moment
+                            },
+                        )
+                    },
+                    decode_deadline: (playing && !capture).then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
                     }),
                     exact: capture,
@@ -2088,6 +2118,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 match result {
                     Ok(Some(mut s)) => {
                         v.status.error = None;
+                        let late_layers = s.compat_late.len();
                         // A scrubbed frame's late override layers are asked
                         // now; playback asks ahead of the playhead instead.
                         let late = std::mem::take(&mut s.compat_late);
@@ -2109,13 +2140,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
-                            if spec.moment == Moment::Scrub && spec.scale < 1. {
+                            // Every dragged frame settles: once the playhead
+                            // rests, the same time is drawn again exact.
+                            if spec.moment == Moment::Scrub {
                                 r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
+                            if capture {
+                                r.capture_waiting = None;
                             }
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
                             r.refusals = 0;
-                            r.waiting_since = None;
+                            // Override layers drawn from an earlier frame are
+                            // still waited for: the wait goes on, and past a
+                            // few seconds the viewer says so.
+                            if late_layers == 0 {
+                                r.waiting_since = None;
+                            } else {
+                                let now = trace::now();
+                                let since = *r.waiting_since.get_or_insert(now);
+                                if now - since >= WAITING_SHOWN_SECONDS {
+                                    v.status.error = Some(late_note(late_layers));
+                                }
+                            }
                         }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
@@ -2191,12 +2238,31 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             if now - since >= WAITING_SHOWN_SECONDS {
                                 v.status.error = Some(format!("Still waiting: {e}"));
                             }
+                            // A capture waits for its exact frame, but not
+                            // forever: past its bound it fails, saying why.
+                            if capture {
+                                let since = *r.capture_waiting.get_or_insert(now);
+                                if now - since >= CAPTURE_WAIT_SECONDS {
+                                    r.capture_waiting = None;
+                                    v.capture = false;
+                                    v.capture_owed = false;
+                                    v.status.capture_failed = Some(format!(
+                                        "The exact frame could not be captured: still waiting after {CAPTURE_WAIT_SECONDS} s ({e})."
+                                    ));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
                         v.status.error = Some(e.to_string());
+                        if capture {
+                            v.capture_owed = false;
+                            v.status.capture_failed =
+                                Some(format!("The exact frame could not be captured: {e}"));
+                        }
                         if let Some(r) = runtime.get_mut(&id) {
                             r.waiting_since = None;
+                            r.capture_waiting = None;
                         }
                     }
                 }
@@ -2907,12 +2973,10 @@ mod worker_tests {
         assert_eq!(skim_rate(-0.4, 0.1).num, -2);
     }
 
-    /// A slow project's drag draws reduced; the stopped frame is drawn again
-    /// exact, as a picture of its own.
     /// A capture taken during a reduced drag (explicit Half quality, a
-    /// scrub) reads the final resampler's pixels, not the drag preview's.
+    /// scrub) reads an exact frame: paused, full resolution, final resampler.
     #[test]
-    fn a_capture_during_a_reduced_drag_takes_the_final_resampler() {
+    fn a_capture_during_a_reduced_drag_reads_the_exact_frame() {
         use pm_render::sampling::Sampling;
         let service = EngineService::start(pm_gpu::Gpu::new("capture-drag-test").unwrap()).unwrap();
         let v = shapes_viewer(&service, None);
@@ -2920,20 +2984,18 @@ mod worker_tests {
         wait_for(&v, "a first frame", |s| {
             s.frame.as_ref().is_some_and(|f| f.gpu_ok)
         });
-        let captured_in_drag = || {
+        let captured = || {
             crate::render::SAMPLED
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(exact, moment, scale, _)| {
-                    *exact && *moment == Moment::Scrub && *scale < 1.
-                })
-                .map(|(.., sampling)| *sampling)
+                .filter(|(exact, ..)| *exact)
+                .map(|(_, moment, scale, sampling)| (*moment, *scale, *sampling))
                 .collect::<Vec<_>>()
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut second = 1;
-        while captured_in_drag().is_empty() {
+        while captured().is_empty() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "no capture landed in a drag"
@@ -2943,7 +3005,168 @@ mod worker_tests {
             drawn(&v);
             second += 1;
         }
-        assert!(captured_in_drag().iter().all(|s| *s == Sampling::Final));
+        assert!(
+            captured()
+                .iter()
+                .all(|c| *c == (Moment::Paused, 1., Sampling::Final)),
+            "{:?}",
+            captured()
+        );
+        v.retire();
+    }
+
+    /// A viewer whose document has a raster override answering through the
+    /// returned log: every shape asks the realm, which answers only what the
+    /// test answers.
+    fn overridden(
+        service: &EngineService,
+        v: &Viewer,
+    ) -> (
+        Arc<compat::CompatStore>,
+        Arc<Mutex<Vec<pm_protocol::snapshot::CompatNeed>>>,
+    ) {
+        let store = service.compat(v.stamp().unwrap().doc_id);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(
+            move |_, _, needs: Vec<pm_protocol::snapshot::CompatNeed>| {
+                log.lock().unwrap().extend(needs)
+            },
+        )));
+        store.set_state(true, 1, 1);
+        (store, asked)
+    }
+
+    /// A capture is an exact read: full resolution and paused whatever the
+    /// quality and moment, so Half never reaches the pixels delivered.
+    #[test]
+    fn a_capture_reads_the_exact_full_resolution_frame_at_half_quality() {
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-half-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Half).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        v.scrub(seconds(1.)).unwrap();
+        v.capture_next().unwrap();
+        let s = wait_for(&v, "captured pixels", |s| {
+            s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+        });
+        let f = s.frame.unwrap();
+        assert_eq!(
+            (f.scale, f.moment, f.stand_ins),
+            (1., Moment::Paused, false)
+        );
+        v.retire();
+    }
+
+    /// A capture whose override layers are never answered is not delivered
+    /// from a stand-in: it waits its bound, then fails saying why.
+    #[test]
+    fn a_capture_waiting_on_unanswered_layers_fails_after_its_bound() {
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-wait-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (_store, asked) = overridden(&service, &v);
+        // A time not drawn yet (no cached frame from before the override).
+        v.scrub(seconds(2.)).unwrap();
+        v.capture_next().unwrap();
+        let start = std::time::Instant::now();
+        let deadline = start + Duration::from_secs_f64(CAPTURE_WAIT_SECONDS + 10.);
+        let failed = loop {
+            let s = v.status();
+            assert!(
+                s.frame.as_ref().is_none_or(|f| f.pixels.is_none()),
+                "pixels delivered without the layers"
+            );
+            if let Some(why) = s.capture_failed {
+                break why;
+            }
+            assert!(std::time::Instant::now() < deadline, "{s:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(start.elapsed().as_secs_f64() >= CAPTURE_WAIT_SECONDS - 0.5);
+        assert!(failed.contains("could not be captured"), "{failed}");
+        assert!(
+            !asked.lock().unwrap().is_empty(),
+            "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// Override layers that keep showing an earlier frame while playing are
+    /// still waited for: the viewer says so past a few seconds, and frames
+    /// with stand-ins don't silence it.
+    #[test]
+    fn layers_left_on_an_earlier_frame_keep_the_wait_note() {
+        let service = EngineService::start(pm_gpu::Gpu::new("late-note-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(Ticks::ZERO).unwrap();
+        // The first frame's layers are answered (passed through); later ones
+        // never are.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let first: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        store.answer_all(
+            1,
+            1,
+            first
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        v.command(TransportCommand::SetLoop {
+            // No frame in the loop is answered: every one shows the 0 s answers.
+            range: Some(pm_protocol::common::TickRange {
+                start: seconds(0.5),
+                end: seconds(2.5),
+            }),
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        let s = wait_for(&v, "the wait note", |s| {
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("earlier frame"))
+        });
+        assert!(s.frame.is_some_and(|f| f.stand_ins));
+        v.retire();
+    }
+
+    /// A drag at full resolution settles too: once the playhead rests, the
+    /// same time is drawn again exact (paused), so no drag stand-in stays.
+    #[test]
+    fn a_full_resolution_drag_settles_to_an_exact_frame() {
+        let service = EngineService::start(pm_gpu::Gpu::new("full-drag-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Full).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let at = seconds(1.);
+        v.scrub(at).unwrap();
+        wait_for(&v, "the dragged frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.moment == Moment::Scrub)
+        });
+        wait_for(&v, "the settled frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.moment == Moment::Paused && f.gpu_ok)
+        });
         v.retire();
     }
 
