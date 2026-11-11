@@ -30,11 +30,26 @@ float3 mastering(float3 p,float4 u) {
 // A reduced-resolution frame scales to the drawable once, here; a full one is
 // read pixel for pixel, so paused frames equal the export.
 constexpr sampler reduced(filter::linear,address::clamp_to_edge);
+// A source larger than the drawable (a paused frame rendered at the
+// composition's size) is averaged over each drawable pixel's footprint:
+// up to 6×6 bilinear taps, premultiplied. A smaller one is sampled once.
+half4 scaled(texture2d<half> src,float2 p,float2 drawable) {
+    float2 ratio=float2(src.get_width(),src.get_height())/drawable;
+    int2 k=int2(clamp(ceil(ratio),float2(1.0),float2(6.0)));
+    if(k.x==1&&k.y==1) return src.sample(reduced,p/drawable);
+    float2 corner=p-0.5;
+    float4 sum=float4(0);
+    for(int j=0;j<k.y;j++) for(int i=0;i<k.x;i++) {
+        float2 q=corner+(float2(i,j)+0.5)/float2(k);
+        sum+=float4(src.sample(reduced,q/drawable));
+    }
+    return half4(sum/float(k.x*k.y));
+}
 fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], constant Params& u [[buffer(0)]]) {
     // A rendered (disk cache) frame is the whole composition: the drawable
     // samples its window of the canvas.
     float4 c=float4(u.whole!=0 ? src.sample(reduced,(u.canvas.xy+p.xy)/u.canvas.zw)
-        : u.reduced!=0 ? src.sample(reduced,p.xy/u.drawable) : src.read(uint2(p.xy)));
+        : u.reduced!=0 ? scaled(src,p.xy,u.drawable) : src.read(uint2(p.xy)));
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
     v=float3(dec(v.r),dec(v.g),dec(v.b));
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);

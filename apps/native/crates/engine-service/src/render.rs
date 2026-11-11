@@ -52,6 +52,27 @@ impl FrameSpec {
             exact: true,
         }
     }
+    /// A paused frame at Full shows the composition as an export draws it:
+    /// rendered at the composition's size (After Effects' Full) and scaled
+    /// down to the drawable once, by the final pass's area filter, so
+    /// pixel-sized effects (an ASCII grid, grain, dither) and text weight
+    /// look as they do in a delivered file at any zoom. Zoomed-in views (a
+    /// crop) and frames of other moments keep their scale. Bounded at 4×
+    /// the drawable.
+    pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
+        if output.crop.is_some() || output.width == 0 || output.height == 0 {
+            return 1.;
+        }
+        let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
+            return 1.;
+        };
+        let side = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0. { v } else { 0. }
+        };
+        let ratio = (side("w") / f64::from(output.width)).max(side("h") / f64::from(output.height));
+        ratio.clamp(1., 4.)
+    }
     fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))

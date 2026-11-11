@@ -1933,6 +1933,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Moment::Paused
             };
             let budget = frame.max(interval);
+            let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             work = Some(Work {
                 id,
                 stamp: v.stamp,
@@ -1945,17 +1946,27 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // from exact answers (no stand-in, cache or disk frame of
                     // another moment).
                     moment: if capture { Moment::Paused } else { moment },
-                    scale: if capture {
-                        1.
-                    } else {
-                        v.quality.scale(
-                            &r.auto,
-                            if moment == Moment::Scrub && !v.adapt_drags {
-                                Moment::Paused
-                            } else {
-                                moment
-                            },
-                        )
+                    scale: {
+                        let scale = if capture {
+                            1.
+                        } else {
+                            v.quality.scale(
+                                &r.auto,
+                                if moment == Moment::Scrub && !v.adapt_drags {
+                                    Moment::Paused
+                                } else {
+                                    moment
+                                },
+                            )
+                        };
+                        // A paused (or captured) frame at Full renders at the
+                        // composition's size; playing and dragged frames keep
+                        // their policy.
+                        if scale == 1. && (capture || moment == Moment::Paused) {
+                            full
+                        } else {
+                            scale
+                        }
                     },
                     decode_deadline: (playing && !capture).then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
@@ -2138,7 +2149,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         }
                         v.status.stand_in_frames +=
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
-                        v.status.effective_quality = spec.scale;
+                        // A share of Full: a paused frame rendered above the
+                        // drawable is Full.
+                        v.status.effective_quality = spec.scale.min(1.);
                         if let Some(r) = runtime.get_mut(&id) {
                             // Every dragged frame settles: once the playhead
                             // rests, the same time is drawn again exact.
@@ -2973,6 +2986,22 @@ mod worker_tests {
         assert_eq!(skim_rate(-0.4, 0.1).num, -2);
     }
 
+    /// The fixture is 640 × 360 in a 160 × 90 drawable (Fit at a quarter):
+    /// a paused frame renders the composition at its own size, as an export
+    /// does, so pixel-sized effects look as delivered, and the final pass
+    /// shows it at the drawable's.
+    #[test]
+    fn a_paused_full_frame_renders_at_the_composition_size_and_shows_at_the_drawable() {
+        let service = EngineService::start(pm_gpu::Gpu::new("paused-full-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        let frame = status.frame.as_ref().unwrap();
+        assert_eq!(frame.pixels.as_ref().unwrap().len(), 160 * 90);
+        assert_eq!((frame.moment, frame.scale), (Moment::Paused, 4.));
+        assert_eq!(status.effective_quality, 1., "Full");
+    }
+
     /// A capture taken during a reduced drag (explicit Half quality, a
     /// scrub) reads an exact frame: paused, full resolution, final resampler.
     #[test]
@@ -3053,9 +3082,10 @@ mod worker_tests {
             s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
         });
         let f = s.frame.unwrap();
+        // Exact is Full: the composition's size (640 × 360 in 160 × 90).
         assert_eq!(
             (f.scale, f.moment, f.stand_ins),
-            (1., Moment::Paused, false)
+            (4., Moment::Paused, false)
         );
         v.retire();
     }
@@ -3249,7 +3279,8 @@ mod worker_tests {
         // new stamp: the window tells extensions `frame:rendered` again).
         let exact = loop {
             let status = v.status();
-            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale == 1.) {
+            // Exact: Full, the composition's size (scale 4 here).
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale >= 1.) {
                 break f;
             }
             assert!(std::time::Instant::now() < deadline, "never drawn exact");
