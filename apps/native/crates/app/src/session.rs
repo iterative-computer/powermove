@@ -1826,6 +1826,20 @@ impl Controller {
         }
         // View ▸ 3D ▸ Frame and the viewer bar's Frame: Free View fits the
         // selection, or everything.
+        // F reveals a mask's Feather in 2D (AE); with nothing or only 3D
+        // layers selected in a 3D composition it frames the view (§4).
+        if cmd.name == "timeline.revealProperty:f"
+            && cmd.args.is_empty()
+            && let (Some(g), Some(p)) = (self.builtins.gizmos.clone(), self.published.clone())
+            && g.read(cx).studio_active()
+            && p.selection
+                .layers()
+                .iter()
+                .all(|id| crate::gizmo::is_studio(&p, id))
+        {
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            return true;
+        }
         if cmd.name == "studio.frame" {
             // The gizmo reads the Controller, so it runs after this update.
             if let Some(g) = self.builtins.gizmos.clone() {

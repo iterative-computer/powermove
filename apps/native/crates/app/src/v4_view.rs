@@ -1565,6 +1565,9 @@ impl SurfaceView {
             if let Some(expanded) = ax.expanded {
                 element = element.aria_expanded(expanded);
             }
+            if let Some(toggled) = ax.toggled {
+                element = element.aria_toggled(toggled);
+            }
         }
         if let Some(semantic) = &node.semantic {
             element =

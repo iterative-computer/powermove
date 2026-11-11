@@ -208,6 +208,10 @@ impl GizmoSurface {
             self.studio_ui("studioLook", "free", cx);
         }
     }
+    /// Whether the composition shows Studio 3D layers (F frames them).
+    pub fn studio_active(&self) -> bool {
+        self.studio.active()
+    }
     /// Frame (F): Free View fits the selection, or everything.
     pub fn studio_frame(&mut self, cx: &mut Context<Self>) {
         let Some(scene) = self.studio.scene.clone() else {

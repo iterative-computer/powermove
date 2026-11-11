@@ -706,7 +706,7 @@ export function InspectorPanel({
               label={
                 target.count > 1
                   ? `${target.count} layers selected`
-                  : `${target.first.name}, ${target.first.typeLabel.toLowerCase()} layer`
+                  : `${target.first.name}, ${target.first.typeLabel.toLowerCase().replace(/\b3d\b/g, "3D")} layer`
               }
               style={{
                 ...horizontal,

@@ -103,6 +103,8 @@ pub struct Ax {
     pub disabled: bool,
     pub selected: Option<bool>,
     pub expanded: Option<bool>,
+    /// Checked state of radios, checkboxes and pressed buttons.
+    pub toggled: Option<Toggled>,
 }
 /// Facts that vary by kit component and have no generic style expression.
 #[derive(Clone, Debug, Default)]
@@ -236,6 +238,7 @@ impl Prepared {
                         disabled: n.is_disabled(),
                         selected: n.is_selected(),
                         expanded: n.is_expanded(),
+                        toggled: n.toggled(),
                     },
                 )
             })

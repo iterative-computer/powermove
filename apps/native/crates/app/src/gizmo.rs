@@ -2109,7 +2109,7 @@ impl Render for GizmoSurface {
 }
 
 /// A Studio 3D layer (model, light, camera) by its definition.
-fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
+pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
     p.snapshot.root().is_some_and(|root| {
         pm_kernel::model::find_layer(root, id)
             .and_then(|at| pm_kernel::model::layer_at(root, &at))

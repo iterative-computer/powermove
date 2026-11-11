@@ -82,7 +82,7 @@ export function ViewerPanel({
   const spoken = (text: string) => text.replace(/ %$/, " percent");
   // D3: an unnamed composition is spoken as "Untitled Composition"; the authored
   // empty name is never rewritten.
-  const value = `${m.name || "Untitled Composition"}, ${percent(m.shownZoom)} percent, ${effective ? `${spoken(effective)} resolution, ` : ""}${m.selectionCount} layers selected`;
+  const value = `${m.name || "Untitled Composition"}, ${percent(m.shownZoom)} percent, ${effective ? `${spoken(effective)} resolution, ` : ""}${m.selectionCount} ${m.selectionCount === 1 ? "layer" : "layers"} selected`;
   // The same two pop-ups (same ids) live in the docked bar or, in Focus and
   // full screen, in the ViewerOverlay capsule (viewer-chrome.md §2 Overlay),
   // so keyboard focus follows them across presentations (design review D5).
