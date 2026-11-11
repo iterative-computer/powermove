@@ -67,7 +67,7 @@ def generate(root):
         history = {"version": 1, "paths": "composition", "index": -1, "entries": []}
         if kind == "long-history":
             for n in range(1000):
-                patch = {"path": ["comps", project["compId"], "layers", 0, "name"], "value": f"Edit {n} " + "x" * 8192}
+                patch = {"path": ["comps", project["compId"], "layers", 0, "name"], "exists": True, "value": f"Edit {n} " + "x" * 8192}
                 back = dict(patch, value=f"Edit {n - 1} " + "x" * 8192)
                 history["entries"].append({"label": "Rename", "forward": [patch], "backward": [back]})
             history["index"] = 999

@@ -117,6 +117,10 @@ pub(crate) fn scene() -> anyhow::Result<(
 
 #[cfg(not(feature = "kernel"))]
 pub(crate) fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate, Option<()>)> {
+    anyhow::ensure!(
+        arg("project", "").is_empty() && arg("fixture", "").is_empty(),
+        "project and corpus benchmarks require the kernel feature"
+    );
     let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json"))?;
     let snapshot = Snapshot {
         doc_id: 1,

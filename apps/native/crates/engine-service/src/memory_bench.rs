@@ -36,7 +36,7 @@ fn sample(stage: &str, h: &Headless, start: Instant) -> Sample {
 pub fn run() -> anyhow::Result<()> {
     let _scratch = Scratch;
     let start = Instant::now();
-    let (snapshot, catalog, duration, rate, _store) = scene()?;
+    let (snapshot, catalog, duration, _rate, _store) = scene()?;
     let mut paths = pm_export::render::MediaPaths::default();
     for (id, path) in catalog.originals {
         paths.insert(id, path);
@@ -58,7 +58,12 @@ pub fn run() -> anyhow::Result<()> {
     };
     let seconds: u32 = arg("seconds", "20").parse()?;
     anyhow::ensure!((1..=300).contains(&seconds), "seconds must be 1..300");
-    let mut h = Headless::new()?;
+    let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
+    let fonts = pm_text::host::FontBroker::new();
+    fonts.set_wake(Arc::new(|| {}));
+    fonts.set_generation(font_service.generation());
+    let mut h = Headless::with_fonts(pm_render::text::host::RenderFonts::new(fonts.clone()))?;
+    let mut pump = || pm_text::host::serve(&mut font_service, fonts.take_asks());
     let mut samples = vec![sample("open", &h, start)];
     let spec = |n: i64, moment| FrameSpec {
         time: Ticks::new(n).unwrap(),
@@ -68,14 +73,14 @@ pub fn run() -> anyhow::Result<()> {
         decode_deadline: None,
         exact: false,
     };
-    h.preview(&scene, spec(0, Moment::Paused))?;
+    h.preview_with_pump(&scene, spec(0, Moment::Paused), &mut pump)?;
     samples.push(sample("frame0", &h, start));
     let playback = Instant::now();
     let frames = u64::from(seconds) * 30;
     for n in 0..frames {
-        let t = rate.frame_start(n as i64).unwrap_or(0)
+        let t = n as i64 * pm_time::TICKS_PER_SECOND / 30
             % (duration * pm_time::TICKS_PER_SECOND as f64).max(1.) as i64;
-        h.preview(&scene, spec(t, Moment::Playing))?;
+        h.preview_with_pump(&scene, spec(t, Moment::Playing), &mut pump)?;
         if n % 30 == 29 {
             samples.push(sample(&format!("play{}", n / 30 + 1), &h, start));
         }
@@ -90,7 +95,7 @@ pub fn run() -> anyhow::Result<()> {
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
         let t = ((rng >> 32) as f64 / u32::MAX as f64 * duration * pm_time::TICKS_PER_SECOND as f64)
             as i64;
-        h.preview(&scene, spec(t, Moment::Paused))?;
+        h.preview_with_pump(&scene, spec(t, Moment::Paused), &mut pump)?;
     }
     samples.push(sample("seeks50", &h, start));
     if arg("pressure", "false") == "true" {

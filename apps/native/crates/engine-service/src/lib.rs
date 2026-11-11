@@ -2320,8 +2320,19 @@ impl Headless {
 
     /// Submit a preview frame without allocating a CPU pixel readback.
     pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        self.preview_with_pump(scene, spec, || {})
+    }
+
+    /// Pump the main-thread font broker between transient frame refusals.
+    pub fn preview_with_pump(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        mut pump: impl FnMut(),
+    ) -> Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
+            pump();
             match self.engine.frame(
                 scene,
                 spec,
@@ -2333,6 +2344,11 @@ impl Headless {
                 Ok(Some(s)) => {
                     s.commit();
                     s.complete()?;
+                    anyhow::ensure!(
+                        s.failures.is_empty(),
+                        "memory benchmark frame omitted {} layers",
+                        s.failures.len()
+                    );
                     return Ok(());
                 }
                 Ok(None) => anyhow::bail!("no headless surface"),
