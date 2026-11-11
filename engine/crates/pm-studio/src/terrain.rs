@@ -27,7 +27,7 @@ pub struct Terrain {
     pub natural: bool,
     pub water_level: f32,
     pub snow_level: f32,
-    /// Optional row-major normalized grayscale heights, (resolution+1)².
+    /// Optional row-major signed normalized heights (-1..1), (resolution+1)².
     pub heights: Vec<f32>,
     pub material: usize,
     /// First matching region selects that triangle's material.
@@ -96,12 +96,23 @@ impl Terrain {
         }
         let image = image::ImageReader::open(path)
             .map_err(|e| e.to_string())?
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
             .decode()
             .map_err(|e| e.to_string())?
-            .to_luma32f();
-        let n = self.resolution + 1;
-        let image = image::imageops::resize(&image, n, n, image::imageops::FilterType::Triangle);
-        self.heights = image.pixels().map(|p| p[0].clamp(0., 1.)).collect();
+            .into_rgb32f();
+        // Match the scene-contract image sampler: encoded integer RGB is height
+        // data, not radiance. Endpoint-aligned nearest sampling is intentional.
+        let n = self.resolution;
+        self.heights.clear();
+        for y in 0..=n {
+            for x in 0..=n {
+                let sx = (x as f64 / n as f64 * (image.width() - 1) as f64).round() as u32;
+                let sy = (y as f64 / n as f64 * (image.height() - 1) as f64).round() as u32;
+                let p = image.get_pixel(sx, sy);
+                self.heights.push((0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).clamp(0., 1.));
+            }
+        }
         Ok(())
     }
     pub fn validate(&self, materials: usize) -> Result<(), String> {
@@ -129,10 +140,10 @@ impl Terrain {
                 || self
                     .heights
                     .iter()
-                    .any(|v| !v.is_finite() || !(0. ..=1.).contains(v)))
+                    .any(|v| !v.is_finite() || !(-1. ..=1.).contains(v)))
         {
             return Err(
-                "terrain heights must be normalized (resolution+1)² grayscale values".into(),
+                "terrain heights must be (resolution+1)² values in -1..1".into(),
             );
         }
         for l in &self.layers {
@@ -441,6 +452,28 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn signed_document_heights_preserve_negative_elevation() {
+        let t = Terrain { resolution: 2, amplitude: 4., heights: vec![-0.5; 9], ..Default::default() };
+        t.validate(1).unwrap();
+        assert_eq!(t.sample(0., 0.).0, -2.);
+    }
+    #[test]
+    fn retained_height_image_uses_encoded_luminance_and_endpoint_sampling() {
+        let path = std::env::temp_dir().join(format!("pm-height-{}.bin", std::process::id()));
+        let image = image::RgbImage::from_fn(2, 2, |x, y| image::Rgb(match (x, y) {
+            (0, 0) => [128, 128, 128], (1, 0) => [255, 0, 0], (0, 1) => [0, 255, 0], _ => [0, 0, 255],
+        }));
+        image.save_with_format(&path, image::ImageFormat::Png).unwrap();
+        let mut t = Terrain { resolution: 2, ..Default::default() };
+        let result = t.load_height_image(&path);
+        std::fs::remove_file(path).unwrap();
+        result.unwrap();
+        assert!((t.heights[0] - 128. / 255.).abs() < 1e-6);
+        assert!((t.heights[1] - 0.2126).abs() < 1e-6);
+        assert!((t.heights[6] - 0.7152).abs() < 1e-6);
+        assert!((t.heights[8] - 0.0722).abs() < 1e-6);
+    }
     #[test]
     fn heights_and_normals_are_deterministic_and_match_mesh() {
         let t = Terrain::default();
