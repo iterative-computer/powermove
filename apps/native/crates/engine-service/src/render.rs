@@ -223,6 +223,31 @@ pub struct Submission {
     pub compat_late: Vec<CompatNeed>,
 }
 impl Engine {
+    pub fn memory_usage(&self) -> crate::memory::CacheUsage {
+        let media = self.renderer.media_usage();
+        crate::memory::CacheUsage {
+            target_pool_bytes: self.renderer.target_pool_bytes(),
+            target_pool_idle: self.renderer.target_pool_idle(),
+            targets_created: self.renderer.target_pool_created(),
+            image_bytes: self.renderer.image_cache_bytes(),
+            converted_frame_bytes: self.renderer.converted_frame_bytes(),
+            decoded_frame_bytes: media.frame_cache as u64,
+            decoder_bytes: media.decoders as u64,
+            decoder_sessions: media.sessions,
+            decoder_pool_free_bytes: media.pool.free_bytes as u64,
+            surface_bytes: self
+                .pool
+                .iter()
+                .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
+                .sum(),
+            text_bytes: self.renderer.text_cache_bytes(),
+            vector_bytes: self.renderer.vector_cache_bytes(),
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.renderer.release_idle_targets();
+    }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {

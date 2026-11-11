@@ -1759,6 +1759,20 @@ impl MediaCache {
         self.bytes
     }
 
+    pub fn image_bytes(&self) -> u64 {
+        self.images.values().map(Target::bytes).sum()
+    }
+
+    pub fn frame_bytes(&self) -> u64 {
+        self.frames.values().map(|(t, _)| t.bytes()).sum::<u64>()
+            + self
+                .retired_frames
+                .iter()
+                .chain(&self.free_frames)
+                .map(Target::bytes)
+                .sum::<u64>()
+    }
+
     /// Bytes of converted textures held.
     fn recount(&mut self) {
         self.bytes = self

@@ -1343,6 +1343,13 @@ impl Renderer {
         self.media.bytes
     }
 
+    pub fn image_cache_bytes(&self) -> u64 {
+        self.media.image_bytes()
+    }
+    pub fn converted_frame_bytes(&self) -> u64 {
+        self.media.frame_bytes()
+    }
+
     /// Nominal texel bytes of cached text rasters.
     pub fn text_cache_bytes(&self) -> u64 {
         self.text_gpu.cached_bytes()

@@ -8,6 +8,7 @@ pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
 pub mod media;
+pub mod memory;
 pub mod policy;
 mod present;
 pub mod qos;
@@ -2295,6 +2296,39 @@ pub struct Headless {
     engine: render::Engine,
 }
 impl Headless {
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.engine.memory_usage()
+    }
+
+    /// Submit a preview frame without allocating a CPU pixel readback.
+    pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.engine.frame(
+                scene,
+                spec,
+                None,
+                &OverlayGeometry::default(),
+                false,
+                Arc::default(),
+            ) {
+                Ok(Some(s)) => {
+                    s.commit();
+                    s.complete()?;
+                    return Ok(());
+                }
+                Ok(None) => anyhow::bail!("no headless surface"),
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.engine.release_idle_memory();
+    }
     pub fn new() -> Result<Self> {
         Ok(Self {
             engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
