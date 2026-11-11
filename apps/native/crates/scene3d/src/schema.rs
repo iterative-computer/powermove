@@ -53,6 +53,7 @@ enum Kind {
     Number(f64, f64),
     Color,
     Bool,
+    Choice(&'static [&'static str]),
 }
 #[derive(Clone)]
 struct Field {
@@ -79,6 +80,13 @@ fn boolean(name: &'static str, v: bool) -> Field {
         name,
         kind: Kind::Bool,
         default: json!(v),
+    }
+}
+fn enumeration(name: &'static str, choices: &'static [&'static str], value: &str) -> Field {
+    Field {
+        name,
+        kind: Kind::Choice(choices),
+        default: json!(value),
     }
 }
 fn fields(group: &str) -> Vec<Field> {
@@ -146,11 +154,110 @@ fn fields(group: &str) -> Vec<Field> {
             n("far", 0.01, 100000., 1000.),
             n("fStop", 0., 64., 0.),
             n("focusDistance", 0., 100000., 0.),
+            n("irisShape", 0., 16., 0.),
+            n("irisRotation", -360000., 360000., 0.),
+            n("irisRoundness", 0., 1., 0.),
+            n("irisAspect", 0.1, 10., 1.),
         ],
         "environment" => vec![
             n("ambient", 0., 100., 0.5),
             color("ambientColor", "#FFFFFF"),
             n("exposure", 0.01, 20., 1.),
+        ],
+        "world" => vec![
+            n("intensity", 0., 10000., 1.),
+            n("rotation", -360000., 360000., 0.),
+            boolean("visible", true),
+            n("metersPerUnit", 0.000001, 1000., 0.1),
+            n("elevation", -90., 90., 45.),
+            n("azimuth", -360000., 360000., 0.),
+            n("haze", 1., 10., 2.),
+            n("sunIntensity", 0., 10000., 1.),
+            n("sunRadius", 0.05, 10., 0.266),
+            n("overcast", 0., 1., 0.),
+            color("groundColor", "#7C7C7C"),
+            n("fogDensity", 0., 100., 0.),
+            color("fogColor", "#E6E6E6"),
+            n("fogAnisotropy", -0.95, 0.95, 0.),
+            n("fogBaseHeight", -100000., 100000., 0.),
+            n("fogHeightFalloff", 0., 100., 0.),
+            n("fogDistance", 0.001, 100000., 10000.),
+            boolean("adaptive", false),
+            n("minSamples", 1., 4096., 64.),
+            n("relativeError", 0.00001, 1., 0.025),
+            n("absoluteError", 0.000001, 1., 0.001),
+        ],
+        "fog" => vec![
+            enumeration("shape", &["box", "sphere"], "box"),
+            n("width", 0.0001, 100000., 2.),
+            n("height", 0.0001, 100000., 2.),
+            n("depth", 0.0001, 100000., 2.),
+            n("density", 0., 100., 0.02),
+            color("color", "#E6E6E6"),
+            n("anisotropy", -0.95, 0.95, 0.),
+        ],
+        "region" => vec![
+            n("minHeight", -100000., 100000., -100000.),
+            n("maxHeight", -100000., 100000., 100000.),
+            n("minSlope", 0., 90., 0.),
+            n("maxSlope", 0., 90., 90.),
+            color("color", "#737B47"),
+            n("roughness", 0.02, 1., 0.8),
+            n("metalness", 0., 1., 0.),
+        ],
+        "terrain" => vec![
+            n("width", 0.001, 10000., 20.),
+            n("depth", 0.001, 10000., 20.),
+            n("resolution", 2., 256., 64.),
+            n("amplitude", 0., 10000., 2.),
+            n("frequency", 0.00001, 1000., 0.1),
+            n("octaves", 1., 12., 5.),
+            n("seed", 0., 4294967295., 1.),
+            boolean("ridged", false),
+            n("detail", 0., 0.25, 0.),
+            n("erosion", 0., 64., 0.),
+            boolean("adaptive", false),
+            n("blend", 0., 1., 0.),
+            boolean("natural", false),
+            n("waterLevel", -100000., 100000., -100000.),
+            n("snowLevel", -100000., 100000., 100000.),
+        ],
+        "scatter" => vec![
+            n("count", 0., 100000., 100.),
+            n("density", 0., 1., 1.),
+            n("seed", 0., 4294967295., 1.),
+            n("scaleMin", 0.0001, 1000., 0.8),
+            n("scaleMax", 0.0001, 1000., 1.2),
+            n("rotationMin", -360000., 360000., 0.),
+            n("rotationMax", -360000., 360000., 360.),
+            n("minHeight", -100000., 100000., -100000.),
+            n("maxHeight", -100000., 100000., 100000.),
+            n("minSlope", 0., 90., 0.),
+            n("maxSlope", 0., 90., 60.),
+        ],
+        "materialOptions" => vec![
+            enumeration("castsShadows", &["off", "on", "only"], "on"),
+            boolean("acceptsShadows", true),
+            boolean("acceptsLights", true),
+            boolean("appearsInReflections", true),
+        ],
+        "intrinsic" => vec![
+            n("opacity", 0., 100., 100.),
+            n("roughness", 0., 1., 0.4),
+            n("metallic", 0., 1., 0.),
+            color("emissionColor", "#000000"),
+            n("emissionIntensity", 0., 100., 1.),
+            n("ambientResponse", 0., 100., 1.),
+        ],
+        "part" => vec![
+            basic("x", 0.),
+            basic("y", 0.),
+            basic("z", 0.),
+            n("rx", -360000., 360000., 0.),
+            n("ry", -360000., 360000., 0.),
+            n("rz", -360000., 360000., 0.),
+            n("scale", 0., 10000., 100.),
+            boolean("visible", true),
         ],
         _ => vec![],
     }
@@ -197,6 +304,7 @@ fn check(v: &Value, k: Kind) -> Result<()> {
         Kind::Number(lo, hi) => {
             number(v, lo, hi, false)?;
         }
+        Kind::Choice(choices) => choice(v, choices)?,
         Kind::Bool => {
             if !v.is_boolean() {
                 return fail("Expected boolean");
@@ -244,6 +352,11 @@ pub fn properties(group: &str, raw: Option<&Value>) -> Result<Value> {
     strict(raw, &fs.iter().map(|f| f.name).collect::<Vec<_>>())?;
     let mut out = json!({});
     for f in fs {
+        // Preserve the old document's normalized shape when new optional
+        // camera controls are absent; rendering supplies their defaults.
+        if group == "camera" && f.name.starts_with("iris") && raw.get(f.name).is_none() {
+            continue;
+        }
         out[f.name] = normalize_channel(raw.get(f.name).cloned().unwrap_or(f.default), f.kind)?;
     }
     Ok(out)
@@ -278,8 +391,11 @@ pub fn material(mut v: Value) -> Result<Value> {
             "ao",
         ],
     )?;
-    for s in v["maps"].as_object().unwrap().values() {
-        text(s, 1, 160)?;
+    for (slot, s) in v["maps"].as_object().unwrap() {
+        crate::contract::source(s, false)?;
+        if s.is_object() && !matches!(slot.as_str(), "color" | "emissive") {
+            return fail("Live sources support color and emissive maps");
+        }
     }
     flag(&mut v, "doubleSided", true)?;
     default(&mut v, "screen", Value::Null);
@@ -289,6 +405,17 @@ pub fn material(mut v: Value) -> Result<Value> {
     Ok(v)
 }
 pub fn source(v: &Value) -> Result<usize> {
+    if v.get("nature").is_some() {
+        strict(v, &["nature", "seed"])?;
+        choice(
+            &v["nature"],
+            &["conifer", "broadleaf", "birch", "bush", "grass", "rock"],
+        )?;
+        if let Some(seed) = v.get("seed") {
+            number(seed, 0., 4294967295., true)?;
+        }
+        return Ok(0);
+    }
     if v.get("primitive").is_some() {
         strict(v, &["primitive", "parameters"])?;
         choice(
@@ -447,6 +574,15 @@ pub fn object(mut v: Value) -> Result<Value> {
             "useSourceMaterials",
             "castShadow",
             "receiveShadow",
+            "world",
+            "fog",
+            "terrain",
+            "scatter",
+            "materialOptions",
+            "materialProperties",
+            "sourceMaterialProperties",
+            "sourceMaterials",
+            "parts",
         ],
     )?;
     id(&v["id"])?;
@@ -456,6 +592,7 @@ pub fn object(mut v: Value) -> Result<Value> {
     if !v["parent"].is_null() {
         id(&v["parent"])?;
     }
+    crate::contract::normalize_object(&mut v)?;
     source(&v["source"])?;
     v["p"] = properties("object", v.get("p"))?;
     v["material"] = material(v.get("material").cloned().unwrap_or(json!({})))?;
@@ -469,12 +606,26 @@ pub fn object(mut v: Value) -> Result<Value> {
     Ok(v)
 }
 pub fn light(mut v: Value) -> Result<Value> {
-    strict(&v, &["id", "name", "type", "p", "castShadow"])?;
+    strict(&v, &["id", "name", "type", "p", "castShadow", "world"])?;
     id(&v["id"])?;
     default(&mut v, "name", json!("Light"));
     text(&v["name"], 1, 160)?;
     default(&mut v, "type", json!("sun"));
-    choice(&v["type"], &["sun", "point", "spot", "area"])?;
+    choice(
+        &v["type"],
+        &[
+            "sun",
+            "parallel",
+            "point",
+            "spot",
+            "area",
+            "ambient",
+            "environment",
+        ],
+    )?;
+    if let Some(world) = v.get("world").cloned() {
+        v["world"] = crate::contract::node("world", world)?;
+    }
     v["p"] = properties("light", v.get("p"))?;
     flag(&mut v, "castShadow", true)?;
     Ok(v)
@@ -515,7 +666,7 @@ pub fn parse_scene(mut v: Value) -> Result<Value> {
     if v["version"].as_f64() != Some(1.) {
         return fail("Unknown 3D scene version");
     }
-    for (k, max) in [("objects", 512), ("lights", 16)] {
+    for (k, max) in [("objects", 512), ("lights", 4096)] {
         default(&mut v, k, json!([]));
         let a = v[k]
             .as_array()
@@ -548,8 +699,34 @@ pub fn parse_scene(mut v: Value) -> Result<Value> {
         .map(|n| (n["id"].as_str().unwrap(), n))
         .collect();
     let mut vertices = 0;
+    if objects.iter().filter(|o| o.get("world").is_some()).count() > 1 {
+        return fail("A composition has one World layer");
+    }
+    if objects.iter().filter(|o| o.get("fog").is_some()).count() > 32 {
+        return fail("At most 32 fog volumes");
+    }
+    let count: f64 = objects
+        .iter()
+        .filter_map(|o| o["scatter"]["p"]["count"]["v"].as_f64())
+        .sum();
+    if count > 1000000. {
+        return fail("At most one million scattered placements per composition");
+    }
     for o in objects {
-        vertices += source(&o["source"])?;
+        vertices += if o.get("terrain").is_some() {
+            let r = o["terrain"]["p"]["resolution"]["v"]
+                .as_f64()
+                .unwrap_or(64.)
+                .round() as usize;
+            (r + 1) * (r + 1)
+        } else if ["world", "fog", "scatter"]
+            .iter()
+            .any(|k| o.get(k).is_some())
+        {
+            0
+        } else {
+            source(&o["source"])?
+        };
         let mut chain = HashSet::from([o["id"].as_str().unwrap()]);
         let mut p = o["parent"].as_str();
         while let Some(parent) = p {
@@ -612,6 +789,15 @@ pub fn layer_data(r: Role, raw: Value) -> Result<Value> {
                     "useSourceMaterials",
                     "castShadow",
                     "receiveShadow",
+                    "world",
+                    "fog",
+                    "terrain",
+                    "scatter",
+                    "materialOptions",
+                    "materialProperties",
+                    "sourceMaterialProperties",
+                    "sourceMaterials",
+                    "parts",
                 ],
             )?;
             let mut o = raw["object"].clone();
@@ -624,7 +810,7 @@ pub fn layer_data(r: Role, raw: Value) -> Result<Value> {
         }
         Role::Light => {
             strict(&raw, &["light"])?;
-            strict(&raw["light"], &["type", "p", "castShadow"])?;
+            strict(&raw["light"], &["type", "p", "castShadow", "world"])?;
             for k in ["x", "y", "z", "visible"] {
                 if raw["light"]["p"].get(k).is_some() {
                     return fail("Use the light layer transform for position and visibility");

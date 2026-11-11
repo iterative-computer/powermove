@@ -36,14 +36,15 @@ worker adapter compiles in the GPUI app. Live uses an in-process MetalFX GPU
 texture, with portable temporal filtering as fallback. Refine/Final share one
 resolved/denoised image across per-layer compositor targets. Viewer, headless
 capture and windowless export use the same native seam. The newer document
-contract is a separate, incomplete `feat/na-studio3d-wip` checkpoint; the native
-renderer translation for those new document nodes is not finished.
+contract and quality bridge are integrated after their targeted checks and the
+GPUI binary build passed. Native renderer translation for new environment and
+nature nodes is not finished; those nodes return an explicit unsupported error.
 
 ## Main capability inventory
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Ordinary model/light/camera timeline layers | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
+| Ordinary model/light/camera timeline layers | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | Existing scene-container/mesh project migration | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Indexed mesh, lathe and polygon extrusion sources | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -59,7 +60,7 @@ renderer translation for those new document nodes is not finished.
 | Flat text/shapes remain flat until extrusion enabled | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Text outlines, font loading/fallback and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Shape extrusion, compound paths and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Animated extrusion depth/bevel and quality | Shared engine present; row integration unverified | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
+| Animated extrusion depth/bevel and quality | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Angular/concave/convex bevels, inner hole bevel depth | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front/Bevel/Side/Back independent materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | PBR color/roughness/metalness/emission/opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -75,15 +76,15 @@ renderer translation for those new document nodes is not finished.
 | Light cast-shadow toggle, model cast/receive-shadow toggles | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Global shadows and ambient color/intensity/exposure | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light markers, select and move/target gizmos | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Perspective and orthographic cameras | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
-| Animated camera position/target/FOV/zoom/near/far | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
-| Camera and free/editor view; orbit/pan/zoom/frame | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
+| Perspective and orthographic cameras | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Animated camera position/target/FOV/zoom/near/far | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Camera and free/editor view; orbit/pan/zoom/frame | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | Move/rotate/scale gizmos, scene/object axes, modal transforms | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Projected bounds, ray picking, model/part selection | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Mixed 2D/3D depth sets and transparent layer ordering | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Per-layer effects/masks/blend modes and opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Viewer, agent render_frames and still capture | Shared engine present; row integration unverified | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
-| Video/image-sequence export, nested composition and motion-blur sampling | Shared engine present; row integration unverified | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
+| Viewer, agent render_frames and still capture | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Video/image-sequence export, nested composition and motion-blur sampling | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Extension api.scene3d and revision-guarded edit_3d/get_3d_scene | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Validation, budgets, undo/redo, serialization and asset bundles | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 
@@ -92,10 +93,10 @@ renderer translation for those new document nodes is not finished.
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
 | Groups as Base Color or Emissive | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Cycles and local links | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Cycles and local links | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Stable group source canvas | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Safe group capture | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
+| Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | Capture budgets | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Texture sharing/replacement | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Static capture reuse | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -108,9 +109,9 @@ renderer translation for those new document nodes is not finished.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Environment Light and HDRI | Shared engine present; row integration unverified | G | U | U | G | World/source/atmosphere channels → world edits pending; existing `set_environment` |
+| Environment Light and HDRI | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; source loading pending |
 | Parallel / spot / point lights | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Ambient / environment light types | Shared engine present; row integration unverified | G | U | U | G | World/source/atmosphere channels → world edits pending; existing `set_environment` |
+| Ambient / environment light types | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; source loading pending |
 | Material Options: Casts Shadows | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Material Options: Accepts Shadows | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Material Options: Accepts Lights | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
@@ -120,24 +121,24 @@ renderer translation for those new document nodes is not finished.
 | Keyframeable Emission Color/Emission Intensity/Ambient Response | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Substance SBSAR | G (upstream gap) | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front / Bevel / Side / Back | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Camera depth of field/focus | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
-| Camera iris controls | Shared engine present; row integration unverified | G | U | U | G | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
-| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
+| Camera depth of field/focus | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Camera iris controls | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | glTF embedded animation | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | FBX with embedded animation | Shared engine present; row integration unverified | G | U | U | G | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | 2D layers casting shadows onto 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Render passes | Shared engine present; row integration unverified | G | U | U | G | Tier, quality, progress, result → render/export requests; saved quality pending |
+| Render passes | Shared engine present; row integration unverified | G | U | U | G | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 
 ## Studio features to retain
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Live / Refine / Final path tracing | Shared engine present; row integration unverified | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
-| Fast / Quality preview | Shared engine present; row integration unverified | P | K | K | P | Tier, quality, progress, result → render/export requests; saved quality pending |
+| Live / Refine / Final path tracing | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Fast / Quality preview | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Finish presets and rendered swatches | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Softbox lights and light-by-pointing | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Auto studio, seamless set, shadow catcher | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Shots and exploded views | Shared engine present; row integration unverified | P | K | K | P | Camera channels, transient views → `set_camera`, navigation; iris/views pending |
+| Shots and exploded views | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | Drop to floor / place on surface | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Live screens | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | STEP/IGES/BREP CAD import | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
@@ -149,9 +150,9 @@ renderer translation for those new document nodes is not finished.
 
 Sky/sun/HDRI and atmosphere, fog volumes, terrain regions/thermal erosion,
 seeded scatter/instances, procedural plants/grass/rocks and distance LOD exist
-in the pinned engine. Native document authoring/translation are gaps. Expose
-ordinary layer definitions/channels, validated actor operations, readback,
-retained asset references and inverse patches. No alternate document writer.
+in the pinned engine. Native authoring, channels, actor operations, readback, persistence and inverse
+patches now exist. Renderer translation and external source loading remain gaps.
+The kernel is the only document writer.
 
 ## Ordered plan
 
@@ -175,13 +176,13 @@ retained asset references and inverse patches. No alternate document writer.
 
 | Gate | Required | Current native evidence |
 | --- | --- | --- |
-| Rust renderer and native regressions | Pass | 123 renderer/host checks; 18 adapter checks; 5 native scene/export checks pass |
+| Rust renderer and native regressions | Pass | 123 renderer/host checks; 18 adapter checks; 7 native scene/export checks pass |
 | Bounded Cycles yardstick | Pass | All 11 scenes pass; included in the 123 renderer checks |
 | Live presented rate | ≥60 fps | Unmeasured |
 | Input → pixel p95 | ≤50 ms | Unmeasured |
 | Refine | 32 spp + OIDN ≤2 s | Engine 4.8–7.0 s; full app unmeasured |
 | Production | 1080p ≤3 s/frame, no visible noise | Engine diagnostic exceeds target; full app unmeasured |
-| Save/reopen and Undo | Every authored operation | Baseline tests; new contract pending |
+| Save/reopen and Undo | Every authored operation | 24 kernel, 17 document, 2 source-contract and 9 MCP checks pass; broader Electron project compatibility pending |
 | Electron project compatibility | Same evaluated scene | Pending |
 
 Upstream diagnostic measurements in the pinned `docs/studio/native-host.md`
@@ -266,8 +267,8 @@ and visual acceptance belong to the designer.
   material bindings, safe instance-capacity changes and existing splat support.
 - `4464573c8`: opt-in half-resolution OIDN auxiliary filters. Beauty remains
   full resolution, normals are normalized after reconstruction, and default
-  OIDN behavior retains full-resolution guides. Native preset selection still
-  needs to choose this option; Final can retain full guides.
+  OIDN behavior retains full-resolution guides. The quality bridge now selects
+  half guides for Refine and non-Final saved presets; Final retains full guides.
 
 The app binary builds with the local pinned V8 archive/bindings and installed
 native JS build dependencies. On this Mac, Bun 1.3.14 cannot read the v2 lock
@@ -321,36 +322,104 @@ bundled alongside OIDN/core and explicit Metal-device selection in the binding.
 That source build was deliberately not performed. Native distribution bundling
 of OIDN/TBB/licenses remains a separate gate; dev builds use installed libraries.
 
-## Document/data checkpoint on the WIP branch
+## Integrated document/data checkpoint
 
-The WIP branch adds the pinned World/fog/terrain/scatter/material-option schemas,
+The data checkpoint adds the pinned World/fog/terrain/scatter/material-option schemas,
 material/part sparse data, iris channels, ordinary actor/property paths, quality
 presets, MCP operation metadata/readback and source validation. Its targeted
-checks pass: **24 kernel**, **17 document**, **2 source-contract**, **8 MCP**.
+checks pass: **24 kernel**, **17 document**, **2 source-contract**, **9 MCP**.
 They prove exact Undo/Redo, protected edits, atomic failure, saved quality and
 PMV reopening. The old source oracle is retained; its 16-light case is explicitly
 superseded by Studio's 4096-light budget. No scene rendering claim follows from
 these document tests.
 
 The current-composition serialization previously dropped `studioQuality`.
-The WIP fix keeps the frozen v1 `COMP_FIELDS` inventory and adds a current
+The persistence fix keeps the frozen v1 `COMP_FIELDS` inventory and adds a current
 composition-field set used by canonical projection and native PMV envelopes.
 The actor remains the sole author; planned structural staging is validated at
 the end of each compound edit, before publication.
 
-Still required before integrating that checkpoint: wire new scene nodes and
+Still required for full scene parity: wire new scene nodes and
 hidden prototypes into native extraction; world/HDRI source loading; terrain,
 scatter/LOD, atmosphere and volume translation; material source capture and all
-imported maps; iris/orthographic transport; composition quality and per-export
-quality overrides into actual rendering; FBX native import; render passes;
+imported maps; iris/orthographic transport; quality motion-blur sample integration and automatic
+paused Refine scheduling; FBX native import; render passes;
 noise convergence/filter/edge checks and native presentation/input measurements.
 The standalone engine supports more than the native document adapter currently
 translates. Treat the capability matrix as partial until each row has evidence.
 
 
-WIP source checkpoints: `f62ec5781` (composition quality persistence),
+Source checkpoints (first staged on `feat/na-studio3d-wip`, then integrated): `f62ec5781` (composition quality persistence),
 `1dcfc3270` (document/MCP authoring), `492226f10` (explicit failure while new
 render translations are pending). The last checkpoint adds a separate passing
 native regression that prevents environment placeholders from being drawn as
-ordinary planes. The five existing native scene/export regressions still pass.
-The data checkpoint is deliberately not merged into `feat/na-studio3d`.
+ordinary planes. All seven native scene/export regressions pass after the quality bridge.
+The data and quality checkpoints are now integrated into `feat/na-studio3d`.
+
+
+### Quality and export command bridge
+
+`4e195ac4a` connects saved composition quality to actual Final rendering and
+adds `ExportRequest.studio_quality` / MCP `export_video.studioQuality` for a
+job-only preset or patch. The root composition receives the override; nested
+compositions retain their own saved settings. No document write is involved.
+The native worker applies the noise threshold, minimum/maximum samples,
+bounces, caustics and denoise toggle. Stills/deliveries ignore the saved time
+limit and stop on convergence or the sample ceiling. Legacy documents without
+`studioQuality` retain their camera/environment sample count.
+
+Refine and non-Final quality presets use half-resolution auxiliary filters and
+the balanced OIDN network. The Final preset keeps full-resolution auxiliaries
+and the high-quality network. Beauty resolution is unchanged. These native
+policy changes passed the adapter/native regressions but have not received a
+new 1080p timing or high-sample image grading run. The earlier diagnostic table
+is not a measurement of this newer native policy.
+
+The GPUI binary builds. Native tests prove saved-quality sample counts, an
+export-only override, rejection of an invalid range, unchanged document bytes,
+and delivery completing all eight requested samples despite a tiny saved time
+hint. The seven native scene/export checks pass in 14.76 seconds; nine MCP
+checks pass in 0.88 seconds. The eighteen adapter checks pass. These are targeted
+regressions; the broad workspace suite was interrupted when storage ran low
+and has no overall pass result.
+
+Designer hooks: read `get_3d_scene.scene.studioQuality`, write through
+`edit_3d {operation:"set_render_quality", preset|patch}`, and send a job-only
+`studioQuality` on `export_video`. Native callers can use `studio::attach_with_quality`
+or `ExportRequest.studio_quality`. `motionBlurSamples` is preserved but not yet
+connected to shutter scheduling. The viewer uses Live by default; Refine is
+available on the worker seam but automatic idle/interaction tier selection
+remains open. No panel, control, colour or layout was added.
+
+### Deferred Metal OIDN build recipe
+
+This recipe is documented, not executed tonight. Keep Cargo profiles/features
+unchanged. Use a separate OIDN staging directory only after storage is available.
+OIDN 2.5.1 requires Git LFS plus recursive submodules, CMake, Python and the
+CPU backend's ISPC/TBB; its Metal backend needs Xcode 15+ and CMake 3.21+.
+[Upstream build instructions](https://github.com/RenderKit/oidn/blob/v2.5.1/README.md#compiling-from-source).
+
+```sh
+# Future build only: provide these three task-specific absolute directories.
+# OIDN_SRC, OIDN_BUILD and OIDN_STAGE must be outside the shared Cargo target.
+git clone --branch v2.5.1 --depth 1 --recurse-submodules \
+  https://github.com/RenderKit/oidn.git "$OIDN_SRC"
+git -C "$OIDN_SRC" lfs pull
+cmake -S "$OIDN_SRC" -B "$OIDN_BUILD" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DOIDN_DEVICE_METAL=ON -DOIDN_DEVICE_CPU=ON \
+  -DOIDN_DEVICE_SYCL=OFF -DOIDN_DEVICE_CUDA=OFF -DOIDN_DEVICE_HIP=OFF \
+  -DOIDN_APPS=OFF -DCMAKE_INSTALL_PREFIX="$OIDN_STAGE"
+flock /tmp/pm-build.lock cmake --build "$OIDN_BUILD" --parallel 2
+flock /tmp/pm-build.lock cmake --install "$OIDN_BUILD"
+```
+
+Before integration, request `OIDN_DEVICE_TYPE_METAL` explicitly, report its
+actual type, and use OIDN device buffers (or verified Metal shared allocations)
+for beauty/albedo/normal/output; ordinary host pointers must satisfy that
+device's allocation rules. Preserve an explicit CPU-device fallback. Bundle
+the matching OIDN/core/Metal/CPU device libraries, TBB and notices with verified
+runtime paths, then repeat the stage split and image comparisons using that
+bundle. The current binding uses host images and default-device selection;
+merely copying a Metal dylib does not complete this work.
+[OIDN device and buffer API](https://github.com/RenderKit/oidn/blob/v2.5.1/doc/api.md).

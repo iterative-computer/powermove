@@ -162,6 +162,38 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
                 o["parent"] = l["parent"].clone();
                 o["p"] = trans;
                 o["material"]["p"] = eval_p(&o["material"]["p"], "m")?;
+                for kind in crate::contract::GROUPS {
+                    if o.get(*kind).is_some() {
+                        o[*kind]["p"] = eval_p(&o[*kind]["p"], kind)?;
+                    }
+                }
+                if let Some(regions) = o["terrain"]["regions"].as_array().cloned() {
+                    for (i, region) in regions.iter().enumerate() {
+                        o["terrain"]["regions"][i]["p"] =
+                            eval_p(&region["p"], &format!("terrain.region{i}"))?;
+                    }
+                }
+                for key in ["materialProperties", "sourceMaterialProperties", "parts"] {
+                    if let Some(entries) = o.get(key).and_then(Value::as_object).cloned() {
+                        for (k, v) in entries {
+                            if key == "materialProperties" {
+                                o[key][&k] = eval_p(&json!({&k:v}), "mi")?[&k].clone();
+                            } else if key == "sourceMaterialProperties" {
+                                for (field, ch) in v.as_object().unwrap() {
+                                    o[key][&k][field] =
+                                        eval_p(&json!({field:ch}), &format!("mi.{k}"))?[field]
+                                            .clone();
+                                }
+                            } else {
+                                for (field, ch) in v["p"].as_object().unwrap() {
+                                    o[key][&k]["p"][field] =
+                                        eval_p(&json!({field:ch}), &format!("pt.{k}"))?[field]
+                                            .clone();
+                                }
+                            }
+                        }
+                    }
+                }
                 objects.push(o);
             }
             Role::Light => {
@@ -169,6 +201,9 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
                 light["id"] = l["id"].clone();
                 light["name"] = l["name"].clone();
                 light["p"] = eval_p(&light["p"], "light")?;
+                if light.get("world").is_some() {
+                    light["world"]["p"] = eval_p(&light["world"]["p"], "world")?;
+                }
                 for k in ["x", "y", "z"] {
                     light["p"][k] = trans[k].clone();
                 }
@@ -205,7 +240,11 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
     }
     scene["objects"] = json!(objects);
     scene["lights"] = json!(lights);
-    schema::parse_scene(scene)
+    let mut resolved = schema::parse_scene(scene)?;
+    if comp.get("studioQuality").is_some() {
+        resolved["studioQuality"] = crate::quality::get(comp)?;
+    }
+    Ok(resolved)
 }
 pub fn presets() -> Value {
     serde_json::from_str(include_str!("material-presets.json")).expect("frozen preset data")

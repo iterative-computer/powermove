@@ -19,6 +19,7 @@ pub struct DocumentSource {
     meshes: Mutex<HashMap<String, Arc<Mesh>>>,
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
+    quality_override: Option<(String, Value)>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -40,6 +41,9 @@ fn color(p: &Value, key: &str, default: &str) -> Vec3 {
     srgb_hex(val(&p[key]).as_str().unwrap_or(default))
 }
 impl DocumentSource {
+    pub(super) fn revision(&self) -> u64 {
+        self.snapshot.revision
+    }
     pub fn new(document: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) -> Self {
         Self {
             snapshot: pm_kernel::Snapshot {
@@ -51,7 +55,27 @@ impl DocumentSource {
             meshes: Mutex::default(),
             resources: Mutex::default(),
             resolved: Mutex::default(),
+            quality_override: None,
         }
+    }
+    /// Resolve one export's override without editing the saved composition.
+    pub fn with_quality_override(
+        mut self,
+        composition: &str,
+        patch: Value,
+    ) -> Result<Self, String> {
+        let request = SceneRequest {
+            composition: composition.into(),
+            revision: self.snapshot.revision,
+            ticks: 0,
+            width: 1,
+            height: 1,
+        };
+        let scene = self.resolve(&request)?;
+        let current = pm_scene3d::quality::get(&scene.scene).map_err(|e| e.to_string())?;
+        let quality = pm_scene3d::quality::resolve(&current, &patch).map_err(|e| e.to_string())?;
+        self.quality_override = Some((composition.into(), quality));
+        Ok(self)
     }
     fn resolve(
         &self,
@@ -245,12 +269,43 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
         Ok(layers)
     }
     fn final_samples(&self, request: &SceneRequest) -> Result<u32, String> {
+        if let Some(quality) = self.final_quality(request)? {
+            return Ok(quality.max_samples);
+        }
         Ok(self.resolve(request)?.scene["environment"]["samples"]
             .as_u64()
             .unwrap_or(64) as u32)
     }
 }
 impl SceneSource for DocumentSource {
+    fn final_quality(
+        &self,
+        request: &SceneRequest,
+    ) -> Result<Option<pm_studio3d_engine::extract::FinalQuality>, String> {
+        let resolved = self.resolve(request)?;
+        let Some(value) = self
+            .quality_override
+            .as_ref()
+            .filter(|(id, _)| id == &request.composition)
+            .map(|(_, q)| q)
+            .or_else(|| resolved.scene.get("studioQuality"))
+        else {
+            return Ok(None);
+        };
+        let q = pm_scene3d::quality::validate(value.clone()).map_err(|e| e.to_string())?;
+        Ok(Some(
+            pm_studio3d_engine::extract::FinalQuality {
+                min_samples: q["minSamples"].as_u64().unwrap() as u32,
+                max_samples: q["maxSamples"].as_u64().unwrap() as u32,
+                noise_threshold: q["noiseThreshold"].as_f64().unwrap() as f32,
+                max_bounces: q["maxBounces"].as_u64().unwrap() as u32,
+                caustics: q["caustics"].as_bool().unwrap(),
+                denoise: q["denoise"].as_bool().unwrap(),
+                half_resolution_guides: q["preset"] != "final",
+            }
+            .validate()?,
+        ))
+    }
     fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
         let r = self.resolve(request)?;
         let c = &r.scene["camera"];
@@ -310,6 +365,30 @@ impl SceneSource for DocumentSource {
             .ok_or("Studio scene has no objects")?
         {
             let id = object["id"].as_str().ok_or("Studio object has no ID")?;
+            if ["world", "fog", "terrain", "scatter"]
+                .iter()
+                .any(|key| object.get(*key).is_some())
+                || object["source"].get("nature").is_some()
+            {
+                return Err("Studio environment document adapter is not connected yet".into());
+            }
+            if [
+                "materialProperties",
+                "sourceMaterialProperties",
+                "sourceMaterials",
+                "parts",
+            ]
+            .iter()
+            .any(|key| {
+                object
+                    .get(*key)
+                    .and_then(Value::as_object)
+                    .is_some_and(|m| !m.is_empty())
+            }) {
+                return Err(
+                    "Studio sparse material/part document adapter is not connected yet".into(),
+                );
+            }
             if val(&object["p"]["visible"]) == false {
                 continue;
             }

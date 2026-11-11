@@ -769,6 +769,7 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        studio_quality: None,
     })
 }
 

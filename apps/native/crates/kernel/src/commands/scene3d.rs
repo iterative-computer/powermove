@@ -164,9 +164,21 @@ fn set_data(cx: &mut Cx<'_>, id: &str, data: Value) -> Result<(), CommandError> 
             .is_some_and(|m| {
                 m.iter().any(|(k, v)| {
                     v.is_truthy()
-                        && ["m.", "light.", "camera.", "environment."]
-                            .iter()
-                            .any(|p| k.to_string_lossy().starts_with(p))
+                        && [
+                            "m.",
+                            "light.",
+                            "camera.",
+                            "environment.",
+                            "world.",
+                            "fog.",
+                            "terrain.",
+                            "scatter.",
+                            "materialOptions.",
+                            "mi.",
+                            "pt.",
+                        ]
+                        .iter()
+                        .any(|p| k.to_string_lossy().starts_with(p))
                 })
             })
     {
@@ -215,7 +227,7 @@ fn apply(
     // Content structural updates precede channel writes so a material-map edit
     // cannot restore the previous material channels later in the same plan.
     actions.sort_by_key(|a| {
-        if matches!(a, Action::Data { .. }) {
+        if matches!(a, Action::Data { .. } | Action::StagedData { .. }) {
             0
         } else {
             1
@@ -223,6 +235,37 @@ fn apply(
     });
     for action in actions {
         match action {
+            Action::RenderQuality { quality } => {
+                let quality = pm_scene3d::quality::validate(quality).map_err(invalid)?;
+                let mut path = cx.comp_path(comp);
+                path.push("studioQuality".into());
+                cx.set(path, pm_scene3d::to_model(&quality))?;
+            }
+            Action::StagedData { id, data } => {
+                guard(cx, &id, "3d")?;
+                let (loc, mut layer) = cx.layer_mut_checked(&id)?;
+                let before = layer.clone();
+                values::obj(
+                    values::obj(&mut layer)
+                        .get_mut("d")
+                        .ok_or_else(|| invalid("Missing 3D content"))?,
+                )
+                .insert("data", pm_scene3d::to_model(&data));
+                if cx.origin().is_generated() {
+                    for (name, path) in all(&before) {
+                        if properties::locked_intent(&before, &name)
+                            && channels::get(&before, &path) != channels::get(&layer, &path)
+                        {
+                            return Err(CommandError::PreservedHandEdit {
+                                layer_id: id.clone(),
+                                channel: name,
+                            });
+                        }
+                    }
+                }
+                normalize_key_ids(&mut layer);
+                cx.put_layer(&loc, layer)?;
+            }
             Action::Add {
                 id,
                 name,
@@ -334,6 +377,8 @@ fn apply(
     for l in cx.layers(comp) {
         validate_layer(&l)?;
     }
+    let current = pm_scene3d::from_model(&cx.comp_node(comp)?.to_value()).map_err(invalid)?;
+    pm_scene3d::contract::validate_composition(&current).map_err(invalid)?;
     Ok(())
 }
 fn fresh_keys(v: &mut Value, replace: bool) {
@@ -363,6 +408,56 @@ fn fresh_keys(v: &mut Value, replace: bool) {
 pub(crate) fn path(layer: &Value, channel: &str) -> Option<Vec<Step>> {
     let def = layer.get("d")?.get("definition")?.as_str()?;
     let (prefix, key_name) = channel.split_once('.')?;
+    let parts: Vec<_> = channel.split('.').collect();
+    let mut extra = vec![
+        key("d"),
+        key("data"),
+        key(if def == schema::LIGHT {
+            "light"
+        } else {
+            "object"
+        }),
+    ];
+    let known = if def == schema::OBJECT || def == schema::LIGHT && prefix == "world" {
+        match parts.as_slice() {
+            [kind, field] if pm_scene3d::contract::GROUPS.contains(kind) => {
+                extra.extend([key(kind), key("p"), key(field)]);
+                true
+            }
+            ["terrain", region, field] if region.starts_with("region") => {
+                if let Ok(index) = region[6..].parse::<usize>() {
+                    extra.extend([
+                        key("terrain"),
+                        key("regions"),
+                        Step::Index(index),
+                        key("p"),
+                        key(field),
+                    ]);
+                    true
+                } else {
+                    false
+                }
+            }
+            ["mi", field] => {
+                extra.extend([key("materialProperties"), key(field)]);
+                true
+            }
+            ["mi", index, field] => {
+                extra.extend([key("sourceMaterialProperties"), key(index), key(field)]);
+                true
+            }
+            ["pt", part, field] => {
+                extra.extend([key("parts"), key(part), key("p"), key(field)]);
+                true
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if known {
+        return channels::get(layer, &extra).is_some().then_some(extra);
+    }
     if key_name.contains('.') {
         return None;
     }
@@ -402,6 +497,28 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
                 let s = format!("{prefix}.{}", k.to_string_lossy());
                 if let Some(p) = path(layer, &s) {
                     out.push((s, p));
+                }
+            }
+        }
+    }
+    if let Some(object) = layer.get("d").and_then(|d| d.get("data")).and_then(|d| {
+        d.get(
+            if layer
+                .get("d")
+                .and_then(|d| d.get("definition"))
+                .and_then(Value::as_str)
+                == Some(schema::LIGHT)
+            {
+                "light"
+            } else {
+                "object"
+            },
+        )
+    }) {
+        if let Ok(object) = pm_scene3d::from_model(object) {
+            for (name, _) in pm_scene3d::contract::channels(&object) {
+                if let Some(p) = path(layer, &name) {
+                    out.push((name, p));
                 }
             }
         }

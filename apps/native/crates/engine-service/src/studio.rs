@@ -26,13 +26,29 @@ pub fn attach(
     doc: std::sync::Arc<pm_model::Document>,
     media: &pm_export::render::MediaPaths,
 ) {
-    let revision = doc.revision();
+    attach_source(renderer, DocumentSource::new(doc, media.clone()));
+}
+
+/// Native export command hook. Overrides affect this frozen job only.
+#[cfg(feature = "kernel")]
+pub fn attach_with_quality(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    composition: &str,
+    quality: serde_json::Value,
+) -> Result<(), String> {
+    let source =
+        DocumentSource::new(doc, media.clone()).with_quality_override(composition, quality)?;
+    attach_source(renderer, source);
+    Ok(())
+}
+#[cfg(feature = "kernel")]
+fn attach_source(renderer: &mut pm_render::Renderer, source: DocumentSource) {
+    let revision = source.revision();
     renderer.set_studio_source(
         Some(std::sync::Arc::new(
-            pm_studio3d_engine::compositor::Adapter(std::sync::Arc::new(DocumentSource::new(
-                doc,
-                media.clone(),
-            ))),
+            pm_studio3d_engine::compositor::Adapter(std::sync::Arc::new(source)),
         )),
         pm_render::scene3d::provider::Settings {
             revision,

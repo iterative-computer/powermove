@@ -56,6 +56,10 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
+    /// Studio preset or quality patch for this export's root composition.
+    /// Omitted jobs use saved composition quality (or legacy camera samples).
+    #[serde(default)]
+    pub studio_quality: Option<serde_json::Value>,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -372,6 +376,7 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
+            studio_quality: None,
         })
     }
 }
@@ -868,7 +873,18 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]
-        crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
+        if let Some(quality) = request.studio_quality {
+            crate::studio::attach_with_quality(
+                &mut renderer,
+                Arc::new(doc.clone()),
+                &media,
+                composition.as_str(),
+                quality,
+            )
+            .map_err(anyhow::Error::msg)?;
+        } else {
+            crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
+        }
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {
             let job = request.job.clone();
