@@ -917,13 +917,36 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   `fog.shape`, `terrain.*` and `options.*` with specific Undo names.
 - Shell: the `new3d` submenu. Submenu parents in auto-enabling menus keep the
   submenu's own action; this also re-enables View ▸ Tools, which was disabled.
+- Viewer chrome: `viewer.studio.tier` (`live` | `refine`) writes `studioTier`;
+  the bar shows Fast | Quality only with 3D layers (§2 item 5).
+- Panel facts carry the viewer's `layerFailures`; panels republish when the
+  status line changes. Inspector: disclosure replies are applied (groups
+  previously never opened), section `note`, `finishes`, hidden rows and a
+  target `error`.
+
+### Engine findings from the UI pass (for the engine lane)
+
+- **One bad layer blanks the whole 3D set.** `studio/native.rs` `scene()`
+  returns an error for the entire scene when one object's mesh can't be
+  built (`self.mesh(&object["source"])?`, e.g. a `roundedBox` primitive) or
+  when an object uses a Screen material or part offsets. The viewer then
+  reports every 3D layer as not drawn. The requirement is that a broken
+  model, font or texture affects only its own layer: skip that object and
+  report a `LayerFailure` for its layer ID only. Properties already shows
+  the per-layer error and names the culprit on the other layers.
+- Until composition capture lands, Properties offers Screen compositions
+  disabled ("Screens aren’t available in this version yet.") because
+  choosing one stops the whole scene from drawing.
+- `edit_3d` from MCP/agents still writes the generic Undo name `Edit 3D
+  Layers`; UI edits carry specific names (`Add Pine Trees`, `Sky`,
+  `Finish: Gold`, `3D Quality: Final`).
 
 ### Still open for the designer
 
-- Viewer 3D toolbar (§2), gizmos (§5), Light tool panel (§6) and the status
-  capsule (§3). `studioTier` exists now, but automatic idle Refine, picking and
-  projected gizmo geometry are needed first. Per §3, Live is never shown as a
-  status.
+- The rest of the viewer 3D toolbar (§2: Camera/Free View, transform and
+  navigation tools, Frame), gizmos (§5), the Light tool panel (§6) and the
+  status capsule (§3: Refining · n %, Clean). These need picking, projected
+  gizmo geometry and worker refine progress. Per §3, Live is never shown.
 - Import 3D Model…: needs the NSOpenPanel → `import::prepare` worker →
   `Scene3dCommand::Import` route in the app.
 - Text/shape extrusion (Front/Bevel/Side/Back), layers and groups as material

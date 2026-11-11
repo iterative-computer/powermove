@@ -825,7 +825,16 @@ impl Properties {
                     let options = pm_panel_studio3d::properties::screens(model.published(), layer)
                         .map_err(|e| e.to_string())?
                         .into_iter()
-                        .map(|o| json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]}))
+                        // The native renderer can't capture a composition onto a
+                        // surface yet, and a Screen would stop the whole 3D scene
+                        // from drawing: offer them disabled, with the reason.
+                        .map(|o| {
+                            if o["v"].is_null() || o["v"] == object["material"]["screen"] {
+                                json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]})
+                            } else {
+                                json!({"v":o["v"],"label":o["label"],"disabled":true,"detail":"Screens aren’t available in this version yet."})
+                            }
+                        })
                         .collect::<Vec<_>>();
                     // Studio finishes (3d-studio.md §8): a shelf of swatches
                     // under the Material heading, with no selected state.
