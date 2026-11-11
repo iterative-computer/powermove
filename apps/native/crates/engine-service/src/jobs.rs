@@ -1400,14 +1400,16 @@ fn fill_cache(
                 frame: &crate::render_cache::CacheFrame|
      -> Result<Option<Vec<u8>>> {
         let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
-        Ok(render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
-            let bytes: Vec<u8> = read
-                .rgba
-                .iter()
-                .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
-                .collect();
-            crate::frame_codec::encode(&bytes, fill.width, fill.height)
-        }))
+        Ok(
+            render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
+                let bytes: Vec<u8> = read
+                    .rgba
+                    .iter()
+                    .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                    .collect();
+                crate::frame_codec::encode(&bytes, fill.width, fill.height)
+            }),
+        )
     };
     // What the frame costs as playback draws it (its motion samples and
     // resampler), at the composition's size: whether it plays in real time.
