@@ -822,3 +822,58 @@ fn structural_region_replacement_preserves_hand_edited_channels() {
     assert!(s.execute(command(json!({"operation":"update_terrain","target":"ground","patch":{"regions":[{"p":{"roughness":0.4}}]}})),Origin::Mcp).is_err());
     assert_eq!(project(&s), before);
 }
+
+#[test]
+fn fbx_import_undo_and_pmv_keep_converted_and_original_bytes() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-animated.fbx");
+    let prepared = import::prepare(
+        vec![ImportFile {
+            name: "animated.fbx".into(),
+            mime: "model/fbx".into(),
+            bytes: original.to_vec(),
+        }],
+        None,
+    )
+    .unwrap();
+    let converted = prepared.bytes.clone();
+    let mut dir = common::TempDir::new("fbx-roundtrip");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let archive = Archive::open(&dir.path("archive")).unwrap();
+    let receipt = std::sync::Arc::new(archive.admit(prepared).unwrap());
+    let mut s = store();
+    s.execute(
+        Scene3dCommand::Import {
+            comp: None,
+            asset_id: "fbx".into(),
+            layer_id: "product".into(),
+            receipt,
+            time: 0.,
+            setup_studio: false,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(project(&s)["assets"]["fbx"]["format"], "glb");
+    let saved = project(&s);
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    for (id, expected) in [
+        ("fbx", converted.as_slice()),
+        ("fbx-source-0", original.as_slice()),
+    ] {
+        let output = dir.path(&format!("{id}.bin"));
+        reopened.media().get(id).unwrap().copy_to(&output).unwrap();
+        assert_eq!(std::fs::read(output).unwrap(), expected);
+    }
+    reopened.undo().unwrap();
+    assert!(project(&reopened)["assets"].get("fbx").is_none());
+    reopened.redo().unwrap();
+    assert_eq!(project(&reopened), saved);
+}

@@ -839,3 +839,35 @@ fn saved_quality_and_export_override_drive_samples_without_mutating_the_document
     assert_eq!(renderer.studio_counters().samples, 4);
     assert_eq!(doc.to_value(), before);
 }
+
+#[test]
+fn metal_persisted_fbx_uses_source_materials_and_windowless_export() {
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retained.bin");
+    std::fs::write(&path, original).unwrap();
+    let old = imported_document();
+    let mut project = pm_scene3d::from_model(&old.to_value().unwrap()).unwrap();
+    project["assets"]["imported"]["format"] = json!("fbx");
+    for layer in project["comps"]["test"]["layers"].as_array_mut().unwrap() {
+        if layer["id"] == "camera" {
+            layer["d"]["data"]["environment"]["p"]["ambient"]["v"] = json!(1);
+        }
+    }
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    encoded_repeat_with_witness(doc, media, |pixels| {
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[3] > 20 && p[0] > p[1] && p[1] > p[2])
+                .count()
+                > 10,
+            "FBX Coral material must reach the native compositor and exported image"
+        );
+    });
+}

@@ -5035,6 +5035,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-import-fbx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "ufbx",
+]
+
+[[package]]
 name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
@@ -5490,6 +5499,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "pm-geom3d",
+ "pm-import-fbx",
  "pm-model",
  "serde",
  "serde_json",
@@ -7562,6 +7572,15 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ufbx"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "unarray"

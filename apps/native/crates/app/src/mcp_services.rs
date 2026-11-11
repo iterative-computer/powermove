@@ -572,6 +572,7 @@ fn media_type(path: &Path) -> Option<(&'static str, String)> {
         "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",
         "obj" => "model/obj",
+        "fbx" => "model/fbx",
         _ => return None,
     };
     Some(("model", mime.into()))
