@@ -55,6 +55,65 @@ impl Controller {
         })
         .detach();
     }
+    /// Layer ▸ Add 3D Layer ▸ Import 3D Model…: the open panel for models,
+    /// then a 3D layer for each one once its asset lands (`add_3d`).
+    pub(crate) fn pick_models(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.message = "Open a project before importing a 3D model".into();
+            cx.notify();
+            return;
+        }
+        let rx = platform::import_paths(
+            &self.host.borrow().window,
+            false,
+            true,
+            &["glb", "gltf", "obj", "fbx"],
+        );
+        cx.spawn(async move |this, cx| {
+            if let Ok(paths) = rx.recv().await
+                && !paths.is_empty()
+            {
+                let _ = this.update(cx, |v, cx| {
+                    v.import(
+                        ImportRequest {
+                            paths,
+                            models: true,
+                            add_3d: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+    /// One Undo step adds a model layer per imported model, selected.
+    fn add_imported_models(&mut self, assets: Vec<String>, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        let Some(published) = self.kernel.published(&session.project) else {
+            return;
+        };
+        let pairs: Vec<(String, String)> = assets
+            .into_iter()
+            .map(|a| (a, pm_kernel::new_id("L")))
+            .collect();
+        match pm_panel_studio3d::properties::add_models(&published, self.time(), &pairs) {
+            Ok((label, commands, select)) => self.run_layer_plan_at(
+                crate::layer_commands::Plan {
+                    label,
+                    commands,
+                    select: Some(select),
+                },
+                Some(published.revision()),
+                cx,
+            ),
+            Err(error) => {
+                self.message = error.to_string();
+                cx.notify();
+            }
+        }
+    }
     /// File ▸ Import Folder…, Project panel Import Folder.
     pub(crate) fn pick_media_folder(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
         if self.session.is_none() {
@@ -351,6 +410,7 @@ impl Controller {
         let document = published.snapshot.doc_id;
         let profile = self.profile.clone();
         let note = request.note.clone();
+        let add_3d = request.add_3d;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -368,6 +428,9 @@ impl Controller {
                         // Settings › Media › Create Proxies, once the
                         // catalog resolves the new files.
                         v.pro_media.after_import(outcome.assets.clone());
+                        if add_3d && !outcome.assets.is_empty() {
+                            v.add_imported_models(outcome.assets.clone(), cx);
+                        }
                         match note {
                             Some(note) if outcome.failed.is_empty() && !outcome.cancelled => note,
                             _ => outcome.summary(),

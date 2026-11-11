@@ -882,3 +882,45 @@ fn overview_camera(layers: &[Value], id: &str) -> Option<Value> {
         "x":0,"y":6,"z":19,"targetX":0,"targetY":0.5,"targetZ":0,"fov":40}}}),
     )
 }
+
+/// Import 3D Model…: one model layer per imported model asset, in one Undo
+/// step. `assets` pairs each asset ID with a fresh layer ID from the host.
+/// Imported glTF/FBX keep their own materials; OBJ starts on the Studio
+/// material, as the kernel's import does.
+pub fn add_models(
+    p: &Published,
+    time: f64,
+    assets: &[(String, String)],
+) -> Result<(String, Vec<Command>, Vec<String>)> {
+    let root = from_model(
+        &p.snapshot
+            .root()
+            .ok_or_else(|| invalid("No project"))?
+            .to_value(),
+    )?;
+    let mut commands = vec![];
+    let mut names = vec![];
+    let mut select = vec![];
+    for (asset, layer) in assets {
+        let record = &root["assets"][asset];
+        if record["kind"] != "model" {
+            continue;
+        }
+        let name = record["name"].as_str().unwrap_or("3D Model").to_string();
+        let obj = name.to_ascii_lowercase().ends_with(".obj");
+        commands.push(scene(
+            p,
+            time,
+            json!({"operation":"add_object","id":layer,"name":name,
+                "object":{"source":{"assetId":asset},"useSourceMaterials":!obj}}),
+        ));
+        names.push(name);
+        select.push(layer.clone());
+    }
+    let label = match names.as_slice() {
+        [] => return Err(invalid("No 3D models were imported")),
+        [one] => format!("Import {one}"),
+        many => format!("Import {} 3D Models", many.len()),
+    };
+    Ok((label, commands, select))
+}

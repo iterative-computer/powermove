@@ -1018,6 +1018,16 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         let revision = self.published.as_ref().map(|p| p.revision());
+        self.run_layer_plan_at(plan, revision, cx);
+    }
+    /// A plan made from a publication newer than the window's (an import that
+    /// just landed): it is checked against that revision instead.
+    pub(crate) fn run_layer_plan_at(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        revision: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {
                 self.call(SelectionCall::Layers { ids, add: false }.into(), cx);
@@ -1816,7 +1826,15 @@ impl Controller {
         }
         // The viewer's context menu names its New 3D kind in the command.
         if let Some(kind) = cmd.name.strip_prefix("new3d:") {
+            if kind == "import" {
+                self.pick_models(cx);
+                return true;
+            }
             return self.run_plan("new3d", &[serde_json::json!(kind)], cx);
+        }
+        if cmd.name == "new3d" && cmd.args.first().and_then(|a| a.as_str()) == Some("import") {
+            self.pick_models(cx);
+            return true;
         }
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {

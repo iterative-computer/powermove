@@ -15,8 +15,8 @@ use std::sync::Arc;
 pub mod properties {
     pub use crate::fields::{Field, environment};
     pub use crate::view::{
-        NATURE, QUALITY, SKIES, about, add_layer, estimate_seconds_per_frame, export_quality,
-        new_menu, scene_summary,
+        NATURE, QUALITY, SKIES, about, add_layer, add_models, estimate_seconds_per_frame,
+        export_quality, new_menu, scene_summary,
     };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};

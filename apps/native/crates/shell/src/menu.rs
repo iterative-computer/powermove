@@ -102,6 +102,8 @@ pub fn new3d() -> Vec<Item> {
         ("Capsule", "capsule"),
         ("Icosphere", "icosahedron"),
         ("", ""),
+        ("Import 3D Model…", "import"),
+        ("", ""),
         ("Softbox", "area"),
         ("Spotlight", "spot"),
         ("Bulb", "point"),
