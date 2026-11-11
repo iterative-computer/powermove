@@ -55,8 +55,6 @@ use crate::transport::{Effect, Transport};
 /// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
 /// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
-/// How often fully prepared paused starts are checked again.
-const PAUSED_REFRESH: Duration = Duration::from_secs(1);
 /// Maximum source wait, measured in callback frames at the device rate,
 /// independent of wall-clock scheduling, project rate, and shuttle speed.
 pub const SOURCE_WAIT_MS: u64 = 120;
@@ -1069,6 +1067,10 @@ impl Playback {
     pub fn cache_bytes(&self) -> usize {
         self.cache.stats().bytes
     }
+    /// Block residency, decode and eviction counters for memory diagnostics.
+    pub fn cache_stats(&self) -> crate::source::CacheStats {
+        self.cache.stats()
+    }
 
     /// Plays `comp_id` of `doc` from now on (a new revision, or another
     /// composition). Returns the media that could not be opened.
@@ -1730,10 +1732,9 @@ struct RenderThread {
     pending_prepare: bool,
     /// A control or consumed loop head requires another boundary pass.
     boundary_due: bool,
-    /// The paused starts of the last complete preparation pass and when it
-    /// ran: unchanged and still ready, they are re-checked only every
-    /// [`PAUSED_REFRESH`] rather than every idle turn.
-    settled: Option<(Vec<i64>, std::time::Instant)>,
+    /// The starts of the last complete paused preparation pass. Source
+    /// eviction alone must not restart speculative decoding while stopped.
+    settled: Option<Vec<i64>>,
     shared: Arc<Shared>,
     ring: Arc<Ring>,
     transport: Transport,
@@ -2279,6 +2280,7 @@ impl RenderThread {
     fn control(&mut self, c: Control) -> bool {
         let _trace = crate::profile::control_timer(control_label(&c, self.batching));
         self.boundary_due = true;
+        self.settled = None;
         self.shared
             .prepared
             .lock()
@@ -2588,12 +2590,11 @@ impl RenderThread {
             }
         }
         starts.dedup();
-        // Once everything is prepared, re-bounding every voice's spans each
-        // 20 ms turn cost 1-2% CPU with 16 stretched voices while idle.
-        // Recheck occasionally so evicted source blocks are queued again.
-        if let Some((last, at)) = &self.settled
+        // Prepared histories survive source eviction. Rewarming their input
+        // periodically thrashes a bounded cache across these distant starts.
+        // Play/Seek refill missing input on demand; edits invalidate readiness.
+        if let Some(last) = &self.settled
             && *last == starts
-            && at.elapsed() < PAUSED_REFRESH
             && self.mixer.prepared_ready(&starts)
         {
             return;
@@ -2601,53 +2602,27 @@ impl RenderThread {
         self.settled = None;
         self.mixer.retain_prepared(&starts);
         self.preparation.schedule(&mut self.mixer, &starts, true);
-        let ahead = (self.config.lookahead_ms.max(self.config.preroll_ms) as i64 * rate / 1000)
-            .max(CHUNK as i64);
         let mut ready = Vec::new();
-        let mut forward = true;
         for start in starts.iter().copied() {
             if self.preempted() {
-                forward = false;
                 break;
             }
-            // The first chunk's pre-roll comes before the optional three
-            // seconds of read-ahead. Otherwise edits spend hundreds of ms
-            // bounding audio that Play does not yet need.
+            // Prepare only the first chunk. Warming several seconds around
+            // every distant start can evict the playhead's own source blocks.
             if !self.mixer.prepared_ready(&[start]) {
                 if !self.mixer.stretches_ready(start) {
-                    forward = false;
                     break;
                 }
                 self.mixer.prefetch_within(start, CHUNK, LOOKAHEAD_GROUPS);
                 self.mixer.mark_unstretched_ready(start);
                 if !self.mixer.prepared_ready(&[start]) {
-                    forward = false;
                     break;
                 }
             }
             ready.push(start);
-            if !self
-                .mixer
-                .prefetch_within(start, ahead as usize, LOOKAHEAD_GROUPS)
-            {
-                forward = false;
-                break;
-            }
         }
-        let mut behind = forward;
-        for start in starts.iter().copied().filter(|_| forward) {
-            if self.preempted() {
-                behind = false;
-                break;
-            }
-            behind &= self.mixer.prefetch_within(
-                start - 2 * ahead,
-                (2 * ahead) as usize,
-                LOOKAHEAD_GROUPS,
-            );
-        }
-        if behind && ready.len() == starts.len() {
-            self.settled = Some((starts, std::time::Instant::now()));
+        if ready.len() == starts.len() {
+            self.settled = Some(starts);
         }
         *self
             .shared

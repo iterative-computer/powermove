@@ -23,9 +23,9 @@ pub const BLOCK: usize = 1 << 16;
 /// How long a block a playback read, checked, or asked for again survives
 /// a memory-pressure grant ([`SourceCache::playback_memory_pressure`]).
 /// A playing transport asks for its whole look-ahead again each quarter
-/// second of media (at least every 250 ms: J/K/L rates are 1x or faster),
-/// and a paused, prepared start asks again every second (the producer's
-/// `PAUSED_REFRESH`); this covers both with margin. Today's
+/// second of media (at least every 250 ms: J/K/L rates are 1x or faster).
+/// Paused starts are prepared once; this grace also
+/// protects their newly decoded input. Today's
 /// `trimDecodedCache` likewise never evicts the assets of active voices.
 const PLAYBACK_PRESSURE_HOT: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -252,13 +252,18 @@ fn log_decode(
 }
 
 /// Counters for diagnostics and tests.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CacheStats {
     pub decoded_blocks: u64,
     pub hits: u64,
     pub misses: u64,
     pub evicted_blocks: u64,
     pub bytes: usize,
+    pub budget_bytes: usize,
+    pub resident_blocks: usize,
+    pub queued_blocks: usize,
+    pub in_flight_blocks: usize,
 }
 
 /// Shared by every mixer and render in one process.
@@ -443,12 +448,17 @@ impl SourceCache {
     }
 
     pub fn stats(&self) -> CacheStats {
+        let blocks = lock(&self.blocks);
         CacheStats {
             decoded_blocks: self.decoded.load(Ordering::Relaxed),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             evicted_blocks: self.evicted.load(Ordering::Relaxed),
-            bytes: lock(&self.blocks).bytes,
+            bytes: blocks.bytes,
+            budget_bytes: self.budget.load(Ordering::Relaxed) as usize,
+            resident_blocks: blocks.map.len(),
+            queued_blocks: blocks.queue.len(),
+            in_flight_blocks: blocks.in_flight.len(),
         }
     }
 
