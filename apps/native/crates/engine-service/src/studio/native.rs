@@ -57,6 +57,7 @@ pub struct DocumentSource {
         Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
     failures: Mutex<Option<(SceneRequest, Vec<pm_render::LayerFailure>)>>,
+    backdrop_owner: Mutex<Option<(SceneRequest, Option<String>)>>,
 }
 fn val(v: &Value) -> &Value {
     v.get("v").unwrap_or(v)
@@ -110,6 +111,7 @@ impl DocumentSource {
             vertex_attributes: Mutex::default(),
             scatter_placements: Mutex::default(),
             failures: Mutex::default(),
+            backdrop_owner: Mutex::default(),
         }
     }
     pub fn with_text_fonts(self, fonts: Box<dyn pm_render::text::TextFonts>) -> Self {
@@ -492,6 +494,22 @@ impl SceneSource for DocumentSource {
                     id: layer["id"].as_str().ok_or("Extrusion has no ID")?.into(),
                     include_void: false,
                 });
+            }
+        }
+        if !layers.iter().any(|l| l.include_void) {
+            let owner = self
+                .backdrop_owner
+                .lock()
+                .map_err(|_| "Studio backdrop state poisoned")?;
+            if let Some((_, Some(id))) = owner.as_ref().filter(|(key, _)| key == request) {
+                if let Some(layer) = layers.iter_mut().find(|l| l.id == *id) {
+                    layer.include_void = true;
+                } else {
+                    layers.push(pm_studio3d_engine::extract::AuxiliaryLayer {
+                        id: id.clone(),
+                        include_void: true,
+                    });
+                }
             }
         }
         Ok(layers)
@@ -1049,6 +1067,41 @@ impl SceneSource for DocumentSource {
         } else {
             0.
         };
+        // Port the source runtime's display-referred studio backdrop. It is
+        // independent of the lighting environment and is composited only once.
+        scene.shadow_catcher &= !instances.is_empty();
+        let background = e["background"]
+            .as_str()
+            .or_else(|| scene.shadow_catcher.then_some("#F6F5F8"));
+        scene.backdrop = background.map_or(Vec3::ZERO, |hex| {
+            let rgb = u32::from_str_radix(hex.strip_prefix('#').unwrap_or(hex), 16).unwrap_or(0);
+            v3(
+                ((rgb >> 16) & 255) as f32 / 255.,
+                ((rgb >> 8) & 255) as f32 / 255.,
+                (rgb & 255) as f32 / 255.,
+            )
+        });
+        let backdrop_owner = if background.is_some() {
+            let visible: std::collections::HashSet<_> = instances
+                .iter()
+                .filter(|i| i.primary_visible)
+                .map(|i| i.layer.as_str())
+                .collect();
+            let comp = pm_eval::Comp::resolve(&self.snapshot.document, &request.composition)
+                .map_err(|e| e.to_string())?;
+            comp.layers()
+                .iter()
+                .rev()
+                .filter_map(|l| pm_eval::node::string(l.get("id")).map(|id| id.to_string_lossy()))
+                .find(|id| visible.contains(id.as_str()))
+        } else {
+            None
+        };
+        *self
+            .backdrop_owner
+            .lock()
+            .map_err(|_| "Studio backdrop state poisoned")? =
+            Some((request.clone(), backdrop_owner));
         *self
             .failures
             .lock()
@@ -1066,6 +1119,7 @@ impl SceneSource for DocumentSource {
                 basis,
                 ground: Some(env * 0.35),
                 floor_y,
+                backdrop_opaque: Some(background.is_some()),
                 shadows: e["shadows"] != false,
                 ambient,
                 orthographic_span: match choice {

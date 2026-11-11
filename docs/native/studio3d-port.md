@@ -1289,3 +1289,43 @@ named-camera selection, invalid poses and supplying-composition isolation.
 The view-command/serialization unit check and camera-sensitive frame-cache
 check both pass. The GPUI app build passes in **22.42 s**. No on-screen fps
 or input percentile is claimed by these functional tests.
+
+### UI dependency 6 — studio backdrop and shadow catcher
+
+The black backdrop had two native glue gaps: `Scene.backdrop` was always zero,
+and every surface output discarded uncovered pixels. Native now carries the
+saved environment background in display sRGB, or the pinned Studio source's
+existing `#F6F5F8` backdrop when its catcher is enabled. Lighting remains scene
+linear. This ports an existing renderer value; it adds no new visual choice.
+
+Exactly one healthy primary surface owns the studio void, chosen from the
+composition's layer order. A visible World keeps ownership of the environment.
+The Studio service permits that surface's existing output to include the void
+and rejects multiple owners. An explicit background can be opaque without
+turning on the catcher. With both disabled, uncovered pixels remain transparent.
+The catcher stays at the scene's lowest bound and no floor proxy is introduced.
+This also fixes the round-two **shadow catcher black void** report.
+
+OIDN was biasing even the nominally flat sky part of its shade image. The engine
+now preserves exact shade outside the floor, and native Refine/Final skip the
+shade network entirely when there is no catcher. Actual floor shadow/caustic
+shading still uses the denoiser. No quality threshold or render deadline changed.
+
+Checks: **46 native Metal scene/export tests** pass in **11.12 s**, including
+12 background/catcher/tier combinations (Live, Refine and Final), transparency,
+explicit black and saved/default colors. **29 native Studio checks** pass;
+the new ownership check proves that only its designated surface includes the
+void and duplicate owners fail. **51 shared engine unit tests** pass. A fresh
+Blender/Cycles reference run passes **all 11 existing regression tolerances**;
+the first reference-reuse attempt correctly refused a different floating-point
+export and fresh references were rendered. The app build passes in **118 s**.
+These checks do not establish independent Cycles environment matching or the
+native performance gates.
+
+The post-fix no-visible-noise regression also passes both checks in **20.26 s**:
+at 192×128 against fresh 4096-spp references, Final luminance RMS is **0.00166**
+(teapot), **0.00554** (glass), **0.00237** (chrome), with smooth residual RMS
+**0.00161 / 0.00321 / 0.00219**. This small-image acceptance is separate from
+the pending 1080p native export budget and the owner's chrome caustic complaint.
+A final app rebuild after the defensive background-color parsing change passes
+in **13.09 s**.

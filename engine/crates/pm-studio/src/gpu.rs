@@ -1068,6 +1068,9 @@ impl Renderer {
         self.post(0, true, Some(denoise), None)
     }
 
+    /// Whether the current view includes the noisy studio floor.
+    pub fn has_shadow_catcher(&self)->bool{self.base.backdrop[3]>0.}
+
     /// Actual per-pixel counts (adaptive rendering may stop before the ceiling).
     pub fn sample_counts(&self)->Vec<f32> {self.read_f32(&self.accum,u64::from(self.width)*u64::from(self.height)*16).chunks_exact(4).map(|p|p[3]).collect()}
 
@@ -1226,7 +1229,12 @@ impl Renderer {
                 eprintln!("denoise failed, keeping the noisy frame: {e}");
             } else {
                 for i in 0..pixels {
-                    color[i * 4 + 3] = shade[i * 4];
+                    // A learned filter can bias a constant unit shade. Empty
+                    // sky/background has no floor shading to denoise; preserve
+                    // its exact authored backdrop instead of tinting the void.
+                    if self.has_shadow_catcher() && (aov[i*8+3]>0. || aov[i*8+5]>0.) {
+                        color[i * 4 + 3] = shade[i * 4];
+                    }
                 }
                 self.queue.write_buffer(&self.display[0], 0, bytemuck::cast_slice(&color));
             }

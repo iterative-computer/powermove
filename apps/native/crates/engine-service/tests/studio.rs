@@ -3187,3 +3187,87 @@ fn studio_view_override_does_not_change_a_supplying_compositions_camera() {
             && input.scene.camera.position.x.abs() < 1e-6
     );
 }
+
+#[test]
+fn studio_backdrop_and_shadow_catcher_reach_every_native_tier() {
+    use studio::SceneSource;
+    for (catcher, background, expected) in [
+        (false, Some("#88AACC"), Some([136., 170., 204.])),
+        (true, None, Some([246., 245., 248.])),
+        (false, None, None),
+        (false, Some("#000000"), Some([0.; 3])),
+    ] {
+        let original = document(false, 100.);
+        let mut project = pm_scene3d::from_model(&original.to_value().unwrap()).unwrap();
+        let camera = project["comps"]["test"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|l| l["id"] == "camera")
+            .unwrap();
+        camera["d"]["data"]["environment"]["shadowCatcher"] = json!(catcher);
+        camera["d"]["data"]["environment"]["background"] = json!(background);
+        let doc = project_document(&project);
+        let before = doc.to_value();
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        let source = studio::DocumentSource::new(doc.clone(), Default::default());
+        let input = source.scene(&req).unwrap();
+        assert_eq!(input.view.backdrop_opaque, Some(expected.is_some()));
+        let outputs = source.auxiliary_layers(&req).unwrap();
+        assert_eq!(
+            outputs.iter().filter(|l| l.include_void).count(),
+            usize::from(expected.is_some())
+        );
+        let mut renderer = Renderer::headless().unwrap();
+        for tier in [
+            studio::Preview::Live,
+            studio::Preview::Refine,
+            studio::Preview::Final,
+        ] {
+            studio::attach_with_preview(
+                &mut renderer,
+                doc.clone(),
+                &Default::default(),
+                &req,
+                tier,
+            )
+            .unwrap();
+            let mut request = request();
+            request.export = false;
+            request.output_kind = OutputKind::Preview;
+            let frame = renderer
+                .render(
+                    &doc,
+                    "test",
+                    Ticks::ZERO,
+                    &request,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let pixels = renderer.read_rgba(&frame).unwrap();
+            let corner = &pixels[(2 * 64 + 2) * 4..][..4];
+            if let Some(rgb) = expected {
+                assert!(
+                    corner[3] > 0.99,
+                    "{catcher} {background:?} {tier:?}: {corner:?}"
+                );
+                for i in 0..3 {
+                    assert!(
+                        (corner[i] * 255. - rgb[i]).abs() < 3.,
+                        "{catcher} {background:?} {tier:?}: {corner:?}"
+                    );
+                }
+            } else {
+                assert!(corner[3] < 0.01, "{tier:?}: {corner:?}");
+            }
+        }
+        assert_eq!(doc.to_value(), before);
+    }
+}

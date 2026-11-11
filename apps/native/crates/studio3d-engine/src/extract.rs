@@ -29,7 +29,8 @@ pub trait SceneSource: Send + Sync {
 }
 
 /// Non-surface timeline layers still need a compositor answer. World owns the
-/// visible environment; fog volumes affect transport without drawing a proxy.
+/// visible environment; a surface may instead own the studio backdrop. At most
+/// one output owns the void. Fog affects transport without drawing a proxy.
 #[derive(Clone, Debug)]
 pub struct AuxiliaryLayer {
     pub id: String,
@@ -179,6 +180,8 @@ pub struct View {
     pub basis: Option<[Vec3; 3]>,
     pub ground: Option<Vec3>,
     pub floor_y: f32,
+    /// Explicit backdrop opacity; None keeps prototype shadow-catcher policy.
+    pub backdrop_opaque: Option<bool>,
     pub shadows: bool,
     pub ambient: Vec3,
     /// Half the vertical extent in scene units; None selects perspective.
@@ -193,6 +196,7 @@ impl Default for View {
             basis: None,
             ground: None,
             floor_y: 0.,
+            backdrop_opaque: None,
             shadows: true,
             ambient: Vec3::ZERO,
             orthographic_span: None,
