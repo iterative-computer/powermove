@@ -7,7 +7,7 @@ import { editPartGroup } from './part-groups';
 import { canAssignMaterialMap,listModelMaterials } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
-import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
+import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS, compositionScene } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
@@ -87,9 +87,13 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     if(matches.length>1)throw new Error('Multiple 3D layers have that name; use a layer ID');
     layer=matches[0];
   }
+  if(args.operation==='set_environment' && args.patch?.map != null){
+    const asset=PM.proj.assets?.[args.patch.map];
+    if(!asset || asset.kind!=='image' || !/^(hdr|exr)$/i.test(asset.format || asset.name?.split('.').pop() || ''))throw new Error('Choose an HDR or EXR environment image');
+  }
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);
-    if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:{},environment:args.patch || {}});return {commands,id};}
+    if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:compositionScene(PM,PM.time || 0).camera,environment:args.patch || {}});return {commands,id};}
   }
   if(layer && extrusionEligible(layer) && ['set_extrusion','set_surface_material_map','set_surface_material_properties','set_material_map','set_material_properties'].includes(args.operation)){
     if(layer.lock || (PM.groupAncestors?.(layer) || []).some((g:any)=>g.lock))throw new Error('Unlock the 3D layer before editing it');

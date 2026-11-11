@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { ControlEditBinding, Layer, PowermoveAPI } from 'powermove';
+  import { chooseEnvironment } from './environment';
   import SceneField from './SceneField.svelte';
   import MaterialsSection from './MaterialsSection.svelte';
   import PartsSection from './PartsSection.svelte';
@@ -17,6 +18,7 @@
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
   /* Base fields the Materials options now cover show here only while they
      carry animation, so existing keyframes stay reachable. */
+  const environmentOptions=$derived((ui.version,[{v:null,label:'None'},...Object.values(api.project.get().assets).filter((asset:any)=>asset.kind==='image' && /^(hdr|exr)$/i.test(asset.format || asset.name?.split('.').pop() || '')).map((asset:any)=>({v:asset.id,label:asset.name})),...(environment?.map && !api.project.get().assets[environment.map]?[{v:environment.map,label:'Missing image'}]:[]),{v:'__import__',label:'Import HDR / EXR…'}]));
   const baseFields=$derived((ui.version,MATERIAL_FIELDS.filter(field=>field.key==='color' || value(object?.material,field.key)?.kf?.length || value(object?.material,field.key)?.expr)));
 </script>
 {#if layer && data}
@@ -42,6 +44,7 @@
     <Row {api} label="Projection"><SelectField {api} get={()=>camera.projection} options={[{v:'perspective',label:'Perspective'},{v:'orthographic',label:'Orthographic'}]} edit={structural('set_camera','projection','Camera projection')} label="Projection" /></Row>
     {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
     <Section {api} title="Environment" />
+    <Row {api} label="Map"><SelectField {api} get={()=>environment.map ?? null} options={environmentOptions} edit={structural('set_environment','map','Environment map')} onChange={(v:unknown)=>{if(v==='__import__'){void chooseEnvironment(api,layerId);return false;}}} label="Map" /></Row>
     {#each ENVIRONMENT_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}
     <Row {api} label="Shadows"><ToggleField {api} get={()=>environment.shadows} edit={structural('set_environment','shadows','Shadows')} label="Shadows" /></Row>
     <Row {api} label="Background"><ToggleField {api} get={()=>!!environment.background} edit={{mode:'set',label:'Background',set:(v:unknown)=>edit('set_environment',{background:v?'#161616':null},'Background')}} label="Background" />{#if environment.background}<ColorField {api} get={()=>environment.background} edit={structural('set_environment','background','Background color')} label="Background color" />{/if}</Row>

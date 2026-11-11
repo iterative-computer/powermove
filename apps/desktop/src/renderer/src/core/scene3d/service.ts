@@ -30,6 +30,7 @@ function scanReferences(PM:any,comp:any,scan:ReferenceScan):void {
     if(!(i in layers))continue; // flatMap snapshots length and skips sparse holes.
     const layer=layers[i];
     localCount=0;
+    append(layer?.d?.data?.environment?.map);
     const node=layer?.d?.data?.object;if(!node){
       if(isShared3DPlane(comp,layer))append(layer.d?.asset);
       for(const surface of Object.values<any>(layer?.d?.extrusion?.surfaces || {}))for(const map of Object.values<any>(surface.maps || {})){const id=mapImageId(map);if(id)append(id);}

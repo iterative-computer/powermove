@@ -1,3 +1,4 @@
+import { chooseEnvironment } from './environment';
 import { mount, unmount } from 'svelte';
 import type { ExtensionLayerDefinition, PowermoveAPI } from 'powermove';
 import { OBJ_MODEL } from './obj-model';
@@ -57,6 +58,7 @@ export default function activate(api:PowermoveAPI):void {
     {id:'3d.new-model',label:'New 3D Model',run:()=>addPrimitive(api)},
     {id:'3d.add-object',label:'Add 3D Object',run:(primitive?:unknown)=>addPrimitive(api,PRIMITIVES.find(p=>p.id===primitive)?.id || 'box')},
     {id:'3d.add-light',label:'Add 3D Light',run:(type?:unknown)=>addLight(api,LIGHT_TYPES.find(l=>l.id===type)?.id || 'point')},
+    {id:'3d.environment',label:'Environment Light…',run:(file?:unknown)=>chooseEnvironment(api,undefined,file)},
     {id:'3d.add-camera',label:'Add Camera',run:()=>addCamera(api)},
     {id:'3d.import-obj',label:'Import 3D Model…',run:(files?:unknown)=>importModelIntoScene(api,files)},
     {id:'3d.convert-layer',label:'Convert to 3D Layers',run:convert},

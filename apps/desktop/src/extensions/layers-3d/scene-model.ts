@@ -86,6 +86,8 @@ export function cameraFields(projection: 'perspective' | 'orthographic'): FieldS
 }
 
 export const ENVIRONMENT_FIELDS: FieldSpec[] = [
+  { key: 'intensity', label: 'Strength', kind: 'num', step: 0.05, min: 0 },
+  { key: 'rotation', label: 'Rotation', kind: 'num', step: 1, unit: '°' },
   { key: 'ambient', label: 'Ambient', kind: 'num', step: 0.01, min: 0 },
   { key: 'ambientColor', label: 'Ambient color', kind: 'color' },
   { key: 'exposure', label: 'Exposure', kind: 'num', step: 0.01, min: 0 }

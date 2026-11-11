@@ -27,6 +27,7 @@ import { cornerRadii, isUniformCircular, roundedRectPath } from './corner-geomet
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
+import { loadEnvironmentImage, isEnvironmentImage } from '../../core/scene3d/environment-map';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg,svgImportRepair } from '../core/svg-import';
@@ -1067,6 +1068,7 @@ function disposeAsset(a: any) {
     disposedAssets.add(a);
   }
   if(a?.object3d)disposeModel(a.object3d);
+  a.environmentTexture?.dispose();
   disposeVideoInstances(a);
   if (a.preview) {
     cancelPreviewVideoSeek(a.preview.el);
@@ -1136,6 +1138,10 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string, 
 }
 async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCurrent }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
+  if (kind === 'image' && isEnvironmentImage(name)) {
+    const loaded = await loadEnvironmentImage(blob, name);
+    return {id, name, kind, blob, size:blob.size, dur:0, ...loaded};
+  }
   if(kind==='lut'){if(blob.size>MAX_CUBE_BYTES)throw new Error('LUT exceeds the 16 MiB file limit');const sourceText=await blob.text(),lut=parseCube(sourceText);return{id,name,kind,format:'cube',blob,lut,size:blob.size,w:lut.width,h:lut.height,dur:0};}
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta, onStage, assertCurrent });
   if (kind === 'model') {

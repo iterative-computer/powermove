@@ -20,6 +20,22 @@ function editor() {
 }
 
 describe('individual 3D layers and guarded edits',()=>{
+  it('assigns HDR environments with undo, channels, asset references and missing-asset reload',()=>{
+    const PM=editor();PM.proj.assets.env={id:'env',kind:'image',name:'Studio.exr',format:'exr'};
+    expect(editScene(PM,{operation:'set_environment',patch:{map:'env',p:{rotation:45,intensity:2}}}).ok).toBe(true);
+    const camera=PM.proj.layers.find((l:any)=>l.d?.data?.camera),before=JSON.stringify(camera.d);
+    expect(layer3DAssetIds(camera)).toEqual(['env']);
+    expect(camera.d.data.environment.p.intensity.v).toBe(2);
+    expect(editScene(PM,{operation:'set_environment',target:camera.id,patch:{map:'missing'}}).ok).toBe(false);
+    expect(JSON.stringify(camera.d)).toBe(before);
+    expect(editScene(PM,{operation:'set_environment',target:camera.id,patch:{map:null}}).ok).toBe(true);
+    PM.hist.undo();expect(PM.L(camera.id).d.data.environment.map).toBe('env');
+    const texture=new THREE.Texture();PM.assets={get:()=>({environmentTexture:texture})};
+    const runtime=compositionRuntime(PM,0);expect(runtime.scene.environment).toBe(texture);
+    PM.assets.get=()=>null;expect(compositionRuntime(PM,0).scene.environment).toBeNull();
+    PM.assets.get=()=>({environmentTexture:texture});expect(compositionRuntime(PM,0).scene.environment).toBe(texture);
+    PM.L(camera.id).lock=true;expect(editScene(PM,{operation:'set_environment',target:camera.id,patch:{map:null}}).ok).toBe(false);
+  });
   it('groups, renames, edits and ungroups imported parts with undo and saved child animation',()=>{
     const PM=editor(),source=new THREE.Group(),file=new THREE.Group();file.userData[PARTS_ROOT_FLAG]=true;
     for(const [i,name] of ['Left','Right','Other'].entries()){const mesh=new THREE.Mesh(new THREE.BoxGeometry(.2,.2,.2));mesh.name=name;mesh.userData.name=name;mesh.position.x=i-1;file.add(mesh);}

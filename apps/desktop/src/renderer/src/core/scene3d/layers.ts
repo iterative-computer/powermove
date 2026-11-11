@@ -113,7 +113,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
-  if(!node)return [...new Set<string>(Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any))).filter((id):id is string=>!!id))];
+  if(!node)return [...new Set<string>([layer?.d?.data?.environment?.map,...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any)))].filter((id):id is string=>!!id))];
   return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 

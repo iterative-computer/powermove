@@ -1,3 +1,4 @@
+import { chooseEnvironment } from './environment';
 import type { EditResult, PowermoveAPI, MenuContribution } from 'powermove';
 import { PRIMITIVES, LIGHT_TYPES } from './scene-model';
 import type { Primitive, LightType } from './scene-types';
@@ -46,5 +47,6 @@ export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[
   '-',
   {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
   ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
+  {label:'Environment Light…',run:()=>chooseEnvironment(api)},
   {label:'Camera',run:()=>addCamera(api)}
 ];

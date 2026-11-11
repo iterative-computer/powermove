@@ -95,7 +95,8 @@ export const cameraSchema = z.object({
     fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
-  p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),
+  p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1], intensity:[num(0,100),1], rotation:[num(-360_000,360_000),0] }).default({} as any),
+  map: z.string().min(1).max(160).nullable().default(null),
   background: color.nullable().default(null), shadows: z.boolean().default(true)
 }).strict();
 const schema = z.object({
@@ -217,5 +218,5 @@ export function validateSceneChannel(path:string,property:unknown):void {
 }
 
 export function sceneAssetIds(scene: Scene3D): string[] {
-  return [...new Set(scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x)))];
+  return [...new Set([...(scene.environment.map?[scene.environment.map]:[]),...scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x))])];
 }

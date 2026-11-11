@@ -316,6 +316,11 @@ export class SceneRuntime {
     const environment=values(data.environment.p,'environment');
     this.ambient.color.set(environment.ambientColor);this.ambient.groundColor.set(environment.ambientColor).multiplyScalar(.35);
     this.ambient.intensity=environment.ambient;
+    const environmentAsset=data.environment.map?assets(data.environment.map):null;
+    this.scene.environment=environmentAsset?.environmentTexture ?? null;
+    this.scene.environmentIntensity=environment.intensity ?? 1;
+    this.scene.environmentRotation.set(0,radians(environment.rotation ?? 0),0);
+    if(data.environment.map && !this.scene.environment)this.warnings.push('Environment image is missing or still loading');
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
