@@ -307,6 +307,26 @@ impl DiskFrames {
         r
     }
 
+    /// Drop a closed project's scene and read-ahead. The generation fences
+    /// any fingerprint or disk read that was already running.
+    pub(crate) fn forget_document(&self, doc_id: u64) {
+        let generation = self.with(|s| {
+            if !s.frames.as_ref().is_some_and(|f| f.source.doc_id == doc_id) {
+                return (None, false);
+            }
+            s.generation += 1;
+            s.frames = None;
+            s.media_checked = None;
+            s.indexed = None;
+            s.last_read = None;
+            (Some(s.generation), true)
+        });
+        if let Some(generation) = generation {
+            self.inner.reader.clear(generation);
+            self.cancel_fill();
+        }
+    }
+
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
     /// render cache). The same folder again finds its frames again (Clear…
     /// may have removed some). Disk work: call off the main thread.
@@ -321,15 +341,16 @@ impl DiskFrames {
             Some((dir, quota)) => Some(Arc::new(RenderCache::open(dir, *quota)?)),
             None => None,
         };
-        self.with(|s| {
+        let generation = self.with(|s| {
             s.root = root;
             s.cache = cache;
             s.generation += 1;
             // Observed again (and fingerprinted against the new folder).
             s.frames = None;
             s.fill = Fill::default();
-            ((), true)
+            (s.generation, true)
         });
+        self.inner.reader.clear(generation);
         Ok(())
     }
 
@@ -408,6 +429,7 @@ impl DiskFrames {
         let Some((size, rate, count)) = composition(scene) else {
             state.frames = None;
             state.generation += 1;
+            self.inner.reader.clear(state.generation);
             bump(&mut state, &self.inner.published);
             return true;
         };
@@ -427,6 +449,7 @@ impl DiskFrames {
         };
         state.generation += 1;
         let generation = state.generation;
+        self.inner.reader.clear(generation);
         state.frames = Some(Frames {
             identity: identity.clone(),
             source: source.clone(),
@@ -893,6 +916,11 @@ impl Reader {
                     });
                     let mut ready = shared.lock().unwrap();
                     ready.asked.remove(&ask.id);
+                    if ready.wanted.is_some_and(|(g, first, last)| {
+                        ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
+                    }) {
+                        continue;
+                    }
                     if let Some(data) = data {
                         ready.frames.push_back((ask.id, Arc::new(data)));
                         while ready.frames.len() > READY_FRAMES {
@@ -911,6 +939,13 @@ impl Reader {
             .iter()
             .find(|(id, _)| *id == (generation, n))
             .map(|(_, bytes)| bytes.clone())
+    }
+    fn clear(&self, generation: u64) {
+        let mut ready = self.ready.lock().unwrap();
+        *ready = Ready {
+            wanted: Some((generation, 1, 0)),
+            ..Default::default()
+        };
     }
     fn want(&self, generation: u64, first: i64, last: i64) {
         self.ready.lock().unwrap().wanted = Some((generation, first, last));
@@ -1099,6 +1134,50 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_document_releases_the_scene_and_ready_disk_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().to_owned(), 64 << 20)))
+            .unwrap();
+        let scene = scene();
+        let doc = Arc::downgrade(&scene.doc);
+        assert!(disk.observe(&scene, &[], None, None, 7));
+        ready(&disk);
+        {
+            let mut ready = disk.inner.reader.ready.lock().unwrap();
+            ready.frames.push_back(((1, 0), Arc::new(vec![0; 1024])));
+        }
+        drop(scene);
+        disk.forget_document(8);
+        assert!(doc.upgrade().is_some(), "another document must stay live");
+        disk.forget_document(7);
+        assert!(disk.inner.state.lock().unwrap().frames.is_none());
+        assert!(disk.inner.reader.ready.lock().unwrap().frames.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while doc.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "fingerprint worker retained closed scene"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pixels = Arc::new(vec![0; 1024]);
+        let released = Arc::downgrade(&pixels);
+        disk.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .push_back(((1, 0), pixels));
+        disk.set_storage(None).unwrap();
+        assert!(
+            released.upgrade().is_none(),
+            "storage changes release old read-ahead too"
+        );
+    }
 
     fn scene() -> Scene {
         scene_from(include_str!("../tests/fixtures/shapes.json"))

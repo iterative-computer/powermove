@@ -1501,6 +1501,8 @@ impl Controller {
         }
         self.host.borrow_mut().close_flowchart();
         self.composition_views.clear();
+        self.rows.clear();
+        self.keyframes = 0;
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();

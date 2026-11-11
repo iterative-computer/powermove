@@ -17,6 +17,10 @@ pub struct CacheUsage {
     pub vector_bytes: u64,
     pub pyramid_bytes: u64,
     pub geometry_bytes: u64,
+    /// Gross resources held by cached bindings; can overlap other caches.
+    pub binding_bytes: u64,
+    /// Metal-device allocation, including work in flight; overlaps caches.
+    pub gpu_allocated_bytes: u64,
 }
 
 impl CacheUsage {

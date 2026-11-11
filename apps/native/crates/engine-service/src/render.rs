@@ -250,18 +250,26 @@ impl Engine {
             pyramid_bytes: self.renderer.pyramid_bytes(),
             geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
                 + self.renderer.scene3d_resident().map_bytes,
+            binding_bytes: self.renderer.binding_cache_bytes(),
+            gpu_allocated_bytes: self.metal.current_allocated_size() as u64,
         }
     }
 
     pub fn release_idle_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.release_idle_memory_inner());
+        crate::memory::pressure_relief();
+    }
+
+    fn release_idle_memory_inner(&mut self) {
         self.renderer.clear_draw_reuse();
         self.renderer.release_idle_targets();
         self.renderer.release_idle_media();
+        self.renderer.trim(0);
         self.cache.clear();
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
         self.idle_released = true;
-        crate::memory::pressure_relief();
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
     }
 
     pub fn maintain_memory(&mut self) -> bool {
@@ -273,7 +281,39 @@ impl Engine {
         false
     }
 
+    pub fn release_project_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.release_project_memory_inner());
+        crate::memory::pressure_relief();
+    }
+
+    fn release_project_memory_inner(&mut self) {
+        self.release_idle_memory_inner();
+        self.renderer.release_project_memory();
+        self.compat_document = None;
+        self.resources = Arc::default();
+        self.studio_content = None;
+        self.font_generation = None;
+        self.hdr = None;
+        self.missing_effects.clear();
+        self.definition_failure = None;
+        self.scopes = None;
+        self.scope_frames = None;
+        self.memory_request.store(
+            self.memory_client.grant(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.govern_memory();
+        // Process deferred wgpu/Metal destruction after the last cache
+        // handles go, rather than waiting for the next project's submission.
+        self.gpu.queue.submit([]);
+        self.gpu.wait_idle();
+    }
+
     pub fn govern_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.govern_memory_inner());
+    }
+
+    fn govern_memory_inner(&mut self) {
         use std::sync::atomic::Ordering;
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
@@ -343,7 +383,9 @@ impl Engine {
     }
     /// Non-blocking: runs wgpu's completed callbacks, a device loss among them.
     pub fn poll(&self) {
-        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        objc2::rc::autoreleasepool(|_| {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        });
     }
     pub fn lost(&self) -> bool {
         self.lost.load(std::sync::atomic::Ordering::Acquire)
@@ -846,6 +888,7 @@ impl Engine {
                     .map(|store| store.end_frame())
                     .unwrap_or_default();
                 let rendered = rendered?;
+                self.renderer.trim_submitted_frame_caches();
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }

@@ -402,6 +402,7 @@ impl View {
 #[derive(Default)]
 struct State {
     views: BTreeMap<u64, View>,
+    retired_documents: BTreeSet<u64>,
     next: u64,
     content: u64,
     stop: bool,
@@ -415,6 +416,7 @@ type ScopeTap = (
 );
 struct Shared {
     state: Mutex<State>,
+    memory: Mutex<memory::CacheUsage>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
@@ -832,8 +834,18 @@ impl Viewer {
     }
     pub fn retire(&self) {
         let mut state = self.shared.state.lock().unwrap();
-        state.views.remove(&self.id);
+        if let Some(view) = state.views.remove(&self.id) {
+            let doc = view.stamp.doc_id;
+            if !state.views.values().any(|v| v.stamp.doc_id == doc) {
+                state.retired_documents.insert(doc);
+            }
+        }
         state.notify();
+        drop(state);
+        let mut scopes = self.shared.scopes.lock().unwrap();
+        if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *scopes = None;
+        }
         self.shared.wake.try_send(()).ok();
     }
 }
@@ -884,10 +896,15 @@ impl EngineService {
     pub fn forget_compat(&self, doc_id: u64) {
         self.compat.forget(doc_id);
     }
+    /// The renderer's latest cache counters (not OS or allocator footprint).
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.shared.memory.lock().unwrap().clone()
+    }
     fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
+            memory: Mutex::default(),
             wake,
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
@@ -1435,6 +1452,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // Delivers a pending device-lost callback even while idle.
         engine.govern_memory();
         engine.poll();
+        *shared.memory.lock().unwrap() = engine.memory_usage();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
             // and draw every viewer again on the new device. A device lost
@@ -1642,10 +1660,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             .filter(|id| !state.views.contains_key(id))
             .copied()
             .collect();
-        if !retired.is_empty() {
+        let closed: Vec<_> = std::mem::take(&mut state.retired_documents)
+            .into_iter()
+            .filter(|doc| !state.views.values().any(|v| v.stamp.doc_id == *doc))
+            .collect();
+        if !retired.is_empty() || !closed.is_empty() {
+            if !closed.is_empty() {
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+            }
             drop(state);
             for id in retired {
                 runtime.remove(&id);
+            }
+            if !closed.is_empty() {
+                for doc in closed {
+                    if let Some(compat) = &engine.compat {
+                        compat.forget(doc);
+                    }
+                    shared.disk.forget_document(doc);
+                }
+                engine.release_project_memory();
+                *shared.memory.lock().unwrap() = engine.memory_usage();
             }
             continue;
         }
@@ -2396,14 +2433,21 @@ impl Headless {
     pub fn release_idle_memory(&mut self) {
         self.engine.release_idle_memory();
     }
+    /// Releases every cache owned by the previous project. The renderer and
+    /// device stay available for the next project in the same window.
+    pub fn release_project_memory(&mut self) {
+        self.engine.release_project_memory();
+    }
     pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
         memory::simulate_pressure(pressure);
         self.engine.govern_memory();
         self.engine.poll();
     }
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+        objc2::rc::autoreleasepool(|_| {
+            Ok(Self {
+                engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+            })
         })
     }
     pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {

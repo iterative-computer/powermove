@@ -208,6 +208,99 @@ fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
 }
 
 #[test]
+fn closing_a_project_returns_every_reported_cache_to_empty() {
+    let s = snapshot();
+    let scene = scene(&s);
+    let mut h = Headless::new().unwrap();
+    let baseline = h.memory_usage();
+    let pixels = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(h.memory_usage().resident_bytes() > baseline.resident_bytes());
+    h.release_project_memory();
+    let closed = h.memory_usage();
+    assert_eq!(
+        closed.resident_bytes(),
+        baseline.resident_bytes(),
+        "{closed:?}"
+    );
+    assert_eq!(closed.decoder_sessions, 0);
+    assert_eq!(closed.binding_bytes, 0);
+    assert_eq!(closed.decoder_pool_free_bytes, 0);
+    assert_eq!(closed.target_pool_idle, 0);
+    let reopened = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        pixels, reopened,
+        "cache lifetime must not change exact pixels"
+    );
+}
+
+#[test]
+fn retiring_the_last_view_releases_its_document_and_shared_caches() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("project-retirement-test").unwrap()).unwrap();
+    let c = config(snapshot());
+    let document = Arc::downgrade(&c.snapshot.document);
+    let v = service.viewer(c).unwrap();
+    let (scopes, results) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, scopes)))
+        .unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    v.retire();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let u = service.memory_usage();
+        if u.resident_bytes() == 0 && document.upgrade().is_none() {
+            assert!(results.is_closed(), "closed viewer retained its scope tap");
+            assert_eq!(u.decoder_sessions, 0);
+            assert_eq!(u.decoder_pool_free_bytes, 0);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed document/caches retained: {u:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn closing_one_document_keeps_the_other_view_usable() {
+    let service = EngineService::start(pm_gpu::Gpu::new("other-project-test").unwrap()).unwrap();
+    let first = config(snapshot());
+    let closed = Arc::downgrade(&first.snapshot.document);
+    let a = service.viewer(first).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    a.retire();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while closed.upgrade().is_some() {
+        assert!(Instant::now() < deadline, "closed project stayed live");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    b.command(C::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Exact,
+    })
+    .unwrap();
+    wait_frame(&b, b.stamp().unwrap());
+    b.retire();
+}
+
+#[test]
 fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do_not() {
     use pm_engine_service::MediaMode;
     let mut catalog = MediaCatalog {

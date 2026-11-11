@@ -685,6 +685,7 @@ impl Controller {
                         v.close_pending = false;
                         v.closing_note = None;
                         v.home = false;
+                        v.start_builtins(cx);
                         v.message = "No project".into();
                         if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
                             shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
