@@ -264,7 +264,9 @@ fn an_extension_layer_with_no_installed_provider_is_the_checkerboard_in_the_view
         let px = &shown[(y * 16 + x) * 4..][..4];
         assert!((px[3] - 1.).abs() < 1e-3, "{px:?}");
         assert!(
-            cells.iter().any(|c| c.iter().zip(px).all(|(w, g)| (w - g).abs() < 0.02)),
+            cells
+                .iter()
+                .any(|c| c.iter().zip(px).all(|(w, g)| (w - g).abs() < 0.02)),
             "({x}, {y}) {px:?}"
         );
     }
