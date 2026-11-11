@@ -378,6 +378,9 @@ impl Controller {
             .detach();
         crate::render_frames::install(engine.render_cache());
         sync_render_storage(&pro_media, &engine);
+        engine
+            .render_cache()
+            .set_background(pro_media.preferences().background());
         let pro_events = pro_media.event_receiver.clone();
         cx.spawn(async move |this, cx| {
             while let Ok(first) = pro_events.recv().await {

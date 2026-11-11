@@ -316,6 +316,7 @@ fn main() -> Result<()> {
                     v.font_broker = Some(font_broker);
                     v.job_overrides = job_overrides.clone();
                 });
+                render_frames::serve_background(&engine, job_overrides.clone());
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);

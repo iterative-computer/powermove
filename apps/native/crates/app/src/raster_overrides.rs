@@ -265,6 +265,17 @@ impl JobOverrides {
         }
         session.answer_overrides(self.answers(job, revision, frozen, look, cancel));
     }
+    /// [`Self::pin`] from the project as it is published now (background
+    /// rendering's fills, frozen from the viewer's scene a moment ago).
+    pub(crate) fn pin_current(&self, session: &mut JobSession) {
+        if let Some(published) = self
+            .kernel
+            .published(&self.project)
+            .filter(|p| p.snapshot.doc_id == self.doc_id)
+        {
+            self.pin(session, &published, false);
+        }
+    }
     /// What answers job `job`'s needs (see [`Self::pin`]).
     fn answers(
         &self,
