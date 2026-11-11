@@ -1,0 +1,45 @@
+{
+ "project": {
+  "v": "1.2.0",
+  "proj": {
+   "id": "v1-embedded",
+   "name": "Embedded media",
+   "w": 640,
+   "h": 360,
+   "fps": 30,
+   "dur": 2,
+   "bg": "#202020",
+   "layers": [
+    {
+     "id": "picture",
+     "type": "image",
+     "name": "Gradient",
+     "from": 0,
+     "dur": 2,
+     "d": {
+      "asset": "gradient",
+      "fit": "contain",
+      "w": 1,
+      "h": 1
+     }
+    }
+   ],
+   "assets": {
+    "gradient": {
+     "id": "gradient",
+     "name": "Gradient.png",
+     "kind": "image",
+     "type": "image/png",
+     "w": 320,
+     "h": 180,
+     "fingerprint": "v2:95467:b0f9a240f4e2e9d0a77b14cfe13172a8ef69f4892a8914ba817b6e5f67774617",
+     "storageKey": "media:v2:95467:b0f9a240f4e2e9d0a77b14cfe13172a8ef69f4892a8914ba817b6e5f67774617",
+     "size": 95468
+    }
+   },
+   "comps": {}
+  }
+ },
+ "savedHash": "ef1b9c5702e4aa67bbeb31701fb2f00caaf7e71c1c8ffacde408ea5231598b12",
+ "baselineHash": "ef1b9c5702e4aa67bbeb31701fb2f00caaf7e71c1c8ffacde408ea5231598b12"
+}

@@ -333,3 +333,19 @@ fn an_item_undo_history_cannot_bind_to_one_record_stays_offline() {
     let kernel = open(&config, &id);
     assert_eq!(bytes(&kernel, &root), None);
 }
+
+/// PMV3 items carry no checksum: one whose asset records another size than
+/// the item has is not used, even when its sampled fingerprint matches.
+#[test]
+fn pmv3_media_whose_recorded_size_differs_stay_offline() {
+    for (saved, lent) in [("Sized-pmv3.pmv", true), ("Mislabeled-pmv3.pmv", false)] {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let file = root.join("Embedded.pmv");
+        fs::copy(fixture(saved), &file).unwrap();
+        let (config, id) = migrated(&root, saved, &file, |_| {});
+        let kernel = open(&config, &id);
+        let expected = lent.then(|| embedded_bytes(&file));
+        assert_eq!(bytes(&kernel, &root), expected, "{saved}");
+    }
+}

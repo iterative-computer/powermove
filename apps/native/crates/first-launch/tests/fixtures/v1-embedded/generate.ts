@@ -39,7 +39,8 @@ mkdirSync(out, { recursive: true });
 // - Embedded-pmv3.pmv: PMV3 (browser download), items without a checksum.
 // - Converted-pmv3.pmv: PMV3 whose asset was converted on import, so its
 //   fingerprint names the chosen file, not the stored bytes.
-// - Mislabeled-pmv3.pmv: PMV3 whose asset records a size other than its item's.
+// - Sized-pmv3.pmv / Mislabeled-pmv3.pmv: PMV3 whose asset records its item's
+//   size, or another one.
 // - Replaced.pmv: the entry holds the asset as first imported; the file was
 //   saved after its media were replaced under the same id and then deleted,
 //   so only undo holds either record and the item is the replacement's bytes.
@@ -92,5 +93,6 @@ await save('Embedded.pmv', 320, 180, 'pmv4');
 await save('Other.pmv', 160, 90, 'pmv4');
 await save('Embedded-pmv3.pmv', 320, 180, 'pmv3');
 await save('Converted-pmv3.pmv', 320, 180, 'pmv3', { converted: true });
+await save('Sized-pmv3.pmv', 320, 180, 'pmv3', { sizeDelta: 0 });
 await save('Mislabeled-pmv3.pmv', 320, 180, 'pmv3', { sizeDelta: 1 });
 await save('Replaced.pmv', 320, 180, 'pmv4', { replaced: true });

@@ -11,6 +11,12 @@
 //! its item to an undo record only when that history names one identity for
 //! the id: two (a replace, then a delete) leave which one the bytes are
 //! ambiguous, so they stay offline.
+//!
+//! PMV3 items carry no checksum. Their guarantee is compatibility-level: the
+//! v1 sampled fingerprint (64 KiB at start, middle and end behind the size)
+//! plus size equality (the fingerprint's size and any recorded `size` equal
+//! the item's length). A change outside the samples of an item above 192 KiB
+//! can pass; PMV4 items are proven whole by SHA-256.
 use crate::{
     History,
     library::LibraryProject,
@@ -30,6 +36,7 @@ use std::{
 struct Identity {
     key: String,
     fingerprint: Option<String>,
+    size: Option<String>,
     kind: Option<String>,
     proxy: Option<String>,
 }
@@ -39,6 +46,7 @@ fn identity(id: &str, asset: &Value) -> Option<Identity> {
     Some(Identity {
         key: text("storageKey").unwrap_or_else(|| id.to_owned()),
         fingerprint: text("fingerprint"),
+        size: asset.get("size").map(pm_model::json::to_canonical_string),
         kind: text("kind"),
         proxy: asset
             .get("playbackProxy")
@@ -190,16 +198,21 @@ pub fn lent(profile: &Path, project: &str) -> BTreeSet<String> {
 }
 
 /// Whether the item's bytes are proven: by the file's checksum (verified at
-/// open and again on every read), or without one by the asset's fingerprint.
+/// open and again on every read), or without one by size equality and the
+/// asset's sampled fingerprint (see the module note on that guarantee).
 fn proven(entry: &MediaEntry, asset: &Identity) -> bool {
-    let MediaSource::Embedded { sha256, .. } = &entry.source else {
+    let MediaSource::Embedded { sha256, length, .. } = &entry.source else {
         return false;
     };
-    sha256.is_some()
-        || asset
-            .fingerprint
-            .as_deref()
-            .is_some_and(|f| sampled_fingerprint(entry).as_deref() == Some(f))
+    if sha256.is_some() {
+        return true;
+    }
+    let length = length.to_string();
+    asset.size.as_ref().is_none_or(|size| *size == length)
+        && asset.fingerprint.as_deref().is_some_and(|f| {
+            f.split(':').nth(1) == Some(length.as_str())
+                && sampled_fingerprint(entry).as_deref() == Some(f)
+        })
 }
 
 /// The original app's `v2` media fingerprint of an embedded item: 64 KiB
@@ -217,6 +230,15 @@ fn sampled_fingerprint(entry: &MediaEntry) -> Option<String> {
     let size = *length;
     let sample = size.min(64 * 1024);
     let mut input = std::fs::File::open(&file.path).ok()?;
+    // The handle read must be the file as verified, not one put in its place.
+    let held = |input: &std::fs::File| {
+        input
+            .metadata()
+            .is_ok_and(|m| project_io::durable_stat_of(&m).same_file(&file.stat))
+    };
+    if !held(&input) {
+        return None;
+    }
     let mut hash = Sha256::new();
     hash.update(format!("powermove-media-v2\n{size}\n").as_bytes());
     let mut buffer = vec![0; sample as usize];
@@ -225,6 +247,5 @@ fn sampled_fingerprint(entry: &MediaEntry) -> Option<String> {
         input.read_exact(&mut buffer).ok()?;
         hash.update(&buffer);
     }
-    file.check(false).ok()?;
-    Some(format!("v2:{size}:{:x}", hash.finalize()))
+    (held(&input) && file.check(false).is_ok()).then(|| format!("v2:{size}:{:x}", hash.finalize()))
 }
