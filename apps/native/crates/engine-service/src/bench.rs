@@ -101,17 +101,15 @@ pub(crate) fn scene() -> anyhow::Result<(
     let comp = snapshot
         .open_comp()
         .ok_or_else(|| anyhow::anyhow!("the project has no open composition"))?;
-    let root = snapshot
-        .document
-        .to_value()
-        .ok_or_else(|| anyhow::anyhow!("empty project"))?;
-    let canonical: serde_json::Value =
-        serde_json::from_str(&pm_model::json::to_canonical_string(&root))?;
-    let c = &canonical["comps"][&comp];
-    let duration = c["dur"].as_f64().filter(|d| *d > 0.).unwrap_or(1.);
-    let fps = c["fps"].as_f64().filter(|f| *f > 0.).unwrap_or(30.);
-    let rate =
-        pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+    // Kernel snapshots can keep the open composition at the root. Resolve
+    // it exactly as the renderer does; indexing only comps[compId] silently
+    // reduced such projects to a one-second benchmark loop.
+    let c = pm_eval::Comp::resolve(&snapshot.document, &comp)
+        .map_err(|_| anyhow::anyhow!("composition unavailable"))?;
+    let duration = pm_eval::node::number(c.member("dur"))
+        .filter(|d| *d > 0.)
+        .unwrap_or(1.);
+    let rate = c.rate().map(|r| r.rate).unwrap_or(pm_time::Rate::FPS_30);
     Ok((snapshot, media, duration, rate, Some(store)))
 }
 
