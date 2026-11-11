@@ -59,7 +59,7 @@ fn only_3d_schemas_change_from_the_frozen_catalog() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
-        serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json")).unwrap();
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
@@ -184,4 +184,47 @@ fn unloaded_imported_geometry_is_a_visible_failure() {
     );
     assert!(e["message"].as_str().unwrap().contains("not loaded"));
     assert_eq!(f.read(), before);
+}
+
+#[test]
+fn environment_and_quality_ops_reach_the_kernel_and_readback() {
+    let fixture = Fixture::new();
+    let mut session = fixture.session();
+    ok(session.call(
+        "edit_3d",
+        json!({"operation":"set_world","id":"world","world":{"p":{"elevation":8}}}),
+    ));
+    ok(session.call(
+        "edit_3d",
+        json!({"operation":"add_fog","id":"mist","fog":{"p":{"density":0.03}}}),
+    ));
+    ok(session.call(
+        "edit_3d",
+        json!({"operation":"set_render_quality","preset":"preview"}),
+    ));
+    let result = ok(session.call("get_3d_scene", json!({})));
+    assert_eq!(result["scene"]["studioQuality"]["preset"], "preview");
+    assert!(
+        result["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["path"] == "world.elevation" && c["value"] == 8)
+    );
+    assert!(
+        result["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["path"] == "fog.density")
+    );
+    let before = fixture.read();
+    assert!(
+        session.call(
+            "edit_3d",
+            json!({"operation":"set_world","patch":{"source":{"layerId":"world"}}})
+        )["isError"]
+            == true
+    );
+    assert_eq!(fixture.read(), before);
 }

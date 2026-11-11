@@ -147,5 +147,15 @@ pub fn properties(l: &Value) -> Vec<(String, Value)> {
             }
         }
     }
+    let node = if schema::role(l) == Some(schema::Role::Light) {
+        &l["d"]["data"]["light"]
+    } else {
+        &l["d"]["data"]["object"]
+    };
+    out.extend(
+        pm_scene3d::contract::channels(node)
+            .into_iter()
+            .map(|(path, prop)| (path, prop.clone())),
+    );
     out
 }

@@ -7,6 +7,15 @@ use crate::{
 use serde_json::{Value, json};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    /// Scratch-only content staging. The kernel validates the final compound
+    /// state before publication, after normal channel/autokey commands.
+    StagedData {
+        id: String,
+        data: Value,
+    },
+    RenderQuality {
+        quality: Value,
+    },
     Add {
         id: String,
         name: String,
@@ -185,6 +194,21 @@ pub fn plan(
     let operation = args["operation"]
         .as_str()
         .ok_or_else(|| Error("Missing 3D operation".into()))?;
+    if [
+        "set_world",
+        "add_fog",
+        "update_fog",
+        "add_terrain",
+        "update_terrain",
+        "add_scatter",
+        "update_scatter",
+        "set_material_options",
+        "set_render_quality",
+    ]
+    .contains(&operation)
+    {
+        return crate::contract::plan(comp, args, selection, uid);
+    }
     if [
         "apply_material",
         "light_highlight",

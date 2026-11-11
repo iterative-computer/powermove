@@ -715,3 +715,110 @@ fn splat_import_undo_reopen_preserves_exact_source() {
     reopened.undo().unwrap();
     assert!(project(&reopened)["assets"].get("splat").is_none());
 }
+
+#[test]
+fn studio_environment_quality_channels_undo_and_pmv_are_exact() {
+    let mut s = store();
+    let edits = [
+        json!({"operation":"set_world","id":"world","world":{"mode":"sky","preset":"golden-hour","p":{"elevation":8,"fogDensity":0.003}}}),
+        json!({"operation":"add_fog","id":"mist","fog":{"p":{"density":0.035}}}),
+        json!({"operation":"add_terrain","id":"ground","terrain":{"p":{"resolution":8,"seed":41},"regions":[{"p":{"minSlope":32,"color":"#8C7D64"}}]}}),
+        json!({"operation":"add_scatter","id":"trees","scatter":{"model":"nature:conifer","surface":"ground","p":{"count":12,"seed":71}}}),
+        json!({"operation":"update_fog","target":"mist","patch":{"p":{"density":{"v":0.02,"kf":[{"t":2,"v":0.05,"i":"fog-key","future":"keep"}],"expr":null}}}}),
+        json!({"operation":"set_material_options","target":"ground","patch":{"castsShadows":"only","appearsInReflections":false}}),
+        json!({"operation":"set_render_quality","preset":"preview"}),
+        json!({"operation":"set_render_quality","patch":{"maxSamples":128}}),
+    ];
+    for edit in edits {
+        let before = project(&s);
+        apply(&mut s, edit);
+        let after = project(&s);
+        s.undo().unwrap();
+        assert_eq!(project(&s), before);
+        s.redo().unwrap();
+        assert_eq!(project(&s), after);
+    }
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("world", "world.azimuth", 30., 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    s.execute(
+        PropertyCommand::Set(SetProperty::new(
+            "ground",
+            "terrain.region0.roughness",
+            0.7,
+            0.,
+        ))
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["azimuth"]["v"],
+        30.
+    );
+    assert_eq!(
+        layer(&s, "ground")["d"]["data"]["object"]["terrain"]["regions"][0]["p"]["roughness"]["v"],
+        0.7
+    );
+    let saved = project(&s);
+    let mut dir = common::TempDir::new("studio-contract");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    assert_eq!(saved["comps"]["C"]["studioQuality"]["preset"], "custom");
+}
+
+#[test]
+fn environment_cycles_ranges_and_locks_fail_atomically() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"set_world","id":"world"}));
+    apply(
+        &mut s,
+        json!({"operation":"add_terrain","id":"ground","terrain":{"p":{"resolution":8},"regions":[{"p":{}}]}}),
+    );
+    for edit in [
+        json!({"operation":"set_world","patch":{"source":{"layerId":"world"}}}),
+        json!({"operation":"add_scatter","scatter":{"model":"ground","surface":"ground","p":{"scaleMin":2,"scaleMax":1}}}),
+        json!({"operation":"update_terrain","target":"ground","patch":{"heights":[0,1]}}),
+        json!({"operation":"set_render_quality","patch":{"minSamples":4000,"maxSamples":32}}),
+    ] {
+        let before = project(&s);
+        assert!(s.execute(command(edit), Origin::Mcp).is_err());
+        assert_eq!(project(&s), before);
+    }
+    let mut property = SetProperty::new("world", "world.intensity", 2., 0.);
+    property.mark_intent = true;
+    s.execute(PropertyCommand::Set(property).into(), Origin::Interface)
+        .unwrap();
+    let before = project(&s);
+    assert!(
+        s.execute(
+            command(json!({"operation":"set_world","patch":{"p":{"intensity":3}}})),
+            Origin::Mcp
+        )
+        .is_err()
+    );
+    assert_eq!(project(&s), before);
+}
+
+#[test]
+fn structural_region_replacement_preserves_hand_edited_channels() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_terrain","id":"ground","terrain":{"regions":[{"p":{}}]}}),
+    );
+    let mut p = SetProperty::new("ground", "terrain.region0.roughness", 0.7, 0.);
+    p.mark_intent = true;
+    s.execute(PropertyCommand::Set(p).into(), Origin::Interface)
+        .unwrap();
+    let before = project(&s);
+    assert!(s.execute(command(json!({"operation":"update_terrain","target":"ground","patch":{"regions":[{"p":{"roughness":0.4}}]}})),Origin::Mcp).is_err());
+    assert_eq!(project(&s), before);
+}

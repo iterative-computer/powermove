@@ -11,7 +11,7 @@ pub fn catalog() -> &'static Value {
             serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
                 .expect("frozen catalog");
         let studio: Value =
-            serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+            serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json"))
                 .expect("3D source catalog");
         for replacement in studio["tools"].as_array().unwrap() {
             let tool = value["tools"]
