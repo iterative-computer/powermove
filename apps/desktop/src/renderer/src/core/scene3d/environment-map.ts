@@ -66,3 +66,18 @@ export async function loadEnvironmentImage(blob: Blob, name: string) {
   }
   return { format, w, h, el, environmentTexture: texture };
 }
+
+/** Original neutral studio lighting used by a new Environment Light. */
+export function defaultEnvironmentTexture(): THREE.DataTexture {
+  const width=128,height=64,pixels=new Uint16Array(width*height*4);
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+    const panel=(x>16&&x<38&&y>12&&y<32)?4:(x>80&&x<104&&y>18&&y<38)?2:.12;
+    const i=(y*width+x)*4;
+    for(let c=0;c<3;c++)pixels[i+c]=THREE.DataUtils.toHalfFloat(panel);
+    pixels[i+3]=0x3c00;
+  }
+  const texture=new THREE.DataTexture(pixels,width,height,THREE.RGBAFormat,THREE.HalfFloatType);
+  texture.mapping=THREE.EquirectangularReflectionMapping;texture.colorSpace=THREE.LinearSRGBColorSpace;
+  texture.minFilter=texture.magFilter=THREE.LinearFilter;texture.needsUpdate=true;
+  return texture;
+}

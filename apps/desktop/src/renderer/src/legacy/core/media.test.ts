@@ -69,11 +69,13 @@ it('coalesces typed effect image/LUT asset IDs while deletion preserves recovera
 });
 
 it('tracks, coalesces and removes environment maps without deleting their cameras', () => {
-  const PM=mediaRegistry(), project:any={assets:{old:{id:'old',kind:'image'},current:{id:'current',kind:'image'}},layers:[{id:'camera',d:{data:{environment:{map:'old'}}}}],comps:{legacy:{layers:[{id:'scene',d:{data:{scene:{objects:[],environment:{map:'old'}}}}}]}}};
-  expect(PM.MediaImport.referenceCount(project,'old')).toBe(2);
-  expect(PM.MediaImport.coalesce(project,'current',['old'])).toBe(2);
+  const PM=mediaRegistry(), project:any={assets:{old:{id:'old',kind:'image'},current:{id:'current',kind:'image'}},layers:[{id:'camera',d:{data:{environment:{map:'old'}}}},{id:'env',d:{data:{light:{type:'environment',map:'old'}}}}],comps:{legacy:{layers:[{id:'scene',d:{data:{scene:{objects:[],lights:[{id:'light',type:'environment',map:'old'}],environment:{map:'old'}}}}}]}}};
+  expect(PM.MediaImport.referenceCount(project,'old')).toBe(4);
+  expect(PM.MediaImport.coalesce(project,'current',['old'])).toBe(4);
   expect(project.layers[0].d.data.environment.map).toBe('current');
   expect(PM.MediaImport.removeAsset(project,'current').removedLayers).toBe(0);
   expect(project.layers[0].d.data.environment.map).toBeNull();
+  expect(project.layers[1].d.data.light.map).toBeNull();
+  expect(project.comps.legacy.layers[0].d.data.scene.lights[0].map).toBeNull();
   expect(project.comps.legacy.layers[0].d.data.scene.environment.map).toBeNull();
 });

@@ -50,8 +50,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       if(visibility.kf.length || visibility.expr)throw new Error('Animated visibility is not supported; use layer opacity');
       visible=visibility.v;
     }else if(role==='light'){
-      const parsed=parseScene({lights:[{...node,id}]}).lights[0]!;
-      const {x,y,z,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,p,castShadow:parsed.castShadow}};props=nativeProperties({x,y,z});
+      const parsed=parseScene({lights:[{...node,id,...(node.type==='environment'?{p:{x:0,y:0,z:0,intensity:100,...node.p}}:{})}]}).lights[0]!;
+      const {x,y,z,rx,ry,rz,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,map:parsed.map,p,castShadow:parsed.castShadow}};props=nativeProperties({x,y,z,rx,ry,rz});
       if(visibility!.kf.length || visibility!.expr)throw new Error('Animated visibility is not supported; use light intensity');
       visible=visibility!.v;
     }else{
@@ -59,7 +59,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       const parsed=parseScene({camera:{...camera,p:{x:0,y:0,z:6,...camera.p}},environment:node.environment});
       const {x,y,z,...p}=parsed.camera.p;data={camera:{projection:parsed.camera.projection,p},environment:parsed.environment};props=nativeProperties({x,y,z});
     }
-    commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?'Light':'Camera'),
+    commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?(node.type==='environment'?'Environment Light':'Light'):'Camera'),
       content:{definition:LAYER3D_DEFINITIONS[role],data:parseLayer3DData(role,data)},properties:props,
       visible,
       ...(role==='object'&&node.parent?{parent:node.parent}:{}),select:true});
@@ -77,6 +77,11 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     const cameraId=add('camera',{camera:scene.camera,environment:scene.environment});first ||= cameraId;
     return {commands,id:first};
   }
+  const environmentMap=args.operation==='add_light'?args.light?.map:args.operation==='set_environment' || args.operation==='update_light'?args.patch?.map:null;
+  if(environmentMap != null){
+    const asset=PM.proj.assets?.[environmentMap];
+    if(!asset || asset.kind!=='image' || !/^(hdr|exr)$/i.test(asset.format || asset.name?.split('.').pop() || ''))throw new Error('Choose an HDR or EXR environment image');
+  }
   if(args.operation==='add_object')return {commands,id:add('object',args.object || {source:{primitive:'box'}},args.object?.id || args.id)};
   if(args.operation==='add_light')return {commands,id:add('light',args.light || {},args.light?.id || args.id)};
   if(args.operation==='add_camera')return {commands,id:add('camera',args.camera || args.patch || {},args.id)};
@@ -86,10 +91,6 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     const matches=(PM.curComp?.() || PM.proj).layers.filter((l:any)=>l.name===selected && (layer3DRole(l) || extrusionEligible(l)));
     if(matches.length>1)throw new Error('Multiple 3D layers have that name; use a layer ID');
     layer=matches[0];
-  }
-  if(args.operation==='set_environment' && args.patch?.map != null){
-    const asset=PM.proj.assets?.[args.patch.map];
-    if(!asset || asset.kind!=='image' || !/^(hdr|exr)$/i.test(asset.format || asset.name?.split('.').pop() || ''))throw new Error('Choose an HDR or EXR environment image');
   }
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);

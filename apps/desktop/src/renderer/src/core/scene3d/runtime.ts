@@ -1,3 +1,4 @@
+import { defaultEnvironmentTexture } from './environment-map';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
@@ -83,6 +84,8 @@ export class SceneRuntime {
   private evaluation: SceneEvaluator = prop=>prop.v;
   private getter: SceneAssetGetter = ()=>null;
   private mixers = new Map<string,{mixer:THREE.AnimationMixer;clips:THREE.AnimationClip[]}>();
+  private defaultEnvironment:THREE.DataTexture|null=null;
+  environmentLightId:string|null=null;
   warnings: string[] = [];
   revision = 0;
   /** Loading captures must be retried even when project/time are unchanged. */
@@ -285,6 +288,17 @@ export class SceneRuntime {
     }
     let shadowLights=0;
     for (const node of data.lights) {
+      if(node.type==='environment'){
+        let anchor=this.objects.get(node.id);
+        if(!anchor || anchor.userData.lightType!=='environment'){
+          if(anchor)this.remove(node.id,anchor);
+          anchor=new THREE.Object3D();anchor.userData.lightType='environment';anchor.userData.sceneId=node.id;
+          this.objects.set(node.id,anchor);this.scene.add(anchor);
+        }
+        const v=values(node.p,`light.${node.id}`);anchor.name=node.name;anchor.position.set(v.x,v.y,v.z);
+        anchor.rotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'ZYX');
+        continue;
+      }
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
@@ -316,11 +330,20 @@ export class SceneRuntime {
     const environment=values(data.environment.p,'environment');
     this.ambient.color.set(environment.ambientColor);this.ambient.groundColor.set(environment.ambientColor).multiplyScalar(.35);
     this.ambient.intensity=environment.ambient;
-    const environmentAsset=data.environment.map?assets(data.environment.map):null;
-    this.scene.environment=environmentAsset?.environmentTexture ?? null;
-    this.scene.environmentIntensity=environment.intensity ?? 1;
-    this.scene.environmentRotation.set(0,radians(environment.rotation ?? 0),0);
-    if(data.environment.map && !this.scene.environment)this.warnings.push('Environment image is missing or still loading');
+    const environmentLight=data.lights.find(light=>light.type==='environment' && values(light.p,`light.${light.id}`).visible!==false);
+    this.environmentLightId=environmentLight?.id ?? null;
+    const map=environmentLight?environmentLight.map:data.environment.map;
+    const environmentAsset=map?assets(map):null;
+    this.scene.environment=environmentAsset?.environmentTexture ?? (environmentLight && !map ? this.defaultEnvironment ??= defaultEnvironmentTexture() : null);
+    if(environmentLight){
+      const v=values(environmentLight.p,`light.${environmentLight.id}`);
+      this.scene.environmentIntensity=v.intensity/100;
+      this.scene.environmentRotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'ZYX');
+    }else{
+      this.scene.environmentIntensity=environment.intensity ?? 1;
+      this.scene.environmentRotation.set(0,radians(environment.rotation ?? 0),0);
+    }
+    if(map && !this.scene.environment)this.warnings.push('Environment image is missing or still loading');
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
@@ -556,6 +579,7 @@ export class SceneRuntime {
     const mixer=this.mixers.get(id)?.mixer;if(mixer){mixer.stopAllAction();mixer.uncacheRoot(object);}this.mixers.delete(id);
   }
   dispose():void {
+    this.scene.environment=null;this.defaultEnvironment?.dispose();this.defaultEnvironment=null;
     for(const [id,object] of this.objects)this.remove(id,object);
     for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();this.materialBindings.clear();this.compositionFrames.clear();this.materialSources.clear();
     for(const {geometry} of this.extrusionGeometries.values()){cachedExtrusionGeometries.delete(geometry);geometry.dispose();}this.extrusionGeometries.clear();this.extrusionGeometryBytes=0;

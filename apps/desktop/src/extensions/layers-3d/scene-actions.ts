@@ -1,4 +1,3 @@
-import { chooseEnvironment } from './environment';
 import type { EditResult, PowermoveAPI, MenuContribution } from 'powermove';
 import { PRIMITIVES, LIGHT_TYPES } from './scene-model';
 import type { Primitive, LightType } from './scene-types';
@@ -17,7 +16,7 @@ export function addPrimitive(api:PowermoveAPI,primitive:Primitive='box',_layerId
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
 export function addLight(api:PowermoveAPI,type:LightType='point',_layerId?:unknown):string|null {
-  const name=`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
+  const name=type==='environment'?'Environment Light':`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
   const result=run(api,{operation:'add_light',light:{type,name}},`Add ${name}`);
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
@@ -47,6 +46,5 @@ export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[
   '-',
   {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
   ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
-  {label:'Environment Light…',run:()=>chooseEnvironment(api)},
   {label:'Camera',run:()=>addCamera(api)}
 ];

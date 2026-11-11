@@ -4,16 +4,16 @@
     "treeSha": "2af198379a682ecd6c6ef5b956e415f39e748d86"
   },
   "inspector": {
-    "version": "1.7.12",
-    "treeSha": "e866b68114a76d97935f853a2ced04afe067f09d"
+    "version": "1.7.13",
+    "treeSha": "1e3b8aade6f179d2087bb1127b1f14f72b2afc56"
   },
   "keymap-default": {
     "version": "1.0.6",
     "treeSha": "64e87c933dcb3e992535e5b34dccd7b6bc5475f0"
   },
   "layers-3d": {
-    "version": "1.8.1",
-    "treeSha": "83f1fe91492e961b482d0710947c68ac61bddedb"
+    "version": "1.9.0",
+    "treeSha": "7c173d585e1cae405dcc3fdb5e5448a7f433ae97"
   },
   "mods": {
     "version": "1.0.1",

@@ -100,10 +100,10 @@ describe('application menu', () => {
     (layerItems.at(-1)!.click as () => void)();
     expect(sent.splice(0)).toEqual(['saveAnimationPreset']);
     expect(submenu(layerItems[0]!).map((item) => item.label ?? item.type)).toEqual([
-      'Text', 'Solid', 'Shape Layer', 'Null Object', 'Adjustment Layer', 'separator', 'Camera', 'Light'
+      'Text', 'Solid', 'Shape Layer', 'Null Object', 'Adjustment Layer', 'separator', 'Camera', 'Light', 'Environment Light'
     ]);
     for (const item of submenu(layerItems[0]!)) (item.click as (() => void) | undefined)?.();
-    expect(sent.splice(0)).toEqual(['newText', 'newSolid', 'newShape', 'newNull', 'newAdjustment', '3d.add-camera', '3d.add-light']);
+    expect(sent.splice(0)).toEqual(['newText', 'newSolid', 'newShape', 'newNull', 'newAdjustment', '3d.add-camera', '3d.add-light', '3d.environment']);
 
     const appItems = submenu(topLevel(template, 'Powermove'));
     const fileItems = submenu(topLevel(template, 'File'));

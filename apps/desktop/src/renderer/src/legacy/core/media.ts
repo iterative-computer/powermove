@@ -231,7 +231,7 @@ function referenceCount(project: any, assetId: any) {
   let count: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     if (layerAssetId(layer) === assetId) count++;
-    for(const env of [layer?.d?.data?.environment,layer?.d?.data?.scene?.environment])if(env?.map===assetId)count++;
+    for(const env of [layer?.d?.data?.environment,layer?.d?.data?.light,layer?.d?.data?.scene?.environment,...(layer?.d?.data?.scene?.lights || [])])if(env?.map===assetId)count++;
     for(const fx of layer.fx??[])for(const ref of Object.values<any>(fx.inputs??{}))if(ref?.kind==='asset'&&ref.assetId===assetId)count++;
     for(const texture of [...objectMapSets(layer?.d?.data?.object),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).map(surface=>surface.maps || {})].flatMap(maps=>Object.values(maps)))if(texture===assetId)count++;
     for(const object of layer?.d?.data?.scene?.objects || []) {
@@ -248,7 +248,7 @@ function removeAsset(project: any, assetId: any, { preserveRuntime = false }: { 
   layerLists(project).forEach((layers: any) => {
     for (let index: any = layers.length - 1; index >= 0; index--) {
       const layer: any = layers[index];
-      for(const env of [layer?.d?.data?.environment,layer?.d?.data?.scene?.environment])if(env?.map===assetId)env.map=null;
+      for(const env of [layer?.d?.data?.environment,layer?.d?.data?.light,layer?.d?.data?.scene?.environment,...(layer?.d?.data?.scene?.lights || [])])if(env?.map===assetId)env.map=null;
       for(const maps of [...objectMapSets(layer?.d?.data?.object),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).map(surface=>surface.maps || {})])for(const [slot,id] of Object.entries(maps))if(id===assetId)delete maps[slot as MaterialSlot];
       const scene=layer?.d?.data?.scene;
       if(scene) {
@@ -302,7 +302,7 @@ function coalesce(project: any, canonicalId: any, aliases: any) {
   let changed: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     for(const fx of layer.fx??[])for(const ref of Object.values<any>(fx.inputs??{}))if(ref?.kind==='asset'&&retired.has(ref.assetId)){ref.assetId=canonicalId;changed++;}
-    for(const env of [layer?.d?.data?.environment,layer?.d?.data?.scene?.environment])if(retired.has(env?.map)){env.map=canonicalId;changed++;}
+    for(const env of [layer?.d?.data?.environment,layer?.d?.data?.light,layer?.d?.data?.scene?.environment,...(layer?.d?.data?.scene?.lights || [])])if(retired.has(env?.map)){env.map=canonicalId;changed++;}
     if (retired.has(layerAssetId(layer))) { replaceLayerAssetId(layer, canonicalId); changed++; }
   }));
   retired.forEach((id: any) => {

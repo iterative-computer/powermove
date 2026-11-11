@@ -59,7 +59,7 @@ export function onGizmoState(listener:(state:GizmoState)=>void):()=>void {stateL
 export function gizmoModes(role:Layer3DRole,lightType?:string):GizmoMode[] {
   if(role==='object')return ['translate','rotate','scale'];
   if(role==='camera')return ['translate','rotate'];
-  return lightType==='sun'?['rotate']:lightType==='point'?['translate']:['translate','rotate'];
+  return lightType==='sun'||lightType==='environment'?['rotate']:lightType==='point'?['translate']:['translate','rotate'];
 }
 
 const LABEL:Record<GizmoMode,[string,string]>={translate:['Move 3D layer','Move 3D layers'],rotate:['Rotate 3D layer','Rotate 3D layers'],scale:['Scale 3D layer','Scale 3D layers']};
@@ -192,11 +192,11 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       const position=role==='object'||nativeArtwork?object!.getWorldPosition(new THREE.Vector3())
         :new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
       const content=role==='light'?l.d?.data?.light?.p:role==='camera'?l.d?.data?.camera?.p:null,prefix=role==='light'?'light':'camera';
-      const target=content?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;
+      const target=content && lightType!=='environment'?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;
       let world=new THREE.Matrix4();
       if(native)world.copy(bridge).multiply(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
       else if(object){object.updateWorldMatrix(true,false);world=object.matrixWorld.clone();}
-      else if(role==='group')world.fromArray(world3D(PM,l,PM.time));
+      else if(role==='group'||lightType==='environment')world.fromArray(world3D(PM,l,PM.time));
       else {
         // A light or camera's frame looks from its position toward its target.
         const look=new THREE.Matrix4().lookAt(position,target&&target.distanceToSquared(position)>1e-12?target:position.clone().add(new THREE.Vector3(0,0,-1)),new THREE.Vector3(0,1,0));
@@ -289,7 +289,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
         for(const field of fields)commands.push(command(t.id,partPath(t.part!,field),values[field]));
         continue;
       }
-      if(t.role==='object' || t.role==='group' || t.native) {
+      if(t.role==='object' || t.role==='group' || t.native || t.layer.d?.data?.light?.type==='environment') {
         const local=t.parentInverse.clone().multiply(delta.clone().multiply(t.world));
         if(t.native && gesture.mode!=='translate'){
           try{

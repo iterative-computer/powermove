@@ -17,6 +17,7 @@
   const sceneLayer = $derived((doc.tick.structure, doc.proj,
     layer.type === 'extension' && api.layers.get(String(layer.d?.definition ?? ''))?.renderer.kind === 'scene3d'));
   const modelRole = $derived(modelGroup?'object':layer.type==='extension' && api.layers.get(String(layer.d?.definition ?? ''))?.renderer.kind === 'layer3d' ? (layer.d?.data?.object?'object':layer.d?.data?.light?'light':'camera') : null);
+  const environmentLight=$derived((doc.tick.structure,doc.tick.values,doc.proj,modelRole==='light' && layer.d?.data?.light?.type==='environment'));
 </script>
 
 <Section {api} title={sceneLayer ? 'Layer Transform' : 'Transform'}>
@@ -29,7 +30,7 @@
 {#if !modelRole || modelRole === 'object'}
   <ChannelRow {layer} channel="anchor.x" pairWith="anchor.y" thirdWith={threeD ? 'anchor.z' : undefined} label="Anchor Point" unit={modelRole?'':undefined} step={modelRole?.01:undefined} />
 {/if}
-<ChannelRow {layer} channel="position.x" pairWith="position.y" thirdWith={threeD ? 'position.z' : undefined} label="Position" unit={modelRole?'':undefined} step={modelRole?.01:undefined} />
+{#if !environmentLight}<ChannelRow {layer} channel="position.x" pairWith="position.y" thirdWith={threeD ? 'position.z' : undefined} label="Position" unit={modelRole?'':undefined} step={modelRole?.01:undefined} />{/if}
 {#if !modelRole || modelRole === 'object'}
 <ChannelRow {layer} channel="scale.x" thirdWith={threeD ? 'scale.z' : undefined} label="Scale" />
 {#if threeD}
@@ -41,6 +42,10 @@
 {#if !modelRole}<ChannelRow {layer} channel="skew" label="Skew" />{/if}
 {/if}
 {#if threeD && !modelRole}<ChannelRow {layer} channel="perspective" label="Perspective" min={0.001} unit="mm" />{/if}
+{#if environmentLight}
+  <ChannelRow {layer} channel="orientation.x" pairWith="orientation.y" thirdWith="orientation.z" label="Orientation" />
+  <ChannelRow {layer} channel="rotation.x" pairWith="rotation.y" thirdWith="rotation" label="Rotation" />
+{/if}
 <ChannelRow {layer} channel="opacity" label="Opacity" />
 {#if layer.type !== 'adjustment' && !sceneLayer}
   <AnimatedRow {layer} path="l.blend" label="Blend Mode"><SelectField {api} {mixed}

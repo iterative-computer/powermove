@@ -58,7 +58,7 @@ export default function activate(api:PowermoveAPI):void {
     {id:'3d.new-model',label:'New 3D Model',run:()=>addPrimitive(api)},
     {id:'3d.add-object',label:'Add 3D Object',run:(primitive?:unknown)=>addPrimitive(api,PRIMITIVES.find(p=>p.id===primitive)?.id || 'box')},
     {id:'3d.add-light',label:'Add 3D Light',run:(type?:unknown)=>addLight(api,LIGHT_TYPES.find(l=>l.id===type)?.id || 'point')},
-    {id:'3d.environment',label:'Environment Light…',run:(file?:unknown)=>chooseEnvironment(api,undefined,file)},
+    {id:'3d.environment',label:'Add Environment Light',run:(file?:unknown)=>file instanceof File?chooseEnvironment(api,undefined,file):addLight(api,'environment')},
     {id:'3d.add-camera',label:'Add Camera',run:()=>addCamera(api)},
     {id:'3d.import-obj',label:'Import 3D Model…',run:(files?:unknown)=>importModelIntoScene(api,files)},
     {id:'3d.convert-layer',label:'Convert to 3D Layers',run:convert},
@@ -93,7 +93,7 @@ export default function activate(api:PowermoveAPI):void {
   api.menus.contribute('timeline:context',(ctx:any)=>ctx?.kind&&ctx.kind!=='empty'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);
   api.menus.contribute('viewer:context',(ctx:any)=>ctx?.kind&&ctx.kind!=='empty'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);
   api.palette.registerProvider(query=>{
-    const entries=[...commands,...PRIMITIVES.map(p=>({id:`3d.add-object.${p.id}`,label:`Add 3D ${p.label}`,run:()=>addPrimitive(api,p.id)})),...LIGHT_TYPES.map(l=>({id:`3d.add-light.${l.id}`,label:`Add ${l.label} Light`,run:()=>addLight(api,l.id)}))];
+    const entries=[...commands,...PRIMITIVES.map(p=>({id:`3d.add-object.${p.id}`,label:`Add 3D ${p.label}`,run:()=>addPrimitive(api,p.id)})),...LIGHT_TYPES.filter(l=>l.id!=='environment').map(l=>({id:`3d.add-light.${l.id}`,label:`Add ${l.label} Light`,run:()=>addLight(api,l.id)}))];
     return entries.filter(e=>!query.trim() || e.label.toLowerCase().includes(query.toLowerCase())).map(e=>({...e,category:'Layer'}));
   });
 }

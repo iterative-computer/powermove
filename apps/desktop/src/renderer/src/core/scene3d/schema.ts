@@ -83,8 +83,9 @@ export const objectSchema = z.object({
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
-  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot']).default('sun'),
-  p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
+  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','environment']).default('sun'),
+  map: z.string().min(1).max(160).nullable().default(null),
+  p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], rx:[num(-360_000,360_000),0], ry:[num(-360_000,360_000),0], rz:[num(-360_000,360_000),0], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
     color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
     angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true] }).default({} as any),
   castShadow: z.boolean().default(true)
@@ -176,7 +177,7 @@ export function createObject(id: string, source: SceneSource = {primitive:'box'}
   return parseScene({objects:[{id,source,name}]}).objects[0]!;
 }
 export function createLight(id: string, type: SceneLight['type'] = 'sun', name = 'Light'): SceneLight {
-  return parseScene({lights:[{id,type,name}]}).lights[0]!;
+  return parseScene({lights:[{id,type,name,...(type==='environment'?{p:{intensity:100,x:0,y:0,z:0}}:{})}]}).lights[0]!;
 }
 export function createScene(): Scene3D {
   return parseScene({ lights:[{ id:'key', name:'Sun', type:'sun' }] });
@@ -218,5 +219,5 @@ export function validateSceneChannel(path:string,property:unknown):void {
 }
 
 export function sceneAssetIds(scene: Scene3D): string[] {
-  return [...new Set([...(scene.environment.map?[scene.environment.map]:[]),...scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x))])];
+  return [...new Set([...(scene.environment.map?[scene.environment.map]:[]),...scene.lights.flatMap(light=>light.map?[light.map]:[]),...scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x))])];
 }

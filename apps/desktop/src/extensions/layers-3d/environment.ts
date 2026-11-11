@@ -9,11 +9,10 @@ export async function chooseEnvironment(api: PowermoveAPI, target?: string, supp
     if (api.project.get() !== project) throw new Error('The project changed. Import the environment again.');
     const asset = await api.assets.import(file);
     if (api.project.get() !== project || target && !api.model.layer(target)) return;
-    const result = api.scene3d.edit({ operation: 'set_environment', ...(target ? { target } : {}), patch: { map: asset.id } }, { label: 'Set environment light', origin: 'inspector' });
+    const result = api.scene3d.edit(target ? { operation: 'update_light', target, patch: { map: asset.id } } : {operation:'add_light',name:'Environment Light',light:{type:'environment',map:asset.id}}, { label: 'Set environment light', origin: 'inspector' });
     if (!result.ok) throw new Error(result.message);
     const id = (result.data.result as any)?.id;
-    const camera = id || target || api.model.curComp().layers.find((layer: any) => layer.d?.definition === 'powermove.3d.camera' && layer.on !== false)?.id;
-    if (camera) api.selection.select([camera]);
+    if (id || target) api.selection.select([id || target!]);
     api.transport.invalidate();
   } catch (error) { api.ui.toast(error instanceof Error ? error.message : String(error), { error: true }); }
 }

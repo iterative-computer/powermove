@@ -57,10 +57,10 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
   }
   if (role === 'light') {
     const input=lightSchema.omit({id:true,name:true}).strict().parse(raw.light);
-    if(Object.keys(raw.light?.p || {}).some(key=>['x','y','z','visible'].includes(key))) throw new Error('Use the light layer transform for position and visibility');
+    if(Object.keys(raw.light?.p || {}).some(key=>['x','y','z','rx','ry','rz','visible'].includes(key))) throw new Error('Use the light layer transform for position and visibility');
     const node=parseScene({lights:[{...input,id:'light'}]}).lights[0]!;
-    const {x,y,z,visible,...p}=node.p;
-    return {light:{type:node.type,p,castShadow:node.castShadow}};
+    const {x,y,z,rx,ry,rz,visible,...p}=node.p;
+    return {light:{type:node.type,map:node.map,p,castShadow:node.castShadow}};
   }
   if(Object.keys(raw.camera?.p || {}).some(key=>['x','y','z'].includes(key))) throw new Error('Use the camera layer transform for position');
   const node=parseScene({camera:cameraSchema.parse(raw.camera ?? {}),environment:environmentSchema.parse(raw.environment ?? {})});
@@ -113,7 +113,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
-  if(!node)return [...new Set<string>([layer?.d?.data?.environment?.map,...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any)))].filter((id):id is string=>!!id))];
+  if(!node)return [...new Set<string>([layer?.d?.data?.environment?.map,layer?.d?.data?.light?.map,...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any)))].filter((id):id is string=>!!id))];
   return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 
@@ -148,7 +148,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);
-    return {...node,id:layer.id,name:layer.name,p:{...p,x:t.x,y:t.y,z:t.z}};
+    return {...node,id:layer.id,name:layer.name,p:{...p,x:t.x,y:t.y,z:t.z,rx:t.rx,ry:t.ry,rz:t.rz}};
   });
   // Never replace the implicit camera of a saved, unversioned composition.
   // Schema defaults remain v1 for legacy scene containers and templates too.
