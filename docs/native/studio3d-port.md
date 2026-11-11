@@ -2008,3 +2008,55 @@ also measures the product region separately from its floor/backdrop, using the
 same numeric limits, so a large clean background cannot hide object noise.
 Explicit sample-ceiling trials are logged as trials; the saved Production
 ceiling remains 256 pending that acceptance.
+
+#### Export round storage-stop handoff (2026-11-11)
+
+Green increments are `e958100e1` (shadow shading/global convergence readback)
+and `ace8a65b4` (GPU Draft, occupied beauty filtering, specular sampling and
+variance-aware edge classification). Targeted verification: **57 engine units,
+25 engine integration cases, one native Draft regression**, and a native app
+build pass. The Final full-context denoiser regression was rerun after its final
+guard. No sample/noise target or saved Production ceiling was lowered.
+
+Warm second-frame component measurements, seconds, before the last classifier
+refinement (engineering trials, not final acceptance):
+
+| Product | Draft PNG | Refine image ready | Production PNG |
+|---|---:|---:|---:|
+| Hero | 0.225 | 1.871 | 3.057 |
+| Mixed chrome | 1.146 | 3.894 | 18.352 |
+
+These exclude device/pipeline startup, native 2D compositing, motion-blur shutter
+samples and export-process overhead. Other UI preview processes became active
+during later experiments. No final quiet timing or on-screen gate pass is
+claimed for this round. Chrome remains trace-bound; its budgets remain unmet.
+
+Full-HD **1920×1080** Production/Final noise acceptance has completed for teapot
+and glass against independent 4096-spp references. The following table reports
+the **product region**, using the same limits as the whole-image checks; both
+regions pass. Smooth-pixel counts exceed 187,000 in every row.
+
+| Product / policy | Luma RMS (<0.02) | Smooth residual RMS (<0.006) | Block bias p95 (<0.012) |
+|---|---:|---:|---:|
+| Teapot / Production | 0.001736 | 0.001226 | 0.001569 |
+| Teapot / Final | 0.001216 | 0.001127 | 0.000525 |
+| Glass / Production | 0.010996 | 0.003900 | 0.004742 |
+| Glass / Final | 0.007439 | 0.003842 | 0.003405 |
+
+Chrome and the mixed chrome set still need their full-HD references and gates.
+Reference caches retain physical-scene/sampling metadata and decoded pixel
+fingerprints; no reference images are checked into Git. Cached reruns can
+finish the remaining gates without repeating the completed references.
+
+The tile experiment preserved HDR film and stopping decisions but added
+submission/probe overhead, so it was removed. Plain visibility resampling
+increased sample variance. Cached visibility and secondary light-tree sampling
+remain uncommitted experiments, archived outside Git for the next engineering
+round; their final combined source is uncompiled and unverified.
+
+Work stopped when available storage fell below the required 4 GB floor. No
+further builds, renders or timing runs were started. Remaining work is the
+unverified trace experiments, full-HD chrome acceptance, the complete regression
+suite/Cycles yardstick after the final engine choice, and quiet final native
+performance measurements. All test app windows launched by this lane are closed
+(this round used headless workers only).
