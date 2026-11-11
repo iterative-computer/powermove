@@ -5,7 +5,64 @@ use std::sync::Arc;
 use pm_kernel::commands::properties::SetProperty;
 use pm_kernel::commands::{KeyframeCommand, PropertyCommand};
 use pm_kernel::*;
-use pm_panel_timeline::TimelineIndex;
+use pm_panel_timeline::{TimelineIndex, TimelineModel};
+
+#[test]
+fn panel_and_painter_share_indexes_without_retaining_a_closed_document() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "shared-index",
+            OpenSource::Untitled(pm_kernel::synthetic::project(40)),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = kernel.published("shared-index").unwrap();
+    let mut panel = TimelineModel::default();
+    let mut painter = TimelineModel::default();
+    panel.sync(&published);
+    painter.sync(&published);
+    assert!(Arc::ptr_eq(&panel.index, &painter.index));
+    let name = painter.index.layer("L3").unwrap().name.clone();
+    let old = Arc::downgrade(&panel.index);
+    let document = Arc::downgrade(&published.snapshot.document);
+    drop(published);
+    kernel
+        .call_blocking(
+            "shared-index",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: WriteBody::Commands(vec![Command::SetLayerName {
+                        layer_id: "L3".into(),
+                        name: "Changed".into(),
+                    }]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .unwrap();
+    let edited = kernel.published("shared-index").unwrap();
+    panel.sync(&edited);
+    assert!(!Arc::ptr_eq(&panel.index, &painter.index));
+    assert_eq!(painter.index.layer("L3").unwrap().name, name);
+    assert_eq!(
+        panel.index.layer("L3").unwrap().name.as_str(),
+        Some("Changed")
+    );
+    painter.sync(&edited);
+    assert!(Arc::ptr_eq(&panel.index, &painter.index));
+    assert!(old.upgrade().is_none());
+    drop(edited);
+    drop(panel);
+    drop(painter);
+    actor.shutdown();
+    drop(kernel);
+    assert!(document.upgrade().is_none());
+}
 
 fn same(a: &TimelineIndex, b: &TimelineIndex) {
     assert_eq!(a.layers.len(), b.layers.len());

@@ -1,7 +1,7 @@
 use pm_kernel::{Snapshot, model};
 use pm_model::{JsString, Node, NodeKind, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
@@ -176,6 +176,28 @@ impl Default for TimelineIndex {
     }
 }
 impl TimelineIndex {
+    /// The native painter and panel outline read the same immutable index.
+    /// Weak entries never keep a closed document or an old edit alive.
+    pub(crate) fn shared(snapshot: &Snapshot, previous: &Self) -> Arc<Self> {
+        type Key = (u64, u64, u64);
+        static INDEXES: OnceLock<Mutex<HashMap<Key, Weak<TimelineIndex>>>> = OnceLock::new();
+        let mut indexes = INDEXES.get_or_init(Default::default).lock().unwrap();
+        indexes.retain(|_, index| index.strong_count() > 0);
+        // The edition distinguishes independent snapshots with equal ids and
+        // revisions (including synthetic/test documents). It is never reused.
+        let key = (
+            snapshot.doc_id,
+            snapshot.revision,
+            snapshot.document.edition(),
+        );
+        if let Some(index) = indexes.get(&key).and_then(Weak::upgrade) {
+            return index;
+        }
+        let index = Arc::new(previous.updated(snapshot));
+        indexes.insert(key, Arc::downgrade(&index));
+        index
+    }
+
     /// An open composition: `comps/<compId>`, or the root of a project whose
     /// layers sit at the top level.
     pub fn has_composition(&self) -> bool {
