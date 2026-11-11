@@ -3401,6 +3401,47 @@ fn media_proxy_choices_have_controls_and_write_through_the_app() {
         )]
     );
 }
+/// This Mac's settings (Settings › Media, General › Playback) show with no
+/// project open (a window on Home or a fresh launch), and a change to them
+/// made elsewhere republishes Settings.
+#[test]
+fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "builtin-application".into(),
+    };
+    // The application realm: Settings with no project (Home, a fresh launch).
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", true).unwrap();
+    let fact = |limit: u32| {
+        json!({"mediaSettings":{"rows":[
+            {"id":"media.renderLimit","label":"Render Files Limit","detail":"","value":limit,
+             "options":[{"v":10,"label":"10 GB"},{"v":25,"label":"25 GB"}]},
+            {"id":"media.backgroundRender","label":"Background Rendering","detail":"","value":true,
+             "options":[{"v":true,"label":"On"},{"v":false,"label":"Off"}],
+             "section":"general","group":"Playback","control":"switch"}],
+            "location":"/synthetic","used":null,"folders":[]}})
+    };
+    backend.native.facts = fact(25);
+    let publication = backend.settings_snapshot().unwrap();
+    assert!(publication.get("project").is_none());
+    let rows = publication["rows"].as_array().unwrap();
+    let row = |id: &str| rows.iter().find(|r| r["id"] == id).cloned().unwrap();
+    assert_eq!(row("media.renderLimit")["section"], "media");
+    let playback = row("media.backgroundRender");
+    assert_eq!(
+        (
+            &playback["section"],
+            &playback["group"],
+            &playback["control"]
+        ),
+        (&json!("general"), &json!("Playback"), &json!("switch"))
+    );
+    let before = backend.settings_snapshot().unwrap()["revision"].clone();
+    backend.native.facts = fact(10);
+    assert_ne!(backend.settings_snapshot().unwrap()["revision"], before);
+}
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
     let actor = actor();

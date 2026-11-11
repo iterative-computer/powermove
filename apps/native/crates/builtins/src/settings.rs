@@ -154,7 +154,7 @@ impl Backend {
     }
     /// Settings › Media: proxy preferences and storage, from the host's
     /// `mediaSettings` fact (this Mac's, so shown without a project).
-    fn media_rows(&mut self) -> Result<Vec<Value>, String> {
+    pub(crate) fn media_rows(&mut self) -> Result<Vec<Value>, String> {
         let media = self.native.facts["mediaSettings"].clone();
         if media.is_null() {
             return Ok(vec![]);

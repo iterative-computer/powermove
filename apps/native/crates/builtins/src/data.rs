@@ -139,12 +139,13 @@ impl Backend {
         if self.model.is_none() {
             let accounts = self.native.agent_link.accounts_revision();
             let stamp = format!(
-                "{}:{accounts}:{}:{}:{}:{}",
+                "{}:{accounts}:{}:{}:{}:{}:{}",
                 self.kernel.state().revision,
                 self.native.facts["cloud"]["revision"],
                 self.native.facts["provider"]["revision"],
                 self.native.facts["agentClients"]["revision"],
-                crate::speech::revision()
+                crate::speech::revision(),
+                media_stamp(&self.native.facts)
             );
             if self.native.stamp != stamp {
                 self.native.stamp = stamp;
@@ -155,7 +156,7 @@ impl Backend {
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}:{}:{}",
             published.snapshot.doc_id,
             published.revision(),
             published.metadata_revision,
@@ -165,7 +166,8 @@ impl Backend {
             self.native.facts["cloud"]["revision"],
             self.native.facts["provider"]["revision"],
             self.native.facts["agentClients"]["revision"],
-            crate::speech::revision()
+            crate::speech::revision(),
+            media_stamp(&self.native.facts)
         );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;
@@ -848,4 +850,13 @@ fn layer_param(param: &Value) -> Option<pm_panel_inspector::LayerParam> {
             })
             .flatten(),
     })
+}
+
+/// Settings › Media's fact (rows, storage use, folders) changes the Settings
+/// publication: it has no revision of its own, so its content is the stamp.
+fn media_stamp(facts: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    facts["mediaSettings"].to_string().hash(&mut hash);
+    hash.finish()
 }

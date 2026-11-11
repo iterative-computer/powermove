@@ -657,6 +657,14 @@ impl Backend {
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(speech_rows.iter().cloned());
         }
+        // This Mac's settings (Settings › Media, General › Playback) show
+        // with or without a project open.
+        if project.is_none() {
+            let media = self.media_rows()?;
+            if let Some(rows) = publication["rows"].as_array_mut() {
+                rows.extend(media);
+            }
+        }
         if let Some(project) = project {
             publication["project"] = project;
             let mut rows = self.settings_rows()?;
