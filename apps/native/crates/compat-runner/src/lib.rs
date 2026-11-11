@@ -1009,6 +1009,123 @@ mod tests {
             "passed-through bases paint nothing"
         );
     }
+    /// A runner whose 2 × 2 base rasters record the revision of the document
+    /// they were painted from.
+    fn revision_runner() -> (CompatRunner, Log<Value>, Log<Value>) {
+        let (runner, _, _, _) = raster_runner();
+        let painted = Arc::new(std::sync::Mutex::new(vec![]));
+        let answered = Arc::new(std::sync::Mutex::new(vec![]));
+        let (p, a) = (painted.clone(), answered.clone());
+        runner.host.set_rasters(Some(crate::RasterHooks {
+            base: Arc::new(move |request: crate::BaseRasterRequest| {
+                p.lock().unwrap().push(json!([
+                    request.layer,
+                    request.document.revision(),
+                    request.window.is_some()
+                ]));
+                let held = request
+                    .window
+                    .map_or(4, |[_, _, w, h]| (w.min(2) * h.min(2)) as usize);
+                Ok(Some(crate::BaseRasterReply {
+                    width: 2,
+                    height: 2,
+                    window: request
+                        .window
+                        .map(|[x, y, w, h]| [x.min(2), y.min(2), w.min(2), h.min(2)]),
+                    straight_rgba: [255, 0, 0, 255].repeat(held),
+                    size: (2., 2.),
+                    anchor: (1., 1.),
+                    selection: None,
+                    font_offset: None,
+                    uv: [0., 0., 1., 1.],
+                }))
+            }),
+            answers: Arc::new(move |_, answers| {
+                for answer in answers {
+                    a.lock().unwrap().push(match answer {
+                        crate::RasterAnswer::Raster {
+                            window: Some(_), ..
+                        } => json!("window"),
+                        crate::RasterAnswer::Raster {
+                            premultiplied_rgba, ..
+                        } => json!(premultiplied_rgba[..4]),
+                        crate::RasterAnswer::Native => json!("native"),
+                        other => json!(format!("{other:?}")),
+                    });
+                }
+            }),
+            producing: Arc::new(|_, _, _| {}),
+        }));
+        (runner, painted, answered)
+    }
+    /// A base the frame's need gets only a window of is decided once the
+    /// whole batch ran: a later override drawing into its canvas makes it an
+    /// override's canvas, read back with that drawing (review of 3065d9378).
+    #[test]
+    fn a_base_another_override_draws_into_later_in_the_batch_is_read_whole() {
+        let (runner, _, answered) = revision_runner();
+        let manifest =
+            json!({"id":"keep","name":"Keep","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T,up,crop)=>{
+                   if(L.id==='a'){globalThis.saved=base(L,s,T);return globalThis.saved}
+                   const x=globalThis.saved.cv.getContext('2d');x.fillStyle='#00ff00';x.fillRect(0,0,1,1);
+                   return base(L,s,T,up,crop);});}",
+            )
+            .unwrap();
+        runner
+            .eval("for(const id of ['a','b'])__compat.realm.PM.proj.layers.push({id,type:'shape',name:id,d:{}})")
+            .unwrap();
+        runner
+            .eval("const crop={x:0,y:0,width:1,height:1};
+                   __compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop},
+                     {composition:'synthetic-comp',layer:'b',seconds:0,scale:1,crop}]);")
+            .unwrap();
+        assert_eq!(
+            *answered.lock().unwrap(),
+            vec![json!([0, 255, 0, 255]), json!("native")]
+        );
+    }
+    /// A windowed base an extension keeps paints, when it reads it later, the
+    /// frame it was returned for, from that revision's document, whatever the
+    /// project is now (review of 3065d9378).
+    #[test]
+    fn a_kept_windowed_base_reads_the_revision_it_was_returned_for() {
+        let (runner, painted, answered) = revision_runner();
+        let manifest =
+            json!({"id":"hold","name":"Hold","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T)=>{globalThis.saved=base(L,s,T);return globalThis.saved});}",
+            )
+            .unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'a',type:'shape',name:'a',d:{}})")
+            .unwrap();
+        let before = runner
+            .json("(__compat.realm.flush(),__compat.realm.revision)")
+            .unwrap();
+        runner
+            .eval("__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);")
+            .unwrap();
+        assert_eq!(*answered.lock().unwrap(), vec![json!("window")]);
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'later',type:'shape',name:'later',d:{}})")
+            .unwrap();
+        let after = runner
+            .json("(__compat.realm.flush(),__compat.realm.revision)")
+            .unwrap();
+        assert_ne!(before, after, "the project moved on");
+        assert_eq!(runner.json("globalThis.saved.cv.width").unwrap(), json!(2));
+        let painted = painted.lock().unwrap().clone();
+        assert_eq!(painted.len(), 2, "{painted:?}");
+        assert_eq!(painted[1], json!(["a", before, false]), "{painted:?}");
+    }
     /// The canvas round trip of a window is the window of the whole canvas's.
     #[test]
     fn a_window_s_canvas_round_trip_is_the_whole_canvas_s_there() {

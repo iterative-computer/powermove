@@ -223,6 +223,25 @@ globalThis.__compat = {
       };
     };
     const failure = (error) => String(error?.message ?? error ?? "The override failed");
+    // The override's own throw: the same revision throws again.
+    const thrown = (error) => {
+      this.reportFailure(error);
+      return { error: failure(error), threw: true };
+    };
+    // An override's raster as a canvas the host reads when the batch goes.
+    const canvasAnswer = (result) => {
+      const surface = this.nativeSurfaceOf?.(result.cv);
+      if (!surface)
+        return { error: "The override returned a canvas the engine cannot read", threw: true };
+      return {
+        surface,
+        w: result.w,
+        h: result.h,
+        anchorX: result.anchorX,
+        anchorY: result.anchorY,
+        uv: Array.isArray(result.uv) ? result.uv : undefined,
+      };
+    };
     /** `ask`: `{revision}` for the viewer; `{revision, exact}` for a one-frame
      * look (an agent's still), which only this exact revision answers; nothing
      * for an export, whose own realm holds its frozen project (`export.rs`). */
@@ -246,27 +265,35 @@ globalThis.__compat = {
           );
           if (!result) return { hidden: true };
           if (realm.isBaseRaster(result, need)) return { native: true };
-          const baseWindow = realm.uncroppedBase?.(result, need);
-          if (baseWindow) return { baseWindow };
-          const surface = this.nativeSurfaceOf?.(result.cv);
-          if (!surface)
-            return { error: "The override returned a canvas the engine cannot read", threw: true };
-          return {
-            surface,
-            w: result.w,
-            h: result.h,
-            anchorX: result.anchorX,
-            anchorY: result.anchorY,
-            uv: Array.isArray(result.uv) ? result.uv : undefined,
-          };
+          // Decided once every need ran: a later override may draw into it.
+          if (realm.isUncroppedBase?.(result, need)) return { pending: { value: result, need } };
+          return canvasAnswer(result);
         } catch (error) {
-          this.reportFailure(error);
-          // The override's own throw: the same revision throws again.
-          return { error: failure(error), threw: true };
+          return thrown(error);
         } finally {
           realm.rasterContext = null;
         }
       });
+      const pending = answers.flatMap((answer, i) => (answer.pending ? [[i, answer.pending]] : []));
+      if (pending.length) {
+        let windows = [];
+        try {
+          windows = realm.windowBases(pending.map(([, entry]) => entry));
+        } catch (error) {
+          this.reportFailure(error);
+        }
+        pending.forEach(([i, { value }], k) => {
+          const baseWindow = windows[k];
+          if (baseWindow) answers[i] = { baseWindow };
+          else {
+            try {
+              answers[i] = canvasAnswer(value);
+            } catch (error) {
+              answers[i] = thrown(error);
+            }
+          }
+        });
+      }
       try {
         call("compat.answers", { batch, answers });
       } catch (error) {

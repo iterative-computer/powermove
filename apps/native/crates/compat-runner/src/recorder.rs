@@ -6,9 +6,12 @@ use pm_recorder::{
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, Mutex},
 };
+
+/// A kept document, its open composition, and how many rasters keep it.
+type Pin = (Arc<pm_model::Document>, String, usize);
 
 #[derive(Default)]
 struct State {
@@ -76,6 +79,10 @@ pub type CanvasText = Box<dyn TextProvider + Send>;
 pub struct NativeHost {
     state: Mutex<State>,
     kernel: Mutex<crate::adapter::KernelAdapter>,
+    /// Documents windowed base rasters were made from, by revision, with how
+    /// many such rasters the realm still holds: loading one later paints the
+    /// frame it was returned for, not the project as it is now.
+    pins: Mutex<HashMap<u64, Pin>>,
     transport: crate::transport::Transport,
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
@@ -194,6 +201,7 @@ impl NativeHost {
         Self {
             state: Mutex::new(State::default()),
             kernel: Mutex::new(kernel),
+            pins: Mutex::default(),
             transport,
             events,
             text: Mutex::new(None),
@@ -259,8 +267,8 @@ impl NativeHost {
     /// `render.raster(layer, scale, time, uploaded, crop)`'s base: the layer as
     /// the engine paints it, with today's geometry, as a recorder canvas.
     /// Args: `[{id, content?, composition?}, scale, time, crop?]`.
-    fn base_raster(&self, args: &Value) -> Result<Value> {
-        let Some(reply) = self.base_reply(args, None)? else {
+    fn base_raster(&self, args: &Value, revision: Option<u64>) -> Result<Value> {
+        let Some(reply) = self.base_reply(args, revision, None)? else {
             return Ok(Value::Null);
         };
         let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
@@ -272,18 +280,41 @@ impl NativeHost {
             "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
         )
     }
+    /// Keeps the project's document as it is now while a windowed base
+    /// raster answered from it lives (one count per raster): its revision,
+    /// or `None` without a project.
+    fn pin(&self) -> Option<u64> {
+        let (revision, document, open) = self.kernel.lock().unwrap().revision_document().ok()?;
+        self.pins
+            .lock()
+            .unwrap()
+            .entry(revision)
+            .or_insert((document, open, 0))
+            .2 += 1;
+        Some(revision)
+    }
     /// The engine's base raster for `render.raster`'s `args`, or only its
-    /// `window` (of the whole raster).
+    /// `window` (of the whole raster): of the pinned document of `revision`
+    /// if there is one, else of the project as it is.
     fn base_reply(
         &self,
         args: &Value,
+        revision: Option<u64>,
         window: Option<[u32; 4]>,
     ) -> Result<Option<crate::BaseRasterReply>> {
         let hooks = self.rasters.lock().unwrap().clone().ok_or_else(|| {
             Error::Host("render.raster needs the engine, which this host does not have".into())
         })?;
         let spec = &args[0];
-        let (document, open) = self.kernel.lock().unwrap().document()?;
+        let pinned = revision.and_then(|r| {
+            let pins = self.pins.lock().unwrap();
+            pins.get(&r)
+                .map(|(document, open, _)| (document.clone(), open.clone()))
+        });
+        let (document, open) = match pinned {
+            Some(pinned) => pinned,
+            None => self.kernel.lock().unwrap().document()?,
+        };
         let number = |i: usize, default: f64| {
             args.get(i)
                 .and_then(Value::as_f64)
@@ -327,16 +358,17 @@ impl NativeHost {
         let Some(window) = (|| Some([at("x")?, at("y")?, at("width")?, at("height")?]))() else {
             return crate::RasterAnswer::Unavailable("The raster window is not readable".into());
         };
-        let reply = match self.base_reply(&request["args"], Some(window)) {
-            Ok(Some(reply)) => reply,
-            // As the canvas of a base raster that drew nothing.
-            Ok(None) => {
-                return crate::RasterAnswer::Failed(
-                    "The override returned a canvas the engine cannot read".into(),
-                );
-            }
-            Err(error) => return crate::RasterAnswer::Unavailable(error.to_string()),
-        };
+        let reply =
+            match self.base_reply(&request["args"], request["revision"].as_u64(), Some(window)) {
+                Ok(Some(reply)) => reply,
+                // As the canvas of a base raster that drew nothing.
+                Ok(None) => {
+                    return crate::RasterAnswer::Failed(
+                        "The override returned a canvas the engine cannot read".into(),
+                    );
+                }
+                Err(error) => return crate::RasterAnswer::Unavailable(error.to_string()),
+            };
         let held = reply.window.unwrap_or([0, 0, reply.width, reply.height]);
         let pixels = if held[2] == 0 || held[3] == 0 {
             Ok(Vec::new())
@@ -1582,7 +1614,23 @@ impl EngineProxy for NativeHost {
                 return self.wait_capture(&budget);
             }
             "kernel.query" if input["method"] == "render.raster" => {
-                return self.base_raster(&input["args"]["args"]);
+                return self
+                    .base_raster(&input["args"]["args"], input["args"]["revision"].as_u64());
+            }
+            "kernel.query" if input["method"] == "render.rasterPin" => {
+                return Ok(self.pin().map_or(Value::Null, |revision| json!(revision)));
+            }
+            "kernel.query" if input["method"] == "render.rasterUnpin" => {
+                if let Some(revision) = input["args"]["revision"].as_u64() {
+                    let mut pins = self.pins.lock().unwrap();
+                    if let Some(pin) = pins.get_mut(&revision) {
+                        pin.2 -= 1;
+                        if pin.2 == 0 {
+                            pins.remove(&revision);
+                        }
+                    }
+                }
+                return Ok(Value::Null);
             }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "compat.producing" => {
