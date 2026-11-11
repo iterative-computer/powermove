@@ -9,12 +9,37 @@ This lane adds state, commands and worker adapters only.
 - Pinned Studio source: `bd30e2037c840e162e4cf2694851f30679bec8f1` (`origin/studio-3d`).
 - Import `engine/crates/pm-studio` whole. Its host package is named
   `pm-studio-host`, but its source is `engine/hosts/studio-electron`.
-- Subsequent renderer fixes are separate commits containing only `engine/`.
-  Native integration belongs under `apps/native/`.
+- Native is the shipping target; the Electron branch is frozen. Renderer
+  changes stay under `engine/`, native integration under `apps/native/`.
+  Cherry-pick compatibility with Electron is no longer a requirement.
 - One in-process renderer on the viewer worker and shared wgpu device. Output
   flows through the existing compositor and below-slot EDR CAMetalLayer.
   No Electron helper or IPC texture transport. Blender is test-only.
 - Retain portable WGSL traversal when Metal ray queries are unavailable.
+
+## Approved gates and current priority
+
+Owner decisions, 2026-11-11:
+
+- Native Live: **at least 60 fps presented**, with **no stall >=100 ms**.
+- Input to presented pixel: **p95 <=50 ms**.
+- 1080p product-shot export budgets: **Draft <=1 s/frame**,
+  **Production <=3 s/frame**, **Final unlimited**. Publish an export time
+  estimate as state for the designer; estimates are not fixed render deadlines.
+- Memory: flat trend over **two fixed projects**. A growing-catalog run does
+  not establish this gate.
+- v1.1: full USDZ import and Cycles matching for fog, subsurface, sheen and sky.
+  The chrome caustic grain fix remains in scope.
+- On-screen timing remains allowed under the build lock throughout the day;
+  pause it whenever `/tmp/pm-shots/USER_ACTIVE` exists.
+
+The UI lane's round-one handoff is `feat/na-studio3d-ui` at `abb01b5b8`,
+`docs/native/design/reviews/na-studio3d-ui.md`. Engine/data work proceeds before
+remaining noise/performance work in this order: (1) viewer surface picking,
+(2) per-layer failure isolation, (3) persisted/undoable text extrusion and
+Front/Bevel/Side/Back materials, (4) layer/group/composition material capture,
+(5) one/two/four views with per-view camera and tier, (6) Studio backdrop,
+(7) framed, grounded import placement. This lane adds no visual controls.
 
 ## Capability audit
 
@@ -1009,3 +1034,40 @@ presented fps or an image-quality gate:
 GPU time confirms that the Live deficit includes real GPU execution and other
 on-screen GPU work, not CPU OIDN. Animated preparation also exposes avoidable
 texture reuploads; the source image is unchanged when only instances move.
+
+### Retained image uploads during animation
+
+Studio now compares image dimensions, layer count and exact pixel bytes
+independently of scene/instance state. A transform, camera change or output
+resize retains the GPU image allocation. A same-revision pixel replacement,
+removal or restoration still uploads immediately and resets the accumulation.
+`StudioService::texture_uploads` and the development timing hook expose the
+counter. The image retention regression failed before the fix (two uploads
+for one instance move), then passed with visible motion, blue replacement,
+removal, exact red restoration and output resize. All **27 native Studio tests**
+pass (two manual diagnostics intentionally ignored).
+
+At 1080p with the same retained input and 30 measured frames per case, rotating
+Hero preparation fell from **12.50 to 0.75 ms**, total **24.50 to 12.69 ms**;
+rotating Chrome/glass preparation fell from **21.28 to 9.85 ms**, total
+**42.01 to 30.10 ms**. Every case uploaded images once. These are worker
+measurements; the on-screen acceptance gates above remain open.
+
+A new post-filter 1080p Refine/Production split (mean of two frames, CPU OIDN,
+half-resolution guides, full-resolution beauty, convergent policy with no time
+cutoff) measured:
+
+| Scene / policy | Trace | OIDN incl. guide filtering | Guide dispatch + readback | Worker total | Output readback | RGBA8 PNG helper encode + write |
+|---|---:|---:|---:|---:|---:|---:|
+| Hero Refine 32 spp | 1026.5 ms | 1434.9 ms | 238.5 ms | 2712.0 ms | 66.6 ms | 519.9 ms |
+| Hero Production 32–256 spp | 2601.5 ms | 1318.5 ms | 222.5 ms | 4151.2 ms | 66.4 ms | 515.8 ms |
+| Chrome/glass Refine 32 spp | 3643.8 ms | 1321.0 ms | 292.6 ms | 5275.3 ms | 67.2 ms | 802.5 ms |
+| Chrome/glass Production 32–256 spp | 22517.6 ms | 1343.8 ms | 323.4 ms | 24210.4 ms | 73.1 ms | 773.7 ms |
+
+Guide dispatch is submitted before readback, so the latter includes completion
+of the guide GPU work; these columns must not be counted twice inside worker
+total. PNG here uses Studio's default-compression diagnostic helper; native
+sequence delivery has its own encoder. OIDN is material to Hero's cost, but
+path tracing dominates Chrome/glass. Neither the **2 s Refine** nor **3 s
+Production** gate passes for both scenes. The CPU-only OIDN limitation and
+Metal-enabled bundle recipe remain documented above; no source build was made.

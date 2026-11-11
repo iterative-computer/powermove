@@ -56,6 +56,8 @@ pub struct StudioService {
     resource_start: usize,
     geometry_uploads: u64,
     scene_updates: u64,
+    texture_uploads: u64,
+    texture_key: Option<Vec<u8>>,
 }
 
 impl StudioService {
@@ -244,12 +246,17 @@ impl StudioService {
             self.geometry_uploads += u64::from(geometry_changed);
             self.scene_updates += 1;
             self.geometry_key = geometry_key;
+        }
+        let texture_key = texture_key(input.maps.as_ref());
+        if self.texture_key.as_ref() != Some(&texture_key) {
             if let Some(maps) = &input.maps {
                 let pixels: Vec<_> = maps.layers.iter().flatten().copied().collect();
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
             }
+            self.texture_uploads += 1;
+            self.texture_key = Some(texture_key);
         }
         if reset {
             r.set_camera(&input.scene);
@@ -444,6 +451,9 @@ impl StudioService {
     pub fn scene_updates(&self) -> u64 {
         self.scene_updates
     }
+    pub fn texture_uploads(&self) -> u64 {
+        self.texture_uploads
+    }
     pub fn blas_builds(&self) -> u64 {
         self.extractor.builds
     }
@@ -453,6 +463,16 @@ impl StudioService {
     pub fn queue(&self) -> Option<&wgpu::Queue> {
         self.renderer.as_ref().map(Renderer::queue)
     }
+}
+
+fn texture_key(maps: Option<&crate::extract::TextureMaps>) -> Vec<u8> {
+    let Some(maps) = maps else { return vec![] };
+    let mut key = Vec::new();
+    key.extend_from_slice(&maps.width.to_le_bytes());
+    key.extend_from_slice(&maps.height.to_le_bytes());
+    key.extend_from_slice(&(maps.layers.len() as u64).to_le_bytes());
+    for layer in &maps.layers { key.extend_from_slice(layer); }
+    key
 }
 
 fn content(input: &SceneInput, e: &Extracted) -> (Vec<u8>, usize) {
