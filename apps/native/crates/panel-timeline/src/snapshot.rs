@@ -25,8 +25,17 @@ pub struct Key {
     /// Authored layer-local time; never frame-normalised on read.
     pub time: f64,
     pub value: Value,
-    /// Complete stored key, including unknown fields, for lossless clipboard.
-    pub stored: Value,
+    /// Complete stored key, including unknown fields, shared with the
+    /// immutable document. Materialize a value only for clipboard/edits.
+    pub stored: Node,
+}
+impl Key {
+    pub fn stored_string(&self, field: &str) -> Option<&str> {
+        match self.stored.get(field)?.kind() {
+            NodeKind::String(value) => value.as_str(),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Channel {
@@ -617,7 +626,7 @@ fn collect_channels(node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
                             id: string(key.get("i"))?,
                             time: number(key.get("t"))?,
                             value: key.get("v").map(Node::to_value).unwrap_or(Value::Null),
-                            stored: key.to_value(),
+                            stored: key.clone(),
                         })
                     })
                     .collect(),

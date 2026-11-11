@@ -8,6 +8,49 @@ use pm_kernel::*;
 use pm_panel_timeline::{TimelineIndex, TimelineModel};
 
 #[test]
+fn stored_key_payloads_share_the_document_until_an_edit_needs_a_value() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "key-payload",
+            OpenSource::Untitled(pm_kernel::synthetic::project(40)),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = kernel.published("key-payload").unwrap();
+    let index = TimelineIndex::from_snapshot(&published.snapshot);
+    let layer = pm_kernel::model::find_layer(published.snapshot.root().unwrap(), "L3").unwrap();
+    let stored = pm_kernel::model::layer_at(published.snapshot.root().unwrap(), &layer)
+        .unwrap()
+        .get("p")
+        .unwrap()
+        .get("position.x")
+        .unwrap()
+        .get("kf")
+        .unwrap()
+        .at(0)
+        .unwrap();
+    let id = match stored.get("i").unwrap().kind() {
+        pm_model::NodeKind::String(id) => id.as_str().unwrap(),
+        _ => panic!("key id"),
+    };
+    let key = index.key(id).unwrap().2;
+    match (key.stored.kind(), stored.kind()) {
+        (pm_model::NodeKind::Object(indexed), pm_model::NodeKind::Object(source)) => {
+            assert!(
+                Arc::ptr_eq(indexed, source),
+                "index copied the stored key payload"
+            );
+        }
+        _ => panic!("stored key object"),
+    }
+    assert_eq!(key.stored.to_value(), stored.to_value());
+    actor.shutdown();
+}
+
+#[test]
 fn panel_and_painter_share_indexes_without_retaining_a_closed_document() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();

@@ -545,7 +545,7 @@ impl TimelineModel {
                     });
                 tracks[pos].keys.push(CopiedKey {
                     at: l.from + k.time - first,
-                    key: k.stored.clone(),
+                    key: k.stored.to_value(),
                 });
             }
         }
@@ -1572,12 +1572,9 @@ impl TimelineModel {
             "keys.delete" => edit(KeyframeCommand::Delete { key_ids: keys }.into()),
             "keys.hold" => {
                 let hold = !keys.iter().all(|id| {
-                    self.index.key(id).is_some_and(|(_, _, k)| {
-                        k.stored
-                            .get("hold")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    })
+                    self.index
+                        .key(id)
+                        .is_some_and(|(_, _, k)| crate::snapshot::boolean(k.stored.get("hold")))
                 });
                 edit(
                     KeyframeCommand::SetHold {
