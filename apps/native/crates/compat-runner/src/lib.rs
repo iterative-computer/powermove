@@ -166,6 +166,9 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
+    /// Only this window `[x, y, w, h]` of the whole (uncropped) raster is
+    /// wanted: the reply holds just its pixels ([`BaseRasterReply::window`]).
+    pub window: Option<[u32; 4]>,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -179,6 +182,9 @@ pub struct BaseRasterReply {
     /// The part of the canvas the quad samples: a crop window's canvas is
     /// placed inside the whole raster (today's `uv`).
     pub uv: [f64; 4],
+    /// For a window request: the part of the `width` × `height` canvas
+    /// `straight_rgba` holds (`[x, y, w, h]`).
+    pub window: Option<[u32; 4]>,
 }
 /// What an override answered for one layer at one frame.
 #[derive(Debug)]
@@ -199,7 +205,8 @@ pub enum RasterAnswer {
     /// delivered): not the override's doing, so it is asked again.
     Unavailable(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
-    /// store), the quad's size, anchor and `uv`.
+    /// store), the quad's size, anchor and `uv`. With `window`, the rows are
+    /// that part (`[x, y, w, h]`) of the `width` × `height` canvas only.
     Raster {
         width: u32,
         height: u32,
@@ -207,6 +214,7 @@ pub enum RasterAnswer {
         size: [f64; 2],
         anchor: [f64; 2],
         uv: [f64; 4],
+        window: Option<[u32; 4]>,
     },
 }
 /// The app's side of raster overrides.
@@ -704,10 +712,17 @@ mod tests {
                     request.composition,
                     request.content.is_some()
                 ]));
+                // A window of the whole 2 × 2 raster holds just its pixels.
+                let window = request.window.map(|[x, y, w, h]| {
+                    let (x, y) = (x.min(2), y.min(2));
+                    [x, y, w.min(2 - x), h.min(2 - y)]
+                });
+                let held = window.map_or(4, |[_, _, w, h]| (w * h) as usize);
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
                     height: 2,
-                    straight_rgba: [255, 0, 0, 255].repeat(4),
+                    window,
+                    straight_rgba: [255, 0, 0, 255].repeat(held),
                     size: (2., 2.),
                     anchor: (1., 1.),
                     selection: None,
@@ -738,12 +753,32 @@ mod tests {
                             size,
                             anchor,
                             uv,
+                            window: None,
                         } => json!([
                             batch,
                             width,
                             height,
                             &premultiplied_rgba[..4],
                             &premultiplied_rgba[premultiplied_rgba.len() - 4..],
+                            size,
+                            anchor,
+                            uv
+                        ]),
+                        crate::RasterAnswer::Raster {
+                            width,
+                            height,
+                            premultiplied_rgba,
+                            size,
+                            anchor,
+                            uv,
+                            window: Some(window),
+                        } => json!([
+                            batch,
+                            "window",
+                            width,
+                            height,
+                            window,
+                            premultiplied_rgba.len(),
                             size,
                             anchor,
                             uv
@@ -918,6 +953,83 @@ mod tests {
                 json!("hidden"),
             ]
         );
+    }
+    /// An untouched base raster returned without the frame's crop window is
+    /// answered with only that window painted, at the whole raster's size; a
+    /// base the override read (geometry or canvas) or forwarded keeps today's
+    /// answer.
+    #[test]
+    fn an_uncropped_base_raster_is_answered_with_just_the_crop_window() {
+        let (runner, painted, answered, _) = raster_runner();
+        let manifest =
+            json!({"id":"drop","name":"Drop","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T,up,crop)=>{switch(L.id){
+                   case 'dropped': return base(L,s,T);
+                   case 'measured': {const r=base(L,s,T);void r.w;return r}
+                   case 'read': {const r=base(L,s,T);void r.cv;return r}
+                   default: return base(L,s,T,up,crop);}});}",
+            )
+            .unwrap();
+        runner
+            .eval("for(const id of ['dropped','measured','read','forwarded'])__compat.realm.PM.proj.layers.push({id,type:'shape',name:id,d:{}})")
+            .unwrap();
+        runner
+            .eval("const ask=(layer,crop)=>({composition:'synthetic-comp',layer,seconds:0,scale:1,crop});
+                   __compat.answerRasters(1,[ask('dropped',{x:1,y:0,width:5,height:1}),ask('measured',{x:1,y:0,width:1,height:1}),
+                     ask('read',{x:1,y:0,width:1,height:1}),ask('forwarded',{x:1,y:0,width:1,height:1}),ask('dropped')]);")
+            .unwrap();
+        let answered = answered.lock().unwrap().clone();
+        // The window is clamped to the 2 × 2 raster: one texel, 4 bytes.
+        assert_eq!(
+            answered[0],
+            json!([
+                1,
+                "window",
+                2,
+                2,
+                [1, 0, 1, 1],
+                4,
+                [2., 2.],
+                [1., 1.],
+                [0., 0., 1., 1.]
+            ])
+        );
+        assert_eq!(answered[1][1], 2, "a measured base is the whole canvas");
+        assert_eq!(answered[2][1], 2, "a read canvas is the whole canvas");
+        assert_eq!(answered[3], json!([1, "native"]));
+        // Without a crop window the base is the layer itself.
+        assert_eq!(answered[4], json!([1, "native"]));
+        assert_eq!(
+            painted.lock().unwrap().len(),
+            3,
+            "passed-through bases paint nothing"
+        );
+    }
+    /// The canvas round trip of a window is the window of the whole canvas's.
+    #[test]
+    fn a_window_s_canvas_round_trip_is_the_whole_canvas_s_there() {
+        let (w, h) = (37u32, 11u32);
+        let straight: Vec<u8> = (0..w * h * 4)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let whole = crate::recorder::canvas_round_trip(w, h, straight.clone()).unwrap();
+        let [x, y, ww, wh] = [5u32, 3, 20, 7];
+        let window: Vec<u8> = (y..y + wh)
+            .flat_map(|r| {
+                straight[((r * w + x) * 4) as usize..((r * w + x + ww) * 4) as usize].to_vec()
+            })
+            .collect();
+        let part = crate::recorder::canvas_round_trip(ww, wh, window).unwrap();
+        let expected: Vec<u8> = (y..y + wh)
+            .flat_map(|r| {
+                whole[((r * w + x) * 4) as usize..((r * w + x + ww) * 4) as usize].to_vec()
+            })
+            .collect();
+        assert_eq!(part, expected);
     }
     /// An override's own throw is deterministic; an answer the realm could
     /// not read back or deliver is not, and is reported as such so the viewer

@@ -36,8 +36,26 @@ pub struct CompatRaster {
     pub size: [f64; 2],
     /// The part of the raster the quad samples (`[ox, oy, sx, sy]`).
     pub uv: [f64; 4],
-    /// Rows top-down, tightly packed in `format`.
+    /// Rows top-down, tightly packed in `format`: of the whole raster, or of
+    /// `window`.
     pub data: Arc<Vec<u8>>,
+    /// The part of the raster `data` holds (`[x, y, w, h]`, inside it); the
+    /// rest is transparent. A need's crop window holds every texel its frame
+    /// samples, so the whole raster with only that window painted draws the
+    /// same pixels without painting or moving the rest. `None`: all of it.
+    pub window: Option<[u32; 4]>,
+}
+
+impl CompatRaster {
+    /// Where `data` sits in the raster (`[x, y, w, h]`).
+    pub fn held(&self) -> [u32; 4] {
+        let whole = [0, 0, self.width, self.height];
+        let Some([x, y, w, h]) = self.window else {
+            return whole;
+        };
+        let (x, y) = (x.min(self.width), y.min(self.height));
+        [x, y, w.min(self.width - x), h.min(self.height - y)]
+    }
 }
 
 impl std::fmt::Debug for CompatRaster {
@@ -96,7 +114,8 @@ pub fn ticks_of(seconds: f64) -> pm_protocol::common::Ticks {
 
 /// The raster's pixels as premultiplied E values in `f32` (top row first).
 pub(crate) fn premultiplied_f32(raster: &CompatRaster) -> Vec<f32> {
-    let n = (raster.width as usize) * (raster.height as usize);
+    let [_, _, w, h] = raster.held();
+    let n = (w as usize) * (h as usize);
     let mut out = Vec::with_capacity(n * 4);
     match raster.format {
         CompatFormat::Rgba8Premultiplied => {
@@ -199,7 +218,8 @@ fn upload_bytes(
     use pm_protocol::color::Precision;
     use std::sync::OnceLock;
     if raster.format == CompatFormat::Rgba8Premultiplied {
-        let channels = raster.width as usize * raster.height as usize * 4;
+        let [_, _, w, h] = raster.held();
+        let channels = w as usize * h as usize * 4;
         if precision == Precision::Float32 {
             static VALUES: OnceLock<[[u8; 4]; 256]> = OnceLock::new();
             let values =
@@ -279,6 +299,11 @@ pub(crate) fn upload(
 ) -> wgpu::TextureView {
     let (format, bytes, texel) = upload_bytes(raster, precision);
     let (w, h) = (raster.width.max(1), raster.height.max(1));
+    // A window's texels go to its place; wgpu zeroes the texels never written.
+    let [x, y, ww, wh] = match raster.window {
+        Some(_) => raster.held(),
+        None => [0, 0, w, h],
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pm compatibility raster"),
         size: wgpu::Extent3d {
@@ -293,25 +318,27 @@ pub(crate) fn upload(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * texel),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
+    if ww > 0 && wh > 0 {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ww * texel),
+                rows_per_image: Some(wh),
+            },
+            wgpu::Extent3d {
+                width: ww,
+                height: wh,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
@@ -358,6 +385,7 @@ mod tests {
             size: [1.0, 1.0],
             uv: [0.0, 0.0, 1.0, 1.0],
             data: Arc::new(data),
+            window: None,
         }
     }
 

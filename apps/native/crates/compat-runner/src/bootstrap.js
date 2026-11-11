@@ -246,6 +246,8 @@ globalThis.__compat = {
           );
           if (!result) return { hidden: true };
           if (realm.isBaseRaster(result, need)) return { native: true };
+          const baseWindow = realm.uncroppedBase?.(result, need);
+          if (baseWindow) return { baseWindow };
           const surface = this.nativeSurfaceOf?.(result.cv);
           if (!surface)
             return { error: "The override returned a canvas the engine cannot read", threw: true };

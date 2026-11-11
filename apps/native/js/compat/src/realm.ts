@@ -64,6 +64,10 @@ type BaseState = {
   time: number;
   crop: unknown;
   touched: boolean;
+  /** What the engine paints it from (`render.raster`'s first argument). */
+  spec: Data;
+  /** Its pixels were loaded (`cv` or a geometry field read). */
+  loaded: boolean;
 };
 /** Exports whose frozen projects the realm keeps at once. */
 export class CompatRealm {
@@ -854,6 +858,37 @@ export class CompatRealm {
       JSON.stringify(state.crop ?? null) === JSON.stringify(need.crop ?? null)
     );
   }
+  /**
+   * The whole base raster of exactly `need`'s layer, frame and scale,
+   * untouched and not yet loaded, that an override returned without the
+   * frame's crop window: the frame samples only that window of it, so the
+   * engine paints just the window (`{args, window}` for the host's
+   * `baseWindow` answer) instead of the whole canvas. `null` otherwise.
+   */
+  uncroppedBase(
+    value: unknown,
+    need: { layer: string; seconds: number; scale: number; crop?: Data | null },
+  ): Data | null {
+    if (typeof value !== "object" || value === null || !need.crop) return null;
+    const state = this.bases.get(value);
+    if (
+      !state ||
+      !state.own ||
+      state.touched ||
+      state.loaded ||
+      state.crop !== null ||
+      state.id !== need.layer ||
+      state.time !== need.seconds ||
+      state.scale !== need.scale
+    )
+      return null;
+    // As `load` does before it asks for the pixels.
+    this.flush();
+    return {
+      args: [state.spec, state.scale, state.time, null],
+      window: need.crop,
+    };
+  }
   /** The composition holding layer `id` (null: the open one). */
   private compositionOf(id: string): string | null {
     const project = this.PM.proj;
@@ -896,6 +931,7 @@ export class CompatRealm {
     let loaded: Data | null | undefined;
     const load = () => {
       if (loaded !== undefined) return loaded;
+      state.loaded = true;
       this.flush();
       const value = this.options.host.query("render.raster", {
         args: [spec, scale, time, crop ?? null],
@@ -923,6 +959,8 @@ export class CompatRealm {
       time,
       crop: crop ?? null,
       touched: false,
+      spec,
+      loaded: false,
     };
     const written: Data = {};
     // Today's cache key: the same layer, frame, scale and crop paint the same.
