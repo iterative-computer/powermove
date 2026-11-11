@@ -87,6 +87,9 @@ pub struct PipelineTimings {
     pub guides_ms:f64,
     pub guide_readback_ms:f64,
     pub denoise_ms:f64,
+    /// MetalFX's completed external Metal command buffer; zero on OIDN/WGSL.
+    pub metalfx_ms:f64,
+    /// Post/pack wall time. Texture-only packing is submitted, not CPU-waited.
     pub post_ms:f64,
 }
 

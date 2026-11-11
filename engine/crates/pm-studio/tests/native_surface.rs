@@ -44,11 +44,19 @@ fn metalfx_in_process_texture_is_retained_and_flips_without_readback(){
     let mut r=Renderer::new(64,36).unwrap();let scene=preset("hero","blue",0.).unwrap();
     r.set_scene(&scene,&scene.prepare());r.live=true;r.trace(1,3,true,6);
     let (source,_)=r.finish_metalfx_texture(128,72,false,false).unwrap();
+    let timings=r.timings;
+    assert!(timings.trace_ms>0. && timings.guides_ms>0. && timings.metalfx_ms>0. && timings.post_ms>0.);
+    assert_eq!(timings.denoise_ms,0.,"Live never invokes CPU OIDN");
     let retained=target(&r,128,72);let mut encoder=r.device().create_command_encoder(&Default::default());
     encoder.copy_texture_to_texture(source.as_image_copy(),retained.as_image_copy(),source.size());r.queue().submit([encoder.finish()]);
     let a=read(&r,&retained);
     let (flipped,_)=r.finish_metalfx_texture(128,72,true,true).unwrap();let b=read(&r,&flipped);
+    assert_eq!(r.timings.guides_ms,timings.guides_ms,"layer masking reuses guides");
+    assert_eq!(r.timings.metalfx_ms,timings.metalfx_ms,"layer masking reuses MetalFX");
+    assert!(r.timings.post_ms>timings.post_ms);
     assert!(a.chunks_exact(4).any(|p|p[0]!=p[1]));
     assert_eq!(a.chunks_exact(128*4).rev().flatten().copied().collect::<Vec<_>>(),b);
     assert_eq!(a,read(&r,&retained),"later layers must not replace the retained image");
+    r.trace(1,3,true,6);
+    assert_eq!(r.timings.metalfx_ms,0.,"new trace retires previous stage timings");
 }
