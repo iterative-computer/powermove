@@ -811,3 +811,35 @@ explicitly. All **28 native scene/export**, **27 kernel scene**, **18 document**
 **3 scene service**, **8 schema unit** and **2 source-contract** checks pass;
 the GPUI app builds. The Production performance/no-visible-noise acceptance
 gates remain open; applying the correct default is not a speedup claim.
+
+### App worker tier command/state hook
+
+`studio3d.drive` now accepts `id: "tier"`, `arg: "live" | "refine" | "final"`.
+It writes transient `UiState.viewer.studioTier`, and the Studio projection reads
+`tier`. `Viewer.publish` takes that state with the immutable document publication;
+a same-document-revision tier edit changes the viewer sequence and rejects old
+in-flight work. `Viewer::studio_preview(Preview)` is the direct native command
+hook. No controls, colors or layouts were added.
+
+Live selects the retained MetalFX/WGSL live path; Refine requests 32 samples with
+OIDN; Final uses the composition's saved noise/sample policy (Production if
+absent). Captures select Final. Every view supplies its own tier to the shared
+worker. Tier changes retire cached pixels, preserve the GPU backend/geometry,
+and do not change project data or Undo history. Composition identity is now also
+part of source attachment identity so two same-revision views cannot reuse each
+other's quality state. Ordinary export overrides retain their separate scope.
+
+The development-only `PM_NATIVE_STUDIO_TIER=live|refine|final` environment hook
+sets the initial tier when no explicit viewer state exists. Shipped builds
+ignore it. The older Fast/Quality presentation flag remains a compatibility
+field; it does not select the Studio tier. Orthographic cameras no longer reject
+that Quality command. The designer can bind `tier`, saved `studioQuality`, and
+worker status independently. Automatic idle refinement is still pending.
+
+Checks: all **29 native scene/export** and **21 Studio command/session** tests
+pass, including all three tiers on one GPU backend, unchanged upload counts,
+orthographic command acceptance, invalid-value rejection and unchanged project
+and history. All **90 general engine-worker unit** tests also pass (one relaunch
+helper intentionally ignored), using a canonical temporary root because the
+storage admission tests correctly reject macOS symlink ancestors. The GPUI app
+builds with the unchanged profile/features.

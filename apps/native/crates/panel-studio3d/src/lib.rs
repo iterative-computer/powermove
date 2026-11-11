@@ -167,13 +167,7 @@ impl Session {
         let inspector = selected
             .map(|l| view::inspector(&p, &comp, l, time, &mut mirror))
             .transpose()?;
-        let orthographic = layers
-            .iter()
-            .find(|l| {
-                pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera)
-                    && l["on"] != false
-            })
-            .is_some_and(|l| l["d"]["data"]["camera"]["projection"] == "orthographic");
+        let orthographic = view::orthographic(&p)?;
         let quality = p
             .ui_state
             .viewer
@@ -193,7 +187,7 @@ impl Session {
             "labels"
         };
         let value = json!({"ticket":self.ticket.to_string(),"project":self.project,"visible":has_3d&&!source,"layout":layout,"overlay":overlay,"tools":self.tools,"freePose":self.free_pose,
-            "quality":quality&&!orthographic,"qualityStored":quality,"orthographic":orthographic,"allowed":{"move":view::allow_transform(&p,"move").is_ok(),"rotate":view::allow_transform(&p,"rotate").is_ok(),"scale":view::allow_transform(&p,"scale").is_ok()},"inspector":inspector,
+            "quality":quality,"qualityStored":quality,"tier":p.ui_state.viewer.get("studioTier").and_then(pm_model::Value::as_str).unwrap_or("live"),"orthographic":orthographic,"allowed":{"move":view::allow_transform(&p,"move").is_ok(),"rotate":view::allow_transform(&p,"rotate").is_ok(),"scale":view::allow_transform(&p,"scale").is_ok()},"inspector":inspector,
             "lightPanel":if self.tools.light {light::projection(&p,time,&self.light_settings)?}else{Value::Null},"disclosures":p.ui_state.viewer.get("studioDisclosures").map(from_model).transpose()?.unwrap_or(json!({})),"finishes":pm_scene3d::service::presets(),"add":view::add_menu(),"shots":view::shots()});
         self.published = Some(p);
         Ok(value)
@@ -348,14 +342,24 @@ impl Session {
             self.write_ui(&p, ui).await?;
             return Ok(());
         }
+        if id == "tier" {
+            let value = arg
+                .as_str()
+                .filter(|s| ["live", "refine", "final"].contains(s))
+                .ok_or_else(|| invalid("Studio tier must be live, refine or final"))?;
+            let mut ui = p.ui_state.clone();
+            ui.viewer
+                .as_object_mut()
+                .ok_or_else(|| invalid("Invalid viewer state"))?
+                .insert("studioTier", pm_model::Value::from(value));
+            self.write_ui(&p, ui).await?;
+            return Ok(());
+        }
         if id == "preview" {
             let value = arg
                 .as_str()
                 .filter(|s| ["fast", "quality"].contains(s))
                 .ok_or_else(|| invalid("Invalid preview"))?;
-            if value == "quality" && view::orthographic(&p)? {
-                return Err(invalid("Orthographic cameras draw in Fast."));
-            }
             let mut ui = p.ui_state.clone();
             ui.viewer
                 .as_object_mut()

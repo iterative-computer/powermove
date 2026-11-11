@@ -347,6 +347,7 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    studio_preview: studio::Preview,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -363,6 +364,13 @@ struct View {
     paths: Arc<pm_export::render::MediaPaths>,
 }
 impl View {
+    fn set_studio_preview(&mut self, preview: studio::Preview) {
+        if self.studio_preview != preview {
+            self.studio_preview = preview;
+            self.stamp.sequence += 1;
+            self.dirty = true;
+        }
+    }
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
         if matches!(cmd, TransportCommand::Seek { .. })
             && matches!(self.commands.back(), Some(TransportCommand::Seek { .. }))
@@ -457,12 +465,20 @@ impl Viewer {
     /// authoritative fallback if the consumer missed any change events.
     #[cfg(feature = "kernel")]
     pub fn publish(&self, p: &Published) -> Result<()> {
+        let preview = p
+            .ui_state
+            .viewer
+            .get("studioTier")
+            .and_then(pm_model::Value::as_str)
+            .map_or_else(studio::Preview::debug_default, studio::Preview::parse)
+            .map_err(anyhow::Error::msg)?;
         self.snapshot_traced(
             p.snapshot.clone(),
             Some((
                 p.actor_work.as_secs_f64() * 1000.,
                 p.publication_work.as_secs_f64() * 1000.,
             )),
+            Some(preview),
         )
     }
     /// Attach an event origin before dispatching an asynchronous kernel edit.
@@ -475,9 +491,14 @@ impl Viewer {
         }
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.snapshot_traced(snapshot, None)
+        self.snapshot_traced(snapshot, None, None)
     }
-    fn snapshot_traced(&self, snapshot: Snapshot, spans: Option<(f64, f64)>) -> Result<()> {
+    fn snapshot_traced(
+        &self,
+        snapshot: Snapshot,
+        spans: Option<(f64, f64)>,
+        preview: Option<studio::Preview>,
+    ) -> Result<()> {
         self.edit(|v| {
             ensure!(
                 snapshot.doc_id == v.stamp.doc_id,
@@ -487,6 +508,9 @@ impl Viewer {
                 snapshot.revision >= v.stamp.revision,
                 "stale kernel publication"
             );
+            if let Some(preview) = preview {
+                v.set_studio_preview(preview);
+            }
             if snapshot.revision > v.stamp.revision {
                 v.input = v.pending_input.take();
                 let (actor_ms, publication_ms) = spans.unwrap_or_default();
@@ -552,6 +576,13 @@ impl Viewer {
         v.dirty = true;
         self.shared.wake.try_send(()).ok();
         Ok(())
+    }
+    /// Transient Studio worker tier, independent of viewer resolution.
+    pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
+        self.edit(|v| {
+            v.set_studio_preview(preview);
+            Ok(())
+        })
     }
     /// Render resolution. Auto measures playback; stopped frames are full.
     pub fn quality(&self, quality: Quality) -> Result<()> {
@@ -1019,6 +1050,7 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 adapt_drags: false,
                 skim: None,
                 skim_input: None,
@@ -1182,6 +1214,7 @@ struct Work {
     stamp: Stamp,
     scene: Scene,
     spec: FrameSpec,
+    studio_preview: studio::Preview,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -1962,6 +1995,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     }),
                     exact: capture,
                 },
+                studio_preview: if capture {
+                    studio::Preview::Final
+                } else {
+                    v.studio_preview
+                },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -2006,6 +2044,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             stamp,
             scene,
             spec,
+            studio_preview,
             layer,
             overlays,
             provider,
@@ -2029,6 +2068,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 count_work: recorder.is_some(),
                 ..Default::default()
             }));
+            engine.studio_preview(studio_preview);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);

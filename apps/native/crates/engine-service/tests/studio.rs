@@ -78,6 +78,62 @@ fn draw(renderer: &mut Renderer, doc: Arc<pm_model::Document>) -> Vec<f32> {
     renderer.read_rgba(&f).unwrap()
 }
 #[test]
+fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
+    let gpu = pm_gpu::Gpu::new("studio viewer tiers").unwrap();
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    let doc = document(true, 100.);
+    let original = pm_model::json::to_canonical_string(&doc.to_value().unwrap());
+    let scene = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let mut request = request();
+    request.export = false;
+    request.output_kind = OutputKind::Preview;
+    let mut uploads = None;
+    for (tier, samples) in [
+        (studio::Preview::Live, None),
+        (studio::Preview::Refine, Some(32)),
+        (studio::Preview::Final, Some(4)),
+        (studio::Preview::Live, None),
+    ] {
+        studio::attach_with_preview(
+            &mut renderer,
+            doc.clone(),
+            &Default::default(),
+            &scene,
+            tier,
+        )
+        .unwrap();
+        let f = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(f.failures.is_empty(), "{tier:?}: {:?}", f.failures);
+        let c = renderer.studio_counters();
+        if let Some(samples) = samples {
+            assert_eq!(c.samples, samples, "{tier:?}");
+        }
+        if let Some(uploads) = uploads {
+            assert_eq!(c.geometry_uploads, uploads);
+        }
+        uploads = Some(c.geometry_uploads);
+    }
+    assert_eq!(
+        pm_model::json::to_canonical_string(&doc.to_value().unwrap()),
+        original
+    );
+    assert!(studio::Preview::parse("fast").is_err());
+}
+#[test]
 fn metal_native_document_reflection_final_repeat_and_service_export() {
     let gpu = pm_gpu::Gpu::new("studio integration").unwrap();
     assert_eq!(gpu.info.backend, wgpu::Backend::Metal);
