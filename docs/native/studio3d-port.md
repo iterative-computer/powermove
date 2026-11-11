@@ -1392,3 +1392,38 @@ also passes with Metal RT disabled (**0.97 s**). **29 native Studio checks**
 and **51 engine unit checks** pass, and all **11 Cycles yardstick tolerances**
 pass using the existing validated references. The native app build passes in
 **21.04 s**.
+
+### Round-two engine finding — Fast terrain exposure
+
+The designer's Fast/Quality choices select native Live/Refine. A rolling,
+procedurally colored terrain lit by the legacy ambient environment reproduced
+the shift: centre luminance was **0.30512 / 0.33660** at 64×64 and
+**0.31893 / 0.33687** at 256×256 (Live/Refine). The existing portable GPU
+temporal/edge-aware filter kept the same terrain within roughly 1–2% of Refine.
+MetalFX's denoised scaling caused this particular dark bias; changing its
+automatic exposure did not solve it. Native color/guide jitter was already
+aligned by the Rust shader adapter and is unchanged.
+
+Live now selects the existing linear temporal filter when a scene contains
+procedurally colored terrain (the prepared ground-material marker). Other
+product scenes retain MetalFX denoised scaling. Refine/Final, scene lighting,
+authored terrain colors and the saved quality policy are unchanged. This is a
+scene-wide denoiser fallback: mixed terrain/product scenes currently use the
+portable path together, rather than mixing incompatible per-layer histories.
+Its upscale follows the compositor's existing sampling path. Future MetalFX
+re-evaluation can replace this policy after the same exposure checks pass.
+
+The in-process MetalFX output APIs also now respect their disabled/unavailable
+capability flag. This makes the diagnostic fallback effective and prevents a
+host from constructing an unsupported scaler. Normal native rendering chooses
+the fallback before calling MetalFX; direct engine callers receive an error.
+
+At 256×256 the fixed rolling-ground result is **0.33988 / 0.33687 / 0.33761**
+(Live/Refine/Final); at 64×64 it is **0.34008 / 0.33660 / 0.33788**.
+The regression checks plain and natural terrain, ambient and sky lighting, at
+both sizes, requiring Live to stay within **5%** of Refine and Final. All
+**48 native scene/export checks** pass in **17.52 s**; the same terrain check
+passes with Metal RT disabled (**4.13 s**) and MetalFX disabled (**4.45 s**).
+**29 native Studio checks** and **52 engine unit checks** pass, including the
+direct MetalFX capability guard. The native app rebuild passes in **179 s**.
+No presented-fps or 1080p quality claim follows from this small-image regression.

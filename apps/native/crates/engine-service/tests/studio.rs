@@ -3360,3 +3360,94 @@ fn legacy_ambient_fog_keeps_a_visible_native_volume_and_foreground() {
         "fog must retain lit volume radiance in every native tier"
     );
 }
+
+#[test]
+fn terrain_live_and_refine_keep_the_same_exposure() {
+    let mut valid = true;
+    for side in [64u32, 256] {
+        for (natural, amplitude, sky) in [(false, 0., false), (true, 1., false), (true, 1., true)] {
+            let base = environment_geometry_document(
+                json!({"source":{"primitive":"plane"},"terrain":{"p":{"width":10,"depth":10,"resolution":16,"amplitude":amplitude,"natural":natural}},"material":{"p":{"color":"#CCCCCC","roughness":0.8,"metalness":0}}}),
+                json!({}),
+            );
+            let mut project = pm_scene3d::from_model(&base.to_value().unwrap()).unwrap();
+            let comp = &mut project["comps"]["test"];
+            comp["w"] = json!(side);
+            comp["h"] = json!(side);
+            comp["studioQuality"] = pm_scene3d::quality::resolve(
+                &pm_scene3d::quality::preset("production").unwrap(),
+                &json!({"minSamples":128,"maxSamples":128,"noiseThreshold":0,"caustics":false}),
+            )
+            .unwrap();
+            for layer in comp["layers"].as_array_mut().unwrap() {
+                if layer["id"] == "camera" {
+                    layer["p"]["position.y"]["v"] = json!(5);
+                    layer["p"]["position.z"]["v"] = json!(6);
+                    layer["d"]["data"]["environment"]["p"]["ambient"]["v"] = json!(1.);
+                }
+            }
+            if sky {
+                let world = pm_scene3d::service::new_layer(comp,"world","World",pm_scene3d::schema::Role::Object,json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky","p":{"sunIntensity":0,"visible":false}}}}),json!({}),true,None,0.).unwrap();
+                comp["layers"].as_array_mut().unwrap().push(world);
+            }
+            let doc = project_document(&project);
+            let mut renderer = Renderer::headless().unwrap();
+            let req = studio::SceneRequest {
+                composition: "test".into(),
+                revision: doc.revision(),
+                ticks: 0,
+                width: side,
+                height: side,
+            };
+            let mut means = Vec::new();
+            for tier in [
+                studio::Preview::Live,
+                studio::Preview::Refine,
+                studio::Preview::Final,
+            ] {
+                studio::attach_with_preview(
+                    &mut renderer,
+                    doc.clone(),
+                    &Default::default(),
+                    &req,
+                    tier,
+                )
+                .unwrap();
+                let mut r = RenderRequest::sized(Size::new(side, side), Precision::Float16);
+                r.background = false;
+                r.export = false;
+                r.output_kind = OutputKind::Preview;
+                let frame = renderer
+                    .render(
+                        &doc,
+                        "test",
+                        Ticks::ZERO,
+                        &r,
+                        &pm_render::MapResolver::default(),
+                    )
+                    .unwrap();
+                assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+                let pixels = renderer.read_rgba(&frame).unwrap();
+                let lo = side as usize * 5 / 16;
+                let hi = side as usize * 11 / 16;
+                let mean = (lo..hi)
+                    .flat_map(|y| (lo..hi).map(move |x| (y * side as usize + x) * 4))
+                    .map(|i| pixels[i] * 0.2126 + pixels[i + 1] * 0.7152 + pixels[i + 2] * 0.0722)
+                    .sum::<f32>()
+                    / ((hi - lo) * (hi - lo)) as f32;
+                means.push(mean);
+            }
+            eprintln!(
+                "TERRAIN_NATIVE size={side} natural={natural} amplitude={amplitude} sky={sky} live={:.5} refine={:.5} final={:.5}",
+                means[0], means[1], means[2]
+            );
+            valid &= means[1..]
+                .iter()
+                .all(|reference| (means[0] - reference).abs() / reference.max(0.01) < 0.05);
+        }
+    }
+    assert!(
+        valid,
+        "Live terrain must not change its exposure when it refines"
+    );
+}
