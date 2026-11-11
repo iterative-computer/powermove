@@ -1363,12 +1363,16 @@ impl Renderer {
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
         self.pool.set_free_budget(bytes);
         self.pyramids.set_budget(bytes);
+        self.binds.set_budget(bytes);
+    }
+    pub fn binding_cache_bytes(&self) -> u64 {
+        self.binds.retained_bytes()
     }
     pub fn converted_frame_bytes(&self) -> u64 {
         self.media.frame_bytes()
     }
 
-    /// Nominal texel bytes of cached text rasters.
+    /// Bytes of cached text rasters and reusable coverage scratch.
     pub fn text_cache_bytes(&self) -> u64 {
         self.text_gpu.cached_bytes()
     }
