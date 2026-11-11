@@ -2324,38 +2324,67 @@ impl Headless {
 
     /// Submit a preview frame without allocating a CPU pixel readback.
     pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
-        self.preview_with_pump(scene, spec, || {})
+        self.preview_inner(scene, spec)
     }
 
-    /// Pump the main-thread font broker between transient frame refusals.
+    /// Pump the main-thread font broker while the render thread waits for
+    /// replies, including during a frame's first text layout.
     pub fn preview_with_pump(
         &mut self,
         scene: &Scene,
         spec: FrameSpec,
-        mut pump: impl FnMut(),
+        pump: impl FnMut(),
     ) -> Result<()> {
+        with_pump(|| self.preview_inner(scene, spec), pump)
+    }
+
+    /// Keep one render thread for a sequence while the caller pumps its
+    /// main-thread services. Recreating it per frame changes allocator
+    /// ownership and does not model the app's persistent render worker.
+    pub fn run_with_pump<T: Send>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> T + Send,
+        pump: impl FnMut(),
+    ) -> T {
+        with_pump(|| run(self), pump)
+    }
+
+    fn preview_inner(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            pump();
-            match self.engine.frame(
-                scene,
-                spec,
-                None,
-                &OverlayGeometry::default(),
-                false,
-                Arc::default(),
-            ) {
-                Ok(Some(s)) => {
-                    s.commit();
-                    s.complete()?;
-                    anyhow::ensure!(
-                        s.failures.is_empty(),
-                        "memory benchmark frame omitted {} layers",
-                        s.failures.len()
-                    );
+            let rendered = objc2::rc::autoreleasepool(|_| -> Result<()> {
+                let Some(s) = self.engine.frame(
+                    scene,
+                    spec,
+                    None,
+                    &OverlayGeometry::default(),
+                    false,
+                    Arc::default(),
+                )?
+                else {
+                    anyhow::bail!("no headless surface");
+                };
+                s.commit();
+                s.complete()?;
+                anyhow::ensure!(
+                    s.failures.is_empty(),
+                    "memory benchmark frame omitted {} layers: {}",
+                    s.failures.len(),
+                    s.failures
+                        .iter()
+                        .map(|f| f.message.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                Ok(())
+            });
+            match rendered {
+                Ok(_) => {
+                    self.engine.poll();
                     return Ok(());
                 }
-                Ok(None) => anyhow::bail!("no headless surface"),
                 Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
                 }
@@ -2449,10 +2478,42 @@ impl Headless {
     }
 }
 
+/// Font registries belong to the main thread; a render can synchronously
+/// request more fonts at any point. Pumping only between renders deadlocks.
+fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -> T {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| objc2::rc::autoreleasepool(|_| work()));
+        while !worker.is_finished() {
+            pump();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 #[cfg(test)]
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn headless_pump_answers_fonts_during_a_blocking_render() {
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_wake(Arc::new(|| {}));
+        let worker = broker.clone();
+        with_pump(
+            move || worker.ask(Vec::new(), Vec::new(), Duration::from_millis(500)),
+            || {
+                for ask in broker.take_asks() {
+                    ask.answer(Ok(pm_text::host::FontReply::default()));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(broker.counts(), (1, 1, 0));
+    }
     #[test]
     fn revision_and_output_change_while_encoding_reject_the_submission() {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
