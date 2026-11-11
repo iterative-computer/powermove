@@ -1173,6 +1173,9 @@ continuous cap/perimeter/depth UVs, angular/concave/convex bevel profiles and
 hole bevel scaling. It rejects invalid coordinates and enforces the 500,000
 vertex budget during generation. The native adapter caches geometry separately
 from world transforms and material values, and bounds retained outline geometry.
+Ordinary model layers skip outline preparation on the immutable tree before any
+JSON copy. The follow-up passes both extrusion integration tests (1.19 s) and
+an app rebuild (111 s; shared dependencies were rebuilt without flag changes).
 
 Text uses the existing native render-thread font broker and the same full-face
 outline painter as flat text, including its font selection, variations, style

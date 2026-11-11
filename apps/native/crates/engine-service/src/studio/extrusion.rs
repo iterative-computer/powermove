@@ -41,6 +41,14 @@ impl DocumentSource {
             pm_scene3d::render::gltf::math::compose([0.; 3], [0., 0., 0., 1.], [1., -1., -1.]);
         let layers: Vec<_> = scope.layers().iter().collect();
         for layer in layers {
+            let ty = pm_eval::node::member(Some(layer), "type");
+            let data = pm_eval::node::member(pm_eval::node::member(Some(layer), "d"), "extrusion");
+            if !(pm_eval::node::is_str(ty, "text") || pm_eval::node::is_str(ty, "shape"))
+                || !pm_eval::node::truthy(pm_eval::node::member(Some(layer), "threeD"))
+                || !pm_eval::node::truthy(pm_eval::node::member(data, "enabled"))
+            {
+                continue;
+            }
             let stored = pm_scene3d::from_model(&layer.to_value()).map_err(|e| e.to_string())?;
             if !extrusion::enabled(&stored) {
                 continue;
