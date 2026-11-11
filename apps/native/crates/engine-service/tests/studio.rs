@@ -1444,3 +1444,78 @@ fn scatter_material_options_bind_per_owner_and_preserve_shared_palettes() {
         "100 trees share material records"
     );
 }
+
+fn camera_patch(
+    doc: Arc<pm_model::Document>,
+    projection: &str,
+    p: Value,
+    z: f64,
+) -> Arc<pm_model::Document> {
+    let mut project = pm_scene3d::from_model(&doc.to_value().unwrap()).unwrap();
+    let camera = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "camera")
+        .unwrap();
+    camera["p"]["position.z"]["v"] = json!(z);
+    let c = &mut camera["d"]["data"]["camera"];
+    c["projection"] = json!(projection);
+    for (key, value) in p.as_object().unwrap() {
+        c["p"][key] = json!({"v":value,"kf":[],"expr":null});
+    }
+    pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document
+}
+#[test]
+fn native_orthographic_camera_preserves_scale_when_dollied() {
+    let base = material_option_document(json!({"acceptsLights":false}));
+    let near = camera_patch(base.clone(), "orthographic", json!({"zoom":1}), 5.);
+    let far = camera_patch(base, "orthographic", json!({"zoom":1}), 10.);
+    assert_eq!(
+        environment_input(near.clone()).view.orthographic_span,
+        Some(3.)
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    let covered = |pixels: Vec<f32>| pixels.chunks_exact(4).filter(|p| p[3] > 0.9).count();
+    let a = covered(draw(&mut renderer, near));
+    let b = covered(draw(&mut renderer, far));
+    assert!(a > 300);
+    assert!(a.abs_diff(b) <= 4, "ortho coverage {a} vs {b}");
+}
+#[test]
+fn native_iris_and_clip_channels_reach_shared_camera_transport() {
+    let base = material_option_document(json!({"acceptsLights":false}));
+    let lens = camera_patch(
+        base.clone(),
+        "perspective",
+        json!({"fStop":0.3,"focusDistance":1,"irisShape":6,"irisRotation":30,"irisRoundness":0.2,"irisAspect":1.4}),
+        5.,
+    );
+    let input = environment_input(lens.clone());
+    assert_eq!(input.view.iris, [6., 30f32.to_radians(), 0.2, 1.4]);
+    let circular = camera_patch(
+        lens.clone(),
+        "perspective",
+        json!({"irisShape":0,"irisAspect":1}),
+        5.,
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    assert_ne!(draw(&mut renderer, lens), draw(&mut renderer, circular));
+    let clipped = camera_patch(base.clone(), "perspective", json!({"near":10,"far":20}), 5.);
+    assert_eq!(
+        environment_input(clipped.clone()).view.clip_planes,
+        Some([10., 20.])
+    );
+    assert!(
+        draw(&mut renderer, base)
+            .chunks_exact(4)
+            .any(|p| p[3] > 0.9)
+    );
+    assert!(
+        draw(&mut renderer, clipped)
+            .chunks_exact(4)
+            .all(|p| p[3] == 0.)
+    );
+}

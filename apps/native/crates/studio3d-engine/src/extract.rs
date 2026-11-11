@@ -143,6 +143,11 @@ pub struct View {
     pub floor_y: f32,
     pub shadows: bool,
     pub ambient: Vec3,
+    /// Half the vertical extent in scene units; None selects perspective.
+    pub orthographic_span: Option<f32>,
+    pub clip_planes: Option<[f32; 2]>,
+    /// Blades, rotation radians, roundness, aspect; matches shared shader data.
+    pub iris: [f32; 4],
 }
 impl Default for View {
     fn default() -> Self {
@@ -152,6 +157,9 @@ impl Default for View {
             floor_y: 0.,
             shadows: true,
             ambient: Vec3::ZERO,
+            orthographic_span: None,
+            clip_planes: None,
+            iris: [0., 0., 0., 1.],
         }
     }
 }

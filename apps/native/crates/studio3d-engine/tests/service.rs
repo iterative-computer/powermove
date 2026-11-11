@@ -422,3 +422,57 @@ fn changing_instance_capacity_reallocates_gpu_buffers_safely() {
         assert!(pixels(&service, &frame).iter().flatten().any(|p| *p > 0));
     }
 }
+
+struct MovingCamera {
+    source: Source,
+    mode: AtomicU32,
+}
+impl SceneSource for MovingCamera {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        match self.mode.load(Ordering::SeqCst) {
+            1 => input.scene.camera.position.x = 2.,
+            2 => input.scene.meters_per_unit = 1.,
+            _ => {}
+        }
+        Ok(input)
+    }
+}
+#[test]
+fn camera_motion_changes_pixels_without_scene_or_geometry_uploads() {
+    let source = MovingCamera {
+        source: Source::new(),
+        mode: AtomicU32::new(0),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 7,
+        denoise: Denoise::None,
+    };
+    let first = service.render(&source, request(), tier).unwrap();
+    let before = pixels(&service, &first);
+    source.mode.store(1, Ordering::SeqCst);
+    let moved = service.render(&source, request(), tier).unwrap();
+    assert_ne!(before, pixels(&service, &moved));
+    assert_eq!(service.geometry_uploads(), 1);
+    assert_eq!(
+        service.scene_updates(),
+        1,
+        "camera motion must not rebuild the RT scene"
+    );
+}
+#[test]
+fn aperture_units_reset_refine_accumulation_at_the_same_revision() {
+    let source = MovingCamera {
+        source: Source::new(),
+        mode: AtomicU32::new(0),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::QualityRefine { samples: 2 };
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 2);
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 4);
+    source.mode.store(2, Ordering::SeqCst);
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 2);
+    assert_eq!(service.scene_updates(), 1);
+}

@@ -379,11 +379,6 @@ impl SceneSource for DocumentSource {
     fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
         let r = self.resolve(request)?;
         let c = &r.scene["camera"];
-        if c["projection"] != "perspective" {
-            return Err(
-                "Orthographic cameras draw in Fast; Studio Fast adapter is not attached".into(),
-            );
-        }
         let cp = &c["p"];
         let eye = r
             .camera_position
@@ -713,6 +708,15 @@ impl SceneSource for DocumentSource {
                 floor_y,
                 shadows: e["shadows"] != false,
                 ambient,
+                orthographic_span: (c["projection"] == "orthographic")
+                    .then(|| 3. / n(cp, "zoom", 1.)),
+                clip_planes: Some([n(cp, "near", 0.01), n(cp, "far", 1000.)]),
+                iris: [
+                    n(cp, "irisShape", 0.),
+                    n(cp, "irisRotation", 0.).to_radians(),
+                    n(cp, "irisRoundness", 0.),
+                    n(cp, "irisAspect", 1.),
+                ],
             },
         })
     }

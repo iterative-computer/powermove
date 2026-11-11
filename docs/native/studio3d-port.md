@@ -45,7 +45,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Ordinary model/light/camera timeline layers | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Ordinary model/light/camera timeline layers | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Existing scene-container/mesh project migration | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Indexed mesh, lathe and polygon extrusion sources | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -77,9 +77,9 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Light cast-shadow toggle, model cast/receive-shadow toggles | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Global shadows and ambient color/intensity/exposure | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light markers, select and move/target gizmos | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Perspective and orthographic cameras | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
-| Animated camera position/target/FOV/zoom/near/far | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
-| Camera and free/editor view; orbit/pan/zoom/frame | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Perspective and orthographic cameras | Shared camera; native projection/clip checks | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Animated camera position/target/FOV/zoom/near/far | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Camera and free/editor view; orbit/pan/zoom/frame | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Move/rotate/scale gizmos, scene/object axes, modal transforms | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Projected bounds, ray picking, model/part selection | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Mixed 2D/3D depth sets and transparent layer ordering | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -97,7 +97,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Cycles and local links | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Stable group source canvas | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Safe group capture | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Capture budgets | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Texture sharing/replacement | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Static capture reuse | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -110,21 +110,21 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Environment Light and HDRI | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; source loading pending |
+| Environment Light and HDRI | Shared world; native Live/Final HDRI checks | P (render connected; broader parity pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; live layer-source capture pending |
 | Parallel / spot / point lights | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Ambient / environment light types | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; source loading pending |
-| Material Options: Casts Shadows | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material Options: Accepts Shadows | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material Options: Accepts Lights | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material Options: Appears in Reflections | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Ambient / environment light types | Shared lights; native transport checked | P (render connected; broader parity pending) | K | K | P | World/source/atmosphere channels → `set_world`, `add_fog`, `update_fog`; live layer-source capture pending |
+| Material Options: Casts Shadows | Shared shader; native policy/pixel checks | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material Options: Accepts Shadows | Shared shader; native policy/pixel checks | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material Options: Accepts Lights | Shared shader; native policy/pixel checks | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material Options: Appears in Reflections | Shared shader; native policy/pixel checks | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Layers as materials, same-comp source | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Keyframeable Opacity/Roughness/Metallic | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Keyframeable Emission Color/Emission Intensity/Ambient Response | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Substance SBSAR | G (upstream gap) | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front / Bevel / Side / Back | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Camera depth of field/focus | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
-| Camera iris controls | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
-| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Camera depth of field/focus | Shared lens; native focus/defocus checks | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Camera iris controls | Shared iris; native defocus check | P (render connected; broader parity pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | glTF embedded animation | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | FBX with embedded animation | Shared `pm-import-fbx`; geometry/material render verified | P (skin/clip data retained; broader animation scenes pending) | Tested original + GLB round trip | Tested | `import_media` accepts FBX; model-source edits | Import worker → `import::prepare` / archive receipt → `Scene3dCommand::Import`; MCP import + `add_object` |
 | 2D layers casting shadows onto 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -134,16 +134,16 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Live / Refine / Final path tracing | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Live / Refine / Final path tracing | Shared engine; native worker tiers tested | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Fast / Quality preview | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 | Finish presets and rendered swatches | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Softbox lights and light-by-pointing | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Auto studio, seamless set, shadow catcher | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Shots and exploded views | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
+| Shots and exploded views | Shared engine present; row integration unverified | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Drop to floor / place on surface | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Live screens | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | STEP/IGES/BREP CAD import | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
-| Gaussian splats and point clouds | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Gaussian splats and point clouds | Native splat path; pixel/export checks | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Advanced glass/coat/sheen/film/dispersion/droplets/brushed/subsurface | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Native backend attachment | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 
@@ -475,7 +475,7 @@ The port remains incomplete. World sky/atmosphere/fog translation is now impleme
 Terrain/nature translation is now implemented (see the later checkpoint).
 Sparse material/part renderer translation remains unfinished. Live environment capture
 and full cross-composition source-cycle analysis remain pending. Remaining gates include
-material source capture, extended imported maps, iris/orthographic transport,
+material source capture, extended imported maps, broader camera project parity,
 quality shutter samples and automatic idle Refine, complete Electron scene
 round trips, pixel filtering/extra edge sampling/enamel/no-visible-noise grading,
 and measured native presentation/input latency. The measured Production/Refine
@@ -649,3 +649,28 @@ transparent primary output for shadow-only geometry. A 100-tree scatter shares
 its overridden palette and material records. Sparse intrinsic/source-material
 properties and extended maps remain separate unfinished adapters. Performance
 and distribution acceptance are unchanged.
+
+
+### Camera transport and camera-motion residency
+
+Orthographic projection now uses the pinned application's 3-unit half-height
+and saved zoom. Iris blades/rotation/roundness/aspect, focus/aperture, near/far
+clipping and physical scene scale reach the shared camera setters. State and
+commands remain the existing camera channels and `set_camera`; no view controls
+or layouts were added.
+
+Camera motion previously triggered a Metal scene/TLAS rebuild even when every
+resource was unchanged. Exact resource bytes are now compared independently of
+the camera/view values, reusing the previous complete key without another full
+resource copy. Camera edits reset view accumulation while leaving geometry and
+ray-tracing resources resident. Material, map, world and instance edits still
+invalidate by exact bytes. Scene scale is now part of the camera key; its missing
+Refine reset was reproduced before fixing it.
+
+All **24 adapter** and **24 native scene/export** checks pass. A camera edit
+changes fixed-seed pixels with exactly **1 geometry upload / 1 scene update**
+across both frames (previously 2 scene updates). Scale changes restart Refine
+at 2 spp instead of incorrectly continuing to 6 spp. Native tests verify
+orthographic coverage remains within 4 pixels when the camera dollies from 5
+to 10 units, iris changes affect defocus, and clip planes remove out-of-range
+geometry. The GPUI app builds. Presented fps and input p95 remain unmeasured.

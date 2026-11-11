@@ -40,6 +40,7 @@ pub struct StudioService {
     previous: Option<(SceneRequest, Vec<u8>)>,
     previous_tier: Option<Tier>,
     geometry_key: Vec<u8>,
+    resource_start: usize,
     geometry_uploads: u64,
     scene_updates: u64,
 }
@@ -143,7 +144,7 @@ impl StudioService {
         validate(&input, &extracted)?;
         // Compare exact bytes, including resources, instead of trusting a revision
         // or a lossy/partial scene key. No stale frame survives a material edit.
-        let mut key = content(&input, &extracted);
+        let (mut key, resource_start) = content(&input, &extracted);
         key.extend_from_slice(format!("{auxiliary:?}").as_bytes());
         let mut outputs: Vec<_> = extracted
             .layers
@@ -211,7 +212,10 @@ impl StudioService {
             geometry_key.extend_from_slice(data);
         }
         let geometry_changed = self.geometry_key != geometry_key || self.geometry_uploads == 0;
-        let changed = self.previous.as_ref().is_none_or(|(_, old)| *old != key);
+        let changed = self
+            .previous
+            .as_ref()
+            .is_none_or(|(_, old)| old.get(self.resource_start..) != Some(&key[resource_start..]));
         if changed || geometry_changed {
             let instancing = extracted.prepared.instancing.as_ref().unwrap();
             r.set_instanced_scene(
@@ -243,7 +247,10 @@ impl StudioService {
             let focus = c.focus.map_or((c.target - c.position).length(), |p| {
                 (p - c.position).dot(f)
             });
-            let tan = (c.fov.to_radians() * 0.5).tan();
+            let tan = input
+                .view
+                .orthographic_span
+                .unwrap_or_else(|| (c.fov.to_radians() * 0.5).tan());
             let center = (extracted.bounds.0 + extracted.bounds.1) * 0.5;
             let bound = (extracted.bounds.1 - extracted.bounds.0)
                 .length()
@@ -262,6 +269,11 @@ impl StudioService {
                 center.to4(bound),
             );
             r.set_ambient(input.view.ambient.to_array());
+            r.set_iris(input.view.iris);
+            r.set_projection(input.view.orthographic_span.is_some());
+            if let Some([near, far]) = input.view.clip_planes {
+                r.set_clip_planes(Some(near), Some(far));
+            }
         }
         r.live = tier == Tier::QualityLive;
         let (mut samples, mut bounces, salt) = match tier {
@@ -407,6 +419,7 @@ impl StudioService {
                 texture,
             });
         }
+        self.resource_start = resource_start;
         self.previous = Some((request.clone(), key));
         self.previous_tier = Some(tier);
         Ok(RenderedScene {
@@ -435,20 +448,22 @@ impl StudioService {
     }
 }
 
-fn content(input: &SceneInput, e: &Extracted) -> Vec<u8> {
+fn content(input: &SceneInput, e: &Extracted) -> (Vec<u8>, usize) {
     let p = &e.prepared;
     let mut key = format!(
-        "{:?}{:?}{:?}{:?}{:?}{}{}",
+        "{:?}{:?}{:?}{:?}{:?}{}{}:{}",
         e.layers,
         input.scene.camera,
         input.scene.backdrop,
         input.scene.environment,
         e.bounds,
         input.scene.exposure,
-        input.scene.shadow_catcher
+        input.scene.shadow_catcher,
+        input.scene.meters_per_unit
     )
     .into_bytes();
     key.extend_from_slice(format!("{:?}", input.view).as_bytes());
+    let resource_start = key.len();
     for data in [
         bytemuck::cast_slice(&p.positions),
         bytemuck::cast_slice(&p.tris),
@@ -466,10 +481,26 @@ fn content(input: &SceneInput, e: &Extracted) -> Vec<u8> {
             key.extend_from_slice(map);
         }
     }
-    key
+    (key, resource_start)
 }
 
 fn validate(input: &SceneInput, e: &Extracted) -> Result<(), String> {
+    let view = input.view;
+    if view.iris.iter().any(|v| !v.is_finite())
+        || !(0. ..=16.).contains(&view.iris[0])
+        || !(0. ..=1.).contains(&view.iris[2])
+        || !(0.1..=10.).contains(&view.iris[3])
+        || view
+            .orthographic_span
+            .is_some_and(|v| !v.is_finite() || v <= 0.)
+        || view.clip_planes.is_some_and(|[near, far]| {
+            !near.is_finite() || !far.is_finite() || near < 0. || far <= near
+        })
+        || !input.scene.meters_per_unit.is_finite()
+        || input.scene.meters_per_unit <= 0.
+    {
+        return Err("Invalid Studio projection, iris, clip planes or scene scale".into());
+    }
     let c = input.scene.camera;
     if ![
         c.position.x,
