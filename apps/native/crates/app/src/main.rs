@@ -404,6 +404,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--dev-agent-home" => Some("PM_DEV_AGENT_HOME"),
         // A stand-in cloud for files on demand (cloud_media::Fixture).
         "--cloud-fixture" => Some("PM_CLOUD_FIXTURE"),
+        // The v1 profile a review migrates from: a clone, never the live one.
+        "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         _ => None,
     }
 }
@@ -442,6 +444,7 @@ mod review_override_tests {
             "--dev-store-key",
             "--dev-agent-home",
             "--cloud-fixture",
+            "--electron-profile",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
