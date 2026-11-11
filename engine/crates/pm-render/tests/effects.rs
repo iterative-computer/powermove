@@ -605,6 +605,157 @@ fn regions_equal_the_full_frame() {
     }
 }
 
+/// A contributed glow in the shape of a multi-pass bloom: a 2×2
+/// area-filtered half-resolution tile packed into the input texture, a wide
+/// Gaussian blur read bilinearly from the tile, and a bilinear upsample.
+/// It declares its spread (`viewportPadding: ["radius"]`), which does not
+/// count the half-resolution taps' footprint, and its tiles follow the
+/// input texture, so a band's crop moves its downsample grid.
+const HALO: &str = "#version 300 es
+precision highp float;
+in vec2 v_st;
+uniform sampler2D u_tex;
+uniform sampler2D u_orig;
+uniform vec2 u_texel;
+uniform int u_pass;
+uniform float u_radius;
+out vec4 o;
+void main() {
+  vec2 halfTexel = 0.5 * u_texel;
+  bool tile = v_st.x < 0.5 && v_st.y < 0.5;
+  vec2 logicalUV = v_st / 0.5;
+  if (u_pass == 0) {
+    vec4 sum = vec4(0.0);
+    if (tile) {
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          sum += texture(u_orig, logicalUV + (vec2(float(dx), float(dy)) - 0.5) * u_texel) * 0.25;
+        }
+      }
+    }
+    o = sum;
+  } else if (u_pass < 3) {
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    if (tile) {
+      vec2 axis = u_pass == 1 ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      for (int i = -16; i <= 16; i++) {
+        float t = float(i) / 16.0;
+        float w = exp(-4.5 * t * t);
+        vec2 uv = logicalUV + axis * (u_radius * t) * u_texel;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+          sum += texture(u_tex, clamp(uv * 0.5, halfTexel, vec2(0.5) - halfTexel)) * w;
+        }
+        weights += w;
+      }
+    }
+    o = sum / max(weights, 0.00001);
+  } else {
+    vec4 bloom = texture(u_tex, clamp(v_st * 0.5, halfTexel, vec2(0.5) - halfTexel));
+    o = texture(u_orig, v_st) + bloom * 2.0;
+  }
+}
+";
+
+/// Renders the halo whole and in export bands and rectangles, with its
+/// declared spread `reach` beyond its kernel radius 40, and returns each
+/// rectangle with its count of values whose bits differ from the whole
+/// frame's, and their largest difference.
+fn halo_bands(reach: f64) -> Vec<(Precision, PixelRect, usize, f32)> {
+    let mut halo = raw_effect(
+        "acme.halo",
+        HALO,
+        json!([
+            { "type": "number", "key": "radius", "default": 40, "min": 0, "max": 500, "step": null },
+            { "type": "number", "key": "reach", "default": 40, "min": 0, "max": 500, "step": null }
+        ]),
+        false,
+    );
+    halo.flags.passes = 4;
+    halo.flags.keep_orig = true;
+    halo.flags.viewport_safe = true;
+    halo.flags.viewport_padding = vec!["reach".into()];
+    let mut set = builtin_definitions();
+    set.definitions.push(halo);
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (doc, res) = document(
+        vec![fx(
+            "f1",
+            "acme.halo",
+            json!({ "radius": ch(json!(40)), "reach": ch(json!(reach)) }),
+        )],
+        None,
+    );
+    let mut out = Vec::new();
+    for precision in [Precision::Float16, Precision::Float32] {
+        let whole_req = RenderRequest::at_scale(Size::new(W, H), 1.0, precision);
+        let whole = render(&mut r, &doc, &res, 0.5, &whole_req).unwrap();
+        // Export-like bands, and rectangles away from the frame's edges.
+        let mut rects: Vec<PixelRect> = (0..H)
+            .step_by(23)
+            .map(|y| PixelRect {
+                x: 0,
+                y,
+                width: W,
+                height: 23.min(H - y),
+            })
+            .collect();
+        rects.extend([
+            PixelRect {
+                x: 101,
+                y: 37,
+                width: 150,
+                height: 100,
+            },
+            PixelRect {
+                x: 60,
+                y: 70,
+                width: 41,
+                height: 33,
+            },
+        ]);
+        for rect in rects {
+            let mut req = whole_req.clone();
+            req.region = Some(rect);
+            let part = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+            let mut differing = 0usize;
+            let mut worst = 0.0f32;
+            for y in 0..rect.height as usize {
+                for x in 0..rect.width as usize {
+                    for c in 0..4 {
+                        let a = part[(y * rect.width as usize + x) * 4 + c];
+                        let b = whole
+                            [((y + rect.y as usize) * W as usize + x + rect.x as usize) * 4 + c];
+                        if a.to_bits() != b.to_bits() {
+                            differing += 1;
+                            worst = worst.max((a - b).abs());
+                        }
+                    }
+                }
+            }
+            out.push((precision, rect, differing, worst * 255.0));
+        }
+    }
+    out
+}
+
+fn assert_bit_equal(results: Vec<(Precision, PixelRect, usize, f32)>) {
+    let bad: Vec<_> = results.into_iter().filter(|r| r.2 > 0).collect();
+    assert!(bad.is_empty(), "values differ (count, max CV): {bad:?}");
+}
+
+/// A band's padded crop lies on the frame's grid: the halo's
+/// half-resolution tiles follow its input texture, so a crop starting on
+/// an odd row or column moves the downsample grid, and an odd-sized crop
+/// ending on a frame edge clamps its tiles half a texel off the whole
+/// frame's. The declared spread here is generous, so only the grid counts.
+#[test]
+fn a_band_of_a_reduced_resolution_effect_keeps_the_frames_grid() {
+    let _gpu = gpu();
+    assert_bit_equal(halo_bands(60.0));
+}
+
 #[test]
 fn effects_on_groups_and_inside_precomps() {
     let _gpu = gpu();

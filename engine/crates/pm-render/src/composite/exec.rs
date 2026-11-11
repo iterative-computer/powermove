@@ -29,6 +29,10 @@ use crate::exec::{Exec, Resolved};
 use crate::plan::{CompPlan, Content};
 
 /// The padding a node's effects need around the region.
+/// The grid a padded pass aligns to (`Region::align`): an effect's
+/// reduced-resolution passes down to 1/16 keep the whole frame's texels.
+const EFFECT_GRID: u32 = 16;
+
 fn node_padding(node: &Node) -> Padding {
     match node {
         // A transition reads the whole frame (its program sees the full
@@ -261,7 +265,10 @@ impl Exec<'_> {
                 _ => None,
             })
             .fold(Padding::NONE, Padding::max);
-        let rect = want.grow(padding, full);
+        let mut rect = want.grow(padding, full);
+        if padding > Padding::NONE {
+            rect = rect.align(EFFECT_GRID, full);
+        }
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
         // The accumulator: the caller's target until a node writes a new one.
         // `owned`: the loop took it (`take_scoped`) and gives it back once a
