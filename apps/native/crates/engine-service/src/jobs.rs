@@ -1186,6 +1186,10 @@ fn fill_cache(
     };
     let pass = pm_export::render::pass_key(2, size);
     renderer.set_isolate_layers(true);
+    // A stored frame is a delivery: an effect or layer whose extension isn't
+    // installed refuses the fill, as an export refuses it (the viewer still
+    // draws it bypassed, or as the checkerboard, live).
+    renderer.set_bypass_missing_effects(false);
     let total = fill.frames.len().max(1) as f64;
     for (i, frame) in fill.frames.iter().enumerate() {
         if cancel.load(Ordering::Acquire) {
@@ -1205,6 +1209,19 @@ fn fill_cache(
             cancel,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Isolation leaves a failing layer out and draws the rest: a frame
+        // missing a layer is never stored.
+        if !read.failures.is_empty() {
+            renderer.release_frame_reuse();
+            anyhow::bail!(
+                "{}",
+                read.failures
+                    .iter()
+                    .map(|l| format!("layer {} in {}: {}", l.layer, l.composition, l.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
         let bytes: Vec<u8> = read
             .rgba
             .iter()
