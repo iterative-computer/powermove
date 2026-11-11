@@ -10,6 +10,8 @@ test('HDR and EXR environment lighting imports, renders, rotates, undoes and reo
     api.edit({operation:'add_object',object:{id:'sphere',source:{primitive:'sphere'},material:{p:{color:'#FFFFFF',metalness:1,roughness:.1}}}});
     api.edit({operation:'add_light',light:{id:'dark',type:'sun',p:{intensity:0}}});
     api.edit({operation:'set_environment',target:'camera',patch:{p:{ambient:0}}});
+    // Camera data written by a version before environment maps existed.
+    delete PM.L('camera').d.data.environment.map;delete PM.L('camera').d.data.environment.p.intensity;delete PM.L('camera').d.data.environment.p.rotation;
     await PM.cmd('3d.environment',new File([new Uint8Array(bytes)],'Studio.hdr'));
     PM.selectLayers(['camera']);return 'camera';
   },[...hdrPanorama()]);

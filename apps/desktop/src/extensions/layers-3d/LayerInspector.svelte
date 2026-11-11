@@ -45,7 +45,7 @@
     {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
     <Section {api} title="Environment" />
     <Row {api} label="Map"><SelectField {api} get={()=>environment.map ?? null} options={environmentOptions} edit={structural('set_environment','map','Environment map')} onChange={(v:unknown)=>{if(v==='__import__'){void chooseEnvironment(api,layerId);return false;}}} label="Map" /></Row>
-    {#each ENVIRONMENT_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}
+    {#each ENVIRONMENT_FIELDS.filter(field=>environment.map || !['intensity','rotation'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}
     <Row {api} label="Shadows"><ToggleField {api} get={()=>environment.shadows} edit={structural('set_environment','shadows','Shadows')} label="Shadows" /></Row>
     <Row {api} label="Background"><ToggleField {api} get={()=>!!environment.background} edit={{mode:'set',label:'Background',set:(v:unknown)=>edit('set_environment',{background:v?'#161616':null},'Background')}} label="Background" />{#if environment.background}<ColorField {api} get={()=>environment.background} edit={structural('set_environment','background','Background color')} label="Background color" />{/if}</Row>
   {/if}
