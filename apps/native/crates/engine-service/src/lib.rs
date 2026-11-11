@@ -2402,7 +2402,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
                             store.request(needs);
                             if let Some(ahead) = ahead {
-                                store.request(ahead);
+                                store.request_behind(ahead);
                             }
                         }
                         if let Some(recorder) = &recorder {
