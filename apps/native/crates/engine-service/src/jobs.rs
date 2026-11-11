@@ -640,9 +640,16 @@ impl ExportHandle {
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
                         if let Some(delay) = &idle {
-                            interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
-                            // Idle for longer than any quiet period: whole frames.
-                            active_at = None;
+                            // Seen idle, then checked again right before the
+                            // grant: an activity in between waits once more.
+                            loop {
+                                interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
+                                if cancel.load(Ordering::Acquire)
+                                    || (!interactive.busy() && interactive.epoch() == seen)
+                                {
+                                    break;
+                                }
+                            }
                         } else if interactive.wait_quiet(&cancel) {
                             active_at = Some(std::time::Instant::now());
                         }
@@ -652,7 +659,7 @@ impl ExportHandle {
                                 seen = epoch;
                                 active_at = Some(std::time::Instant::now());
                             }
-                            let whole_frame = active_at.is_none_or(|t| t.elapsed() >= QUIET);
+                            let whole_frame = grants_whole_frames(idle.is_some(), active_at);
                             reply(&ParentMessage::Grant { whole_frame });
                             granted.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1292,13 +1299,14 @@ fn fill_cache(
     let render = |renderer: &mut pm_render::Renderer,
                   frame: &crate::render_cache::CacheFrame,
                   spec: crate::render::FrameSpec|
-     -> Result<Option<(pm_export::render::ReadFrame, f64)>> {
+     -> Result<Option<(pm_export::render::ReadFrame, Sample)>> {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
         let time = pm_protocol::common::Ticks::new(frame.ticks)?;
         let request = spec.request(&scene)?;
         gate.take_measured();
+        let (started, cpu) = (std::time::Instant::now(), crate::trace::thread_cpu_ms());
         let read = match pm_export::render::render_frame_reusing(
             renderer,
             &doc,
@@ -1314,7 +1322,14 @@ fn fill_cache(
             Err(pm_export::render::JobError::Cancelled) => anyhow::bail!("cancelled"),
             Err(e) => anyhow::bail!("{e}"),
         };
-        let cost = gate.take_measured();
+        let (gpu_us, submissions, untimed) = gate.take_measured();
+        let cost = Sample {
+            gpu_us,
+            wall_us: started.elapsed().as_secs_f64() * 1e6,
+            cpu_us: (crate::trace::thread_cpu_ms() - cpu) * 1e3,
+            submissions,
+            untimed,
+        };
         Ok(read.failures.is_empty().then_some((read, cost)))
     };
     let time_of = |frame: &crate::render_cache::CacheFrame| {
@@ -1338,14 +1353,37 @@ fn fill_cache(
     // resampler), at the composition's size: whether it plays in real time.
     let measure = |renderer: &mut pm_render::Renderer,
                    frame: &crate::render_cache::CacheFrame|
-     -> Result<Option<f64>> {
+     -> Result<Option<Sample>> {
         let spec = crate::render::FrameSpec {
             moment: crate::policy::Moment::Playing,
             exact: false,
+            scale: fill.probe_scale,
             ..crate::render::FrameSpec::exact(time_of(frame)?, output)
         };
         Ok(render(renderer, frame, spec)?.map(|(_, cost)| cost))
     };
+    // A probe as playback meets it: the frame before it drawn first, so
+    // programs, decoders and caches are warm, then the probe measured.
+    let probe = |renderer: &mut pm_render::Renderer,
+                 frame: &crate::render_cache::CacheFrame|
+     -> Result<Option<(Sample, Sample)>> {
+        let Some(cold) = measure(renderer, frame)? else {
+            return Ok(None);
+        };
+        let before = crate::render_cache::CacheFrame {
+            ticks: (frame.ticks - fill.frame_ticks).max(0),
+            ..frame.clone()
+        };
+        if fill.frame_ticks > 0 && before.ticks != frame.ticks {
+            measure(renderer, &before)?;
+        }
+        Ok(measure(renderer, frame)?.map(|warm| (cold, warm)))
+    };
+    let diagnostics = std::env::var_os("PM_ENGINE_TRACE").map(|t| {
+        let mut path = std::path::PathBuf::from(t).into_os_string();
+        path.push(".fill.jsonl");
+        path
+    });
     let store = |frame: &crate::render_cache::CacheFrame, bytes: &[u8]| -> Result<()> {
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
@@ -1370,26 +1408,31 @@ fn fill_cache(
         let mut probes = Vec::new();
         while at < end && frames[at].probe {
             let frame = &frames[at];
-            match measure(renderer, frame)? {
-                Some(mut cost) => {
-                    // A first frame pays for warming up (programs, decoders):
-                    // a probe over budget is measured once more, warm.
-                    if fill.budget_us.is_some_and(|b| cost >= b)
-                        && let Some(again) = measure(renderer, frame)?
-                    {
-                        cost = cost.min(again);
+            match probe(renderer, frame)? {
+                Some((cold, warm)) => {
+                    if let Some(path) = &diagnostics {
+                        let line = serde_json::json!({"ticks": frame.ticks, "cold": cold, "warm": warm,
+                            "budget_us": fill.budget_us});
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .and_then(|mut f| writeln!(f, "{line}"));
                     }
-                    probes.push((at, Some(cost)));
+                    probes.push((at, Some(warm.cost_us())));
                 }
                 None => probes.push((at, None)),
             }
             at += 1;
             progress(at as f64 / total);
         }
+        // Heavy when every measured probe is at the budget or over (the
+        // parent's rule, `render_cache::Known::need`).
         let heavy = match fill.budget_us {
             None => true,
             Some(budget) => {
-                probes.is_empty() || probes.iter().any(|p| p.1.is_some_and(|c| c >= budget))
+                let measured: Vec<f64> = probes.iter().filter_map(|p| p.1).collect();
+                probes.is_empty() || (!measured.is_empty() && measured.iter().all(|c| *c >= budget))
             }
         };
         let refused = |i: usize| probes.iter().any(|p| p.0 == i && p.1.is_none());
@@ -1433,6 +1476,15 @@ fn fill_cache(
     Ok(fill.dir.clone())
 }
 
+/// Whether a GPU grant admits the rest of a frame: an export's, once the
+/// viewer has been quiet for [`QUIET`]; background work's never: it is
+/// granted right after the viewer is seen idle and only in bounded units
+/// (a whole frame only where bands cost one), so a play that starts waits
+/// behind one unit.
+fn grants_whole_frames(background: bool, active_at: Option<std::time::Instant>) -> bool {
+    !background && active_at.is_none_or(|t| t.elapsed() >= QUIET)
+}
+
 /// How long the viewer stays quiet before an export submits whole frames
 /// again; until then submissions are bounded by [`BAND_BUDGET_US`].
 const QUIET: std::time::Duration = std::time::Duration::from_secs(1);
@@ -1451,7 +1503,13 @@ struct Costs {
     /// Bands cost about a whole frame (a precomp or a multi-pass effect
     /// renders whole for any region): splitting buys no latency.
     indivisible: bool,
+    /// One unit already costs the budget: [`SCALING_UNITS`] units were
+    /// asked once, to see whether cost grows with the band at all.
+    tested: bool,
 }
+/// Units of a scaling test: as many bands as this costing under twice one
+/// band means bands cost a frame each.
+const SCALING_UNITS: u32 = 4;
 impl Costs {
     fn record(&mut self, units: u32, us: f64) {
         if units == 0 || !us.is_finite() {
@@ -1459,33 +1517,65 @@ impl Costs {
         }
         if units >= self.frame_units {
             self.whole_us = Some(us);
-        } else if self.whole_us.is_some_and(|whole| us >= 0.75 * whole) {
+        } else if self.whole_us.is_some_and(|whole| us >= 0.75 * whole)
+            || (units >= SCALING_UNITS && self.unit_us.is_some_and(|unit| us < 2. * unit))
+        {
             self.indivisible = true;
         }
         self.unit_us = Some(us / f64::from(units));
     }
     /// Units of `remaining` to submit within the budget: one unit to probe
     /// a job not measured yet, as many as fit otherwise, and the rest of the
-    /// frame when bands cost a whole frame anyway.
-    fn bounded(&self, remaining: u32) -> u32 {
+    /// frame when bands cost a whole frame anyway. Where one unit already
+    /// costs the budget and no whole frame was measured (background work
+    /// never gets one), a few units are asked once to find out.
+    fn bounded(&mut self, remaining: u32) -> u32 {
         if self.indivisible {
             return remaining;
         }
         match self.unit_us {
             None => 1,
+            Some(unit) if unit >= BAND_BUDGET_US && self.whole_us.is_none() && !self.tested => {
+                self.tested = true;
+                SCALING_UNITS.min(remaining)
+            }
             Some(unit) => ((BAND_BUDGET_US / unit.max(1.)).floor() as u32).clamp(1, remaining),
         }
     }
 }
 
+/// What drawing one probe frame took.
+#[derive(Clone, Copy, Debug, Serialize)]
+struct Sample {
+    /// GPU time the gate measured (span timestamps, or wall time from
+    /// submission to completion for `untimed` submissions).
+    gpu_us: f64,
+    /// The whole draw, CPU and GPU.
+    wall_us: f64,
+    /// This thread's CPU time in the draw.
+    cpu_us: f64,
+    submissions: u32,
+    untimed: u32,
+}
+impl Sample {
+    /// The whole draw (with what it waits on: override answers, exact
+    /// video frames, other threads), less the part playback overlaps with
+    /// the frame before (this frame's CPU work runs during the last one's
+    /// GPU work). Calibrated on Paper against the frames live playback
+    /// dropped: GPU or CPU time alone missed the override waits.
+    fn cost_us(&self) -> f64 {
+        self.wall_us - self.gpu_us.min(self.cpu_us)
+    }
+}
 /// Inherited-pipe admission: a whole-frame grant admits the rest of the frame
 /// (the viewer has been quiet for [`QUIET`]), any other a submission bounded
 /// by [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
 struct ChildGate {
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
-    /// Microseconds measured since [`ChildGate::take_measured`] last ran.
-    measured: Mutex<f64>,
+    /// Microseconds measured since [`ChildGate::take_measured`] last ran,
+    /// the submissions they came from, and how many had no GPU timestamps.
+    measured: Mutex<(f64, u32, u32)>,
 }
 impl ChildGate {
     fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
@@ -1495,9 +1585,10 @@ impl ChildGate {
             measured: Mutex::default(),
         }
     }
-    /// The measured time of the submissions finished since the last call:
-    /// one frame's GPU time when taken around it.
-    fn take_measured(&self) -> f64 {
+    /// The measured time of the submissions finished since the last call
+    /// (one frame's GPU time when taken around it), their count, and how
+    /// many were wall time for want of GPU timestamps.
+    fn take_measured(&self) -> (f64, u32, u32) {
         std::mem::take(&mut *self.measured.lock().unwrap())
     }
 }
@@ -1520,8 +1611,14 @@ impl pm_export::render::GpuGate for ChildGate {
         None
     }
     fn finished(&self, _: u64, units: u32, measured_us: f64) {
+        self.finished_timed(0, units, measured_us, true);
+    }
+    fn finished_timed(&self, _: u64, units: u32, measured_us: f64, gpu_timed: bool) {
         self.costs.lock().unwrap().record(units, measured_us);
-        *self.measured.lock().unwrap() += measured_us;
+        let mut measured = self.measured.lock().unwrap();
+        measured.0 += measured_us;
+        measured.1 += 1;
+        measured.2 += u32::from(!gpu_timed);
     }
     fn abandoned(&self, _: u64) {}
     /// Whole frames (a quiet viewer) overlap: the next frame's CPU work runs
@@ -1554,6 +1651,41 @@ mod tests {
         };
         cheap.record(12, 1_200.);
         assert_eq!(cheap.bounded(12), 12, "a cheap frame fits whole");
+    }
+    /// Without a whole-frame measurement (background work), a band costing
+    /// the budget asks a few bands once: when they cost about one band,
+    /// bands cost a frame each and frames go whole; when cost grows with
+    /// the band, bands stay bounded.
+    #[test]
+    fn bands_that_cost_a_frame_are_found_without_a_whole_frame() {
+        let mut heavy = Costs {
+            frame_units: 68,
+            ..Costs::default()
+        };
+        heavy.record(1, 40_000.);
+        assert_eq!(heavy.bounded(67), SCALING_UNITS);
+        heavy.record(SCALING_UNITS, 42_000.);
+        assert_eq!(heavy.bounded(63), 63, "bands cost a frame: whole");
+        let mut divisible = Costs {
+            frame_units: 68,
+            ..Costs::default()
+        };
+        divisible.record(1, 10_000.);
+        assert_eq!(divisible.bounded(67), SCALING_UNITS);
+        divisible.record(SCALING_UNITS, 40_000.);
+        assert_eq!(divisible.bounded(63), 1, "cost grows with the band");
+        assert_eq!(divisible.bounded(62), 1, "tested once");
+    }
+    /// Background work is never granted whole frames, however long the
+    /// viewer has been idle; an export is, once the viewer is quiet.
+    #[test]
+    fn background_grants_are_always_bounded() {
+        let long_ago = std::time::Instant::now() - 2 * QUIET;
+        assert!(grants_whole_frames(false, None));
+        assert!(grants_whole_frames(false, Some(long_ago)));
+        assert!(!grants_whole_frames(false, Some(std::time::Instant::now())));
+        assert!(!grants_whole_frames(true, None));
+        assert!(!grants_whole_frames(true, Some(long_ago)));
     }
     /// A job waiting for the viewer wakes when it goes quiet, or when the job
     /// is cancelled while it is still busy.

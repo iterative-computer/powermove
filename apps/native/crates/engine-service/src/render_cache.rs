@@ -60,8 +60,9 @@ const READY_FRAMES: usize = 8;
 /// about this long.
 const CHUNK_SECONDS: f64 = 0.5;
 /// A frame that costs this share of its interval or more can't be counted
-/// on to play in real time (the viewer also composites and presents).
-const BUDGET_SHARE: f64 = 0.75;
+/// on to play in real time (the viewer also presents; calibrated on Paper
+/// against the frames live playback dropped).
+const BUDGET_SHARE: f64 = 0.9;
 /// The playhead's neighbourhood background rendering starts with.
 const NEAR_BEHIND: f64 = 1.;
 const NEAR_AHEAD: f64 = 5.;
@@ -71,6 +72,8 @@ const PAUSED_AT_MOST: Duration = Duration::from_secs(20);
 /// A background fill that failed is not tried again on the same state
 /// sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// The cost a frame playback dropped stands for: more than any budget.
+const DROPPED_US: f64 = 1e9;
 /// Measured costs and refusals kept, by frame key, at most.
 const KNOWN_AT_MOST: usize = 200_000;
 
@@ -89,6 +92,12 @@ pub struct CacheFill {
     /// One frame's length in ticks: a probe is warmed by the frame before it.
     #[serde(default)]
     pub frame_ticks: i64,
+    /// Probes draw at this share of the composition's size: the viewer's.
+    #[serde(default = "whole_size")]
+    pub probe_scale: f64,
+}
+fn whole_size() -> f64 {
+    1.
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheFrame {
@@ -260,24 +269,33 @@ impl Known {
         }
         self.refused.insert(id);
     }
-    /// Chunk `[a, b)`'s need: a measured cost over budget makes it heavy;
-    /// two measured under it (one in a one-frame chunk) light; a cost
-    /// measured at its frames under earlier keys (before an edit) heavy.
+    /// Chunk `[a, b)`'s need: frames playback dropped, or all of at least
+    /// two measured frames (one in a one-frame chunk) at the budget or
+    /// over, make it heavy (one slow sample among fast ones is noise, not a
+    /// range that can't play); enough measured otherwise make it light;
+    /// unmeasured under its keys, what its frames measured before an edit
+    /// decides the same way.
     fn need(&self, frames: &Frames, a: i64, b: i64) -> Need {
         let budget = frames.budget_us();
         let ids: Vec<FrameId> = (a..b).filter_map(|n| frames.id(n)).collect();
         if ids.iter().any(|id| self.refused.contains(id)) {
             return Need::Refused;
         }
+        let enough = (b - a).min(2) as usize;
+        let heavy = |costs: &[f64]| {
+            costs.iter().any(|c| *c >= DROPPED_US)
+                || (costs.len() >= enough && costs.iter().all(|c| *c >= budget))
+        };
         let known: Vec<f64> = ids
             .iter()
             .filter_map(|id| self.costs.get(id).copied())
             .collect();
-        if known.iter().any(|c| *c >= budget) {
+        let before: Vec<f64> = (a..b).filter_map(|n| self.hints.get(&n).copied()).collect();
+        if heavy(&known) {
             Need::Heavy
-        } else if known.len() as i64 >= (b - a).min(2) {
+        } else if known.len() >= enough {
             Need::Light
-        } else if (a..b).any(|n| self.hints.get(&n).is_some_and(|c| *c >= budget)) {
+        } else if heavy(&before) {
             Need::Heavy
         } else {
             Need::Unknown
@@ -371,8 +389,9 @@ struct State {
     /// scrubbing back): read-ahead follows the motion.
     last_read: Option<i64>,
     backward: bool,
-    /// The time the viewer drew last.
+    /// The time the viewer drew last, and the size it rendered at.
     playhead: Option<Ticks>,
+    viewer: Option<Size>,
     activity: Option<crate::jobs::Activity>,
     background: Background,
     host: Option<BackgroundHost>,
@@ -765,10 +784,38 @@ impl DiskFrames {
         let n = frames.index(time)?;
         Some((n, frames.id(n)?))
     }
-    /// What a playing viewer frame cost (microseconds, its GPU or render
-    /// time, whichever is longer): background rendering renders the chunks
-    /// that cost too much to play in real time.
-    pub(crate) fn measured(&self, (n, id): (i64, FrameId), cost_us: f64) {
+    /// The viewer drew at this size: background probes measure frames as
+    /// it draws them.
+    pub(crate) fn viewing(&self, size: Size) {
+        self.inner.state.lock().unwrap().viewer = Some(size);
+    }
+    /// Playback skipped the frames between `before` and `n` (`id` is
+    /// frame `n`'s key, so the skip is of the current state): they didn't
+    /// play in real time and need render.
+    pub(crate) fn dropped(&self, before: i64, (n, id): (i64, FrameId)) {
+        let mut state = self.inner.state.lock().unwrap();
+        let state = &mut *state;
+        let Some(frames) = state.frames.as_ref().filter(|f| f.id(n) == Some(id)) else {
+            return;
+        };
+        let mut changed = false;
+        for k in before + 1..n {
+            if let Some(kid) = frames.id(k) {
+                let step = frames.chunk_len();
+                let a = k - k % step;
+                let b = (a + step).min(frames.count);
+                let was = state.known.need(frames, a, b);
+                state.known.cost(frames, Some(k), kid, DROPPED_US);
+                changed |= state.known.need(frames, a, b) != was;
+            }
+        }
+        if changed {
+            bump(state, &self.inner.published);
+        }
+    }
+    /// A frame known to cost `cost_us` (tests).
+    #[cfg(test)]
+    fn measured(&self, (n, id): (i64, FrameId), cost_us: f64) {
         let mut state = self.inner.state.lock().unwrap();
         let state = &mut *state;
         let Some(frames) = state.frames.as_ref() else {
@@ -865,6 +912,10 @@ impl DiskFrames {
             ..Fill::default()
         };
         let storage = state.storage;
+        // Probes measure frames at the size the viewer draws them.
+        let probe_scale = state.viewer.map_or(1., |v| {
+            (f64::from(v.width) / f64::from(size.width.max(1))).clamp(0.05, 1.)
+        });
         bump(&mut state, &self.inner.published);
         drop(state);
         let fill = CacheFill {
@@ -875,6 +926,7 @@ impl DiskFrames {
             frames: frames.into_iter().map(|m| m.1).collect(),
             budget_us,
             frame_ticks: rate.frame_start(1).unwrap_or(0),
+            probe_scale,
         };
         let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill)
@@ -2142,6 +2194,54 @@ mod tests {
         assert!(disk.observe(&scene, &[], None, None, Some(2), 1, t0));
     }
 
+    /// A chunk needs render when all its measured probes cost the budget
+    /// (90 % of a frame) or more; one slow probe among fast ones is noise.
+    #[test]
+    fn a_chunk_is_heavy_when_all_its_probes_are_slow() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        let measure =
+            |n: i64, ms: f64| disk.measured(disk.frame_id(&scene, at(n)).unwrap(), ms * 1e3);
+        // Chunk 0-14: one probe slow, one fast.
+        measure(0, 40.);
+        measure(14, 5.);
+        // Chunk 15-29: both slow.
+        measure(15, 31.);
+        measure(29, 45.);
+        assert_eq!(disk.bars().bars, vec![(0.5, 1., BarState::Missing)]);
+        let state = disk.inner.state.lock().unwrap();
+        let frames = state.frames.as_ref().unwrap();
+        assert_eq!(state.known.need(frames, 0, 15), Need::Light);
+        assert_eq!(state.known.need(frames, 15, 30), Need::Heavy);
+    }
+
+    /// Frames playback skipped need render; a skip reported for another
+    /// state (frame 14's key from before an edit) is ignored.
+    #[test]
+    fn dropped_frames_need_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = scene();
+        disk.observe(&scene, &[], None, None, None, 1, t0);
+        ready(&disk);
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        let (_, stale) = disk.frame_id(&scene, at(40)).unwrap();
+        disk.dropped(10, (14, stale));
+        assert!(disk.bars().bars.is_empty());
+        disk.dropped(10, disk.frame_id(&scene, at(14)).unwrap());
+        // Frames 11-13 are in the first 0.5 s chunk.
+        assert_eq!(disk.bars().bars, vec![(0., 0.5, BarState::Missing)]);
+    }
+
     /// Background rendering through the real child, once the viewer is
     /// idle: a chunk measured too slow to play renders and is stored whole,
     /// chunks whose probes play in real time are measured and left alone,
@@ -2159,7 +2259,7 @@ mod tests {
         ready(&disk);
         // The viewer played frame 50 too slowly (chunk 45-59 at 30 fps).
         let at = Ticks::new(Rate::FPS_30.frame_start(50).unwrap()).unwrap();
-        disk.measured(disk.frame_id(&scene, at).unwrap(), 1e6);
+        disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
         assert_eq!(disk.bars().bars, vec![(1.5, 2., BarState::Missing)]);
         disk.set_background(Background {
             enabled: true,
@@ -2225,7 +2325,7 @@ mod tests {
         // Every chunk measured too slow: all 90 frames render.
         for n in (0..90).step_by(15) {
             let at = Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
-            disk.measured(disk.frame_id(&scene, at).unwrap(), 1e6);
+            disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
         }
         disk.set_background(Background {
             enabled: true,

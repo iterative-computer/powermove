@@ -52,7 +52,7 @@ impl FrameSpec {
             exact: true,
         }
     }
-    fn render_size(&self) -> Size {
+    pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
     }

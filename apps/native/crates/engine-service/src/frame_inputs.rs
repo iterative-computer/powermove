@@ -224,7 +224,10 @@ impl Index {
             assets: Vec::new(),
         };
         for (i, layer) in layers.iter().enumerate() {
-            if let Some(&g) = layer.get("group").and_then(string).and_then(|g| by_id.get(&g))
+            if let Some(&g) = layer
+                .get("group")
+                .and_then(string)
+                .and_then(|g| by_id.get(&g))
                 && g != i
             {
                 index.members[g].push(i);
@@ -515,7 +518,10 @@ mod tests {
     /// any edit changes every frame.
     #[test]
     fn overrides_key_every_frame_on_the_whole_document() {
-        let a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        let a = project(serde_json::json!([
+            layer("L1", 0., 1.),
+            layer("L2", 2., 1.)
+        ]));
         let mut b = a.clone();
         b["layers"][1]["p"]["opacity"]["v"] = 50.into();
         assert_eq!(changed_with(&a, &b, true).len(), 120);
@@ -526,7 +532,10 @@ mod tests {
     /// further than one frame each side.
     #[test]
     fn the_motion_margin_follows_the_shutter() {
-        let mut a = project(serde_json::json!([layer("L1", 0., 1.), layer("L2", 2., 1.)]));
+        let mut a = project(serde_json::json!([
+            layer("L1", 0., 1.),
+            layer("L2", 2., 1.)
+        ]));
         a["shutter"] = 4.into();
         let mut b = a.clone();
         b["layers"][1]["p"]["opacity"]["v"] = 50.into();
