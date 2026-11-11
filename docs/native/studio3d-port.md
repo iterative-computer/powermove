@@ -885,6 +885,31 @@ PMV reopen, post-reopen Undo/Redo and agent readback. The GPUI app builds
 Electron-project render equivalence still needs the outstanding capture,
 extrusion, mixed-depth and broader import cases.
 
+### Input timestamp and multi-view cache corrections
+
+An input origin now stays pending through stale, dropped or failed work until a
+current GPU frame lands. A later publication no longer clears an unpresented
+origin, and an older completion cannot consume a newer input. A deterministic
+worker barrier reproduces the former missing timestamp and checks that a later
+capture does not reuse the consumed origin.
+
+The frame cache includes the Studio tier and exact composition ID. Changing a
+source or tier on the shared worker no longer clears unrelated viewers' cached
+frames. Two viewers using different tiers retain independent cached pictures;
+same-content/revision requests for two compositions cannot alias their pixels.
+
+Checks: **93 worker unit** tests pass (one intentionally ignored relaunch helper),
+plus **17 service integration** tests; the app builds (**54.46 s**). The
+composition regression alternates two immutable compositions with different
+shape colors at an identical content/revision/time.
+
+The previous isolated app diagnostic presented **1,976 Live frames over
+73.3326 s = 26.9321 fps**, using a rotating torus and three softboxes in a
+1920×1080/60-fps composition at Fit 38%, Full resolution. Worker render wall
+median/p95 were **32.668 / 49.843 ms**, which are not input-to-pixel latency.
+Other native apps remained running, so this was not quiet-machine acceptance.
+The input-origin correction requires a fresh on-screen latency run.
+
 ## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
 
 Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay

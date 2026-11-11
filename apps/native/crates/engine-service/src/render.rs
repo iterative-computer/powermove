@@ -139,6 +139,7 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
 }
 struct CachedFrame {
     key: crate::policy::CacheKey,
+    composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
 }
@@ -165,7 +166,7 @@ pub struct Engine {
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64, String)>,
+    studio_content: Option<(usize, u64, String, crate::studio::Preview)>,
     studio_preview: crate::studio::Preview,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
@@ -455,22 +456,18 @@ impl Engine {
         }
     }
     /// Each viewer supplies its tier before rendering on this shared worker.
-    /// Retire cached pixels so a same-revision tier change draws again.
+    /// Frame cache identities include the tier, independently for each view.
     pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
-        if self.studio_preview != preview {
-            self.studio_preview = preview;
-            self.studio_content = None;
-            self.clear_cache();
-        }
+        self.studio_preview = preview;
     }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
         let key = (
             Arc::as_ptr(&scene.doc) as usize,
             scene.content,
             scene.comp.clone(),
+            self.studio_preview,
         );
         if self.studio_content.as_ref() != Some(&key) {
-            self.cache.clear();
             // A bad contribution draws nothing and is reported; frames carry on.
             // A compiler slot that was busy is retried, never reported as broken.
             let busy = |e: &str| e.contains("compiler-busy");
@@ -618,6 +615,7 @@ impl Engine {
             height: size.height,
             crop: output.crop,
             moment: spec.moment,
+            studio_preview: self.studio_preview,
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
@@ -625,7 +623,11 @@ impl Engine {
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
         let hit = self
             .cache_enabled
-            .then(|| self.cache.iter().position(|c| c.key == key))
+            .then(|| {
+                self.cache
+                    .iter()
+                    .position(|c| c.key == key && c.composition == scene.comp)
+            })
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
@@ -756,6 +758,7 @@ impl Engine {
                 if self.cache_enabled && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
+                        composition: scene.comp.clone(),
                         surface: surface.clone(),
                         failures: failures.clone(),
                     });
