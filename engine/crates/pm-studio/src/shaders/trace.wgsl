@@ -311,6 +311,23 @@ fn secondary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
   return Hit(tmax,-1,vec2f(0.0),0u);
 }
 
+// Coverage is known without a shading frame only for unmapped, fully opaque
+// casters. Texture/vertex alpha, transmission and all other cases retain the
+// complete surface evaluation. This avoids its normal/coat/procedural work on
+// the common blocking shadow hit without changing visibility or random draws.
+fn opaque_coverage(h:Hit)->bool {
+  let mi=u32(tris[u32(h.tri)].uv2m.z);let m=materials[mi].base;
+  if((u32(m.policy.y)&1u)==0u || m.extra.z<1. || (u32(m.policy.y)&16u)!=0u){return false;}
+  if(materials[mi].imported.physical3.w>0.5){return materials[mi].physical_maps[0u].info.x<0.;}
+  return m.maps.x<0.;
+}
+fn opaque_shadow(h:Hit)->bool {
+  if(!opaque_coverage(h)){return false;}
+  let m=tri_material(h.tri);
+  if(m.policy.w>0.){return false;}
+  return m.spec.w*(1.-m.base.w)<=0. || (P.caustic.z>0.5 && P.opts.x==0u);
+}
+
 fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   var o = ro;
   var left = dist - 2.0 * ray_epsilon();
@@ -319,6 +336,7 @@ fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   for (var k = 0; k < 6; k++) {
     let h = intersect(o, rd, left, !nearest);
     if (h.tri < 0) { return t; }
+    if (opaque_shadow(h)) { return vec3f(0.); }
     let sf = surface(o, rd, h);
     let m = sf.m;
     if ((u32(m.policy.y) & 1u) == 0u) {
@@ -497,6 +515,7 @@ fn ambient_visibility(ro:vec3f,rd:vec3f,dist:f32) -> f32 {
   var origin=ro;var left=dist;var visible=1.0;
   for(var k=0;k<8;k++){
     let hit=intersect(origin,rd,left,false);if(hit.tri<0){return visible;}
+    if(opaque_coverage(hit)){return 0.;}
     let sf=surface(origin,rd,hit);
     if((u32(sf.m.policy.y)&1u)!=0u){visible*=1.0-sf.m.extra.z;if(visible<0.001){return 0.0;}}
     origin+=rd*(hit.t+ray_epsilon());left-=hit.t+ray_epsilon();if(left<=0.0){return visible;}

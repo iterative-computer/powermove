@@ -1915,3 +1915,56 @@ The launcher checks the disk floor and supplies the development FFmpeg path
 after the system lock launcher. For a source build, use the native README's
 `cargo +1.96.1 run -p pm-native-app --bin powermove-native` from `apps/native`,
 with the documented shared target/runtime environment and the same lock.
+
+### Export-budget round: overhead checkpoint (2026-11-11)
+
+Targets remain Draft <=1 s, Refine <=2 s, Production <=3 s at 1920×1080;
+Final has no wall-clock cap. Sample floors, error thresholds and numeric noise
+limits are unchanged. Engineering measurements below are headless worker
+measurements under `nice -n 10 flock /tmp/pm-build.lock`, interleaved with the
+UI lane's builds. They are not the final on-screen/acceptance run.
+
+The diagnostic now reports scene preparation/upload separately and the actual
+per-pixel sample distribution. Baseline hero preparation/upload: 13.6/13.0 ms;
+chrome: 271.9/13.8 ms. Renderer/device/pipeline initialization is separately
+reported and excluded from steady-frame totals. Native already retains mesh
+BLASes and scene resources across frames; changing camera/instances does not
+rebuild unchanged mesh geometry. PNG costs about 40–80 ms and readback 1–2 ms,
+so moving encoding alone cannot fix the leading trace or OIDN costs.
+
+Two exact overhead reductions are implemented:
+
+- An unmapped, fully opaque shadow caster does not need a shading frame,
+  normal/coat textures or procedural BSDF evaluation. Mapped/vertex alpha,
+  noncasters and transmission retain the complete path. White-alpha-map
+  fallback parity passes with both portable and hardware traversal.
+- Global convergence reads a GPU-reduced maximum sample count (4 bytes),
+  instead of downloading the entire RGBA accumulation every 32 samples.
+  The stopping inequality and per-pixel sampling decisions are unchanged.
+  Odd dimensions, continued refinement and resize are covered.
+
+Initial worker results with these changes (single-frame diagnostics, seconds):
+
+| Product / measure | Baseline | Optimized overhead |
+|---|---:|---:|
+| Hero / Draft PNG | 1.608 | 1.540 |
+| Hero / Refine ready | 2.154 | 2.078 |
+| Hero / Production PNG | 3.677 | 3.356 |
+| Chrome / Draft PNG | 2.625 | 2.506 |
+| Chrome / Refine ready | 4.949 | 4.449 |
+| Chrome / Production PNG | 23.715 | 20.521 |
+
+Chrome Production still averages about 91 actual samples/pixel, with its
+95th percentile at the 256 ceiling; hero averages 38.7 with p95 88. The
+expensive chrome pixels still need structural sampling work. A diagnostic
+Draft GPU-guided filter (same trace samples) removes CPU OIDN: hero 0.217 s,
+chrome 1.336 s. This diagnostic choice is not yet the native Draft policy.
+
+`noise_quality::full_hd_product_noise_acceptance` is an explicit ignored test
+for teapot, glass, chrome and the mixed chrome set at 1920×1080. It retains
+4096 independent reference spp, Production/Final thresholds RMS <0.02,
+smooth noise RMS <0.006 and block bias p95 <0.012. Held reference caches check
+physical scene/sampling metadata, dimensions and decoded pixel fingerprints;
+renderer provenance is recorded outside Git. Use `PM_STUDIO_NOISE_SCENES`
+to run one fixture per lock acquisition. The first expensive reference
+attempt was stopped to prioritize engineering; it is not counted as a pass.
