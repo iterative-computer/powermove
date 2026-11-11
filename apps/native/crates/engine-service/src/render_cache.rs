@@ -1315,6 +1315,15 @@ fn stop(running: Running) {
     let _ = running.thread.join();
 }
 
+/// The project's export default for motion blur (`exportDefaults.mblur`,
+/// on unless turned off, as the Export sheet reads it).
+fn export_motion_blur(doc: &pm_model::Document) -> bool {
+    doc.root()
+        .and_then(|r| r.get("exportDefaults"))
+        .and_then(|d| d.get("mblur"))
+        .is_none_or(|m| !matches!(m.kind(), pm_model::NodeKind::Bool(false)))
+}
+
 /// The fill child's request: the viewer's scene as an export job (png
 /// settings stand in for delivery; the child renders `fill`'s frames only).
 fn fill_request(
@@ -1333,7 +1342,9 @@ fn fill_request(
     let fps = (TICKS_PER_SECOND as f64 / step as f64 * 1000.).round() as u32;
     let settings = ExportSettings {
         format: ExportFormat::PngSequence { sixteen_bit: true },
-        alpha: AlphaOutput::Straight,
+        // Cached frames are the export's: opaque (the viewer shows the
+        // background), with the project's export motion blur.
+        alpha: AlphaOutput::None,
         quality: QualityTier::High,
         size: Size::new(fill.width, fill.height),
         frame_rate: FrameRate::new(fps, 1000),
@@ -1343,7 +1354,7 @@ fn fill_request(
         },
         audio: false,
         audio_index_playhead: None,
-        motion_blur: false,
+        motion_blur: export_motion_blur(&source.scene.doc),
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
@@ -1708,8 +1719,10 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
 fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v3");
+    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v4");
     hash.update(identity.comp.as_bytes());
+    // Frames are rendered as exported: with or without its motion blur.
+    hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
     hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
     for (asset, path) in &source.scene.media.paths {
         hash.update(asset.as_bytes());
@@ -2053,6 +2066,113 @@ mod tests {
             filled_frame(&scene()),
             "the offline clip's card is drawn"
         );
+    }
+
+    /// A cached frame is the exported frame: the cache's pixels through the
+    /// export's own 16-bit conversion (its dither too) are the samples of a
+    /// 16-bit PNG export of the same time, both through the real children.
+    #[test]
+    fn a_cached_frame_is_the_exported_frame() {
+        use pm_export::convert::{ConvertParams, WorkingFrame, convert};
+        use pm_export::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+        let exe = job_binary();
+        // An animated layer with motion blur: the paused viewer's samples
+        // (12) and the export's (16) differ, so only the export's request
+        // gives the exported bytes.
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["mblur"] = true.into();
+        let scene = scene_from(&project.to_string());
+        let at = Ticks::new(Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        let cached = filled_frame(&scene);
+        // The same frame exported as a 16-bit PNG, as the app exports it
+        // (opaque, dithered, the project's motion blur).
+        let out = tempfile::tempdir().unwrap();
+        let frames = {
+            let (w, h) = (640, 360);
+            CacheFill {
+                dir: out.path().into(),
+                quota: 0,
+                width: w,
+                height: h,
+                frames: vec![CacheFrame {
+                    ticks: at.get(),
+                    key: RenderKey {
+                        graph: [0; 32],
+                        media: [0; 32],
+                        ticks: at.get(),
+                        width: w,
+                        height: h,
+                        format: FORMAT.into(),
+                        renderer_version: String::new(),
+                    },
+                    chunk: 0,
+                    probe: false,
+                }],
+                budget_us: None,
+                frame_ticks: 0,
+                probe_scale: 1.,
+            }
+        };
+        let source = Source {
+            scene: scene.clone(),
+            definitions: vec![],
+            doc_id: 1,
+        };
+        let mut request = fill_request(&source, Rate::FPS_30, frames).unwrap();
+        request.cache = None;
+        request.destination = out.path().join("still");
+        if let pm_protocol::priority::JobSpec::Export { settings, .. } = &mut request.spec {
+            settings.format = pm_protocol::priority::ExportFormat::PngSequence { sixteen_bit: true };
+            settings.dither = true;
+        }
+        let export = crate::jobs::ExportHandle::start(&exe, request).unwrap();
+        let status = export.wait().unwrap();
+        assert_eq!(status.state, pm_protocol::priority::JobState::Done, "{status:?}");
+        let png = walk_png(out.path()).expect("the exported frame");
+        let (_, decoded) = pm_export::png::read(&png, true).unwrap();
+        let decoded = decoded.unwrap();
+        let exported = decoded.planes[0].u16().unwrap();
+        let working: Vec<f32> = cached
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
+        let expected = convert(
+            &WorkingFrame {
+                width: 640,
+                height: 360,
+                rgba: &working,
+            },
+            InputFormat::Rgba16,
+            &ConvertParams {
+                working: WorkingEncoding::Standard,
+                alpha: AlphaOutput::None,
+                tags: ColorTags::SrgbImage,
+                dither: true,
+                frame: 0,
+            },
+        )
+        .unwrap();
+        let expected = expected.planes[0].u16().unwrap();
+        let differing = expected
+            .iter()
+            .zip(exported)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 0, "of {} samples", expected.len());
+    }
+    fn walk_png(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk_png(&path) {
+                    return Some(found);
+                }
+            } else if path.extension().is_some_and(|e| e == "png") {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Delete Rendered Frames while a fill runs: the fill stops first, so no

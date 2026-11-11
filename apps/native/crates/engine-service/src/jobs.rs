@@ -1016,6 +1016,12 @@ pub fn run_child() -> Result<()> {
                     let _ = send(&mut std::io::stdout().lock(), &ChildMessage::Frame(frame));
                 },
                 &rasters.deferred_us,
+                // Stored frames are exported ones: the export's request.
+                &pm_export::render::frame_request(
+                    &settings,
+                    pm_export::settings::AlphaOutput::None,
+                    None,
+                ),
             );
         }
         let job = pm_export::render::ExportJob {
@@ -1288,8 +1294,9 @@ impl pm_render::compat::CompatRasters for JobRasters {
         mine
     }
 }
-/// Renders `fill`'s frames as the paused viewer draws them (the viewer's
-/// request at the composition's size, RGBA16F) into the render cache folder
+/// Renders `fill`'s frames as the export draws them (its request, opaque, at
+/// the composition's size and the project's motion blur, RGBA16F) into the
+/// render cache folder
 /// captured when the fill started, stopping before the volume or the Render
 /// Files Limit is full (`crate::render_cache`).
 ///
@@ -1311,6 +1318,7 @@ fn fill_cache(
     progress: &mut dyn FnMut(f64),
     report: &mut dyn FnMut(crate::render_cache::FrameReport),
     deferred: &AtomicU64,
+    export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
     if fill.budget_us.is_some() {
@@ -1338,15 +1346,19 @@ fn fill_cache(
     // can't be drawn exactly (a layer failed): it is left out and the fill
     // goes on. An error (often passing: an override answer that didn't
     // come) stops the fill.
-    let render = |renderer: &mut pm_render::Renderer,
-                  frame: &crate::render_cache::CacheFrame,
-                  spec: crate::render::FrameSpec|
+    let render_as = |renderer: &mut pm_render::Renderer,
+                     frame: &crate::render_cache::CacheFrame,
+                     spec: crate::render::FrameSpec,
+                     request: Option<&pm_render::RenderRequest>|
      -> Result<Option<(pm_export::render::ReadFrame, Sample)>> {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
         let time = pm_protocol::common::Ticks::new(frame.ticks)?;
-        let request = spec.request(&scene)?;
+        let request = match request {
+            Some(request) => request.clone(),
+            None => spec.request(&scene)?,
+        };
         gate.take_measured();
         gate.take_waited();
         let deferred_before = deferred.load(Ordering::Acquire);
@@ -1383,12 +1395,12 @@ fn fill_cache(
     let time_of = |frame: &crate::render_cache::CacheFrame| {
         pm_protocol::common::Ticks::new(frame.ticks).map_err(anyhow::Error::from)
     };
-    // The exact frame, coded for the cache.
+    // The exported frame (the export's own request), coded for the cache.
     let draw = |renderer: &mut pm_render::Renderer,
                 frame: &crate::render_cache::CacheFrame|
      -> Result<Option<Vec<u8>>> {
         let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
-        Ok(render(renderer, frame, spec)?.map(|(read, _)| {
+        Ok(render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
             let bytes: Vec<u8> = read
                 .rgba
                 .iter()
@@ -1408,7 +1420,7 @@ fn fill_cache(
             scale: fill.probe_scale,
             ..crate::render::FrameSpec::exact(time_of(frame)?, output)
         };
-        Ok(render(renderer, frame, spec)?.map(|(_, cost)| cost))
+        Ok(render_as(renderer, frame, spec, None)?.map(|(_, cost)| cost))
     };
     // A probe as playback meets it: the frame before it drawn first, so
     // programs, decoders and caches are warm, then the probe measured.
