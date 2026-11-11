@@ -1246,10 +1246,11 @@ impl pm_render::compat::CompatRasters for JobRasters {
 /// Files Limit is full (`crate::render_cache`).
 ///
 /// With a budget (background rendering), each chunk's probe frames come
-/// first: a chunk renders and stores its frames only when a probe costs
-/// the budget or more (GPU time, measured warm), and is left alone
-/// otherwise, so ranges that play in real time take no disk. A frame
-/// that can't be drawn exactly (a layer failed) is never stored.
+/// first, drawn as playback draws them and measured (GPU time, warm): a
+/// chunk renders and stores all its frames, exactly, only when a probe
+/// costs the budget or more, and is left alone otherwise, so ranges that
+/// play in real time take no disk. A frame that can't be drawn exactly (a
+/// layer failed) is never stored.
 #[allow(clippy::too_many_arguments)]
 fn fill_cache(
     renderer: &mut pm_render::Renderer,
@@ -1284,18 +1285,19 @@ fn fill_cache(
     };
     let pass = pm_export::render::pass_key(2, size);
     renderer.set_isolate_layers(true);
-    // One frame's coded pixels and GPU time, or `None` when it can't be
-    // drawn exactly (a layer failed): it is left out and the fill goes on.
-    // An error (often passing: an override answer that didn't come) stops
-    // the fill.
-    let draw = |renderer: &mut pm_render::Renderer,
-                    frame: &crate::render_cache::CacheFrame|
-     -> Result<Option<(Vec<u8>, f64)>> {
+    // One frame drawn as `spec` asks, with its GPU time, or `None` when it
+    // can't be drawn exactly (a layer failed): it is left out and the fill
+    // goes on. An error (often passing: an override answer that didn't
+    // come) stops the fill.
+    let render = |renderer: &mut pm_render::Renderer,
+                  frame: &crate::render_cache::CacheFrame,
+                  spec: crate::render::FrameSpec|
+     -> Result<Option<(pm_export::render::ReadFrame, f64)>> {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
         let time = pm_protocol::common::Ticks::new(frame.ticks)?;
-        let request = crate::render::FrameSpec::exact(time, output).request(&scene)?;
+        let request = spec.request(&scene)?;
         gate.take_measured();
         let read = match pm_export::render::render_frame_reusing(
             renderer,
@@ -1313,19 +1315,36 @@ fn fill_cache(
             Err(e) => anyhow::bail!("{e}"),
         };
         let cost = gate.take_measured();
-        // A layer that failed drew nothing: not the frame's exact picture.
-        if !read.failures.is_empty() {
-            return Ok(None);
-        }
-        let bytes: Vec<u8> = read
-            .rgba
-            .iter()
-            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
-            .collect();
-        Ok(Some((
-            crate::frame_codec::encode(&bytes, fill.width, fill.height),
-            cost,
-        )))
+        Ok(read.failures.is_empty().then_some((read, cost)))
+    };
+    let time_of = |frame: &crate::render_cache::CacheFrame| {
+        pm_protocol::common::Ticks::new(frame.ticks).map_err(anyhow::Error::from)
+    };
+    // The exact frame, coded for the cache.
+    let draw = |renderer: &mut pm_render::Renderer,
+                frame: &crate::render_cache::CacheFrame|
+     -> Result<Option<Vec<u8>>> {
+        let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
+        Ok(render(renderer, frame, spec)?.map(|(read, _)| {
+            let bytes: Vec<u8> = read
+                .rgba
+                .iter()
+                .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                .collect();
+            crate::frame_codec::encode(&bytes, fill.width, fill.height)
+        }))
+    };
+    // What the frame costs as playback draws it (its motion samples and
+    // resampler), at the composition's size: whether it plays in real time.
+    let measure = |renderer: &mut pm_render::Renderer,
+                   frame: &crate::render_cache::CacheFrame|
+     -> Result<Option<f64>> {
+        let spec = crate::render::FrameSpec {
+            moment: crate::policy::Moment::Playing,
+            exact: false,
+            ..crate::render::FrameSpec::exact(time_of(frame)?, output)
+        };
+        Ok(render(renderer, frame, spec)?.map(|(_, cost)| cost))
     };
     let store = |frame: &crate::render_cache::CacheFrame, bytes: &[u8]| -> Result<()> {
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
@@ -1345,48 +1364,41 @@ fn fill_cache(
     let total = frames.len().max(1) as f64;
     let mut at = 0;
     while at < frames.len() {
-        let chunk = frames[at].chunk;
+        let (first, chunk) = (at, frames[at].chunk);
         let end = at + frames[at..].iter().take_while(|f| f.chunk == chunk).count();
-        // Probes first: drawn, measured, and held until the chunk is judged.
-        let mut held = Vec::new();
-        let mut probed = false;
+        // Probes first: measured as playback draws them, never stored.
+        let mut probes = Vec::new();
         while at < end && frames[at].probe {
-            probed = true;
             let frame = &frames[at];
-            match draw(renderer, frame)? {
-                Some((bytes, mut cost)) => {
+            match measure(renderer, frame)? {
+                Some(mut cost) => {
                     // A first frame pays for warming up (programs, decoders):
                     // a probe over budget is measured once more, warm.
                     if fill.budget_us.is_some_and(|b| cost >= b)
-                        && let Some((_, again)) = draw(renderer, frame)?
+                        && let Some(again) = measure(renderer, frame)?
                     {
                         cost = cost.min(again);
                     }
-                    held.push((at, bytes, cost));
+                    probes.push((at, Some(cost)));
                 }
-                None => report(FrameReport {
-                    at: at as u32,
-                    cost_us: None,
-                    stored: false,
-                    refused: true,
-                }),
+                None => probes.push((at, None)),
             }
             at += 1;
             progress(at as f64 / total);
         }
         let heavy = match fill.budget_us {
             None => true,
-            Some(budget) => !probed || held.iter().any(|h| h.2 >= budget),
-        };
-        for (i, bytes, cost) in held {
-            if heavy {
-                store(&frames[i], &bytes)?;
+            Some(budget) => {
+                probes.is_empty() || probes.iter().any(|p| p.1.is_some_and(|c| c >= budget))
             }
+        };
+        let refused = |i: usize| probes.iter().any(|p| p.0 == i && p.1.is_none());
+        for &(i, cost) in &probes {
             report(FrameReport {
                 at: i as u32,
-                cost_us: Some(cost),
-                stored: heavy,
-                refused: false,
+                cost_us: cost,
+                stored: false,
+                refused: cost.is_none(),
             });
         }
         if !heavy {
@@ -1394,21 +1406,28 @@ fn fill_cache(
             progress(at as f64 / total);
             continue;
         }
-        while at < end {
-            let frame = &frames[at];
+        // Every frame of a chunk that can't play, its probes too, exactly.
+        for i in first..end {
+            if refused(i) {
+                continue;
+            }
+            let frame = &frames[i];
             let drawn = draw(renderer, frame)?;
-            if let Some((bytes, _)) = &drawn {
+            if let Some(bytes) = &drawn {
                 store(frame, bytes)?;
             }
             report(FrameReport {
-                at: at as u32,
-                cost_us: drawn.as_ref().map(|d| d.1),
+                at: i as u32,
+                cost_us: None,
                 stored: drawn.is_some(),
                 refused: drawn.is_none(),
             });
-            at += 1;
-            progress(at as f64 / total);
+            if i >= at {
+                at = i + 1;
+                progress(at as f64 / total);
+            }
         }
+        at = end;
     }
     renderer.release_frame_reuse();
     Ok(fill.dir.clone())
