@@ -505,11 +505,11 @@ fn fill_range(
         let frame = pm_engine_service::frame_codec::decode(payload, width, height)
             .ok_or_else(|| anyhow::anyhow!("a frame does not decode"))?;
         reads.push(t.elapsed().as_secs_f64() * 1000.);
-        anyhow::ensure!(frame.len() == width as usize * height as usize * 8);
+        anyhow::ensure!(frame.len() == width as usize * height as usize * 16);
         bytes += data.len() as u64;
     }
     reads.sort_by(f64::total_cmp);
-    let raw = u64::from(width) * u64::from(height) * 8;
+    let raw = u64::from(width) * u64::from(height) * 16;
     Ok(json!({"queued":queued,"fill_s":fill_s,"frames":files.len(),
         "bytes_per_frame":bytes / (files.len().max(1) as u64),"raw_bytes_per_frame":raw,
         "read_ms":{"p50":percentile(&reads,0.5),"p95":percentile(&reads,0.95),"max":reads.last()}}))

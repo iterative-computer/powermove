@@ -666,15 +666,18 @@ impl ExportHandle {
                         if let Some(delay) = &idle {
                             // Background work: granted only while the viewer
                             // is still idle, checked and sent under one lock;
-                            // an activity in between waits for idle again.
-                            // Never a whole frame by grant (an indivisible
-                            // frame is admitted whole only by this idle grant).
+                            // an activity in between waits for idle again. A
+                            // whole frame: bands of a frame with effects that
+                            // reach across them are not bit-equal to the frame
+                            // an export renders whole, and cached frames are
+                            // the export's. A play that starts waits behind
+                            // that one frame at most.
                             while !cancel.load(Ordering::Acquire) {
                                 interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
                                 if cancel.load(Ordering::Acquire) {
                                     break;
                                 }
-                                let grant = ParentMessage::Grant { whole_frame: false };
+                                let grant = background_grant();
                                 if interactive.grant_if_idle(seen, || reply(&grant)) {
                                     granted.fetch_add(1, Ordering::Relaxed);
                                     break;
@@ -690,7 +693,7 @@ impl ExportHandle {
                                 seen = epoch;
                                 active_at = Some(std::time::Instant::now());
                             }
-                            let whole_frame = grants_whole_frames(false, active_at);
+                            let whole_frame = grants_whole_frames(active_at);
                             reply(&ParentMessage::Grant { whole_frame });
                             granted.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1402,11 +1405,8 @@ fn fill_cache(
         let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
         Ok(
             render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
-                let bytes: Vec<u8> = read
-                    .rgba
-                    .iter()
-                    .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
-                    .collect();
+                // Every bit of the export's values (finer than half floats).
+                let bytes: Vec<u8> = read.rgba.iter().flat_map(|v| v.to_le_bytes()).collect();
                 crate::frame_codec::encode(&bytes, fill.width, fill.height)
             }),
         )
@@ -1559,13 +1559,16 @@ fn own_time(wall_us: f64, waited_us: f64, deferred_us: u64) -> f64 {
     (wall_us - waited_us - deferred_us as f64).max(0.)
 }
 
-/// Whether a GPU grant admits the rest of a frame: an export's, once the
-/// viewer has been quiet for [`QUIET`]; background work's never: it is
-/// granted right after the viewer is seen idle and only in bounded units
-/// (a whole frame only where bands cost one), so a play that starts waits
-/// behind one unit.
-fn grants_whole_frames(background: bool, active_at: Option<std::time::Instant>) -> bool {
-    !background && active_at.is_none_or(|t| t.elapsed() >= QUIET)
+/// Background work's GPU grant: a whole frame (see where it is sent).
+fn background_grant() -> ParentMessage {
+    ParentMessage::Grant { whole_frame: true }
+}
+
+/// Whether an export's GPU grant admits the rest of a frame: once the
+/// viewer has been quiet for [`QUIET`]. (Background work is granted whole
+/// frames, and only while the viewer is idle: `Activity::grant_if_idle`.)
+fn grants_whole_frames(active_at: Option<std::time::Instant>) -> bool {
+    active_at.is_none_or(|t| t.elapsed() >= QUIET)
 }
 
 /// A fill's renderer: a layer that fails is reported, not drawn into a
@@ -1811,8 +1814,7 @@ mod tests {
     fn a_fill_never_bypasses_a_missing_effect() {
         let mut project: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
-        project["layers"][0]["fx"] =
-            serde_json::json!([{"id": "fx-gone", "type": "not-installed.effect", "on": true, "p": {}}]);
+        project["layers"][0]["fx"] = serde_json::json!([{"id": "fx-gone", "type": "not-installed.effect", "on": true, "p": {}}]);
         let doc = pm_model::Document::new(
             Some(pm_model::canonical::canonical_project(
                 pm_model::json::parse(&project.to_string()).unwrap(),
@@ -1876,16 +1878,24 @@ mod tests {
         }
         assert!(activity.busy());
     }
-    /// Background work is never granted whole frames, however long the
-    /// viewer has been idle; an export is, once the viewer is quiet.
+    /// Background work renders whole frames, as an export does: a frame's
+    /// bands with effects that reach across them (Paper's Deep Glow) are
+    /// not bit-equal to the whole frame, and cached frames are the export's.
     #[test]
-    fn background_grants_are_always_bounded() {
+    fn background_grants_admit_whole_frames() {
+        assert!(matches!(
+            background_grant(),
+            ParentMessage::Grant { whole_frame: true }
+        ));
+    }
+    /// An export is granted whole frames once the viewer is quiet, bounded
+    /// submissions within the quiet period.
+    #[test]
+    fn export_grants_are_whole_once_the_viewer_is_quiet() {
         let long_ago = std::time::Instant::now() - 2 * QUIET;
-        assert!(grants_whole_frames(false, None));
-        assert!(grants_whole_frames(false, Some(long_ago)));
-        assert!(!grants_whole_frames(false, Some(std::time::Instant::now())));
-        assert!(!grants_whole_frames(true, None));
-        assert!(!grants_whole_frames(true, Some(long_ago)));
+        assert!(grants_whole_frames(None));
+        assert!(grants_whole_frames(Some(long_ago)));
+        assert!(!grants_whole_frames(Some(std::time::Instant::now())));
     }
     /// A job waiting for the viewer wakes when it goes quiet, or when the job
     /// is cancelled while it is still busy.

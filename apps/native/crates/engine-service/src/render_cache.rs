@@ -46,9 +46,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::render::Scene;
 
-/// Frames on disk: RGBA16F rows, top-down, premultiplied working values,
-/// coded losslessly (`crate::frame_codec`).
-pub const FORMAT: &str = "rgba16f-viewer-lzfse-v2";
+/// Frames on disk: RGBA32F rows, top-down, the export's premultiplied
+/// working values, coded losslessly (`crate::frame_codec`).
+pub const FORMAT: &str = "rgba32f-export-lzfse-v3";
 /// Media stamps are looked at again at most this often.
 const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
@@ -1533,9 +1533,24 @@ impl Reader {
                     if stale {
                         continue;
                     }
-                    let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
-                        crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
-                    });
+                    // Stored at full precision, shown on a half-float surface.
+                    let data = ask
+                        .cache
+                        .get(&ask.key)
+                        .ok()
+                        .flatten()
+                        .and_then(|d| {
+                            crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
+                        })
+                        .map(|values| {
+                            values
+                                .chunks_exact(4)
+                                .flat_map(|b| {
+                                    half::f16::from_f32(f32::from_le_bytes(b.try_into().unwrap()))
+                                        .to_le_bytes()
+                                })
+                                .collect::<Vec<u8>>()
+                        });
                     if data.is_some() {
                         // Played frames are the last the limit removes.
                         let _ = ask.cache.touch(&ask.key);
@@ -1800,10 +1815,9 @@ mod tests {
                 state.cache.clone().unwrap(),
             )
         };
-        let bytes: Vec<u8> =
-            std::iter::repeat_n(half::f16::from_f32(0.25).to_le_bytes(), 640 * 360 * 4)
-                .flatten()
-                .collect();
+        let bytes: Vec<u8> = std::iter::repeat_n(0.25f32.to_le_bytes(), 640 * 360 * 4)
+            .flatten()
+            .collect();
         cache
             .put(&key, &crate::frame_codec::encode(&bytes, 640, 360))
             .unwrap();
@@ -2047,6 +2061,27 @@ mod tests {
         read_eventually(&disk, scene, time).expect("rendered frame")
     }
 
+    /// Frame 30 filled through the real child, as stored (RGBA32F values).
+    fn filled_values(scene: &Scene) -> Vec<f32> {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        disk.start_fill(
+            1.,
+            1.03,
+            &job_binary(),
+            crate::jobs::Activity::default(),
+            |_| {},
+        )
+        .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert_eq!(bars.error.as_deref(), None, "{bars:?}");
+        stored_values(&disk, 30)
+    }
+
     /// Cached playback shows what the viewer shows: an offline clip fills as
     /// the Media Offline card, never left out as an export without it would.
     #[test]
@@ -2068,23 +2103,43 @@ mod tests {
         );
     }
 
-    /// A cached frame is the exported frame: the cache's pixels through the
+    /// A cached frame is the exported frame: the cache's values through the
     /// export's own 16-bit conversion (its dither too) are the samples of a
     /// 16-bit PNG export of the same time, both through the real children.
+    /// An animated layer with motion blur (the paused viewer's samples and
+    /// the export's differ) and a 32-bit working depth (values finer than
+    /// half floats).
     #[test]
     fn a_cached_frame_is_the_exported_frame() {
-        use pm_export::convert::{ConvertParams, WorkingFrame, convert};
-        use pm_export::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
-        let exe = job_binary();
-        // An animated layer with motion blur: the paused viewer's samples
-        // (12) and the export's (16) differ, so only the export's request
-        // gives the exported bytes.
         let mut project: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
         project["layers"][0]["mblur"] = true.into();
+        project["colorDepth"] = 32.into();
+        assert_cache_is_export(&project, false);
+    }
+
+    /// The same through background rendering, with a glow that reaches
+    /// across bands: a background fill renders whole frames, as the export.
+    #[test]
+    fn a_background_cached_frame_is_the_exported_frame() {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] =
+            serde_json::json!([{"id": "fx-glow", "type": "glow", "on": true, "p": {}}]);
+        assert_cache_is_export(&project, true);
+    }
+
+    fn assert_cache_is_export(project: &serde_json::Value, background: bool) {
+        use pm_export::convert::{ConvertParams, WorkingFrame, convert};
+        use pm_export::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+        let exe = job_binary();
         let scene = scene_from(&project.to_string());
         let at = Ticks::new(Rate::FPS_30.frame_start(30).unwrap()).unwrap();
-        let cached = filled_frame(&scene);
+        let cached = if background {
+            background_values(&scene)
+        } else {
+            filled_values(&scene)
+        };
         // The same frame exported as a 16-bit PNG, as the app exports it
         // (opaque, dithered, the project's motion blur).
         let out = tempfile::tempdir().unwrap();
@@ -2138,15 +2193,11 @@ mod tests {
         let (_, decoded) = pm_export::png::read(&png, true).unwrap();
         let decoded = decoded.unwrap();
         let exported = decoded.planes[0].u16().unwrap();
-        let working: Vec<f32> = cached
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect();
         let expected = convert(
             &WorkingFrame {
                 width: 640,
                 height: 360,
-                rgba: &working,
+                rgba: &cached,
             },
             InputFormat::Rgba16,
             &ConvertParams {
@@ -2166,6 +2217,49 @@ mod tests {
             .count();
         assert_eq!(differing, 0, "of {} samples", expected.len());
     }
+
+    /// Frame 30 rendered by background rendering (its chunk known not to
+    /// play), as stored.
+    fn background_values(scene: &Scene) -> Vec<f32> {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.set_activity(crate::jobs::Activity::default());
+        disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let at = Ticks::new(Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        disk.measured(disk.frame_id(scene, at).unwrap(), DROPPED_US);
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(100),
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        settle(&disk, |_| present(&disk).contains(&30));
+        disk.set_background_host(None);
+        stored_values(&disk, 30)
+    }
+
+    fn stored_values(disk: &DiskFrames, n: i64) -> Vec<f32> {
+        let (key, cache) = {
+            let state = disk.inner.state.lock().unwrap();
+            (
+                state.frames.as_ref().unwrap().key(n).unwrap(),
+                state.cache.clone().unwrap(),
+            )
+        };
+        let coded = cache.get(&key).unwrap().expect("the stored frame");
+        crate::frame_codec::decode(&coded, 640, 360)
+            .unwrap()
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    }
+
     fn walk_png(dir: &Path) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let path = entry.path();
