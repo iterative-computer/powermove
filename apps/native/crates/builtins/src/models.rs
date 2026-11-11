@@ -51,6 +51,11 @@ pub(crate) struct Models {
     /// The export the viewer last measured a 3D estimate for (size, length,
     /// revision), so the sheet asks once per change.
     pub export_estimate_key: Option<String>,
+    /// The estimate state last seen and how often it was asked again: the
+    /// viewer drops a queued measurement when its picture is redrawn (a
+    /// full-resolution refine after a scrub), so the sheet asks again, at
+    /// most a few times per change.
+    pub export_estimate_seen: (String, u8),
     /// Loaded for the Agent panel only; its load settles interrupted runs.
     pub agent: Option<crate::agent_host::SharedAgent>,
     pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
@@ -121,6 +126,7 @@ impl Models {
             fields: BTreeMap::new(),
             platform: vec![],
             export_estimate_key: None,
+            export_estimate_seen: (String::new(), 0),
             agent,
             agent_link: Default::default(),
             stamp: String::new(),
@@ -1082,7 +1088,17 @@ impl Backend {
         ) {
             let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
             let key = format!("{w}x{h}x{frames}@{}", p.revision());
-            if self.native.export_estimate_key.as_deref() != Some(key.as_str()) {
+            let status = self.native.facts["studioExportEstimate"]["status"]
+                .as_str()
+                .unwrap_or("idle")
+                .to_owned();
+            let (seen, asked) = std::mem::take(&mut self.native.export_estimate_seen);
+            let superseded =
+                matches!(seen.as_str(), "queued" | "measuring") && status == "idle" && asked < 3;
+            let changed = self.native.export_estimate_key.as_deref() != Some(key.as_str());
+            self.native.export_estimate_seen =
+                (status, if changed { 0 } else { asked + superseded as u8 });
+            if changed || superseded {
                 self.native.export_estimate_key = Some(key);
                 self.native.platform.push((
                     "export.estimate".into(),
@@ -1090,14 +1106,19 @@ impl Backend {
                 ));
             }
             let preset = policy["preset"].as_str().unwrap_or("production");
-            if let Some(note) = crate::delivery::measured_estimate(
-                &self.native.facts["studioExportEstimate"],
-                preset,
-                &label,
-                w,
-                h,
-                frames,
-            ) {
+            // Asked just now: say so until the viewer's state catches up,
+            // rather than flash the static guess before the measured range.
+            let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
+            if let Some(note) = asked.or_else(|| {
+                crate::delivery::measured_estimate(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                )
+            }) {
                 let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();
                 self.native.export["project"]["summary"] = json!(format!("{base} · {note}"));
             }

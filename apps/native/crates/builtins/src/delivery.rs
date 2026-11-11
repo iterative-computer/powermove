@@ -71,27 +71,33 @@ pub fn measured_estimate(
         "queued" | "measuring" => Some(format!("3D {label}, measuring…")),
         "ready" => {
             let e = &state["estimate"];
+            // A measurement of another size or length: this one is coming.
             if e["width"].as_u64() != Some(width as u64)
                 || e["height"].as_u64() != Some(height as u64)
                 || e["frames"].as_u64() != Some(frames)
             {
-                return None;
+                return Some(format!("3D {label}, measuring…"));
             }
             let row = e["presets"].as_array()?.iter().find(|r| r["preset"] == preset)?;
             let lo = row["totalMs"]["min"].as_f64()? / 1000.;
             let hi = row["totalMs"]["max"].as_f64()? / 1000.;
             let about = |s: f64| pm_panel_studio3d::properties::about(s);
+            // A number keeps its unit on one line (no-break space).
+            let keep = |t: String| t.replace(' ', "\u{a0}");
             Some(if (hi - lo) / hi.max(1.) < 0.25 {
-                format!("3D {label}, {}", about((lo + hi) / 2.))
+                let a = about((lo + hi) / 2.);
+                let rest = a.trim_start_matches("about ");
+                format!("3D {label}, about {}", keep(rest.to_owned()))
             } else {
-                // "about 2 min to about 3 min" reads as "about 2–3 min".
+                // A range already says "about": "11–63 min", "38 min–3.2 h".
                 let (a, b) = (about(lo), about(hi));
+                let (a, b) = (a.trim_start_matches("about "), b.trim_start_matches("about "));
                 let unit = |t: &str| t.rsplit(' ').next().unwrap_or("").to_owned();
-                if unit(&a) == unit(&b) {
-                    let n = |t: &str| t.split(' ').nth(1).unwrap_or("").to_owned();
-                    format!("3D {label}, about {}–{} {}", n(&a), n(&b), unit(&b))
+                let n = |t: &str| t.split(' ').next().unwrap_or("").to_owned();
+                if unit(a) == unit(b) {
+                    format!("3D {label}, {}–{}", n(a), keep(b.to_owned()))
                 } else {
-                    format!("3D {label}, {a} to {}", b.trim_start_matches("about "))
+                    format!("3D {label}, {}–{}", keep(a.to_owned()), keep(b.to_owned()))
                 }
             })
         }
@@ -946,5 +952,28 @@ mod capability_tests {
             portable_capability(&snapshot, &originals)["available"],
             true
         );
+    }
+}
+#[cfg(test)]
+mod estimate_tests {
+    use super::measured_estimate;
+    use serde_json::json;
+    fn ready(min: f64, max: f64) -> serde_json::Value {
+        json!({"status":"ready","estimate":{"width":1920,"height":1080,"frames":120,
+            "presets":[{"preset":"production","totalMs":{"min":min,"max":max}}]}})
+    }
+    #[test]
+    fn the_sheet_says_measuring_then_the_measured_range() {
+        let say = |s: &serde_json::Value, w| measured_estimate(s, "production", "Production", w, 1080, 120);
+        assert_eq!(say(&json!({"status":"queued"}), 1920).unwrap(), "3D Production, measuring…");
+        assert_eq!(say(&json!({"status":"measuring","completed":3,"total":8}), 1920).unwrap(), "3D Production, measuring…");
+        assert_eq!(say(&ready(660_000., 3_780_000.), 1920).unwrap(), "3D Production, 11–63\u{a0}min");
+        assert_eq!(say(&ready(2_280_000., 11_520_000.), 1920).unwrap(), "3D Production, 38\u{a0}min–3.2\u{a0}h");
+        assert_eq!(say(&ready(400_000., 440_000.), 1920).unwrap(), "3D Production, about 7\u{a0}min");
+        // Another size's measurement: the new one is on its way.
+        assert_eq!(say(&ready(660_000., 3_780_000.), 960).unwrap(), "3D Production, measuring…");
+        // Nothing measured, or a failure: the static guess stays.
+        assert_eq!(say(&json!({"status":"idle"}), 1920), None);
+        assert_eq!(say(&json!({"status":"failed","message":"x"}), 1920), None);
     }
 }

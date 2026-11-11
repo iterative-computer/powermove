@@ -733,15 +733,91 @@ fn scene_commands(
 /// Set Up Studio (3d-studio.md §8): softboxes, a framing camera and the
 /// seamless set around what's in the scene, from its evaluated geometry.
 /// Imported models need loaded geometry; without it this says so.
+/// A model's size from what the import measured (`native3dBounds`), or the
+/// unit envelope older imports were fitted into: enough to frame a studio
+/// set without loading the file.
+struct RetainedBounds;
+impl pm_scene3d::geometry::AssetGeometry for RetainedBounds {
+    fn bounds(
+        &self,
+        _id: &str,
+        record: &Value,
+        _time: f64,
+    ) -> pm_scene3d::Result<pm_scene3d::navigation::Bounds> {
+        if record["native3dBounds"]["version"] == 1
+            && let Some(v) = record["native3dBounds"]["bounds"]
+                .as_array()
+                .filter(|a| a.len() == 6)
+                .and_then(|a| a.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>())
+        {
+            let b = pm_scene3d::navigation::Bounds {
+                min: [v[0], v[1], v[2]],
+                max: [v[3], v[4], v[5]],
+            };
+            if b.validate().is_ok() {
+                return Ok(b);
+            }
+        }
+        Ok(pm_scene3d::navigation::Bounds {
+            min: [-1.; 3],
+            max: [1.; 3],
+        })
+    }
+}
 pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)> {
-    let args = json!({"operation":"auto_studio"});
+    let comp = composition(p)?;
+    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+    // The set frames the product: the selected model, else the first model
+    // that isn't an environment or a flat plane (a floor would make the set
+    // the size of the floor).
+    let product = |l: &Value| {
+        schema::role(l) == Some(Role::Object)
+            && fields::environment(&l["d"]["data"]).is_none()
+            && l["d"]["data"]["object"]["source"]["primitive"] != "plane"
+    };
+    let hero = layers
+        .iter()
+        .find(|l| p.selection.layers().iter().any(|id| l["id"] == id.as_str()) && product(l))
+        .or_else(|| layers.iter().find(|l| product(l)))
+        .and_then(|l| l["id"].as_str())
+        .map(str::to_owned);
+    let mut args = json!({"operation":"auto_studio"});
+    if let Some(hero) = &hero {
+        args["target"] = json!(hero);
+    }
+    // The starter light, sky and floor a first model brought give way to the
+    // studio set, so there's one lighting setup, not two.
+    let starter: Vec<String> = layers
+        .iter()
+        .filter_map(|l| l["id"].as_str())
+        .filter(|id| {
+            ["w", "k", "f"].iter().any(|suffix| {
+                id.strip_suffix(suffix)
+                    .is_some_and(|model| layers.iter().any(|m| m["id"] == model && product(m)))
+            })
+        })
+        .map(str::to_owned)
+        // A studio set from before is replaced, not doubled.
+        .chain(
+            layers
+                .iter()
+                .filter(|l| {
+                    schema::role(l) == Some(Role::Light)
+                        && matches!(
+                            l["name"].as_str(),
+                            Some("Key softbox" | "Fill softbox" | "Rim strip")
+                        )
+                })
+                .filter_map(|l| l["id"].as_str().map(str::to_owned)),
+        )
+        .collect();
     let geometry = pm_kernel::commands::scene3d::prepare_geometry(
         &p.snapshot,
         p.snapshot.open_comp(),
         &to_model(&args),
         p.selection.layers(),
         time,
-        &pm_scene3d::geometry::NoAssets,
+        &RetainedBounds,
     )
     .map_err(|e| {
         let e = e.to_string();
@@ -753,8 +829,7 @@ pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)>
     })?;
     Ok((
         "Set Up Studio".into(),
-        vec![
-            Scene3dCommand::ApplyPrepared {
+        [Scene3dCommand::ApplyPrepared {
                 comp: p.snapshot.open_comp(),
                 args: to_model(&args),
                 selection: p.selection.layers().to_vec(),
@@ -762,8 +837,15 @@ pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)>
                 autokey: false,
                 geometry,
             }
-            .into(),
-        ],
+            .into()]
+        .into_iter()
+        .chain((!starter.is_empty()).then(|| {
+            pm_kernel::LayerCommand::Delete {
+                layer_ids: starter,
+            }
+            .into()
+        }))
+        .collect(),
     ))
 }
 /// What the composition's 3D summary shows, or `None` when it has no 3D layer:
@@ -1069,8 +1151,15 @@ pub fn add_models(
         if record["kind"] != "model" {
             continue;
         }
-        let name = record["name"].as_str().unwrap_or("3D Model").to_string();
-        let obj = name.to_ascii_lowercase().ends_with(".obj");
+        let file = record["name"].as_str().unwrap_or("3D Model").to_string();
+        let obj = file.to_ascii_lowercase().ends_with(".obj");
+        // The layer is named for the model, not its file: "Bottle".
+        let name = std::path::Path::new(&file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&file)
+            .to_string();
         commands.push(scene(
             p,
             time,
@@ -1079,6 +1168,15 @@ pub fn add_models(
         ));
         names.push(name);
         select.push(layer.clone());
+    }
+    // The first model in an unlit composition arrives lit, as a first shape
+    // does: a soft sky, a key softbox and a floor for its contact shadow.
+    if let Some(first) = select.first() {
+        let comp = composition(p)?;
+        let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+        for args in starter(&layers, first) {
+            commands.push(scene(p, time, args));
+        }
     }
     let label = match names.as_slice() {
         [] => return Err(invalid("No 3D models were imported")),

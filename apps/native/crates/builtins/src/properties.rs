@@ -544,7 +544,23 @@ impl Properties {
     fn scene_section(&mut self, model: &mut Inspector) -> Result<Option<Value>, String> {
         use pm_panel_studio3d::properties::{QUALITY, SKIES, scene_summary};
         let Some(summary) = scene_summary(model.published()).map_err(|e| e.to_string())? else {
-            return Ok(None);
+            // An empty composition says where 3D starts, with the one-click
+            // lit set beside it.
+            let empty = model
+                .published()
+                .snapshot
+                .root()
+                .and_then(|root| {
+                    pm_kernel::model::comp_node(root, model.published().snapshot.open_comp().as_deref())
+                        .and_then(|c| c.get("layers").map(|l| l.to_value()))
+                })
+                .is_some_and(|l| l.as_array().is_some_and(|a| a.is_empty()));
+            if !empty {
+                return Ok(None);
+            }
+            return Ok(Some(json!({"id":"3d.scene","title":"3D Scene","collapsed":false,"rows":[],
+                "note":"Add a model, text or light from Layer ▸ Add 3D Layer, or start from a lit studio set.",
+                "action":"set-up-studio"})));
         };
         let quality = summary["quality"]["preset"]
             .as_str()

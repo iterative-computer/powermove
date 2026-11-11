@@ -903,8 +903,14 @@ impl Controller {
             return;
         };
         while let Some(request) = self.builtins.requests.pop_front() {
-            if !self.builtins.ready.contains(&request.panel)
-                || self.builtins.generations.get(&request.panel) != Some(&request.generation)
+            // The Export sheet asks for its 3D estimate from its first
+            // snapshot, before the panel is marked ready. The request only
+            // asks the viewer to measure and edits nothing, so it never
+            // waits on the panel.
+            let measure_only = request.operation == "export.estimate";
+            if !measure_only
+                && (!self.builtins.ready.contains(&request.panel)
+                    || self.builtins.generations.get(&request.panel) != Some(&request.generation))
             {
                 runtime.platform_reply(request.id, Err("Panel is not ready".into()));
                 continue;
@@ -1006,17 +1012,22 @@ impl Controller {
                 // shot on its idle worker; the state comes back in the facts.
                 "export.estimate" => {
                     let n = |k: &str| request.input[k].as_u64().unwrap_or(0);
+                    // Measure the viewer's current scene (its stamp, not the
+                    // last drawn frame's, which may already be superseded).
                     if let Some(viewer) = &self.viewer
-                        && let Some(frame) = viewer.status().frame
+                        && let Some(stamp) = viewer.stamp()
                         && n("width") > 0
                         && n("height") > 0
                     {
-                        let _ = viewer.estimate_studio_export(
-                            frame.stamp,
-                            frame.time,
+                        let time = viewer.status().frame.map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
+                        if let Err(error) = viewer.estimate_studio_export(
+                            stamp,
+                            time,
                             pm_protocol::common::Size::new(n("width") as u32, n("height") as u32),
                             n("frames").max(1),
-                        );
+                        ) {
+                            eprintln!("Studio export estimate not started: {error}");
+                        }
                     }
                     Ok(Value::Null)
                 }
