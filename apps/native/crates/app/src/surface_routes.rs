@@ -174,22 +174,18 @@ impl Controller {
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
-                // Open in New Window, or a project opened from Home while this
-                // window shows one: a window of its own, as a tab of this one.
+                // Normal Home actions replace this window's project through
+                // settle_open, which saves and releases its previous session.
                 Outbound::Opened {
                     reply,
                     name,
                     file,
-                    new_window,
-                } if new_window || v.session.is_some() || v.opening => {
-                    let pending = crate::entry::Pending::Adopt { reply, name, file };
-                    if new_window {
-                        crate::entry::open_in_new_window(pending, cx);
-                    } else {
-                        let leader = v.shell_window_id(cx);
-                        crate::entry::open_in_new_tab(pending, leader, cx);
-                        v.hide_home(cx);
-                    }
+                    new_window: true,
+                } => {
+                    crate::entry::open_in_new_window(
+                        crate::entry::Pending::Adopt { reply, name, file },
+                        cx,
+                    );
                 }
                 Outbound::Opened {
                     reply, name, file, ..
@@ -249,13 +245,6 @@ impl Controller {
                 && !self.reopening
                 && self.opening_name.is_none()
                 && !self.recovery_pending)
-    }
-    /// The shell window id of this editor (for joining its tab group).
-    fn shell_window_id(&self, cx: &App) -> u64 {
-        self.shell
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .map_or(0, |s| s.read(cx).window_id)
     }
     /// Home for the shell to draw in place of the docks, or `None`.
     pub(crate) fn home_element(
