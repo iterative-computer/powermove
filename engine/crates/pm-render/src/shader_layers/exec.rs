@@ -18,6 +18,9 @@ use crate::effects::program::{Call, GpuProgram};
 #[derive(Default)]
 pub struct ShaderState {
     programs: HashMap<Key, (GpuProgram, u64)>,
+    /// Sources whose last build failed because of the compiler: built
+    /// again after their backoff.
+    retry: HashMap<Key, crate::effects::retry::Retry>,
     tick: u64,
     /// Whether a fallback runner draws programs the native pipeline cannot
     /// (the interactive engine with a viewer); see [`super::fallback`].
@@ -39,6 +42,11 @@ pub struct ShaderState {
     /// would a translation it cannot compile.
     #[cfg(test)]
     pub(crate) refuse_pipelines: bool,
+    /// Tests: every program build fails with this, and builds are counted.
+    #[cfg(test)]
+    pub(crate) fail_builds: Option<Failure>,
+    #[cfg(test)]
+    pub(crate) builds: u32,
 }
 
 /// Programs kept before the least recently used is dropped (today's
@@ -115,10 +123,44 @@ impl ShaderState {
         self.tick += 1;
         let tick = self.tick;
         if !self.programs.contains_key(&key) {
+            if let Some(f) = self
+                .retry
+                .get(&key)
+                .and_then(crate::effects::retry::Retry::waiting)
+            {
+                return Err(f.clone());
+            }
             let prepared = prepared.as_ref().as_ref().map_err(|f| f.clone())?;
-            let program = prepared
-                .finish()
-                .and_then(|p| GpuProgram::new(device, p, "pm shader layer"))?;
+            #[cfg(test)]
+            let forced = {
+                self.builds += 1;
+                self.fail_builds.clone()
+            };
+            #[cfg(not(test))]
+            let forced: Option<Failure> = None;
+            let built = match forced {
+                Some(f) => Err(f),
+                None => prepared
+                    .finish()
+                    .and_then(|p| GpuProgram::new(device, p, "pm shader layer")),
+            };
+            let program = match built {
+                Ok(program) => {
+                    self.retry.remove(&key);
+                    program
+                }
+                Err(f) => {
+                    if f.stage.retryable() {
+                        if self.retry.len() >= PROGRAMS {
+                            self.retry.clear();
+                        }
+                        let next =
+                            crate::effects::retry::Retry::after(self.retry.get(&key), f.clone());
+                        self.retry.insert(key, next);
+                    }
+                    return Err(f);
+                }
+            };
             if self.programs.len() >= PROGRAMS {
                 let oldest = self
                     .programs
@@ -601,6 +643,49 @@ mod tests {
     use pm_protocol::color::Precision;
     use pm_protocol::common::{Size, Ticks};
     use pm_protocol::error::ErrorCode;
+
+    /// Draws of a shader layer during a busy compiler build its program
+    /// once per backoff window, not once per draw.
+    #[test]
+    fn shader_layer_draws_during_a_busy_compiler_build_once_per_window() {
+        let gpu = pm_gpu::Gpu::new("shader layer backoff test").unwrap();
+        // The missing-definition checkerboard: a program that translates.
+        let (source, offset) = super::super::missing_layer_program();
+        let (key, verdict) = super::super::translate::verdict(&source, offset);
+        let super::super::translate::Verdict::Ready(prepared) = verdict else {
+            panic!("the fixture translates");
+        };
+        let mut state = super::ShaderState {
+            fail_builds: Some(pm_glsl::Failure::new(
+                pm_glsl::FailureStage::CompilerProcess,
+                "the compiler crashed",
+            )),
+            ..Default::default()
+        };
+        for _ in 0..30 {
+            assert!(
+                state
+                    .program(
+                        &gpu.device,
+                        key,
+                        &prepared,
+                        wgpu::TextureFormat::Rgba16Float
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(state.builds, 1);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        for _ in 0..30 {
+            let _ = state.program(
+                &gpu.device,
+                key,
+                &prepared,
+                wgpu::TextureFormat::Rgba16Float,
+            );
+        }
+        assert_eq!(state.builds, 2);
+    }
     use serde_json::json;
 
     use super::super::FallbackPixels;
