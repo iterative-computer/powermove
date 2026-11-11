@@ -92,12 +92,26 @@ pub struct Activity {
 impl Activity {
     pub fn set(&self, busy: bool) {
         if busy {
+            // Under the lock a background grant is checked and sent with
+            // (`grant_if_idle`): activity lands before it or after it.
+            let _grant = self.quiet.0.lock().unwrap();
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            self.busy.store(true, Ordering::Release);
+            return;
         }
-        self.busy.store(busy, Ordering::Release);
-        if !busy {
-            self.wake();
+        self.busy.store(false, Ordering::Release);
+        self.wake();
+    }
+    /// Sends a background grant (`send`) only if the viewer is still idle
+    /// as last seen (`seen`): no activity can land between this check and
+    /// the send. Whether it sent.
+    fn grant_if_idle(&self, seen: u64, send: impl FnOnce()) -> bool {
+        let _grant = self.quiet.0.lock().unwrap();
+        if self.busy() || self.epoch() != seen {
+            return false;
         }
+        send();
+        true
     }
     fn wake(&self) {
         let _quiet = self.quiet.0.lock().unwrap();
@@ -640,16 +654,23 @@ impl ExportHandle {
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
                         if let Some(delay) = &idle {
-                            // Seen idle, then checked again right before the
-                            // grant: an activity in between waits once more.
-                            loop {
+                            // Background work: granted only while the viewer
+                            // is still idle, checked and sent under one lock;
+                            // an activity in between waits for idle again.
+                            // Never a whole frame by grant (an indivisible
+                            // frame is admitted whole only by this idle grant).
+                            while !cancel.load(Ordering::Acquire) {
                                 interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
-                                if cancel.load(Ordering::Acquire)
-                                    || (!interactive.busy() && interactive.epoch() == seen)
-                                {
+                                if cancel.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                let grant = ParentMessage::Grant { whole_frame: false };
+                                if interactive.grant_if_idle(seen, || reply(&grant)) {
+                                    granted.fetch_add(1, Ordering::Relaxed);
                                     break;
                                 }
                             }
+                            continue;
                         } else if interactive.wait_quiet(&cancel) {
                             active_at = Some(std::time::Instant::now());
                         }
@@ -659,7 +680,7 @@ impl ExportHandle {
                                 seen = epoch;
                                 active_at = Some(std::time::Instant::now());
                             }
-                            let whole_frame = grants_whole_frames(idle.is_some(), active_at);
+                            let whole_frame = grants_whole_frames(false, active_at);
                             reply(&ParentMessage::Grant { whole_frame });
                             granted.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1674,6 +1695,37 @@ mod tests {
         divisible.record(SCALING_UNITS, 40_000.);
         assert_eq!(divisible.bounded(63), 1, "cost grows with the band");
         assert_eq!(divisible.bounded(62), 1, "tested once");
+    }
+    /// An activity that lands while a background grant is being checked
+    /// and sent waits for it; one that landed first stops it, so nothing
+    /// is sent once the person has acted.
+    #[test]
+    fn no_background_grant_is_sent_after_an_activity() {
+        let activity = Activity::default();
+        let seen = activity.epoch();
+        // Play lands first: nothing is sent.
+        activity.set(true);
+        activity.set(false);
+        let mut sent = false;
+        assert!(!activity.grant_if_idle(seen, || sent = true));
+        assert!(!sent);
+        // Play lands during the send: it takes effect after it.
+        let seen = activity.epoch();
+        let player = activity.clone();
+        let mut epoch_during_send = 0;
+        assert!(activity.grant_if_idle(seen, || {
+            let play = std::thread::spawn(move || player.set(true));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            epoch_during_send = activity.epoch();
+            drop(play);
+        }));
+        assert_eq!(epoch_during_send, seen, "no activity landed inside the grant");
+        let start = std::time::Instant::now();
+        while activity.epoch() == seen {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+        assert!(activity.busy());
     }
     /// Background work is never granted whole frames, however long the
     /// viewer has been idle; an export is, once the viewer is quiet.
