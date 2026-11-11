@@ -203,10 +203,9 @@ enum Late {
     /// Wait for it: the frame fails with `CompatPending` (paused frames, exact).
     #[default]
     Wait,
-    /// Draw its nearest answer, or wait when it has none (scrubbing).
+    /// Draw its nearest answer, or hold the picture when it has none
+    /// (playing and scrubbing: a late layer is never left out).
     Nearest,
-    /// Draw its nearest answer, or nothing (playing: the picture keeps time).
-    NearestOrNothing,
 }
 
 #[derive(Default)]
@@ -229,8 +228,8 @@ struct Answers {
     /// not asked again until the revision or wrappers change.
     failed: HashMap<NeedKey, String>,
     /// Needs the realm could not answer this time: asked again once their
-    /// backoff passes; after a few attempts their frames report the error
-    /// meanwhile instead of waiting.
+    /// backoff passes. Their frames wait (or draw the nearest answer) and are
+    /// never drawn without the layer.
     unavailable: HashMap<NeedKey, Unavailable>,
     /// The frame being drawn: how it treats late layers, and which it drew
     /// from a nearest answer.
@@ -251,7 +250,6 @@ struct Answers {
     horizon: Option<i64>,
 }
 struct Unavailable {
-    message: String,
     attempts: u32,
     again_at: Instant,
 }
@@ -261,8 +259,6 @@ fn backoff(attempts: u32) -> Duration {
 }
 const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
-/// Transient failures a frame waits through before it reports the error.
-const REPORT_AFTER: u32 = 3;
 
 type Redraw = Arc<dyn Fn() + Send + Sync>;
 
@@ -605,20 +601,19 @@ impl CompatStore {
     pub(crate) fn frame_ticks(&self) -> i64 {
         self.answers.lock().unwrap().frame
     }
-    /// The frame about to be drawn: playing frames draw late layers from
-    /// their nearest answer (or not at all), scrubbed frames from their
-    /// nearest answer when there is one, paused frames wait.
+    /// The frame about to be drawn: playing and scrubbed frames draw late
+    /// layers from their nearest answer (holding the picture when there is
+    /// none), paused frames wait.
     pub(crate) fn begin_frame(&self, moment: crate::policy::Moment) {
         let mut answers = self.answers.lock().unwrap();
         answers.late = match moment {
-            crate::policy::Moment::Playing => Late::NearestOrNothing,
-            crate::policy::Moment::Scrub => Late::Nearest,
+            crate::policy::Moment::Playing | crate::policy::Moment::Scrub => Late::Nearest,
             crate::policy::Moment::Paused => Late::Wait,
         };
         answers.stood_in.clear();
     }
-    /// The needs the frame just drawn showed from a nearest answer (or not at
-    /// all): the frame is not exact, and these are still to be answered.
+    /// The needs the frame just drawn showed from a nearest answer: the
+    /// frame is not exact, and these are still to be answered.
     pub(crate) fn end_frame(&self) -> Vec<CompatNeed> {
         let mut answers = self.answers.lock().unwrap();
         answers.late = Late::Wait;
@@ -662,20 +657,15 @@ impl CompatStore {
                 }
                 // Asked again by the first frame that needs it after the
                 // backoff; a redraw then makes sure one does.
-                Reply::Unavailable(message) => {
+                Reply::Unavailable(_) => {
                     if answers.unavailable.len() >= MAX_ENTRIES {
                         answers.unavailable.clear();
                     }
                     let attempts = answers.unavailable.get(&key).map_or(0, |u| u.attempts) + 1;
                     let again_at = Instant::now() + backoff(attempts);
-                    answers.unavailable.insert(
-                        key,
-                        Unavailable {
-                            message,
-                            attempts,
-                            again_at,
-                        },
-                    );
+                    answers
+                        .unavailable
+                        .insert(key, Unavailable { attempts, again_at });
                     again.push(again_at);
                     continue;
                 }
@@ -785,21 +775,16 @@ impl CompatRasters for CompatStore {
         if let Some(message) = answers.failed.get(&key) {
             return CompatAnswer::Failed(message.clone());
         }
-        // One the realm keeps failing to answer is reported while it waits
-        // to be asked again; once due, the frame asks.
-        if let Some(u) = answers.unavailable.get(&key)
-            && u.attempts >= REPORT_AFTER
-            && Instant::now() < u.again_at
-        {
-            return CompatAnswer::Failed(u.message.clone());
-        }
+        // Not answered yet, or the realm couldn't answer this time (asked
+        // again after its backoff): never drawn without the layer. A paused
+        // frame waits (the viewer says what for after a few seconds); a
+        // playing or scrubbed one draws the layer's nearest answer, or holds
+        // the previous picture until one arrives.
         if answers.late == Late::Wait {
             return CompatAnswer::Missing;
         }
-        let stand_in = match (answers.nearest(composition, layer, ticks), answers.late) {
-            (Some(answer), _) => answer.clone(),
-            (None, Late::NearestOrNothing) => hidden_raster(),
-            (None, _) => return CompatAnswer::Missing,
+        let Some(stand_in) = answers.nearest(composition, layer, ticks).cloned() else {
+            return CompatAnswer::Missing;
         };
         answers.stood_in.push(CompatNeed {
             composition: composition.into(),
@@ -981,23 +966,25 @@ mod tests {
         store.answer_all(7, 1, vec![(need("x"), draw(9))]);
         assert!(matches!(answer(&store, "x"), CompatAnswer::Raster(r) if r.data[0] == 9));
 
-        // Failing every time: reported after a few attempts, never sticky.
-        for attempt in 1..=REPORT_AFTER {
+        // Failing every time: asked again after each backoff, never drawn
+        // without the layer and never sticky.
+        for attempt in 1..=4usize {
             let before = redraws.load(Ordering::SeqCst);
             store.request(vec![need("y")]);
-            assert_eq!(asked.lock().unwrap().len(), 2 + attempt as usize);
+            assert_eq!(asked.lock().unwrap().len(), 2 + attempt);
             store.answer_all(7, 1, vec![(need("y"), unavailable())]);
-            let reported =
-                matches!(answer(&store, "y"), CompatAnswer::Failed(m) if m == "readback");
-            assert_eq!(reported, attempt >= REPORT_AFTER, "attempt {attempt}");
+            assert!(
+                matches!(answer(&store, "y"), CompatAnswer::Missing),
+                "attempt {attempt}: the paused frame waits, the layer is not left out"
+            );
             redrawn(before);
         }
         store.request(vec![need("y")]);
-        assert_eq!(asked.lock().unwrap().len(), 3 + REPORT_AFTER as usize);
+        assert_eq!(asked.lock().unwrap().len(), 7);
         // An override's throw is not asked again for this revision.
         store.answer_all(7, 1, vec![(need("y"), Reply::Failed("boom".into()))]);
         store.request(vec![need("y")]);
-        assert_eq!(asked.lock().unwrap().len(), 3 + REPORT_AFTER as usize);
+        assert_eq!(asked.lock().unwrap().len(), 7);
     }
     /// Two layers the realm could not answer wait different backoffs: each
     /// gets a redraw when its own wait ends and is asked again then, even
@@ -1084,11 +1071,29 @@ mod tests {
         assert_eq!(byte_of(answer_at(&store, "x", 2.0)), Some(20));
         let late = store.end_frame();
         assert_eq!(late.len(), 2, "the exact frame is not late");
-        // A layer never answered: playing draws nothing, scrubbing waits.
+        // A layer never answered is never left out: playing and scrubbing
+        // hold the picture until it is answered.
         store.begin_frame(Moment::Playing);
-        assert!(
-            matches!(answer_at(&store, "y", 1.), CompatAnswer::Raster(r) if *r.data == vec![0; 4])
+        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
+        assert!(store.end_frame().is_empty());
+        // One the realm keeps failing to answer draws its nearest answer.
+        store.answer_all(
+            7,
+            1,
+            vec![(at("x", 1.5), Reply::Unavailable("busy".into()))],
         );
+        store.answer_all(
+            7,
+            1,
+            vec![(at("x", 1.5), Reply::Unavailable("busy".into()))],
+        );
+        store.answer_all(
+            7,
+            1,
+            vec![(at("x", 1.5), Reply::Unavailable("busy".into()))],
+        );
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(answer_at(&store, "x", 1.5)), Some(10));
         assert_eq!(store.end_frame().len(), 1);
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
