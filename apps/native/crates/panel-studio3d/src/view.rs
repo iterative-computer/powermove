@@ -680,8 +680,57 @@ fn scene_commands(
                 )],
             ))
         }
+        "shot" => {
+            let label = shots()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["id"] == arg)
+                .and_then(|a| a["label"].as_str().map(str::to_owned))
+                .ok_or_else(|| invalid("Unknown shot"))?;
+            Ok((
+                format!("Add Shot: {label}"),
+                vec![scene(p, time, json!({"operation":"shot","shot":arg}))],
+            ))
+        }
         _ => Err(invalid("Unknown Studio scene control")),
     }
+}
+/// Set Up Studio (3d-studio.md §8): softboxes, a framing camera and the
+/// seamless set around what's in the scene, from its evaluated geometry.
+/// Imported models need loaded geometry; without it this says so.
+pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)> {
+    let args = json!({"operation":"auto_studio"});
+    let geometry = pm_kernel::commands::scene3d::prepare_geometry(
+        &p.snapshot,
+        p.snapshot.open_comp(),
+        &to_model(&args),
+        p.selection.layers(),
+        time,
+        &pm_scene3d::geometry::NoAssets,
+    )
+    .map_err(|e| {
+        let e = e.to_string();
+        if e.contains("not loaded") {
+            invalid("Set Up Studio needs the model’s geometry, which isn’t loaded yet.")
+        } else {
+            invalid(e)
+        }
+    })?;
+    Ok((
+        "Set Up Studio".into(),
+        vec![
+            Scene3dCommand::ApplyPrepared {
+                comp: p.snapshot.open_comp(),
+                args: to_model(&args),
+                selection: p.selection.layers().to_vec(),
+                time,
+                autokey: false,
+                geometry,
+            }
+            .into(),
+        ],
+    ))
 }
 /// What the composition's 3D summary shows, or `None` when it has no 3D layer:
 /// its saved render quality and its World's sky (`none`, a preset or `hdri`).

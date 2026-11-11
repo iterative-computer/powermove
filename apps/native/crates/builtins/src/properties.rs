@@ -600,8 +600,19 @@ impl Properties {
         }
         let lease = self.control_lease("3d.scene.sky");
         rows.insert(0, json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}}));
+        // Add Shot (§8): a command pull-down, so it always shows its title.
+        let mut shots = vec![json!({"v":"add","label":"Add Shot…","disabled":true})];
+        shots.extend(
+            pm_panel_studio3d::properties::shots()
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| json!({"v":s["id"],"label":s["label"],"detail":s["detail"]})),
+        );
+        let lease = self.control_lease("3d.scene.shot");
+        rows.push(json!({"id":"3d.scene.shot","label":"Shot","control":{"kind":"choice","binding":lease,"value":"add","options":shots}}));
         Ok(Some(
-            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"note":detail}),
+            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"note":detail,"action":"set-up-studio"}),
         ))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
@@ -1645,6 +1656,19 @@ impl Properties {
                     label: Some(label.into()),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(vec![command.into()]),
+                },
+            )));
+        }
+        if intent["type"] == "section-action" && intent["action"] == "set-up-studio" {
+            let (label, commands) =
+                pm_panel_studio3d::properties::set_up_studio(model.published(), time)
+                    .map_err(|e| e.to_string())?;
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
                 },
             )));
         }

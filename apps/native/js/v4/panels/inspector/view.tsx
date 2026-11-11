@@ -40,6 +40,7 @@ const sectionActions: Record<SectionAction, string> = {
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
+  "set-up-studio": "Set Up Studio",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -756,7 +757,9 @@ export function InspectorPanel({
                   symbol={
                     section.action === "refresh-fonts"
                       ? "arrow.clockwise"
-                      : "plus"
+                      : section.action === "set-up-studio"
+                        ? "light.max"
+                        : "plus"
                   }
                   children={sectionActions[section.action]}
                   style={{

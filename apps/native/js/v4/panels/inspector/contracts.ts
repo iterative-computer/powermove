@@ -73,7 +73,8 @@ export type SectionAction =
   | "mask"
   | "animator"
   | "release-precomp"
-  | "refresh-fonts";
+  | "refresh-fonts"
+  | "set-up-studio";
 export interface AnimatorPreset {
   id: string | null;
   label: string;
