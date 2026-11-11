@@ -94,9 +94,11 @@ impl Activity {
         if busy {
             // Under the lock a background grant is checked and sent with
             // (`grant_if_idle`): activity lands before it or after it.
+            // Busy is stored before the epoch rises: whoever sees the new
+            // epoch also sees the viewer busy.
             let _grant = self.quiet.0.lock().unwrap();
-            self.epoch.fetch_add(1, Ordering::AcqRel);
             self.busy.store(true, Ordering::Release);
+            self.epoch.fetch_add(1, Ordering::AcqRel);
             return;
         }
         self.busy.store(false, Ordering::Release);
