@@ -1519,3 +1519,114 @@ fn native_iris_and_clip_channels_reach_shared_camera_transport() {
             .all(|p| p[3] == 0.)
     );
 }
+
+fn vertex_attribute_glb() -> Vec<u8> {
+    let mut bin = vec![];
+    let mut views = vec![];
+    let mut accessors = vec![];
+    for (values, kind) in [
+        (vec![-1f32, -1., 0., 1., -1., 0., 0., 1., 0.], "VEC3"),
+        (vec![0., 0., 1., 0., 0., 1., 0., 0., 1.], "VEC3"),
+        (vec![0., 0., 0., 0., 0., 0.], "VEC2"),
+        (vec![0., 1., 1., 1., 0., 0.], "VEC2"),
+        (
+            vec![1., 0., 0., 0.5, 1., 0., 0., 0.5, 1., 0., 0., 0.5],
+            "VEC4",
+        ),
+    ] {
+        let start = bin.len();
+        for v in values {
+            bin.extend(v.to_le_bytes());
+        }
+        views.push(json!({"buffer":0,"byteOffset":start,"byteLength":bin.len()-start}));
+        accessors
+            .push(json!({"bufferView":views.len()-1,"componentType":5126,"count":3,"type":kind}));
+    }
+    accessors[0]["min"] = json!([-1, -1, 0]);
+    accessors[0]["max"] = json!([1, 1, 0]);
+    let mut header = serde_json::to_vec(&json!({"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_unlit"],"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"buffers":[{"byteLength":bin.len()}],"bufferViews":views,"accessors":accessors,"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1]},"extensions":{"KHR_materials_unlit":{}},"doubleSided":true,"alphaMode":"BLEND"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2,"TEXCOORD_1":3,"COLOR_0":4},"material":0}]}]})).unwrap();
+    while !header.len().is_multiple_of(4) {
+        header.push(b' ');
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let mut out = vec![];
+    for word in [
+        0x46546c67u32,
+        2,
+        (12 + 8 + header.len() + 8 + bin.len()) as u32,
+        header.len() as u32,
+        0x4e4f534a,
+    ] {
+        out.extend(word.to_le_bytes());
+    }
+    out.extend(header);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(0x004e4942u32.to_le_bytes());
+    out.extend(bin);
+    out
+}
+#[test]
+fn imported_secondary_uvs_vertex_alpha_and_snapshot_geometry_identity_survive() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("attributes.bin");
+    std::fs::write(&path, vertex_attribute_glb()).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let doc = imported_document();
+    let scene_request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = || studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source().scene(&scene_request).unwrap();
+    let material = input.instances[0].material;
+    let mut extractor = pm_studio3d_engine::extract::Extractor::default();
+    let extracted = extractor.extract(&input).unwrap();
+    let triangle = extracted
+        .prepared
+        .tris
+        .iter()
+        .find(|t| t.uv2m[2] as usize == material)
+        .unwrap();
+    assert_eq!(triangle.uv01_secondary, [0., 1., 1., 1.]);
+    assert_eq!(triangle.uv2_secondary[..2], [0., 0.]);
+    assert_eq!(triangle.n[0][3].to_bits(), 0x800000ff);
+    assert_ne!(
+        extracted.prepared.materials[material].policy[1] as u32 & 16,
+        0
+    );
+    let builds = extractor.builds;
+    extractor
+        .extract(&source().scene(&scene_request).unwrap())
+        .unwrap();
+    assert_eq!(
+        extractor.builds, builds,
+        "exact vertex data survives source replacement"
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > p[1] && (0.49..0.51).contains(&p[3]))
+            .count()
+            > 100
+    );
+}

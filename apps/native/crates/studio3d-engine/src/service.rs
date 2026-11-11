@@ -253,6 +253,14 @@ impl StudioService {
         }
         if reset {
             r.set_camera(&input.scene);
+            // Ordinary native layers leave uncovered/alpha-tested samples for
+            // the compositor. Product sets retain their authored opaque void.
+            r.set_void(
+                input
+                    .scene
+                    .shadow_catcher
+                    .then(|| input.scene.backdrop.to_array()),
+            );
             let c = input.scene.camera;
             let (f, right, up) = input
                 .view

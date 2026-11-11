@@ -32,6 +32,7 @@ impl SceneSource for Source {
                     mesh: self.0.clone(),
                     material: 0,
                     material_palette: None,
+                    attributes: None,
                     primary_visible: true,
                     world,
                 }

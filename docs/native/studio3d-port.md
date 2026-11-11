@@ -718,3 +718,26 @@ the manual timing check also passes. The GPUI app builds. Reproduce only with
 >=5 GB free, under the lock, using `STUDIO_TIMINGS=1` and
 `cargo test -p pm-studio3d-engine --test timing -- --ignored --nocapture --test-threads=1`
 from the native workspace with the documented shared target/V8 environment.
+
+### Imported vertex alpha, secondary UVs and layer coverage
+
+Imported resources now retain linear RGBA vertex colors and TEXCOORD_1 beside
+posed geometry. The native extractor packs alpha with RGB, supplies secondary
+UVs/tangents, and honors imported flat normals. Derived attributes are shared by
+exact bytes across snapshot replacement; different attributes on the same mesh
+cannot alias a GPU binding. Source meshes and the pinned engine are unchanged.
+
+The new native alpha test reproduced an opaque-black-fill bug: the worker kept
+the product renderer's opaque void for ordinary timeline layers. Those layers
+now leave uncovered/stochastically transparent samples for the compositor.
+Product shadow-catcher sets retain their current opaque-void behavior. This also
+preserves fractional edge coverage; it does not implement the requested linear
+pixel reconstruction filter or establish no-visible-noise acceptance.
+
+All **25 native scene/export**, **25 adapter** and **21 import** checks pass, and
+the GPUI app builds. The new retained-GLB check verifies secondary UV records,
+packed 0.5 vertex alpha, visible translucent red pixels and unchanged geometry
+build counts across source replacement. Distinct/malformed attribute bindings
+are checked separately. Existing full-viewport World/HDRI, transparent empty
+scatter, reflections, splats and windowless export checks remain green.
+The next material step is binding the shared shader's extended physical maps.

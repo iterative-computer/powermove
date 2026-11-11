@@ -31,6 +31,8 @@ pub struct DocumentSource {
     quality_override: Option<(String, Value)>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
+    vertex_attributes:
+        Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
 }
 fn val(v: &Value) -> &Value {
@@ -70,6 +72,7 @@ impl DocumentSource {
             quality_override: None,
             environment_maps: Mutex::default(),
             height_maps: Mutex::default(),
+            vertex_attributes: Mutex::default(),
             scatter_placements: Mutex::default(),
         }
     }
@@ -505,6 +508,7 @@ impl SceneSource for DocumentSource {
                     mesh,
                     material: first,
                     material_palette: Some(indices),
+                    attributes: None,
                     primary_visible: true,
                     world: Transform(world.map(|v| v as f32)),
                 });
@@ -573,6 +577,38 @@ impl SceneSource for DocumentSource {
                         mesh,
                         material: materials.len() - 1,
                         material_palette: None,
+                        attributes: {
+                            let flat_shading = source_material.is_some_and(|m| m.flat_shading);
+                            let attrs = &part.attributes;
+                            if attrs.colors.is_empty()
+                                && attrs.secondary_uvs.is_empty()
+                                && !flat_shading
+                            {
+                                None
+                            } else {
+                                let key = (
+                                    Arc::as_ptr(&attrs.colors) as usize,
+                                    Arc::as_ptr(&attrs.secondary_uvs) as usize,
+                                    flat_shading,
+                                );
+                                let mut cache = self
+                                    .vertex_attributes
+                                    .lock()
+                                    .map_err(|_| "Studio vertex cache poisoned")?;
+                                Some(if let Some(attrs) = cache.get(&key) {
+                                    attrs.clone()
+                                } else {
+                                    let attrs = pm_studio3d_engine::extract::VertexAttributes {
+                                        colors: attrs.colors.clone(),
+                                        secondary_uvs: attrs.secondary_uvs.clone(),
+                                        flat_shading,
+                                    }
+                                    .shared()?;
+                                    cache.insert(key, attrs.clone());
+                                    attrs
+                                })
+                            }
+                        },
                         primary_visible: true,
                         world: Transform(
                             pm_scene3d::render::gltf::math::multiply(&world, &part.world)
@@ -593,6 +629,7 @@ impl SceneSource for DocumentSource {
                     mesh: self.mesh(&object["source"])?,
                     material: materials.len() - 1,
                     material_palette: None,
+                    attributes: None,
                     primary_visible: true,
                     world: Transform(world.map(|v| v as f32)),
                 });

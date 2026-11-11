@@ -5,10 +5,16 @@ use gltf::{ObjectKind, math, pose};
 pub use pm_geom3d::{Geometry, gltf};
 use std::{collections::HashMap, sync::Arc};
 
+#[derive(Clone, Debug, Default)]
+pub struct VertexAttributes {
+    pub colors: Arc<Vec<[f32; 4]>>,
+    pub secondary_uvs: Arc<Vec<[f32; 2]>>,
+}
 pub struct Part {
     pub geometry: Arc<Geometry>,
     pub world: [f64; 16],
     pub material: Option<gltf::Material>,
+    pub attributes: Arc<VertexAttributes>,
 }
 /// Resource lifetime owns decoded bytes and derived immutable geometry. Static
 /// parts share geometry across times, instances and renderer snapshot changes.
@@ -16,6 +22,7 @@ pub struct Resource {
     pub model: Model,
     pub key: String,
     meshes: std::sync::Mutex<HashMap<(usize, u64), Arc<Geometry>>>,
+    attributes: std::sync::Mutex<HashMap<usize, Arc<VertexAttributes>>>,
 }
 impl Resource {
     pub fn new(model: Model) -> Self {
@@ -23,6 +30,7 @@ impl Resource {
             model,
             key: String::new(),
             meshes: Default::default(),
+            attributes: Default::default(),
         }
     }
     pub fn load(name: &str, bytes: &[u8]) -> Result<Arc<Self>> {
@@ -111,6 +119,7 @@ impl Resource {
                     geometry,
                     world: math::IDENTITY,
                     material: None,
+                    attributes: Arc::default(),
                 }])
             }
             Model::Splats(_) => {
@@ -201,6 +210,49 @@ impl Resource {
                         cache.insert(key, geometry.clone());
                         geometry
                     };
+                    let attributes = {
+                        let mut cache = self
+                            .attributes
+                            .lock()
+                            .map_err(|_| Error("Model vertex cache poisoned".into()))?;
+                        if let Some(attributes) = cache.get(&d.geometry) {
+                            attributes.clone()
+                        } else {
+                            let mut attributes = VertexAttributes::default();
+                            if let Some(color) = &g.color {
+                                if ![3, 4].contains(&color.size)
+                                    || color.count() != g.vertex_count()
+                                {
+                                    return fail("Invalid imported vertex colors");
+                                }
+                                attributes.colors = Arc::new(
+                                    color
+                                        .data
+                                        .chunks_exact(color.size)
+                                        .map(|c| {
+                                            [
+                                                c[0],
+                                                c[1],
+                                                c[2],
+                                                if color.size == 4 { c[3] } else { 1. },
+                                            ]
+                                        })
+                                        .collect(),
+                                );
+                            }
+                            if let Some(uv) = &g.uv[1] {
+                                if uv.size != 2 || uv.count() != g.vertex_count() {
+                                    return fail("Invalid imported secondary UVs");
+                                }
+                                attributes.secondary_uvs = Arc::new(
+                                    uv.data.chunks_exact(2).map(|p| [p[0], p[1]]).collect(),
+                                );
+                            }
+                            let attributes = Arc::new(attributes);
+                            cache.insert(d.geometry, attributes.clone());
+                            attributes
+                        }
+                    };
                     let material = Some(m.materials[d.material].clone());
                     if let Some(instances) = &d.instances {
                         for instance in &instances.matrices {
@@ -208,6 +260,7 @@ impl Resource {
                                 geometry: geometry.clone(),
                                 world: math::multiply(&worlds[object], &instance.map(f64::from)),
                                 material: material.clone(),
+                                attributes: attributes.clone(),
                             });
                         }
                     } else {
@@ -215,6 +268,7 @@ impl Resource {
                             geometry,
                             world: worlds[object],
                             material,
+                            attributes,
                         });
                     }
                 }

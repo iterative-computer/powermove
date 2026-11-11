@@ -113,11 +113,46 @@ impl Transform {
     }
 }
 
+/// Immutable imported vertex data carried beside the shared engine mesh.
+#[derive(Clone, Debug, Default)]
+pub struct VertexAttributes {
+    pub colors: Arc<Vec<[f32; 4]>>,
+    pub secondary_uvs: Arc<Vec<[f32; 2]>>,
+    pub flat_shading: bool,
+}
+impl VertexAttributes {
+    /// Exact-byte interning preserves BLAS identity across snapshot replacement.
+    pub fn shared(self) -> Result<Arc<Self>, String> {
+        static CACHE: std::sync::OnceLock<
+            std::sync::Mutex<HashMap<Vec<u8>, std::sync::Weak<VertexAttributes>>>,
+        > = std::sync::OnceLock::new();
+        let mut key = vec![u8::from(self.flat_shading)];
+        key.extend_from_slice(&(self.colors.len() as u64).to_le_bytes());
+        key.extend_from_slice(bytemuck::cast_slice(&self.colors));
+        key.extend_from_slice(bytemuck::cast_slice(&self.secondary_uvs));
+        let mut cache = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| "Studio vertex attribute cache poisoned")?;
+        if let Some(value) = cache.get(&key).and_then(std::sync::Weak::upgrade) {
+            return Ok(value);
+        }
+        cache.retain(|_, value| value.strong_count() > 0);
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        let value = Arc::new(self);
+        cache.insert(key, Arc::downgrade(&value));
+        Ok(value)
+    }
+}
+
 #[derive(Clone)]
 pub struct MeshInstance {
     pub layer: String,
     /// Geometry is immutable; the same Arc reuses its BLAS after motion.
     pub mesh: Arc<Mesh>,
+    pub attributes: Option<Arc<VertexAttributes>>,
     pub material: usize,
     /// Local face-material IDs map through this palette. None retains the
     /// engine's absolute scene-material IDs; empty face data uses `material`.
@@ -178,6 +213,7 @@ pub struct SceneInput {
 
 struct Blas {
     mesh: Arc<Mesh>,
+    _attributes: Option<Arc<VertexAttributes>>,
     positions: Vec<[f32; 4]>,
     tris: Vec<GpuTri>,
     nodes: Vec<WideNode>,
@@ -186,7 +222,7 @@ struct Blas {
 
 #[derive(Default)]
 pub struct Extractor {
-    cache: HashMap<usize, Blas>,
+    cache: HashMap<(usize, usize), Blas>,
     world_cache: Option<(Vec<u8>, Vec<[f32; 4]>)>,
     pub builds: u64,
 }
@@ -199,7 +235,19 @@ pub struct Extracted {
     pub bounds: (Vec3, Vec3),
 }
 
-fn build(mesh: Arc<Mesh>) -> Result<Blas, String> {
+fn build(mesh: Arc<Mesh>, attributes: Option<Arc<VertexAttributes>>) -> Result<Blas, String> {
+    let extra = attributes.as_deref();
+    if extra.is_some_and(|a| {
+        (!a.colors.is_empty() && a.colors.len() != mesh.positions.len())
+            || (!a.secondary_uvs.is_empty() && a.secondary_uvs.len() != mesh.positions.len())
+            || a.colors
+                .iter()
+                .flatten()
+                .chain(a.secondary_uvs.iter().flatten())
+                .any(|v| !v.is_finite())
+    }) {
+        return Err("Invalid Studio imported vertex attributes".into());
+    }
     if mesh
         .positions
         .iter()
@@ -231,18 +279,25 @@ fn build(mesh: Arc<Mesh>) -> Result<Blas, String> {
         }
         let face = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
         let uv = t.map(|i| mesh.uvs.get(i as usize).copied().unwrap_or([0.; 2]));
+        let secondary = t.map(|i| {
+            extra
+                .and_then(|a| a.secondary_uvs.get(i as usize))
+                .copied()
+                .unwrap_or_else(|| mesh.uvs.get(i as usize).copied().unwrap_or([0.; 2]))
+        });
         raw.push(GpuTri {
             n: t.map(|i| {
-                mesh.normals.get(i as usize).copied().unwrap_or(face).to4(
-                    mesh.colors
-                        .get(i as usize)
-                        .map_or(f32::from_bits(0xffffffff), |c| {
-                            let b = c
-                                .to_array()
-                                .map(|v| (v.clamp(0., 1.) * 255.).round() as u32);
-                            f32::from_bits(b[0] | b[1] << 8 | b[2] << 16 | 255 << 24)
-                        }),
-                )
+                let normal = if extra.is_some_and(|a| a.flat_shading) {
+                    face
+                } else {
+                    mesh.normals.get(i as usize).copied().unwrap_or(face)
+                };
+                let color = extra
+                    .and_then(|a| a.colors.get(i as usize))
+                    .copied()
+                    .unwrap_or_else(|| mesh.colors.get(i as usize).map_or([1.; 4], |c| c.to4(1.)));
+                let b = color.map(|v| (v.clamp(0., 1.) * 255.).round() as u32);
+                normal.to4(f32::from_bits(b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24))
             }),
             uv01: [uv[0][0], uv[0][1], uv[1][0], uv[1][1]],
             uv2m: [
@@ -255,15 +310,21 @@ fn build(mesh: Arc<Mesh>) -> Result<Blas, String> {
                 0.,
             ],
             tangent: crate::packing::tangent(p, uv),
-            uv01_secondary: [0.; 4],
-            uv2_secondary: [0.; 4],
-            tangent_secondary: [0.; 4],
+            uv01_secondary: [
+                secondary[0][0],
+                secondary[0][1],
+                secondary[1][0],
+                secondary[1][1],
+            ],
+            uv2_secondary: [secondary[2][0], secondary[2][1], 0., 0.],
+            tangent_secondary: crate::packing::tangent(p, secondary),
         });
         corners.push(p);
     }
     let (nodes, order) = bvh::build(&corners);
     Ok(Blas {
         mesh,
+        _attributes: attributes,
         positions: order
             .iter()
             .flat_map(|&i| corners[i as usize].map(|p| p.to4(0.)))
@@ -303,7 +364,13 @@ impl Extractor {
                 return Err("Studio instance has no material or layer ID".into());
             }
             let binding = (
-                Arc::as_ptr(&instance.mesh) as usize,
+                (
+                    Arc::as_ptr(&instance.mesh) as usize,
+                    instance
+                        .attributes
+                        .as_ref()
+                        .map_or(0, |a| Arc::as_ptr(a) as usize),
+                ),
                 instance.material,
                 instance.material_palette.clone(),
             );
@@ -333,16 +400,21 @@ impl Extractor {
                     )
                     .map(face_material)
                     .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-                if !instance.mesh.colors.is_empty() {
+                if !instance.mesh.colors.is_empty()
+                    || instance
+                        .attributes
+                        .as_ref()
+                        .is_some_and(|a| !a.colors.is_empty())
+                {
                     for slot in slots {
                         materials[slot].policy[1] = (materials[slot].policy[1] as u32 | 16) as f32;
                     }
                 }
             }
             let mut rows = instance.world.rows()?;
-            let key = Arc::as_ptr(&instance.mesh) as usize;
+            let key = binding.0;
             if let std::collections::hash_map::Entry::Vacant(entry) = self.cache.entry(key) {
-                entry.insert(build(instance.mesh.clone())?);
+                entry.insert(build(instance.mesh.clone(), instance.attributes.clone())?);
                 self.builds += 1;
             }
             used.push(key);

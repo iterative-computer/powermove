@@ -31,6 +31,7 @@ fn instance(mesh: Arc<Mesh>, layer: &str) -> MeshInstance {
         layer: layer.into(),
         material: 0,
         material_palette: None,
+        attributes: None,
         primary_visible: true,
         world: Transform::default(),
     }
@@ -263,4 +264,51 @@ fn malformed_vertex_and_face_arrays_are_refused() {
         input.instances.push(instance(Arc::new(mesh), "invalid"));
         assert!(Extractor::default().extract(&input).is_err());
     }
+}
+
+#[test]
+fn distinct_vertex_attributes_never_alias_an_existing_geometry_binding() {
+    use pm_studio3d_engine::extract::VertexAttributes;
+    let mesh = triangle();
+    let mut input = input();
+    let a = VertexAttributes {
+        colors: Arc::new(vec![[1., 0., 0., 0.5]; 3]),
+        secondary_uvs: Arc::new(vec![[0., 1.], [1., 1.], [0., 0.]]),
+        flat_shading: true,
+    }
+    .shared()
+    .unwrap();
+    let b = VertexAttributes {
+        colors: Arc::new(vec![[0., 1., 0., 1.]; 3]),
+        ..Default::default()
+    }
+    .shared()
+    .unwrap();
+    input.instances = vec![instance(mesh.clone(), "a"), instance(mesh, "b")];
+    input.instances[0].attributes = Some(a.clone());
+    input.instances[1].attributes = Some(b);
+    let mut extractor = Extractor::default();
+    let extracted = extractor.extract(&input).unwrap();
+    assert_eq!(extractor.builds, 2);
+    assert_eq!(
+        extracted
+            .prepared
+            .tris
+            .iter()
+            .map(|t| t.n[0][3].to_bits())
+            .collect::<Vec<_>>(),
+        [0x800000ff, 0xff00ff00]
+    );
+    assert_eq!(extracted.prepared.tris[0].uv01_secondary, [0., 1., 1., 1.]);
+    let identical = (*a).clone().shared().unwrap();
+    assert!(Arc::ptr_eq(&a, &identical));
+    input.instances[0].attributes = Some(
+        VertexAttributes {
+            colors: Arc::new(vec![[1.; 4]; 2]),
+            ..Default::default()
+        }
+        .shared()
+        .unwrap(),
+    );
+    assert!(extractor.extract(&input).is_err());
 }

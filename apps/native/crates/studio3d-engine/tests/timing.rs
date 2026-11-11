@@ -25,6 +25,7 @@ impl Product {
                 mesh: Arc::new(o.mesh),
                 material: o.material,
                 material_palette: None,
+                attributes: None,
                 primary_visible: true,
                 world: Transform::default(),
             })
