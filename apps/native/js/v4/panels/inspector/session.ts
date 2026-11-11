@@ -1,4 +1,5 @@
 import { HostClient, type HostQuery } from "../../src/host-api";
+import type { Json } from "../../src/protocol";
 import type {
   Binding,
   InspectorModel,
@@ -176,7 +177,25 @@ export class InspectorSession {
     if (!operation) return false;
     if (operation.type === "edit")
       await this.host.edit(operation.label, operation.commands);
-    else await this.host.command(operation.command, operation.args);
+    else {
+      const ack = (await this.host.command(
+        operation.command,
+        operation.args,
+      )) as { value?: unknown } | undefined;
+      // A disclosure changes no document, so no publication follows: the
+      // reply is the new projection. Apply it, or the group never opens.
+      const value = ack?.value;
+      if (
+        intent.type === "collapse" &&
+        this.alive &&
+        value &&
+        typeof value === "object" &&
+        "sections" in value
+      ) {
+        this.model.update("evaluated", value as Json);
+        this.refresh();
+      }
+    }
     return true;
   }
   row(id: string): Row | undefined {
