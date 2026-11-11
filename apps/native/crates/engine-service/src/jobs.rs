@@ -818,13 +818,13 @@ pub fn run_child() -> Result<()> {
                     id,
                     answers,
                     deferred_us,
-                }) => match {
+                }) => {
                     replies.deferred_us.fetch_add(deferred_us, Ordering::AcqRel);
-                    replies.reply(id, answers)
-                } {
-                    Ok(()) => continue,
-                    Err(e) => e,
-                },
+                    match replies.reply(id, answers) {
+                        Ok(()) => continue,
+                        Err(e) => e,
+                    }
+                }
                 Ok(ParentMessage::Cancel) => break,
                 Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
                 Err(e) => e.to_string(),
