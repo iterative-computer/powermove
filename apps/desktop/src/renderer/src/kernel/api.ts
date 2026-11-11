@@ -423,6 +423,8 @@ export interface Scene3DAPI {
   groupParts(layerId:string,keys:readonly string[],name?:string):EditResult;
   /** Ungroup a static controller while preserving member placement and animation. */
   ungroupParts(layerId:string,key:string):EditResult;
+  /** Plan an anchor edit for a native control gesture without changing position/rotation keys. */
+  partGroupAnchorCommands(layerId:string,group:string,patch:Partial<Record<'x'|'y'|'z',number>>):EditCommand[];
   /** Move parts into an existing group, or back to their file level, retaining their current pose. */
   moveParts(layerId:string,keys:readonly string[],group:string|null):EditResult;
   renamePartGroup(layerId:string,key:string,name:string):EditResult;

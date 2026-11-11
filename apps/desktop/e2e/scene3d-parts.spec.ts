@@ -120,6 +120,12 @@ test('groups selected model parts, animates the group, renames and reopens it',a
   const values=await page.evaluate(({id,key})=>{const api=(window as any).PM.Kernel.api('part-groups-e2e').scene3d;return [api.getPart(id,key,0).values.x,api.getPart(id,key,.5).values.x,api.getPart(id,key,1).values.x];},{id,key});
   expect(values).toEqual([0,.25,.5]);
   await expect(section.getByRole('button',{name:'Ungroup',exact:true})).toBeDisabled();
+  const anchorBefore=await page.evaluate(({id,key})=>{const PM=(window as any).PM,part=PM.L(id).d.data.object.parts[key];return {pivot:part.pivot.slice(),channels:JSON.stringify(part.p),pixels:[...PM.GL.renderToPixels(PM.time,100,60,{transparent:true,mblur:false})]};},{id,key});
+  const anchorX=section.locator('[data-part-anchor-axis="x"] input');await anchorX.click();await anchorX.fill('.75');await anchorX.press('Enter');
+  const anchored=await page.evaluate(({id,key})=>{const PM=(window as any).PM,part=PM.L(id).d.data.object.parts[key];return {pivot:part.pivot.slice(),channels:JSON.stringify(part.p),pixels:[...PM.GL.renderToPixels(PM.time,100,60,{transparent:true,mblur:false})]};},{id,key});
+  expect(anchored.pivot[0]).toBe(.75);expect(anchored.channels).toBe(anchorBefore.channels);expect(anchored.pixels).toEqual(anchorBefore.pixels);
+  await page.evaluate(()=>(window as any).PM.hist.undo());expect(await page.evaluate(({id,key})=>(window as any).PM.L(id).d.data.object.parts[key].pivot,{id,key})).toEqual(anchorBefore.pivot);
+  await page.evaluate(()=>(window as any).PM.hist.redo());await expect(anchorX).toHaveValue('0.75');
   for(const theme of ['light','dark']){
     await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);
     await section.screenshot({path:info.outputPath(`part-groups-${theme}.png`)});
@@ -134,6 +140,7 @@ test('groups selected model parts, animates the group, renames and reopens it',a
   await page.evaluate(({id,key})=>{const PM=(window as any).PM;PM.selectLayers([id]);PM.Kernel.api('part-groups-e2e').scene3d.setActivePart(id,key);},{id,key});
   await expect(section.locator(`[data-part-key="${key}"] .part-name`)).toHaveText('Controllers');
   expect(await page.evaluate(({id,key})=>(window as any).PM.Kernel.api('part-groups-e2e').scene3d.getPart(id,key,1).values.x,{id,key})).toBe(.5);
+  expect(await page.evaluate(({id,key})=>(window as any).PM.L(id).d.data.object.parts[key].pivot[0],{id,key})).toBe(.75);
   await section.locator('.part-reset').filter({hasText:'Reset'}).click();
   await expect(section.locator(`[data-part-key="${key}"]`)).toBeVisible();
   await x.click();await x.fill('.2');await x.press('Enter');
@@ -170,6 +177,29 @@ test('drags a part into a collapsed existing group and back out without changing
   await page.evaluate(()=>(window as any).PM.hist.undo());expect((await state()).parent).toBe('0');
   await page.evaluate(()=>(window as any).PM.hist.redo());expect((await state()).parent).toBe(setup.group);
   await source.dragTo(section.locator('[data-part-key=""]'));expect((await state()).parent).toBe('0');expect((await state()).pixels).toEqual(before.pixels);
+  await source.dragTo(target);expect((await state()).parent).toBe(setup.group);
+  // The file parent, the edge beside a group, and blank tree space all lift it out.
+  await source.dragTo(section.locator('[data-part-key="0"]'));expect((await state()).parent).toBe('0');
+  await source.dragTo(target);
+  const sourceBox=(await source.boundingBox())!,targetBox=(await target.boundingBox())!;
+  await page.mouse.move(sourceBox.x+sourceBox.width/2,sourceBox.y+13);await page.mouse.down();
+  await page.mouse.move(targetBox.x+100,targetBox.y+2,{steps:8});await page.mouse.move(targetBox.x+100,targetBox.y+2);
+  await expect(target).toHaveClass(/drop-before/);
+  for(const theme of ['light','dark']){
+    await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);
+    await section.screenshot({path:info.outputPath(`part-out-indicator-${theme}.png`)});
+  }
+  const releaseBox=(await target.boundingBox())!;await page.mouse.move(releaseBox.x+100,releaseBox.y+2);
+  await page.mouse.up();await expect.poll(async()=>(await state()).parent).toBe('0');
+  await source.dragTo(target);
+  const tree=section.getByRole('tree'),height=await tree.evaluate(el=>el.getBoundingClientRect().height);
+  await source.dragTo(tree,{targetPosition:{x:100,y:height-5}});expect((await state()).parent).toBe('0');
+  // A boundary drop leaves a nested group by one level; dragging left lifts farther.
+  const outer=await page.evaluate(({id,group})=>{const api=(window as any).PM.Kernel.api('part-drop-e2e').scene3d;api.groupParts(id,[group,'0_2'],'Outer');return api.getActivePart(id);},setup);
+  await source.dragTo(target);expect((await state()).parent).toBe(setup.group);
+  await source.dragTo(target,{targetPosition:{x:100,y:2}});expect((await state()).parent).toBe(outer);
+  await source.dragTo(source,{targetPosition:{x:8,y:13}});expect((await state()).parent).toBe('0');
+  expect((await state()).pixels).toEqual(before.pixels);
   await source.dragTo(target);expect((await state()).parent).toBe(setup.group);
   for(const theme of ['light','dark']){
     await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);

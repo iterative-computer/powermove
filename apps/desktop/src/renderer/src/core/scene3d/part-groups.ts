@@ -3,7 +3,7 @@ import { compositionRuntime } from './service';
 import { GROUP_PART_KEY, PART_DEFAULTS, PART_FIELDS, listLayerParts, partNode, partsRoot, partPath } from './model-parts';
 
 const neutral = () => Object.fromEntries(PART_FIELDS.map(field => [field, { v: PART_DEFAULTS[field], kf: [], expr: null }]));
-export function editPartGroup(PM: any, layer: any, content: any, args: { operation: string; parts?: string[]; part?: string; name?: string }): string | undefined {
+export function editPartGroup(PM: any, layer: any, content: any, args: { operation: string; parts?: string[]; part?: string; name?: string; patch?: Record<string,unknown> }): string | undefined {
   const parts = content.object.parts ||= {}, tree = listLayerParts(PM, layer), byKey = new Map(tree.map(part => [part.key, part]));
   if (args.operation === 'move_parts') {
     const destination=args.part || null;
@@ -92,6 +92,23 @@ export function editPartGroup(PM: any, layer: any, content: any, args: { operati
   if (args.operation === 'rename_part_group') {
     const name = String(args.name || '').trim(); if (!name || name.length > 160) throw new Error('Enter a group name');
     group.name = name; return key;
+  }
+  if(args.operation==='set_part_group_anchor'){
+    const patch=args.patch || {};
+    if(!Object.keys(patch).length || Object.keys(patch).some(axis=>!['x','y','z'].includes(axis)))throw new Error('Choose an anchor point axis');
+    const anchor=group.pivot.slice();
+    for(const [axis,value] of Object.entries(patch)){
+      if(typeof value!=='number' || !Number.isFinite(value) || Math.abs(value)>100000)throw new Error('Enter a finite anchor point coordinate');
+      anchor[['x','y','z'].indexOf(axis)]=value;
+    }
+    const v=Object.fromEntries(PART_FIELDS.map(field=>[field,PM.evP(layer,group.p[field],PM.time,partPath(key,field))]));
+    const shift=new THREE.Vector3().fromArray(group.pivot).sub(new THREE.Vector3().fromArray(anchor));
+    const turned=shift.clone().applyEuler(new THREE.Euler(...[v.rx,v.ry,v.rz].map(THREE.MathUtils.degToRad) as [number,number,number],'XYZ')).multiplyScalar(v.scale/100);
+    // Rebase the static frame at the playhead; position and rotation keys stay intact.
+    const correction=shift.sub(turned);
+    group.matrix=new THREE.Matrix4().fromArray(group.matrix || new THREE.Matrix4().elements)
+      .multiply(new THREE.Matrix4().makeTranslation(correction.x,correction.y,correction.z)).toArray();
+    group.pivot=anchor;return key;
   }
   if (Object.values<any>(group.p).some(prop => prop.kf?.length || prop.expr)) throw new Error('Remove group animation before ungrouping');
   const v = Object.fromEntries(Object.entries<any>(group.p).map(([field, prop]) => [field, prop.v]));

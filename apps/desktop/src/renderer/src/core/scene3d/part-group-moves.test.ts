@@ -59,3 +59,41 @@ describe('moving model parts between existing groups',()=>{
     api.setPart('model',a,{scale:0});refused(['0_4'],a);
   });
 });
+
+describe('part group anchor points',()=>{
+  it('moves a nested group anchor while preserving its current pose, all transform keys, and undo/reopen',()=>{
+    const {PM,api,group,matrices,same}=fixture(),a=group(['0_0','0_1']),b=group(['0_2','0_3']),outer=group([a,b]);
+    api.setPart('model',outer,{ry:20,x:.4});api.setPart('model',a,{x:{v:0,kf:[{t:0,v:0},{t:1,v:1}],expr:null},rz:35,scale:150});
+    const before=matrices(),part=PM.L('model').d.data.object.parts[a],old=part.pivot.slice(),channels=JSON.stringify(part.p);
+    const model=compositionRuntime(PM).objects.get('model')!,handle=partNode(partsRoot(model),a)!;handle.updateWorldMatrix(true,false);
+    const expectedAnchor=new THREE.Vector3(.4,-.2,.1).applyMatrix4(handle.matrixWorld.clone());
+    const commands=api.partGroupAnchorCommands('model',a,{x:old[0]+.4,y:old[1]-.2,z:old[2]+.1}),count=PM.hist.list().length;
+    expect(PM.Edit.apply(commands,{origin:'inspector',label:'Group Anchor Point'}).ok).toBe(true);same(before);
+    expect(JSON.stringify(PM.L('model').d.data.object.parts[a].p)).toBe(channels);expect(PM.hist.list()).toHaveLength(count+1);
+    const nextHandle=partNode(partsRoot(compositionRuntime(PM).objects.get('model')),a)!;nextHandle.updateWorldMatrix(true,false);
+    expect(nextHandle.getWorldPosition(new THREE.Vector3()).distanceTo(expectedAnchor)).toBeLessThan(1e-7);
+    PM.hist.undo();expect(PM.L('model').d.data.object.parts[a].pivot).toEqual(old);same(before);
+    PM.hist.redo();same(before);PM.proj=PM.deserialize(PM.serialize());PM.touch();same(before);
+    expect(JSON.stringify(PM.L('model').d.data.object.parts[a].p)).toBe(channels);
+  });
+  it('rotates and scales around the edited anchor',()=>{
+    const {PM,api,group,matrices}=fixture(),a=group(['0_0','0_1']);
+    api.setPart('model',a,{x:.2});
+    expect(api.edit({operation:'set_part_group_anchor',target:'model',part:a,patch:{x:1,y:0,z:0}}).ok).toBe(true);
+    const before=matrices(),anchor=partNode(partsRoot(compositionRuntime(PM).objects.get('model')),a)!.getWorldPosition(new THREE.Vector3());
+    api.setPart('model',a,{rz:90,scale:200});const after=matrices();
+    for(const i of [0,1]){
+      const expected=new THREE.Vector3().fromArray(before[i]!,12).sub(anchor).applyAxisAngle(new THREE.Vector3(0,0,1),Math.PI/2).multiplyScalar(2).add(anchor);
+      expect(new THREE.Vector3().fromArray(after[i]!,12).distanceTo(expected)).toBeLessThan(1e-7);
+    }
+    expect(after[4]).toEqual(before[4]);
+  });
+  it('validates anchor axes and refuses locked models without changing data',()=>{
+    const {PM,api,group}=fixture(),a=group(['0_0','0_1']);
+    for(const patch of [{x:NaN},{x:100001},{typo:1}]){
+      const before=PM.serialize();expect(api.edit({operation:'set_part_group_anchor',target:'model',part:a,patch}).ok).toBe(false);expect(PM.serialize()).toBe(before);
+    }
+    PM.L('model').lock=true;const before=PM.serialize();
+    expect(api.edit({operation:'set_part_group_anchor',target:'model',part:a,patch:{x:1}}).ok).toBe(false);expect(PM.serialize()).toBe(before);
+  });
+});

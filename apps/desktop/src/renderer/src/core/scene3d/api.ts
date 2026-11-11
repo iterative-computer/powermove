@@ -13,7 +13,7 @@ import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } fr
 import { convertLegacyScene } from './migration';
 import { prepareModelImport } from './import-bundle';
 import { compositionScene,layer3DRole,isModelGroup } from './layers';
-import { editScene } from './operations';
+import { editScene,sceneCommands } from './operations';
 import { viewportCamera } from './viewport';
 import { PART_DEFAULTS, PART_FIELDS, getActivePart, getSelectedParts, setSelectedParts, listLayerParts, onActivePartChange, partKeyOf, partPath, partsRoot, pruneActiveParts, setActivePart, type PartValues } from './model-parts';
 import type { Scene3DAPI } from '../../kernel/api';
@@ -104,6 +104,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       const result=editScene(PM,{operation:'ungroup_parts',target:layerId,part:key},{origin:'inspector',label:'Ungroup model parts'});
       if(result.ok)setSelectedParts(PM,layerId,members);return result;
     },
+    partGroupAnchorCommands:(layerId,group,patch)=>sceneCommands(PM,{operation:'set_part_group_anchor',target:layerId,part:group,patch}).commands,
     moveParts(layerId,keys,group){
       const result=editScene(PM,{operation:'move_parts',target:layerId,parts:[...keys],...(group?{part:group}:{})},{origin:'inspector',label:'Move model parts'});
       if(result.ok)setSelectedParts(PM,layerId,keys);return result;
