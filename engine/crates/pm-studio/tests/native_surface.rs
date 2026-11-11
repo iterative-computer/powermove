@@ -47,6 +47,7 @@ fn metalfx_in_process_texture_is_retained_and_flips_without_readback(){
     let timings=r.timings;
     assert!(timings.trace_ms>0. && timings.guides_ms>0. && timings.metalfx_ms>0. && timings.post_ms>0.);
     assert_eq!(timings.denoise_ms,0.,"Live never invokes CPU OIDN");
+    assert!(timings.metalfx_gpu_ms>0. && timings.metalfx_gpu_ms<=timings.metalfx_ms);
     let retained=target(&r,128,72);let mut encoder=r.device().create_command_encoder(&Default::default());
     encoder.copy_texture_to_texture(source.as_image_copy(),retained.as_image_copy(),source.size());r.queue().submit([encoder.finish()]);
     let a=read(&r,&retained);

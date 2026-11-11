@@ -20,6 +20,7 @@ unsafe extern "C" {
         jitter_y: f32,
         reset: bool,
     ) -> bool;
+    fn studio_metalfx_gpu_ms(context: *mut c_void) -> f64;
     fn studio_metalfx_send(context: *mut c_void, texture: *mut c_void, frame: u64) -> bool;
     fn studio_metalfx_release(context: *mut c_void, frame: u64);
     fn studio_metalfx_destroy(context: *mut c_void);
@@ -618,6 +619,8 @@ impl Renderer {
                 )
             };
             self.timings.metalfx_ms += encode_start.elapsed().as_secs_f64()*1000.;
+            // Same exclusive context; encode has completed its command buffer.
+            self.timings.metalfx_gpu_ms += unsafe { studio_metalfx_gpu_ms(fx.context) };
             if !ok {
                 return Err("MetalFX command buffer failed".into());
             }
