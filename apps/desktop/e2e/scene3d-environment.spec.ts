@@ -7,7 +7,7 @@ test('Environment Light is a timeline light with its own source, intensity and X
     const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel?.();PM.replaceProject(PM.mkProject({w:640,h:360,dur:3,fps:30}));
     const api=PM.Kernel.api('environment-e2e').scene3d;
     api.edit({operation:'add_camera',id:'camera',camera:{p:{x:0,y:0,z:3}}});
-    api.edit({operation:'add_object',object:{id:'sphere',source:{primitive:'sphere'},material:{p:{color:'#FFFFFF',metalness:1,roughness:.1}}}});
+    api.edit({operation:'add_object',object:{id:'sphere',source:{primitive:'sphere'},material:{p:{color:'#FFFFFF',metalness:1,roughness:.12}}}});
     api.edit({operation:'add_light',light:{id:'dark',type:'sun',p:{intensity:0}}});
     api.edit({operation:'set_environment',target:'camera',patch:{p:{ambient:0}}});
     const camera=JSON.stringify(PM.L('camera').d),id=await PM.cmd('3d.environment');
@@ -22,7 +22,7 @@ test('Environment Light is a timeline light with its own source, intensity and X
     const chooser=page.waitForEvent('filechooser');await source.click();await page.getByRole('option',{name:'Import HDR / EXR…',exact:true}).click();
     await (await chooser).setFiles({name,mimeType:'application/octet-stream',buffer:Buffer.from(bytes)});await expect(source).toContainText(name);
   };
-  await importMap('Studio.hdr',hdrPanorama());
+  await importMap('Studio.hdr',hdrPanorama(1024,512));
   const render=()=>page.evaluate(()=>{const PM=(window as any).PM;const pixels=PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false});return {rgb:[...pixels].reduce((sum:number,v:number,i:number)=>sum+(i%4===3?0:v),0),pixels:[...pixels]};});
   const lit=await render();expect(lit.rgb).toBeGreaterThan(10000);
   const intensity=page.locator('[data-scene-channel="light.intensity"] input');
@@ -49,4 +49,5 @@ test('Environment Light is a timeline light with its own source, intensity and X
   await page.evaluate(id=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_layer',target:id,patch:{visible:false}});},setup.id);
   expect((await render()).rgb).toBeLessThan(beforeSave.rgb*.1);
   await page.evaluate(()=>(window as any).PM.hist.undo());expect((await render()).pixels).toEqual(beforeSave.pixels);
+  expect(session.diagnostics.console.filter(record=>/Shader Error|VALIDATE_STATUS|ERROR: 0:/.test(record.text))).toEqual([]);
 });
