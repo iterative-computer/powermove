@@ -889,32 +889,40 @@ export class CompatRealm {
    * rasters, decided once every need ran (an override may draw into another
    * one's canvas meanwhile; then it is that canvas, read as any other), or
    * `null` for one answered the usual way. A windowed base keeps the
-   * revision it was made at: the host keeps that document while the object
-   * lives, so loading it later paints the frame it was returned for.
+   * revision it was answered from: the host keeps that document while the
+   * object lives (or answers `null`: past its cap of kept documents, the base
+   * is read whole now), so loading it later paints the frame it was returned
+   * for.
    */
   windowBases(entries: { value: unknown; need: Data }[]): (Data | null)[] {
-    const kept = entries.map(({ value, need }) =>
+    const candidate = ({ value, need }: { value: unknown; need: Data }) =>
       this.isUncroppedBase(value, need as any)
         ? this.bases.get(value as object)!
-        : null,
-    );
-    if (!kept.some(Boolean)) return kept.map(() => null);
+        : null;
+    if (!entries.some(candidate)) return entries.map(() => null);
     // As `load` does before it asks for the pixels: the document a load in
-    // this batch would paint from is the one now, which the host keeps.
+    // this batch would paint from is the one now, which the host keeps. What
+    // the flush emits may draw into a candidate: check them after it.
     this.flush();
-    return kept.map((state, i) => {
+    return entries.map((entry) => {
+      const state = candidate(entry);
       if (!state) return null;
-      const revision = this.options.host.query("render.rasterPin", {});
-      if (typeof revision !== "number") return null;
-      state.pinned = revision;
-      this.pins.register(entries[i].value as object, revision);
+      // A base answered before keeps the document it was answered from.
+      let revision = state.pinned;
+      if (revision === undefined) {
+        const pinned = this.options.host.query("render.rasterPin", {});
+        if (typeof pinned !== "number") return null;
+        revision = state.pinned = pinned;
+        this.pins.register(entry.value as object, revision);
+      }
       return {
         args: [state.spec, state.scale, state.time, null],
         revision,
-        window: (entries[i].need as Data).crop,
+        window: (entry.need as Data).crop,
       };
     });
   }
+
   /** A windowed base raster went: the host may let its revision go. */
   private pins = new FinalizationRegistry<number>((revision) => {
     if (this.disposed) return;

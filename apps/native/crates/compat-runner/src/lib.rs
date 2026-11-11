@@ -1126,6 +1126,119 @@ mod tests {
         assert_eq!(painted.len(), 2, "{painted:?}");
         assert_eq!(painted[1], json!(["a", before, false]), "{painted:?}");
     }
+    /// A base an override keeps returning keeps the document it was first
+    /// answered from: answering it again after an edit doesn't move it to the
+    /// project as it is now (review of 3bcf93827).
+    #[test]
+    fn a_base_answered_again_after_an_edit_keeps_its_first_document() {
+        let (runner, painted, answered) = revision_runner();
+        let manifest =
+            json!({"id":"same","name":"Same","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T)=>globalThis.saved??=base(L,s,T));}",
+            )
+            .unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'a',type:'shape',name:'a',d:{}})")
+            .unwrap();
+        let first = runner
+            .json("(__compat.realm.flush(),__compat.realm.revision)")
+            .unwrap();
+        let batch = "__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);";
+        runner.eval(batch).unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'later',type:'shape',name:'later',d:{}})")
+            .unwrap();
+        let second = runner
+            .json("(__compat.realm.flush(),__compat.realm.revision)")
+            .unwrap();
+        assert_ne!(first, second);
+        runner.eval(batch).unwrap();
+        assert_eq!(
+            *answered.lock().unwrap(),
+            vec![json!("window"), json!("window")]
+        );
+        runner.json("globalThis.saved.cv.width").unwrap();
+        let painted = painted.lock().unwrap().clone();
+        assert_eq!(
+            painted,
+            vec![
+                json!(["a", first, true]),
+                json!(["a", first, true]),
+                json!(["a", first, false])
+            ]
+        );
+    }
+    /// What a batch's flush emits may draw into a candidate base: it is
+    /// checked after the flush, and read whole (review of 3bcf93827).
+    #[test]
+    fn a_base_drawn_into_while_the_batch_flushes_is_read_whole() {
+        let (runner, _, answered) = revision_runner();
+        let manifest = json!({"id":"flush","name":"Flush","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T)=>globalThis.saved=base(L,s,T));}",
+            )
+            .unwrap();
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'a',type:'shape',name:'a',d:{}});
+                   const realm=__compat.realm,flush=realm.flush.bind(realm);
+                   realm.flush=()=>{flush();const b=globalThis.saved;if(b&&!globalThis.drawn){globalThis.drawn=true;const x=b.cv.getContext('2d');x.fillStyle='#00ff00';x.fillRect(0,0,1,1)}};")
+            .unwrap();
+        runner
+            .eval("__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);")
+            .unwrap();
+        assert_eq!(*answered.lock().unwrap(), vec![json!([0, 255, 0, 255])]);
+    }
+    /// Kept documents are capped (past the cap a base is read whole), and a
+    /// collected base lets its document go (review of 3bcf93827).
+    #[test]
+    fn kept_documents_are_capped_and_go_with_their_bases() {
+        let (runner, _, answered) = revision_runner();
+        let manifest =
+            json!({"id":"many","name":"Many","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');globalThis.kept=[];
+                 api.services.register('raster',(L,s,T)=>{const b=base(L,s,T);kept.push(b);return b});}",
+            )
+            .unwrap();
+        let round = |i: usize| {
+            runner
+                .eval(&format!("__compat.realm.PM.proj.layers.push({{id:'l{i}',type:'shape',name:'l',d:{{}}}});__compat.realm.flush();
+                    __compat.answerRasters({i},[{{composition:'synthetic-comp',layer:'l{i}',seconds:0,scale:1,crop:{{x:0,y:0,width:1,height:1}}}}]);"))
+                .unwrap();
+            answered.lock().unwrap().last().cloned().unwrap()
+        };
+        for i in 0..crate::recorder::MAX_PINNED_REVISIONS {
+            assert_eq!(round(i), json!("window"), "revision {i}");
+        }
+        // Every kept base holds its own revision: the next one is read whole.
+        assert_eq!(round(100), json!([255, 0, 0, 255]));
+        // Once the realm collects them, their documents go.
+        runner.eval("globalThis.kept=[]").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            runner
+                .eval("(()=>{let n=0;for(let i=0;i<64;i++)n+=new Array(65536).fill(i).length;return n})()")
+                .unwrap();
+            let next = 200 + answered.lock().unwrap().len();
+            if round(next) == json!("window") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the kept documents never went"
+            );
+            runner.eval("globalThis.kept=[]").unwrap();
+        }
+    }
     /// The canvas round trip of a window is the window of the whole canvas's.
     #[test]
     fn a_window_s_canvas_round_trip_is_the_whole_canvas_s_there() {

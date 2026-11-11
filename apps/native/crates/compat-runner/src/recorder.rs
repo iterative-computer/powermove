@@ -12,6 +12,11 @@ use std::{
 
 /// A kept document, its open composition, and how many rasters keep it.
 type Pin = (Arc<pm_model::Document>, String, usize);
+/// Documents kept for windowed base rasters at most (distinct revisions).
+pub(crate) const MAX_PINNED_REVISIONS: usize = 8;
+/// Windowed base rasters keeping a document at most: the realm releases
+/// them as it collects them; past this, bases are read whole instead.
+const MAX_PINS: usize = 4096;
 
 #[derive(Default)]
 struct State {
@@ -282,15 +287,17 @@ impl NativeHost {
     }
     /// Keeps the project's document as it is now while a windowed base
     /// raster answered from it lives (one count per raster): its revision,
-    /// or `None` without a project.
+    /// or `None` without a project or past the caps (the realm then reads
+    /// that raster whole now, as an override's canvas).
     fn pin(&self) -> Option<u64> {
         let (revision, document, open) = self.kernel.lock().unwrap().revision_document().ok()?;
-        self.pins
-            .lock()
-            .unwrap()
-            .entry(revision)
-            .or_insert((document, open, 0))
-            .2 += 1;
+        let mut pins = self.pins.lock().unwrap();
+        let held: usize = pins.values().map(|pin| pin.2).sum();
+        if held >= MAX_PINS || (!pins.contains_key(&revision) && pins.len() >= MAX_PINNED_REVISIONS)
+        {
+            return None;
+        }
+        pins.entry(revision).or_insert((document, open, 0)).2 += 1;
         Some(revision)
     }
     /// The engine's base raster for `render.raster`'s `args`, or only its
