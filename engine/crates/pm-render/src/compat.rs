@@ -259,34 +259,74 @@ fn upload_bytes(
     }
 }
 
-/// The textures of the rasters a renderer's frames are drawing now. A raster
-/// is immutable, so one upload serves every band and redraw that draws it; an
-/// entry goes with the last holder of its raster. Each renderer keeps its own
-/// (on its own device): a renderer rebuilt after device loss uploads again.
-pub(crate) type Uploads = Vec<(
-    std::sync::Weak<CompatRaster>,
-    pm_protocol::color::Precision,
-    wgpu::TextureView,
-)>;
+/// The textures of the rasters a renderer's recent frames drew. A raster is
+/// immutable, so one upload serves every band and redraw that draws it. A
+/// texture is the raster's whole size (a windowed raster's included), so
+/// only rasters drawn in this frame or the one before keep theirs: the GPU
+/// memory follows what is on screen, not how many answers a store keeps (a
+/// raster drawn again later uploads again, the same texels). Each renderer
+/// keeps its own (on its own device): a renderer rebuilt after device loss
+/// uploads again.
+#[derive(Default)]
+pub(crate) struct Uploads {
+    entries: Vec<Upload>,
+}
 
-/// [`upload`] once per raster and precision on this renderer.
-pub(crate) fn upload_cached(
-    uploads: &mut Uploads,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raster: &Arc<CompatRaster>,
+struct Upload {
+    raster: std::sync::Weak<CompatRaster>,
     precision: pm_protocol::color::Precision,
-) -> wgpu::TextureView {
-    uploads.retain(|(held, ..)| held.strong_count() > 0);
-    if let Some((.., view)) = uploads
-        .iter()
-        .find(|(held, p, _)| *p == precision && std::ptr::eq(held.as_ptr(), Arc::as_ptr(raster)))
-    {
-        return view.clone();
+    view: wgpu::TextureView,
+    bytes: u64,
+    /// The frame that last drew it.
+    used: u64,
+}
+
+impl Uploads {
+    /// [`upload`] once per raster and precision while frames keep drawing it.
+    pub(crate) fn view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raster: &Arc<CompatRaster>,
+        precision: pm_protocol::color::Precision,
+        frame: u64,
+    ) -> wgpu::TextureView {
+        if let Some(entry) = self.entries.iter_mut().find(|e| {
+            e.precision == precision && std::ptr::eq(e.raster.as_ptr(), Arc::as_ptr(raster))
+        }) {
+            entry.used = frame;
+            return entry.view.clone();
+        }
+        let view = upload(device, queue, raster, precision);
+        let texel = if precision == pm_protocol::color::Precision::Float32 {
+            16
+        } else {
+            8
+        };
+        self.entries.push(Upload {
+            raster: Arc::downgrade(raster),
+            precision,
+            view: view.clone(),
+            bytes: u64::from(raster.width.max(1)) * u64::from(raster.height.max(1)) * texel,
+            used: frame,
+        });
+        view
     }
-    let view = upload(device, queue, raster, precision);
-    uploads.push((Arc::downgrade(raster), precision, view.clone()));
-    view
+
+    /// Frame `frame` ended: textures neither it nor the frame before drew go.
+    pub(crate) fn end_frame(&mut self, frame: u64) {
+        self.entries
+            .retain(|e| e.raster.strong_count() > 0 && e.used + 1 >= frame);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// GPU bytes the kept textures hold.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.entries.iter().map(|e| e.bytes).sum()
+    }
 }
 
 /// The texture of a raster: premultiplied E values as `rgba32float` at

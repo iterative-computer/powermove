@@ -597,8 +597,7 @@ impl Exec<'_> {
                         // A canvas's backing store: premultiplied E values,
                         // top row first, like a text raster (linear light
                         // decodes them).
-                        r.view = Some(crate::compat::upload_cached(
-                            &mut self.binds.compat,
+                        r.view = Some(self.binds.compat_view(
                             self.device,
                             self.queue,
                             &compat.0,

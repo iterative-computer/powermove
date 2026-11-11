@@ -774,3 +774,45 @@ fn a_windowed_base_raster_is_the_whole_raster_s_pixels_in_the_window() {
         }
     }
 }
+
+/// A raster's texture is its whole size, a windowed one's too, so textures
+/// stay only while frames draw them: playing through answers the store
+/// keeps holds the GPU memory of the last two frames' rasters, not of every
+/// answer kept (review: a 1 MiB window kept a 160 MB texture alive).
+#[test]
+fn raster_textures_follow_the_frames_that_draw_them() {
+    let doc = load(&doc(1.0));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut kept = Vec::new();
+    let one = 512u64 * 400 * 8;
+    for i in 0..12u8 {
+        let raster = Arc::new(CompatRaster {
+            width: 512,
+            height: 400,
+            format: CompatFormat::Rgba8Premultiplied,
+            anchor: [50.0, 30.0],
+            size: [100.0, 60.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            data: Arc::new([i, 0, 0, 255].repeat(256)),
+            window: Some([0, 0, 16, 16]),
+        });
+        kept.push(raster.clone());
+        renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(raster))));
+        renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(
+            renderer.compat_texture_bytes() <= 2 * one,
+            "frame {i}: {} bytes of raster textures",
+            renderer.compat_texture_bytes()
+        );
+    }
+    assert_eq!(kept.len(), 12, "every answer is still held");
+}
