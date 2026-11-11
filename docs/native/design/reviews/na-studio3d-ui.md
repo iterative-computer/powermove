@@ -177,6 +177,61 @@ stop.
 | Copy | ✅ the status line names the layer ("“Rounded” isn’t drawn. Select it to see why in Properties."), not the engine reason. "Pine Tree", not "Pine Tree Source" |
 | Finish shelf | ✅ shaded spheres ship (round 2's after-05a was captured before that change) |
 
+## Round 4 (first-time user walkthrough, estimate, capsule, views) · 2026-11-11
+
+Evidence (outside Git): `/tmp/pm-shots/na-studio3d-ui/round4/` and the
+captioned sequence in `round4/walkthrough/` (`captions.md`). Built from
+merges of `feat/na-studio3d` up to df2d8073b.
+
+**Result: the product-shot path works end to end for a first-time user,
+from an empty project to an exported film. Each rough edge found on the way
+is fixed or listed below.**
+
+### Review notes from round 3
+
+| Note | Result |
+|---|---|
+| Free View showed a flat 2D box offset from extruded letters | ✅ extruded text and shapes get a 3D bounds outline and the 3D move/rotate/scale handles in every view; moves write the layer's pixel channels |
+| 2D layers covered the orthographic panes | ✅ AE-like: 2D layers draw only in the Shot Camera pane. Top/Front/Right hide the outermost 2D layers and groups (a group that holds 3D stays) |
+| Pane 1 letterboxed, the others filled | ✅ every pane aspect-fits the composition inside the same inset, on the same backdrop |
+| A broken layer in demo shots | ✅ the walkthrough scene has none |
+
+### Status and estimates
+
+| Item | Result |
+|---|---|
+| Status capsule (§3) | ✅ Quality only, bottom-trailing on the stage: "Refining · n %", "Refining · Denoising", then "✓ Clean" for 2 s. Fed by the engine's refine progress |
+| Export estimate | ✅ the sheet asks the viewer to measure whenever size, length or scene changes; the footer says "measuring…" and then the measured range ("12–60 min", "38 min–3.2 h", number and unit on one line). A measurement superseded by the viewer's own redraw is asked again. It is usually ready before the sheet opens |
+| Export progress | ✅ "About N min left" after 8 frames (the native export never sent it before) |
+
+### Round-3 leftovers
+
+| Item | Result |
+|---|---|
+| Arrow keys in a focused segmented control (app-wide) | ✅ the v4 key listener is on header-slot roots too, so ← → move the segment (Move → Rotate in the 3D bar) |
+| Native pop-ups in the Tab order | ⚠️ still outside GPUI focus; reachable with the mouse and VoiceOver |
+| Light panel Aim | ✅ Reflect / Direct / Orbit segment; Orbit drags the light around its target as one Undo ("Orbit Light") |
+| Slider kit component | ⚠️ not built (the surface schema is frozen); the panel keeps number wells |
+| 3D handles for extruded layers | ✅ (see above) |
+| Navigation and selection in extra panes | ✅ scroll zooms and drag pans a pane; a click selects through that pane's camera |
+| View ▸ 3D checkmarks | ✅ |
+
+### Walkthrough fixes
+
+| # | Rough edge | Result |
+|---|---|---|
+| R1 | An empty project said nothing about 3D | ✅ Properties shows a 3D Scene section with a way in and Set Up Studio |
+| R2 | An imported model landed unlit | ✅ the first model in an unlit composition comes with a key light, sky and floor |
+| R3 | The layer was named "Bottle.obj" | ✅ "Bottle" |
+| R6 | Set Up Studio failed silently ("geometry not loaded") | ✅ works from retained bounds; framing targets the hero model, not the floor (R7); running it again replaces its own rig (R6b) |
+| R11 | "Add Shot…" carried a checkmark | ✅ none |
+| R12 | Shortening the composition left the ruler and bars at the old length | ✅ a view showing the whole old length refits; a zoomed or scrolled one stays |
+| E1 | Export Video greyed the sheet and nothing appeared | ✅ the save panel was begun as a second sheet on the main window and AppKit queued it; it now attaches to the Export sheet |
+| E2 | A dying render worker showed engine wording | ✅ "The renderer stopped unexpectedly…" |
+| R4 | A model's selection box can be about twice its size (unit bounds before geometry loads) | ⚠️ engine: needs retained model bounds |
+| R9 | Default white text is invisible on the white studio set | ⚠️ left as AE does it; noted |
+| R10 | The first extrusion of a session once broke the render until reopen | ⚠️ not reproducible; for the engine lane |
+
 ## Open items
 
 1. Arrow keys inside focused segmented controls; native pop-ups in the Tab

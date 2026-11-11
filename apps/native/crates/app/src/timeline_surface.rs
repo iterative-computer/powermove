@@ -200,8 +200,8 @@ pub struct TimelineSurface {
     /// time column of the frame last prepared.
     shown: (f64, f64, f64),
     fitted: bool,
-    /// The composition length the view was last fitted to: while the view
-    /// still shows exactly that whole length, a new length refits it.
+    /// The composition length last shown: when it changes while the view
+    /// shows all of it from 0, the view refits to the new length.
     fit_duration: f64,
     gesture: Gesture,
     cursor: CursorStyle,
@@ -447,7 +447,6 @@ impl TimelineSurface {
         if self.model.index.duration > 0. {
             self.view.pps = (width / self.model.index.duration).clamp(PPS.0, PPS.1);
             self.view.scroll_time = 0.;
-            self.fit_duration = self.model.index.duration;
             self.changed(true, cx);
         }
     }
@@ -586,25 +585,24 @@ impl TimelineSurface {
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
-            let fit = |d: f64| (width / d).clamp(PPS.0, PPS.1);
+            let fit = (width / duration).clamp(PPS.0, PPS.1);
+            // The view started at 0 and showed all of the old length.
             let whole = |d: f64| {
-                d > 0. && self.view.scroll_time.abs() < 1e-9 && (self.view.pps - fit(d)).abs() <= fit(d) * 0.01
+                d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
             };
             if !self.fitted {
                 self.fitted = true;
-                self.view.pps = fit(duration);
-                self.fit_duration = duration;
-            } else if (self.fit_duration - duration).abs() > 1e-9 {
-                // A shorter or longer composition: if the view showed the
-                // whole old length, it shows the whole new one (the ruler
-                // and bars refit); a view the user zoomed or scrolled stays.
-                if whole(self.fit_duration) {
-                    self.view.pps = fit(duration);
-                    self.fit_duration = duration;
-                } else {
-                    self.fit_duration = if whole(duration) { duration } else { 0. };
-                }
+                self.view.pps = fit;
+            } else if self.fit_duration > 0.
+                && (self.fit_duration - duration).abs() > 1e-9
+                && whole(self.fit_duration)
+            {
+                // A shorter or longer composition: a view that showed the
+                // whole old length shows the whole new one (the ruler and bars
+                // refit); a view the user zoomed into or scrolled stays.
+                self.view.pps = fit;
             }
+            self.fit_duration = duration;
         }
         self.changed(false, cx);
     }

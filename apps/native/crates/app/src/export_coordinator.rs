@@ -247,6 +247,7 @@ impl Controller {
             }
             let worker_job = job.clone();
             let executor = cx.background_executor().clone();
+            let began = std::time::Instant::now();
             let result = cx.background_executor().spawn(async move {
                 execute(
                     frozen,
@@ -281,7 +282,15 @@ impl Controller {
                             let name = std::path::Path::new(path)
                                 .file_name()
                                 .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-                            v.note(format!("Exported {name}"), cx);
+                            // A long export ends while the user is
+                            // elsewhere: the line stays until something
+                            // replaces it, and the Dock icon asks once.
+                            if began.elapsed() > std::time::Duration::from_secs(30) {
+                                v.message = format!("Exported {name}");
+                                crate::platform::request_attention();
+                            } else {
+                                v.note(format!("Exported {name}"), cx);
+                            }
                         }
                         Err(_) => v.close_export_sheet(cx),
                     }

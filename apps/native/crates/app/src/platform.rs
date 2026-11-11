@@ -651,3 +651,15 @@ mod media_tests {
         assert!(media_document(&root.join("gone.png")).is_err());
     }
 }
+
+/// Bounces the Dock icon once when Powermove isn't the active app (a long
+/// export finishing in the background); nothing when it is.
+pub fn request_attention() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.isActive() {
+        app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    }
+}
