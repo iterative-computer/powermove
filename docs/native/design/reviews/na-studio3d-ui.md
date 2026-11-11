@@ -231,21 +231,34 @@ is fixed or listed below.**
 | R4 | A model's selection box can be about twice its size (unit bounds before geometry loads) | ⚠️ engine: needs retained model bounds |
 | R9 | Default white text is invisible on the white studio set | ⚠️ left as AE does it; noted |
 | R10 | The first extrusion of a session once broke the render until reopen | ⚠️ not reproducible; for the engine lane |
+| E3 | No time left during a long export | ✅ "About N min left" |
+| E4 | A 26-minute export ended with a 2.2 s note | ✅ the status line keeps "Exported <name>"; the Dock icon bounces if Powermove is in the background |
+| F1 | Fog blacked out Quality at any density while Fast showed light haze (uniform fog filling the schema's 10,000 units) | ✅ adding a terrain seeds the World's fog shape (Height Falloff 0.06, Visibility 400; Density stays 0), so raising Density gives the same aerial haze in both |
+| F2 | Quality showed a silent dark stage before its first sample | ✅ the capsule says "Rendering…", then Refining · n % |
+
+### Landscape walkthrough
+
+Sky (the "World" layer), Terrain (with an overview camera), Pine Trees (320
+on the terrain) and Atmosphere work from Layer ▸ Add 3D Layer and Properties.
+With the fog fix, Fast and Quality agree. Found on the way (outside 3D):
+
+| # | Rough edge | Owner |
+|---|---|---|
+| L1 | Project cards on Home show a grey "1920×1080" placeholder, never a thumbnail | Home |
+| L2 | With two project windows, closing one with its close button and then choosing Quit stops with "Couldn’t quit: Close every project before releasing the library."; the other window drops to Home (reproduced twice) | lifecycle |
+| L3 | The project left open by L2 (then force-stopped) won't open again: "The operation couldn’t be completed.", with no detail | lifecycle / recovery |
+| A1 | A text field whose value is set through accessibility keeps drawing the old value (the stored value is right) | kit |
+| A2 | New Project sheet: accessibility order lists Height before Width | Home |
 
 ## Open items
 
-1. Arrow keys inside focused segmented controls; native pop-ups in the Tab
-   order (kit/v4 owner).
-2. Status capsule: needs refine progress (samples done / target) in
-   `ViewerStatus` (engine lane).
-3. Light panel: an `NSSlider` kit component (log ranges), the Aim segment
-   (Reflect / Direct / Orbit), and the enter/exit motion.
-4. Views: the extra panes take no navigation or selection yet (they're
-   reference views). View ▸ 3D has no checkmarks yet; the bar and the
-   pull-down have them.
-5. Extruded layers: 3D handles in the viewer (they lose the flat box but
-   have no gizmo yet); per-surface Emission and Opacity rows.
-6. Export: switch the 3D estimate to Sol's export time-estimate state when
-   it lands.
-7. Engine notes: one box face shows a live map mirrored; a dense "Fast" Front
-   view shows speckle on extruded faces.
+1. Native pop-ups in the Tab order (kit/v4 owner).
+2. Light panel: an `NSSlider` kit component (log ranges) and the panel's
+   enter/exit motion.
+3. Extruded layers: per-surface Emission and Opacity rows.
+4. Engine: a model's selection box is about twice its size until geometry
+   loads (unit bounds, R4); the first extrusion of a session once broke the
+   render (R10, not reproduced); Fast's fog ignores shadowing in the
+   atmosphere, so a thick fog that is black in Quality looks light in Fast;
+   scenes saved with the old fog shape keep it.
+5. Lifecycle and Home: L1–L3 and A1–A2 above.
