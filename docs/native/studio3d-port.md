@@ -1769,3 +1769,34 @@ A diagnostic chrome Production run with caustics disabled still spent
 **23.423 s tracing** (256 spp, 1080p), versus **22.394 s** with the fixed photon
 map. This excludes photon-grid lookup as the leading cause of the chrome
 Production budget failure; no speculative photon-cache approximation was added.
+
+
+### Queued MetalFX and constant-channel result
+
+MetalFX now retains the renderer's own Metal command queue, following the
+native viewer's existing tracked-texture producer/consumer architecture. Native
+texture output no longer blocks the CPU after guides or MetalFX. All guide,
+scaler, pack, retained-layer copy and viewer work remains ordered on that queue.
+Three retained scaler command buffers bound backpressure; context destruction
+waits for its own pending buffers. CPU/readback callers retain completed output,
+and `STUDIO_SYNC_METALFX=1` selects the waited diagnostic path.
+
+`PipelineTimings.metalfx_deferred` distinguishes queued submission times from
+completed work. In that mode `metalfx_gpu_ms` is the most recently completed
+scaler buffer, which can initially be zero. Neither queued `trace_ms` nor
+queued guide/MetalFX submission times are represented as complete GPU timings.
+
+Three native surface tests pass (0.86 s), including retained-layer masking/flip
+and 24 queued-versus-waited camera frames across four size transitions. Maximum
+image difference is a few quantization levels, with RMS below 0.5/255. A
+second waited run measures MetalFX's own numerical variation as a control;
+queued errors must also stay within twice that control (floors 0.25/255 RMS
+and 4/255 maximum), with hard limits RMS <0.5/255 and maximum <=8/255. All 54 native Studio tests pass (11.60 s), app build 19.39 s.
+
+At the same 1464×824 viewer and 60 fps product composition: **59.9423 fps**,
+**41.666 ms** largest gap, **zero** gaps >=100 ms; native frame-step input p95
+**49.163 ms** over **177** distinct presented inputs. Input passes. The strict
+>=60 fps gate is still marked failing at this measured composition cadence;
+no rounding-up or changed gate is used. The next throughput check uses the
+same shot at a higher authored cadence to distinguish a cadence limit from
+engine throughput. The 60 fps result is retained independently.

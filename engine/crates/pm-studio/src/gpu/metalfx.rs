@@ -1,11 +1,12 @@
 //! macOS 26's temporal denoised scaler. Wgpu owns all textures; only this
-//! module borrows Metal handles, after a completed wgpu submission. The native
-//! command buffer completes before wgpu uses its output. No handles escape.
+//! module borrows tracked Metal textures on wgpu's own command queue. Native
+//! texture work stays ordered on that queue; CPU readback still waits.
 use super::{Renderer, rt_source, storage, uniform};
 use std::{ffi::c_void, time::Instant};
 unsafe extern "C" {
     fn studio_metalfx_create(
         device: *mut c_void,
+        queue: *mut c_void,
         iw: u32,
         ih: u32,
         ow: u32,
@@ -19,6 +20,7 @@ unsafe extern "C" {
         jitter_x: f32,
         jitter_y: f32,
         reset: bool,
+        wait: bool,
     ) -> bool;
     fn studio_metalfx_gpu_ms(context: *mut c_void) -> f64;
     fn studio_metalfx_send(context: *mut c_void, texture: *mut c_void, frame: u64) -> bool;
@@ -42,6 +44,7 @@ struct Pack {
 
 pub(super) struct MetalFX {
     context: *mut c_void,
+    queue: wgpu::Queue,
     output_size: (u32, u32),
     input_size: (u32, u32),
     guides: wgpu::ComputePipeline,
@@ -95,7 +98,12 @@ impl MetalFX {
         let hal =
             unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.ok_or("MetalFX needs Metal")?;
         let raw = (&**hal.raw_device() as *const _ as *mut c_void).cast();
-        let context = unsafe { studio_metalfx_create(raw, iw, ih, ow, oh) };
+        // All producer/MetalFX/compositor work uses the same Metal queue and
+        // tracked resources, as the native viewer presentation path does.
+        let queue=unsafe { r.queue.as_hal::<wgpu::hal::api::Metal>() }.ok_or("MetalFX needs a Metal queue")?;
+        let raw_queue=(queue.as_raw() as *const _ as *mut c_void).cast();
+        let context = unsafe { studio_metalfx_create(raw, raw_queue, iw, ih, ow, oh) };
+        drop(queue);
         drop(hal);
         if context.is_null() {
             return Err("MetalFX temporal denoised scaling is unavailable on this Mac".into());
@@ -320,6 +328,7 @@ fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
         };
         Ok(Self {
             context,
+            queue: r.queue.clone(),
             output_size: (ow, oh),
             input_size: (iw, ih),
             guides,
@@ -357,7 +366,10 @@ fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
         // returned native scaler retains its own device reference.
         let hal=unsafe{device.as_hal::<wgpu::hal::api::Metal>()}.ok_or("MetalFX needs Metal")?;
         let raw=(&**hal.raw_device() as *const _ as *mut c_void).cast();
-        let context=unsafe{studio_metalfx_create(raw,iw,ih,self.output_size.0,self.output_size.1)};
+        let queue=unsafe{self.queue.as_hal::<wgpu::hal::api::Metal>()}.ok_or("MetalFX needs a Metal queue")?;
+        let raw_queue=(queue.as_raw() as *const _ as *mut c_void).cast();
+        let context=unsafe{studio_metalfx_create(raw,raw_queue,iw,ih,self.output_size.0,self.output_size.1)};
+        drop(queue);
         drop(hal);
         if context.is_null(){return Err("MetalFX temporal denoised scaling is unavailable on this Mac".into());}
         let inputs:Vec<_>=self.inputs.iter().map(|texture|device.create_texture(&wgpu::TextureDescriptor{
@@ -465,7 +477,7 @@ impl Renderer {
     pub fn finish_metalfx(
         &mut self, ow:u32, oh:u32, reuse:bool, surface_id:Option<u64>,
     )->Result<(Vec<u8>,f64),String>{
-        self.finish_metalfx_impl(ow,oh,reuse,surface_id,false,false)
+        self.finish_metalfx_impl(ow,oh,reuse,surface_id,false,false,false)
     }
 
     /// In-process output for shared-device native viewers. Pixels stay on GPU.
@@ -473,12 +485,18 @@ impl Renderer {
     /// the compositor's retained layer texture before rendering another layer.
     pub fn finish_metalfx_texture(&mut self, ow:u32, oh:u32, reuse:bool, flip_y:bool)
         ->Result<(wgpu::Texture,f64),String>{
-        let (_,ms)=self.finish_metalfx_impl(ow,oh,reuse,None,true,flip_y)?;
+        let (_,ms)=self.finish_metalfx_impl(ow,oh,reuse,None,true,flip_y,std::env::var_os("STUDIO_SYNC_METALFX").is_none())?;
         Ok((self.metalfx.as_ref().unwrap().frame_image.clone(),ms))
     }
 
+    /// Completed reference path for diagnostics and queue parity checks.
+    pub fn finish_metalfx_texture_waited(&mut self,ow:u32,oh:u32,reuse:bool,flip_y:bool)
+        ->Result<(wgpu::Texture,f64),String>{
+        let (_,ms)=self.finish_metalfx_impl(ow,oh,reuse,None,true,flip_y,false)?;
+        Ok((self.metalfx.as_ref().unwrap().frame_image.clone(),ms))
+    }
     fn finish_metalfx_impl(&mut self, ow:u32, oh:u32, reuse:bool,
-        surface_id:Option<u64>, texture_only:bool, flip_y:bool,
+        surface_id:Option<u64>, texture_only:bool, flip_y:bool, queued:bool,
     )->Result<(Vec<u8>,f64),String>{
         let start = Instant::now();
         self.last_surface = None;
@@ -557,7 +575,8 @@ impl Renderer {
                 pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
             }
             self.queue.submit([enc.finish()]);
-            self.wait();
+            if !queued { self.wait(); }
+            self.timings.metalfx_deferred=queued;
             self.timings.guides_ms += guide_start.elapsed().as_secs_f64()*1000.;
             let mut textures = Vec::new();
             for input in fx.inputs.iter().take(7) {
@@ -615,8 +634,10 @@ impl Renderer {
                 },
                 if ortho { 1. } else { 0. },
             ];
-            // SAFETY: wgpu work has completed. Borrowed Metal textures remain
-            // alive in `fx`; this call waits for its own command buffer.
+            // SAFETY: the handles are tracked textures on the same retained
+            // Metal queue. Earlier wgpu writes precede these reads; later pack
+            // reads follow the MetalFX write. Command buffers retain resources.
+            // Non-texture callers and diagnostics retain CPU completion waits.
             let encode_start = Instant::now();
             let ok = unsafe {
                 studio_metalfx_encode(
@@ -627,10 +648,11 @@ impl Renderer {
                     j[0],
                     j[1],
                     !self.history_valid || !fx.valid,
+                    !queued,
                 )
             };
             self.timings.metalfx_ms += encode_start.elapsed().as_secs_f64()*1000.;
-            // Same exclusive context; encode has completed its command buffer.
+            // Queued mode reports the most recently completed MetalFX buffer.
             self.timings.metalfx_gpu_ms += unsafe { studio_metalfx_gpu_ms(fx.context) };
             if !ok {
                 return Err("MetalFX command buffer failed".into());

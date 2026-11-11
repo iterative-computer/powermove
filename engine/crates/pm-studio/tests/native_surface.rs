@@ -51,7 +51,8 @@ fn metalfx_in_process_texture_is_retained_and_flips_without_readback(){
     assert!(timings.trace_deferred);
     assert!(timings.trace_ms>0. && timings.guides_ms>0. && timings.metalfx_ms>0. && timings.post_ms>0.);
     assert_eq!(timings.denoise_ms,0.,"Live never invokes CPU OIDN");
-    assert!(timings.metalfx_gpu_ms>0. && timings.metalfx_gpu_ms<=timings.metalfx_ms);
+    assert!(timings.metalfx_deferred);
+    assert!(timings.metalfx_gpu_ms.is_finite() && timings.metalfx_gpu_ms>=0.);
     let retained=target(&r,128,72);let mut encoder=r.device().create_command_encoder(&Default::default());
     encoder.copy_texture_to_texture(source.as_image_copy(),retained.as_image_copy(),source.size());r.queue().submit([encoder.finish()]);
     let a=read(&r,&retained);
@@ -64,4 +65,36 @@ fn metalfx_in_process_texture_is_retained_and_flips_without_readback(){
     assert_eq!(a,read(&r,&retained),"later layers must not replace the retained image");
     r.trace(1,3,true,6);
     assert_eq!(r.timings.metalfx_ms,0.,"new trace retires previous stage timings");
+}
+
+
+#[cfg(all(feature="metalfx",target_os="macos"))]
+#[test]
+fn queued_metalfx_matches_waited_frames_across_animation_and_resize() {
+    fn sequence(wait:bool)->Vec<Vec<u8>> {
+        let mut r=Renderer::new(64,36).unwrap();let mut retained=vec![];
+        let mut scene=preset("hero","blue",0.).unwrap();r.set_scene(&scene,&scene.prepare());
+        for frame in 0..24 {
+            let (w,h)=if frame/6%2==0 {(64,36)}else{(80,45)};
+            r.resize(w,h);
+            scene.camera.position.x+=(frame as f32*0.17).sin()*0.02;
+            r.set_camera(&scene);r.live=true;r.queue_live_trace(3,6).unwrap();
+            let (image,_)=if wait {r.finish_metalfx_texture_waited(w*2,h*2,false,false)}else{r.finish_metalfx_texture(w*2,h*2,false,false)}.unwrap();
+            let copy=target(&r,w*2,h*2);let mut encoder=r.device().create_command_encoder(&Default::default());
+            encoder.copy_texture_to_texture(image.as_image_copy(),copy.as_image_copy(),image.size());r.queue().submit([encoder.finish()]);retained.push(copy);
+        }
+        retained.iter().map(|t|read(&r,t)).collect()
+    }
+    let waited=sequence(true);let control=sequence(true);let queued=sequence(false);
+    for (i,(a,b)) in waited.iter().zip(&queued).enumerate() {
+        let differences:Vec<_>=a.iter().zip(b).map(|(a,b)|(*a as f32-*b as f32).abs()).collect();
+        let max=differences.iter().copied().fold(0.,f32::max);let rms=(differences.iter().map(|d|d*d).sum::<f32>()/differences.len() as f32).sqrt();
+        let control_error:Vec<_>=a.iter().zip(&control[i]).map(|(a,b)|(*a as f32-*b as f32).abs()).collect();
+        let control_max=control_error.iter().copied().fold(0.,f32::max);
+        let control_rms=(control_error.iter().map(|d|d*d).sum::<f32>()/control_error.len() as f32).sqrt();
+        eprintln!("METALFX_QUEUE frame={i} max_lsb={max} rms_lsb={rms} waited_control_max={control_max} waited_control_rms={control_rms}");
+        // MetalFX optimizes pipelines asynchronously and is not bit-exact even
+        // between waited runs. Bound absolute error and the waited control.
+        assert!(rms<0.5 && max<=8. && rms<=0.25f32.max(control_rms*2.) && max<=4f32.max(control_max*2.),"queued frame {i}: RMS {rms}, max {max}");
+    }
 }

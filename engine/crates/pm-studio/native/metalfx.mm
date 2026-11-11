@@ -16,10 +16,13 @@ struct StudioMetalFX {
     id<MTLFXTemporalDenoisedScaler> scaler;
     id<MTLCommandQueue> queue;
     double gpuMilliseconds=0;
+    double gpuEnd=0;
+    std::array<id<MTLCommandBuffer>,3> pending={};
+    unsigned nextPending=0;
     mach_port_t surfaceReceiver=MACH_PORT_NULL;
     std::array<SurfaceSlot,3> surfaces;
 };
-extern "C" void *studio_metalfx_create(void *rawDevice, unsigned iw, unsigned ih, unsigned ow, unsigned oh) {
+extern "C" void *studio_metalfx_create(void *rawDevice, void *rawQueue, unsigned iw, unsigned ih, unsigned ow, unsigned oh) {
     @autoreleasepool {
         if (@available(macOS 26.0, *)) {
             id<MTLDevice> device=(__bridge id<MTLDevice>)rawDevice;
@@ -37,17 +40,31 @@ extern "C" void *studio_metalfx_create(void *rawDevice, unsigned iw, unsigned ih
             d.autoExposureEnabled=YES;d.requiresSynchronousInitialization=NO;
             id<MTLFXTemporalDenoisedScaler> scaler=[d newTemporalDenoisedScalerWithDevice:device];
             if (!scaler) return nullptr;
-            auto *ctx=new StudioMetalFX;ctx->scaler=scaler;ctx->queue=[device newCommandQueue];
+            auto *ctx=new StudioMetalFX;ctx->scaler=scaler;ctx->queue=(__bridge id<MTLCommandQueue>)rawQueue;
             const char*service=getenv("STUDIO_SURFACE_SERVICE");if(service)bootstrap_look_up(bootstrap_port,service,&ctx->surfaceReceiver);
             return ctx;
         }
         return nullptr;
     }
 }
-extern "C" bool studio_metalfx_encode(void *context,void **textures,const float *view,const float *projection,float jitterX,float jitterY,bool reset) {
+extern "C" bool studio_metalfx_encode(void *context,void **textures,const float *view,const float *projection,float jitterX,float jitterY,bool reset,bool wait) {
     @autoreleasepool {
         if (@available(macOS 26.0, *)) {
             auto *ctx=static_cast<StudioMetalFX*>(context);auto s=ctx->scaler;
+            for (auto command:ctx->pending) {
+                if (command.status==MTLCommandBufferStatusError) return false;
+                if (command.status==MTLCommandBufferStatusCompleted && command.GPUEndTime>=ctx->gpuEnd) {
+                    ctx->gpuEnd=command.GPUEndTime;
+                    ctx->gpuMilliseconds=(command.GPUEndTime-command.GPUStartTime)*1000.;
+                }
+            }
+            // Bound in-flight scaler work and retained resources. Only a full
+            // three-frame queue applies backpressure; ordinary frames don't wait.
+            auto previous=ctx->pending[ctx->nextPending];
+            if (previous && previous.status!=MTLCommandBufferStatusCompleted) {
+                [previous waitUntilCompleted];
+                if (previous.status==MTLCommandBufferStatusError) return false;
+            }
             s.colorTexture=(__bridge id<MTLTexture>)textures[0];s.depthTexture=(__bridge id<MTLTexture>)textures[1];
             s.motionTexture=(__bridge id<MTLTexture>)textures[2];s.diffuseAlbedoTexture=(__bridge id<MTLTexture>)textures[3];
             s.specularAlbedoTexture=(__bridge id<MTLTexture>)textures[4];s.normalTexture=(__bridge id<MTLTexture>)textures[5];
@@ -56,9 +73,17 @@ extern "C" bool studio_metalfx_encode(void *context,void **textures,const float 
             s.preExposure=1.f;s.motionVectorScaleX=1.f;s.motionVectorScaleY=1.f;
             s.jitterOffsetX=jitterX;s.jitterOffsetY=jitterY;s.shouldResetHistory=reset;s.depthReversed=NO;
             simd_float4x4 v,p;std::memcpy(&v,view,64);std::memcpy(&p,projection,64);s.worldToViewMatrix=v;s.viewToClipMatrix=p;
-            id<MTLCommandBuffer> command=[ctx->queue commandBuffer];[s encodeToCommandBuffer:command];[command commit];[command waitUntilCompleted];
-            ctx->gpuMilliseconds=(command.GPUEndTime-command.GPUStartTime)*1000.;
-            return command.status==MTLCommandBufferStatusCompleted;
+            id<MTLCommandBuffer> command=[ctx->queue commandBuffer];
+            [s encodeToCommandBuffer:command];
+            ctx->pending[ctx->nextPending]=command;ctx->nextPending=(ctx->nextPending+1)%ctx->pending.size();
+            [command commit];
+            if (wait) {
+                [command waitUntilCompleted];
+                ctx->gpuEnd=command.GPUEndTime;
+                ctx->gpuMilliseconds=(command.GPUEndTime-command.GPUStartTime)*1000.;
+                return command.status==MTLCommandBufferStatusCompleted;
+            }
+            return command.status!=MTLCommandBufferStatusError;
         }
         return false;
     }
@@ -85,5 +110,5 @@ extern "C" bool studio_metalfx_send(void *context,void *rawTexture,uint64_t fram
     }
 }
 extern "C" void studio_metalfx_release(void*context,uint64_t frame){auto*ctx=static_cast<StudioMetalFX*>(context);for(auto&slot:ctx->surfaces){if(slot.frame==frame)slot.frame=0;}}
-extern "C" void studio_metalfx_destroy(void *context) {auto*ctx=static_cast<StudioMetalFX*>(context);if(ctx->surfaceReceiver!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),ctx->surfaceReceiver);for(auto&slot:ctx->surfaces)if(slot.surface)CFRelease(slot.surface);delete ctx;}
+extern "C" void studio_metalfx_destroy(void *context) {auto*ctx=static_cast<StudioMetalFX*>(context);for(auto command:ctx->pending){[command waitUntilCompleted];}if(ctx->surfaceReceiver!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),ctx->surfaceReceiver);for(auto&slot:ctx->surfaces)if(slot.surface)CFRelease(slot.surface);delete ctx;}
 extern "C" uint64_t studio_metal_allocated_bytes(void *rawDevice){id<MTLDevice>device=(__bridge id<MTLDevice>)rawDevice;return device.currentAllocatedSize;}
