@@ -47,6 +47,8 @@ pub struct FinalQuality {
     pub max_bounces: u32,
     pub caustics: bool,
     pub denoise: bool,
+    /// Draft uses the spatial GPU filter; Production/Final retain OIDN.
+    pub fast_denoise: bool,
     pub half_resolution_guides: bool,
 }
 impl FinalQuality {

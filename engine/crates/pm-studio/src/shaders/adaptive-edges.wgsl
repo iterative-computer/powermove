@@ -23,7 +23,14 @@ fn main(@builtin(global_invocation_id) p:vec3u){
         || abs(center.w-other.w)>0.01*max(min(center.w,other.w),1e-4);
     }
     let q=(accum[j].xyz+emission[j].xyz)/max(accum[j].w,1.);
-    edge=edge || length(c-q)>0.15*max(max(length(c),length(q)),0.1);
+    // First-batch Monte Carlo noise is not a persistent image edge. Keep the
+    // original contrast threshold, but require significance above both means'
+    // sampling variance. Geometry/coverage discontinuities stay unconditional.
+    let cn=max(accum[i].w,1.);let qn=max(accum[j].w,1.);
+    let cv=max(vec3f(0.),(emission[count+i].xyz-cn*c*c)/max(cn-1.,1.))/cn;
+    let qv=max(vec3f(0.),(emission[count+j].xyz-qn*q*q)/max(qn-1.,1.))/qn;
+    let contrast=0.15*max(max(length(c),length(q)),0.1);
+    edge=edge || dot(c-q,c-q)>contrast*contrast+9.*dot(cv+qv,vec3f(1.));
   }}
   if(edge){emission[count+i].w=1.;}
 }

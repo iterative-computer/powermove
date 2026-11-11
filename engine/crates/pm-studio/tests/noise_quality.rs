@@ -89,6 +89,9 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
     let mut renderer = Renderer::new(w, h).unwrap();
     let denoiser = Denoiser::new().unwrap();
     let mut failures = vec![];
+    let policies=std::env::var("PM_STUDIO_NOISE_POLICIES").unwrap_or_else(|_|"production,final".into());
+    let policies:Vec<_>=policies.split(',').collect();
+    assert!(policies.iter().all(|p|["production","final"].contains(p)));
     for &name in names {
         let scene = if name == "chrome-set" {
             // The owner's product stress set includes glass, lacquer and the
@@ -121,6 +124,7 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
         for (quality, max_samples, min_samples, threshold) in
             [("production", 256, 32, 0.03), ("final", 1024, 512, 0.015)]
         {
+            if !policies.contains(&quality){continue;}
             denoiser.set_quality(if quality == "final" {
                 Quality::High
             } else {
@@ -138,6 +142,10 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 true,
             );
             let start = Instant::now();
+            // A trial ceiling is reported explicitly; acceptance limits stay
+            // fixed. The normal production policy remains 256 until validated.
+            let max_samples=if quality=="production" {std::env::var("PM_STUDIO_PRODUCTION_SPP").ok().map(|v|v.parse::<u32>().unwrap()).unwrap_or(max_samples)}else{max_samples};
+            assert!(max_samples>=min_samples && max_samples<=4096);
             renderer.trace(max_samples, 8, true, 0);
             let actual = renderer
                 .finish_with_layers(&|color, shade, a, n| {
@@ -153,18 +161,25 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 })
                 .0;
             let counts = renderer.sample_counts();
+            let object_metrics=if w>=1920 {
+                let ids=renderer.first_hit_ids();let mut masked=reference.clone();
+                for (pixel,id) in masked.chunks_exact_mut(4).zip(ids) {
+                    if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){pixel[3]=0;}
+                }
+                Some(metrics(&actual,&masked,w as usize,h as usize))
+            }else{None};
             let (rms, noise, bias, pixels) = metrics(&actual, &reference, w as usize, h as usize);
             println!(
                 "NOISE_GATE {}",
-                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":start.elapsed().as_secs_f64()*1000.})
+                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":start.elapsed().as_secs_f64()*1000.})
             );
             save(&format!("{name}-{quality}"), w, h, &actual);
             // Normalized sRGB code-value limits catch speckle and low-frequency
             // OIDN blotches in both policies. Neither has a wall-clock deadline.
-            if !(rms < 0.02 && noise < 0.006 && bias < 0.012 && pixels > 100)
+            if !(rms < 0.02 && noise < 0.006 && bias < 0.012 && pixels > 100) || object_metrics.is_some_and(|(r,n,b,p)|!(r<0.02 && n<0.006 && b<0.012 && p>100))
             {
                 failures.push(format!(
-                    "{name}/{quality}: RMS {rms:.5}, noise {noise:.5}, block bias {bias:.5}"
+                    "{name}/{quality}: RMS {rms:.5}, noise {noise:.5}, block bias {bias:.5}; object {object_metrics:?}; ceiling {max_samples}"
                 ));
             }
         }

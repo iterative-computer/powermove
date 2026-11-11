@@ -166,7 +166,7 @@ impl StudioService {
         let denoise = match tier {
             Tier::Final { denoise, .. } => quality.map_or(denoise, |q| {
                 if q.denoise {
-                    Denoise::Oidn
+                    if q.fast_denoise {Denoise::Guided}else{Denoise::Oidn}
                 } else {
                     Denoise::None
                 }

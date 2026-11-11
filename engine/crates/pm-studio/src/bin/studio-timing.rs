@@ -35,13 +35,16 @@ fn main()->Result<(),String>{
             let half_guides=match value("--guide-scale","auto").as_str() {"auto"=>preset!="final","2"=>true,"1"=>false,_=>return Err("guide scale must be auto, 1 or 2".into())};
             denoiser.set_half_resolution_guides(half_guides);
             denoiser.set_quality(match value("--oidn-quality","auto").as_str() {"auto"=>quality,"fast"=>Quality::Fast,"balanced"=>Quality::Balanced,"high"=>Quality::High,_=>return Err("unknown OIDN quality".into())});
+            let repeats=value("--repeat","1").parse::<u32>().map_err(|e|e.to_string())?;
+            if !(1..=100).contains(&repeats){return Err("repeat must be 1..100".into());}
+            for run in 0..repeats {
             let frame=Instant::now();
             // Match native stills: converge to the noise target/sample ceiling, no time cap.
             let samples=value("--samples",&samples.to_string()).parse::<u32>().map_err(|e|e.to_string())?;
             let bounces=value("--bounces",&bounces.to_string()).parse::<u32>().map_err(|e|e.to_string())?;
             renderer.trace(samples,bounces,true,64);
             let filter=Cell::new(Default::default());
-            let denoise=value("--denoise","oidn");
+            let denoise=value("--denoise",if preset=="draft" {"guided"}else{"oidn"});
             if denoise=="guided" {renderer.prepare_frame(4,None)?;}
             else if denoise=="none" {renderer.prepare_frame(0,None)?;}
             else if denoise=="oidn" {renderer.prepare_frame(0,Some(&|color,shade,albedo,normal|{
@@ -58,7 +61,9 @@ fn main()->Result<(),String>{
             let encode_ms=encode.elapsed().as_secs_f64()*1000.;
             let frame_ms=frame.elapsed().as_secs_f64()*1000.;
             let mut counts=renderer.sample_counts();counts.sort_by(f32::total_cmp);
-            println!("{}",serde_json::json!({"scene":name,"preset":preset,"width":width,"height":height,"hardware_rt":renderer.uses_hardware_rt(),"samples":renderer.samples,"init_ms":init_ms,"scene_prepare_ms":scene_prepare_ms,"scene_upload_ms":scene_upload_ms,"sample_mean":counts.iter().map(|&n|n as f64).sum::<f64>()/counts.len() as f64,"sample_p50":counts[counts.len()/2],"sample_p95":counts[counts.len()*95/100],"pipeline":renderer.timings,"oidn":filter.get(),"output_readback_ms":output_readback_ms,"png_encode_ms":encode_ms,"frame_ms":frame_ms,"half_resolution_guides":half_guides,"ready_ms":ready_ms, "png_compression":"fast", "caustics":renderer.caustics_enabled,"denoiser":denoise, "convergence_time_cap_ms":0,"png_bytes":png.len()}));
+            println!("{}",serde_json::json!({"scene":name,"preset":preset,"run":run,"width":width,"height":height,"hardware_rt":renderer.uses_hardware_rt(),"samples":renderer.samples,"init_ms":init_ms,"scene_prepare_ms":scene_prepare_ms,"scene_upload_ms":scene_upload_ms,"sample_mean":counts.iter().map(|&n|n as f64).sum::<f64>()/counts.len() as f64,"sample_p50":counts[counts.len()/2],"sample_p95":counts[counts.len()*95/100],"pipeline":renderer.timings,"oidn":filter.get(),"output_readback_ms":output_readback_ms,"png_encode_ms":encode_ms,"frame_ms":frame_ms,"half_resolution_guides":half_guides,"ready_ms":ready_ms, "png_compression":"fast", "caustics":renderer.caustics_enabled,"denoiser":denoise, "convergence_time_cap_ms":0,"png_bytes":png.len()}));
+            if let Some(path)=args.windows(2).find(|a|a[0]=="--out").map(|a|std::path::Path::new(&a[1])) {std::fs::create_dir_all(path).map_err(|e|e.to_string())?;std::fs::write(path.join(format!("{name}-{preset}-{run}.png")),&png).map_err(|e|e.to_string())?;}
+            }
         }
     }
     Ok(())

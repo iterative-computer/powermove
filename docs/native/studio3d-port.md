@@ -1968,3 +1968,43 @@ physical scene/sampling metadata, dimensions and decoded pixel fingerprints;
 renderer provenance is recorded outside Git. Use `PM_STUDIO_NOISE_SCENES`
 to run one fixture per lock acquisition. The first expensive reference
 attempt was stopped to prioritize engineering; it is not counted as a pass.
+
+#### Draft filter and occupied-region denoising increment
+
+Native Draft now selects the existing GPU spatial filter through the resolved
+`FinalQuality.fast_denoise` policy; the saved/export quality command and measured
+estimate calibration carry that choice. Draft retains its 4–16 spp, 0.12 error
+threshold, four bounces and full output resolution. Refine, Preview, Production
+and Final retain OIDN. The native regression checks no OIDN/guide readback work,
+full-sized output and one geometry/texture upload over two frames.
+
+OIDN beauty work may crop a zero-surrounded product with a 64-pixel context halo.
+Beauty pixels, guides and output retain their resolution; the guides are still
+prefiltered. Full-image row strides, RGB-only copying, additional channels and
+buffer tails are preserved. Cropped/full-frame object RMS must stay <0.005 in
+the large padded-buffer regression. Nonzero surroundings, small images and a
+product covering most of the frame retain full-frame filtering. The denoiser
+reports `beauty_pixels` for diagnostics. Final retains full-frame beauty context
+as well as full-resolution guides. Initial warm hero Refine is 1.871 s;
+hero Production PNG is 3.057 s before the latest classifier refinement. These
+are engineering measurements, not the final acceptance table.
+
+Near-mirror, uncoated conductors use the complete visible-normal BSDF estimator
+for offline direct light; the complementary emitter/environment MIS weight is
+removed too, preserving energy. Live and rough/layered surfaces retain their
+existing estimator. A finite-emitter energy regression covers both traversal
+paths. Opaque contact-occlusion rays may terminate on an arbitrary opaque hit;
+alpha/noncaster cases restart closest-first from the original origin.
+
+The edge classifier now distinguishes statistically significant image contrast
+from first-batch Monte Carlo variance. Geometric/coverage edges retain their
+unconditional fourfold sample floor; deterministic fine detail keeps the same
+contrast threshold. A synthetic GPU regression rejects noisy flat fields and
+retains a real detail edge. Pixel error thresholds are unchanged.
+
+An unfinished-pixel compaction prototype preserved pixel samples but produced
+no useful chrome speedup; it was removed from the branch. Full-HD acceptance
+also measures the product region separately from its floor/backdrop, using the
+same numeric limits, so a large clean background cannot hide object noise.
+Explicit sample-ceiling trials are logged as trials; the saved Production
+ceiling remains 256 pending that acceptance.

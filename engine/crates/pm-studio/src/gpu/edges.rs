@@ -86,3 +86,25 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stochastic_first_batch_variation_is_not_a_deterministic_detail_edge() {
+        let (w,h)=(9u32,7u32);let pixels=(w*h) as usize;
+        let mut r=super::Renderer::new(w,h).unwrap();
+        let guide=vec![[0f32,1.,1.,1.];pixels];r.queue.write_buffer(&r.gbuf,0,bytemuck::cast_slice(&guide));
+        for noisy in [true,false] {
+            let mut a=vec![[0f32;4];pixels];let mut e=vec![[0f32;4];pixels*2];
+            for i in 0..pixels {
+                let mean=if noisy {if i%2==0 {0.2}else{1.}}else{if (i%w as usize)<4 {0.2}else{1.}};
+                a[i]=[4.*mean,4.*mean,4.*mean,4.];
+                e[pixels+i]=[4.*(mean*mean+if noisy{1.}else{0.});4];e[pixels+i][3]=0.;
+            }
+            r.queue.write_buffer(&r.accum,0,bytemuck::cast_slice(&a));r.queue.write_buffer(&r.ebuf,0,bytemuck::cast_slice(&e));
+            r.classify_edges();let flags=r.read_f32(&r.ebuf,(pixels*32) as u64);
+            let count=flags[pixels*4..].chunks_exact(4).filter(|p|p[3]>0.).count();
+            if noisy {assert_eq!(count,0,"noise must not force the fourfold edge floor");}else{assert!(count>0,"deterministic detail must keep extra samples");}
+        }
+    }
+}

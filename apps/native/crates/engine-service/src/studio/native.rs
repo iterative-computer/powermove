@@ -567,6 +567,7 @@ impl SceneSource for DocumentSource {
                 max_bounces: q["maxBounces"].as_u64().unwrap() as u32,
                 caustics: q["caustics"].as_bool().unwrap(),
                 denoise: q["denoise"].as_bool().unwrap(),
+                fast_denoise: q["preset"] == "draft",
                 half_resolution_guides: q["preset"] != "final",
             }
             .validate()?,

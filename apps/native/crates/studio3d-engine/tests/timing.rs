@@ -73,6 +73,7 @@ impl SceneSource for Product {
             max_bounces: 8,
             caustics: true,
             denoise: true,
+            fast_denoise: false,
             half_resolution_guides: true,
         }))
     }
@@ -169,4 +170,23 @@ fn native_worker_product_timing_split() {
 }
 fn pm_studio_png(path: &std::path::Path, pixels: &[u8]) {
     pm_studio3d_engine::gpu::write_png(path,1920,1080,pixels).unwrap();
+}
+
+#[test]
+fn draft_spatial_denoise_keeps_targets_and_reuses_geometry() {
+    struct Draft(Product);
+    impl SceneSource for Draft {
+        fn scene(&self,r:&SceneRequest)->Result<SceneInput,String>{self.0.scene(r)}
+        fn final_quality(&self,_:&SceneRequest)->Result<Option<FinalQuality>,String>{Ok(Some(FinalQuality{min_samples:4,max_samples:16,noise_threshold:0.12,max_bounces:4,caustics:false,denoise:true,fast_denoise:true,half_resolution_guides:true}))}
+    }
+    let source=Draft(Product::new("hero"));let mut service=StudioService::default();
+    for ticks in [0,1] {
+        let request=SceneRequest{composition:"draft-filter".into(),revision:1,ticks,width:96,height:64};
+        let frame=service.render(&source,request,Tier::Final{samples:16,salt:0,denoise:Denoise::Oidn}).unwrap();
+        service.device().unwrap().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert_eq!(frame.timings.oidn.total_ms,0.);assert_eq!(frame.timings.pipeline.guide_readback_ms,0.);
+        assert!((4..=16).contains(&frame.samples));assert!(!frame.layers.is_empty());
+        assert_eq!((frame.layers[0].texture.width(),frame.layers[0].texture.height()),(96,64));
+    }
+    assert_eq!(service.geometry_uploads(),1);assert_eq!(service.texture_uploads(),1);
 }
