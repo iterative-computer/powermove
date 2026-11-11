@@ -12,7 +12,9 @@ use std::{sync::Arc, time::Instant};
 struct Product {
     scene: scene::Scene,
     instances: Vec<MeshInstance>,
+    screen: Vec<u8>,
     production: bool,
+    animate: bool,
 }
 impl Product {
     fn new(name: &str) -> Self {
@@ -33,20 +35,32 @@ impl Product {
         Self {
             scene,
             instances,
+            screen: scene::screen_wallpaper(512, 744, 0.),
             production: false,
+            animate: false,
         }
     }
 }
 impl SceneSource for Product {
-    fn scene(&self, _: &SceneRequest) -> Result<SceneInput, String> {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut instances = self.instances.clone();
+        if self.animate {
+            let angle = request.ticks as f32 * 0.01;
+            let (s, c) = angle.sin_cos();
+            for instance in &mut instances {
+                instance.world = Transform([
+                    c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., 0., 0., 0., 1.,
+                ]);
+            }
+        }
         Ok(SceneInput {
             scene: self.scene.clone(),
-            instances: self.instances.clone(),
+            instances,
             materials: None,
             maps: Some(TextureMaps {
                 width: 512,
                 height: 744,
-                layers: vec![scene::screen_wallpaper(512, 744, 0.)],
+                layers: vec![self.screen.clone()],
             }),
             view: Default::default(),
         })
@@ -61,6 +75,38 @@ impl SceneSource for Product {
             denoise: true,
             half_resolution_guides: true,
         }))
+    }
+}
+
+#[test]
+#[ignore = "1080p manual Live diagnostic; run headless under pm-build.lock with >=5 GB free"]
+fn native_worker_live_timing_split() {
+    for name in ["hero", "chrome"] {
+        let mut product = Product::new(name);
+        let mut service = StudioService::default();
+        let mut request = SceneRequest {
+            composition: "live-timing".into(), revision: 1, ticks: 0,
+            width: 1920, height: 1080,
+        };
+        for animated in [false, true] {
+            product.animate = animated;
+            for frame in 0..34 {
+                request.ticks += 1;
+                let rendered = service.render(&product, request.clone(), Tier::QualityLive).unwrap();
+                // Complete pending layer copies without copying pixels to the CPU.
+                service.device().unwrap().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                if frame >= 4 {
+                    println!("NATIVE_LIVE_TIMING {}", serde_json::json!({
+                        "scene": name, "animated": animated, "frame": frame,
+                        "width": request.width, "height": request.height,
+                        "prepare_ms": rendered.timings.prepare_ms, "total_ms": rendered.timings.total_ms,
+                        "pipeline": rendered.timings.pipeline, "hardware_rt": rendered.hardware_rt,
+                        "geometry_uploads": service.geometry_uploads(), "scene_updates": service.scene_updates(),
+                        "blas_builds": service.blas_builds(),
+                    }));
+                }
+            }
+        }
     }
 }
 #[test]
