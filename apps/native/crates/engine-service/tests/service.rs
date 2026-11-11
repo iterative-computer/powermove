@@ -277,6 +277,77 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
 }
 
 #[test]
+fn stopped_playback_retires_recording_pools_without_changing_the_still() {
+    let service = EngineService::start(pm_gpu::Gpu::new("stopped-pools-test").unwrap()).unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while viewer.status().presented < 3 {
+        assert!(Instant::now() < deadline, "playback did not advance");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.command(C::Pause).unwrap();
+    while viewer
+        .status()
+        .clock
+        .is_none_or(|c| c.state != pm_protocol::clock::TransportState::Stopped)
+    {
+        assert!(Instant::now() < deadline, "playback did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.capture_next().unwrap();
+    let pixels = wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.memory_usage().targets_created != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "stopped recording pools stayed live"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        viewer.status().frame.unwrap().pixels.as_ref(),
+        Some(&pixels)
+    );
+    viewer.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap()
+    );
+    viewer.retire();
+}
+
+#[test]
+fn closing_the_last_view_retires_device_pools_and_reopens_with_identical_exact_pixels() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("idle-device-renewal-test").unwrap()).unwrap();
+    let input = snapshot();
+    let first = service.viewer(config(input.clone())).unwrap();
+    first.capture_next().unwrap();
+    let pixels = wait_frame(&first, first.stamp().unwrap()).pixels.unwrap();
+    assert!(service.memory_usage().targets_created > 0);
+    first.retire();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.memory_usage().targets_created != 0 {
+        assert!(Instant::now() < deadline, "old device pools stayed live");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let reopened = service.viewer(config(input)).unwrap();
+    reopened.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&reopened, reopened.stamp().unwrap())
+            .pixels
+            .unwrap()
+    );
+    reopened.retire();
+}
+
+#[test]
 fn closing_one_document_keeps_the_other_view_usable() {
     let service = EngineService::start(pm_gpu::Gpu::new("other-project-test").unwrap()).unwrap();
     let first = config(snapshot());
