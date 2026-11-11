@@ -13,16 +13,44 @@ pub use pm_studio3d_engine::service::{
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
 
+mod views;
+pub use views::{Axis, Pane, ViewCamera, ViewCommand, Views};
+
 /// A viewer's transient Free View (3d-studio.md §4): where the editor camera
 /// stands and looks. It never edits the document; captures and exports use
 /// the composition's camera. `zoom` scales the lens as the camera's zoom does.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreeView {
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub zoom: f64,
 }
 impl FreeView {
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .eye
+            .iter()
+            .chain(self.target.iter())
+            .any(|v| !v.is_finite() || v.abs() > 1e6)
+            || !self.zoom.is_finite()
+            || self.zoom <= 0.
+            || self.zoom > 1e6
+            || self
+                .eye
+                .iter()
+                .zip(self.target)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                < 1e-12
+        {
+            return Err(
+                "Free View needs finite distinct eye/target points and a positive zoom".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Exact bits, for cache identities.
     pub fn key(view: Option<Self>) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -38,7 +66,8 @@ impl FreeView {
 }
 /// Transient viewer state. Final uses the composition's saved noise/sample
 /// policy; selecting a tier never edits the composition or export override.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Preview {
     #[default]
     Live,
@@ -98,9 +127,19 @@ pub fn attach_with_preview(
     request: &SceneRequest,
     preview: Preview,
 ) -> Result<(), String> {
-    attach_with_view(renderer, doc, media, request, preview, None)
+    attach_with_preview_fonts(renderer, doc, media, request, preview, None)
 }
-/// As `attach_with_preview`, seen from a viewer's Free View when it has one.
+#[cfg(feature = "kernel")]
+pub fn attach_with_preview_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    attach_with_view_fonts(renderer, doc, media, request, preview, None, fonts)
+}
 #[cfg(feature = "kernel")]
 pub fn attach_with_view(
     renderer: &mut pm_render::Renderer,
@@ -110,8 +149,35 @@ pub fn attach_with_view(
     preview: Preview,
     view: Option<FreeView>,
 ) -> Result<(), String> {
+    attach_with_view_fonts(renderer, doc, media, request, preview, view, None)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_view_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    view: Option<FreeView>,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    attach_with_camera_fonts(renderer, doc, media, request, preview, view.into(), fonts)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_camera_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    camera: ViewCamera,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    camera.validate()?;
     use pm_studio3d_engine::compositor::Source;
-    let source = DocumentSource::new(doc, media.clone()).with_view(view);
+    let source = DocumentSource::new(doc, media.clone())
+        .with_native_fonts(fonts)
+        .with_camera_for(&request.composition, camera);
     let tier = match preview {
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },
@@ -125,6 +191,20 @@ pub fn attach_with_view(
     Ok(())
 }
 
+#[cfg(feature = "kernel")]
+pub fn attach_with_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    fonts: &pm_render::text::host::RenderFonts,
+) {
+    attach_source(
+        renderer,
+        DocumentSource::new(doc, media.clone()).with_native_fonts(Some(fonts)),
+        Tier::QualityLive,
+    );
+}
+
 /// Native export command hook. Overrides affect this frozen job only.
 #[cfg(feature = "kernel")]
 pub fn attach_with_quality(
@@ -134,13 +214,26 @@ pub fn attach_with_quality(
     composition: &str,
     quality: serde_json::Value,
 ) -> Result<(), String> {
-    let source =
-        DocumentSource::new(doc, media.clone()).with_quality_override(composition, quality)?;
+    attach_with_quality_fonts(renderer, doc, media, composition, quality, None)
+}
+#[cfg(feature = "kernel")]
+pub fn attach_with_quality_fonts(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    composition: &str,
+    quality: serde_json::Value,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+) -> Result<(), String> {
+    let source = DocumentSource::new(doc, media.clone())
+        .with_native_fonts(fonts)
+        .with_quality_override(composition, quality)?;
     attach_source(renderer, source, Tier::QualityLive);
     Ok(())
 }
 #[cfg(feature = "kernel")]
 fn attach_source(renderer: &mut pm_render::Renderer, source: DocumentSource, preview: Tier) {
+    let source = source.with_capture_definitions(renderer.definitions());
     let revision = source.revision();
     renderer.set_studio_source(
         Some(std::sync::Arc::new(

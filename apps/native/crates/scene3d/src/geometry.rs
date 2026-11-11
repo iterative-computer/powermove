@@ -281,6 +281,10 @@ pub fn required_ids(comp: &Value, args: &Value, selection: &[String]) -> Result<
         Ok(matches[0]["id"].as_str().unwrap().into())
     };
     match args["operation"].as_str() {
+        Some("auto_studio") if args["target"].is_string() || args["id"].is_string()=>{
+            let id=resolve(args["target"].as_str().or(args["id"].as_str()).unwrap())?;
+            if !ls.iter().any(|l|l["id"]==id && schema::role(l)==Some(schema::Role::Object)){return fail("Choose a model for Studio setup");}Ok(vec![id])
+        },
         Some("auto_studio") => Ok(ls
             .iter()
             .filter(|l| schema::role(l) == Some(schema::Role::Object))

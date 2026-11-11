@@ -986,3 +986,206 @@ fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
     assert_eq!(s.revision(), revision);
     assert_eq!(project(&s), after);
 }
+
+#[test]
+fn extrusion_surfaces_channels_undo_and_pmv_roundtrip() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"title","name":"Title","type":"text","on":true,"from":0,"dur":10,"p":{},"d":{"text":"Studio","font":"Arial","fontSize":60,"color":"#E8E2CF"}}]})));
+    let flat=project(&s);
+    apply(&mut s,json!({"operation":"set_extrusion","target":"title","patch":{"enabled":true,"depth":30,"bevelStyle":"convex","bevelDepth":4}}));
+    let extruded=project(&s);
+    assert_eq!(layer(&s,"title")["threeD"],true);
+    assert_eq!(layer(&s,"title")["d"]["extrusion"]["p"]["depth"]["v"],30);
+    s.undo().unwrap();assert_eq!(project(&s),flat);s.redo().unwrap();assert_eq!(project(&s),extruded);
+    for (i,surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate() {
+        apply(&mut s,json!({"operation":"set_surface_material_properties","target":"title","materialIndex":i,"patch":{"color":"#FFFFFF","roughness":0.25,"metallic":0.8}}));
+        apply(&mut s,json!({"operation":"set_surface_material_map","target":"title","surface":surface,"slot":"normal","map":"paint"}));
+        s.execute(PropertyCommand::Set(SetProperty::new("title",format!("ms.{surface}.roughness"),0.7,0.)).into(),Origin::Mcp).unwrap();
+        assert_eq!(layer(&s,"title")["d"]["extrusion"]["surfaces"][surface]["properties"]["roughness"]["v"],0.7);
+    }
+    let authored=project(&s);
+    assert!(s.execute(command(json!({"operation":"set_extrusion","target":"title","patch":{"depth":-1}})),Origin::Mcp).is_err());
+    assert!(s.execute(command(json!({"operation":"set_material_map","target":"title","slot":"normal","map":{"layerId":"title"}})),Origin::Mcp).is_err());
+    assert_eq!(project(&s),authored);
+    let mut dir=common::TempDir::new("extrusion");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("text.pmv");
+    common::save_as(&mut s,&path).unwrap();
+    let mut reopened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());
+    assert_eq!(project(&reopened),authored);reopened.undo().unwrap();reopened.redo().unwrap();assert_eq!(project(&reopened),authored);
+    apply(&mut reopened,json!({"operation":"set_material_properties","target":"title","surface":"back","patch":{"roughness":null}}));
+    assert!(layer(&reopened,"title")["d"]["extrusion"]["surfaces"]["back"]["properties"].get("roughness").is_none());
+    reopened.undo().unwrap();assert_eq!(project(&reopened),authored);
+}
+
+#[test]
+fn live_material_source_records_undo_and_reopen_without_rewriting_sources() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"art","name":"Art","type":"group","on":false,"from":0,"dur":10,"p":{}},{"id":"paint","name":"Paint","type":"solid","group":"art","on":true,"from":0,"dur":10,"p":{},"d":{"w":32,"h":32,"color":"#FF0000"}}]})));
+    apply(&mut s,json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
+    let before=project(&s);let source=layer(&s,"art");
+    s.execute(command(json!({"operation":"update_object","target":"model","patch":{"material":{"screen":"screen","maps":{"color":{"layerId":"art"}}},"sourceMaterials":{"1":{"emissive":{"compositionId":"screen"}}}}})),Origin::Mcp).unwrap();
+    let saved=project(&s);assert_eq!(layer(&s,"art"),source);assert_eq!(layer(&s,"model")["d"]["data"]["object"]["material"]["maps"]["color"],json!({"layerId":"art"}));
+    s.undo().unwrap();assert_eq!(project(&s),before);s.redo().unwrap();assert_eq!(project(&s),saved);
+    let mut dir=common::TempDir::new("live-material");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("material.pmv");common::save_as(&mut s,&path).unwrap();let mut opened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());assert_eq!(project(&opened),saved);opened.undo().unwrap();assert_eq!(project(&opened),before);opened.redo().unwrap();assert_eq!(project(&opened),saved);
+}
+
+#[test]
+fn repeated_imports_are_grounded_separated_framed_and_one_undo_each() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let mut dir = common::TempDir::new("placed-imports");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let archive = Archive::open(&dir.path("archive")).unwrap();
+    let bytes = import::triangle_glb(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], &[0, 1, 2]);
+    let receipt = std::sync::Arc::new(
+        archive
+            .admit(
+                import::prepare(
+                    vec![ImportFile {
+                        name: "part.glb".into(),
+                        mime: "model/gltf-binary".into(),
+                        bytes,
+                    }],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+    );
+    let mut s = store();
+    let import = |s: &mut DocumentStore, asset: &str, id: &str, setup_studio: bool| {
+        s.execute(
+            Scene3dCommand::Import {
+                comp: None,
+                asset_id: asset.into(),
+                layer_id: id.into(),
+                receipt: receipt.clone(),
+                time: 0.,
+                setup_studio,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap()
+    };
+    import(&mut s, "a", "one", true);
+    let first = project(&s);
+    let camera = first["comps"]["C"]["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_camera = layer(&s, &camera);
+    import(&mut s, "b", "two", true);
+    let placed = project(&s);
+    assert_eq!(
+        placed["comps"]["C"]["layers"].as_array().unwrap().len(),
+        6,
+        "the existing rig must be reused"
+    );
+    assert_ne!(
+        layer(&s, &camera),
+        old_camera,
+        "studio imports frame the two models"
+    );
+    let mut geometry = pm_scene3d::geometry::LoadedAssets::default();
+    for asset in ["a", "b"] {
+        geometry.insert_shared(
+            asset.into(),
+            placed["assets"][asset].clone(),
+            receipt.model(),
+        );
+    }
+    let bounds = |id: &str| {
+        let args = to_model(&json!({"operation":"drop_to_floor","target":id}));
+        let result = pm_kernel::commands::scene3d::prepare_geometry(
+            &s.snapshot(),
+            None,
+            &args,
+            &[],
+            0.,
+            &geometry,
+        )
+        .unwrap();
+        let v = &result.bounds[id];
+        std::array::from_fn::<_, 6, _>(|i| v[i].as_f64().unwrap())
+    };
+    let a = bounds("one");
+    let b = bounds("two");
+    assert!(pm_kernel::commands::scene3d::prepare_geometry(&s.snapshot(),None,&to_model(&json!({"operation":"auto_studio","target":camera})),&[],0.,&geometry).is_err());
+    assert!(
+        a[1].abs() < 1e-6 && b[1].abs() < 1e-6,
+        "models must meet the ground: {a:?} {b:?}"
+    );
+    assert!(
+        (0..3).any(|i| a[i + 3] < b[i] || b[i + 3] < a[i]),
+        "model bounds overlap: {a:?} {b:?}"
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), first);
+    s.redo().unwrap();
+    assert_eq!(project(&s), placed);
+    let path = dir.path("placed.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut opened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&opened), placed);
+    opened.undo().unwrap();
+    assert_eq!(project(&opened), first);
+    opened.redo().unwrap();
+    assert_eq!(project(&opened), placed);
+    // A locked shot remains exact while a subsequent import is still placed.
+    s.execute(
+        Command::SetLayerLocked {
+            layer_id: camera.clone(),
+            locked: true,
+        },
+        Origin::Interface,
+    )
+    .unwrap();
+    let locked = layer(&s, &camera);
+    let before = project(&s);
+    import(&mut s, "c", "three", true);
+    assert_eq!(layer(&s, &camera), locked);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    // setup_studio=false adds no rig/camera edits but still grounds the import.
+    let mut bare = store();
+    import(&mut bare, "a", "one", false);
+    assert_eq!(
+        project(&bare)["comps"]["C"]["layers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        layer(&bare, "one")["p"]["position.y"]["v"]
+            .as_f64()
+            .unwrap()
+            > 0.
+    );
+    // Pre-bounds projects still bind their exact retained archive without an edit.
+    let mut legacy = first.clone();
+    legacy["assets"]["a"]
+        .as_object_mut()
+        .unwrap()
+        .remove("native3dBounds");
+    let retained = std::sync::Arc::new(archive.recover(&legacy["assets"]["a"]).unwrap());
+    let mut legacy = DocumentStore::new_untitled(to_model(&legacy));
+    let before = project(&legacy);
+    let revision = legacy.revision();
+    legacy
+        .execute(
+            Scene3dCommand::BindImport {
+                asset_id: "a".into(),
+                receipt: retained,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+    assert_eq!(legacy.revision(), revision);
+    assert_eq!(project(&legacy), before);
+}

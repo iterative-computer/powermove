@@ -91,7 +91,7 @@ pub struct CacheKey {
     pub crop: Option<Crop>,
     pub moment: Moment,
     pub studio_preview: crate::studio::Preview,
-    /// `FreeView::key` of the viewer's Free View.
+    /// `ViewCamera::key` of the pane's camera.
     pub studio_view: u64,
 }
 impl CacheKey {

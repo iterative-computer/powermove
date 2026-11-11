@@ -125,7 +125,7 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
                 v.resources.clone(),
                 v.studio_preview,
                 v.stamp,
-                v.studio_view,
+                v.studio_view.clone(),
             ))
         })
     };
@@ -138,7 +138,7 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
         engine.set_resources(resources);
         engine.studio_preview(preview);
         // Picks see what the viewer shows, including its Free View.
-        engine.studio_view(view);
+        engine.studio_camera(view);
         engine.use_compat_document(p.stamp.doc_id);
         engine
             .pick_surface(&scene, &request, p.point)

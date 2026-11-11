@@ -576,3 +576,68 @@ fn surface_queries_share_rendered_layers_world_geometry_and_refine_accumulation(
     assert_eq!(service.geometry_uploads(),1);
     assert_eq!(service.texture_uploads(),1);
 }
+
+struct BackdropSource {
+    source: Source,
+    owners: Vec<String>,
+}
+impl SceneSource for BackdropSource {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.backdrop = v3(0.25, 0.5, 0.75);
+        input.view.backdrop_opaque = Some(true);
+        Ok(input)
+    }
+    fn auxiliary_layers(
+        &self,
+        _request: &SceneRequest,
+    ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
+        Ok(self
+            .owners
+            .iter()
+            .map(|id| pm_studio3d_engine::extract::AuxiliaryLayer {
+                id: id.clone(),
+                include_void: true,
+            })
+            .collect())
+    }
+}
+#[test]
+fn one_surface_output_can_own_the_backdrop_and_duplicate_owners_are_rejected() {
+    let mut source = BackdropSource {
+        source: Source::new(),
+        owners: vec!["right".into()],
+    };
+    let mut service = StudioService::default();
+    let frame = service
+        .render(
+            &source,
+            request(),
+            Tier::Final {
+                samples: 4,
+                salt: 1,
+                denoise: Denoise::None,
+            },
+        )
+        .unwrap();
+    let output = pixels(&service, &frame);
+    for (layer, pixels) in frame.layers.iter().zip(output) {
+        let corner = &pixels[..4];
+        if layer.layer == "right" {
+            assert!(corner[3] > 250);
+            for (actual, expected) in corner[..3].iter().zip([64, 128, 191]) {
+                assert!((*actual as i32 - expected).abs() <= 2, "{corner:?}");
+            }
+        } else {
+            assert_eq!(corner[3], 0);
+        }
+    }
+    source.owners.push("left".into());
+    assert!(
+        service
+            .render(&source, request(), Tier::QualityLive)
+            .err()
+            .unwrap()
+            .contains("multiple output owners")
+    );
+}

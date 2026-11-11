@@ -874,16 +874,17 @@ pub fn run_child() -> Result<()> {
         }
         #[cfg(feature = "kernel")]
         if let Some(quality) = request.studio_quality {
-            crate::studio::attach_with_quality(
+            crate::studio::attach_with_quality_fonts(
                 &mut renderer,
                 Arc::new(doc.clone()),
                 &media,
                 composition.as_str(),
                 quality,
+                Some(&fonts),
             )
             .map_err(anyhow::Error::msg)?;
         } else {
-            crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
+            crate::studio::attach_with_fonts(&mut renderer, Arc::new(doc.clone()), &media, &fonts);
         }
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {

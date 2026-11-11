@@ -1,4 +1,4 @@
-//! Durable image-backed material maps. Live capture is a separate resource lane.
+//! Image and compositor-backed material maps share the Studio texture array.
 use super::*;
 pub(super) fn overrides(object: &Value, index: Option<usize>, basic: bool) -> Value {
     let mut maps = object["material"]["maps"]
@@ -9,6 +9,12 @@ pub(super) fn overrides(object: &Value, index: Option<usize>, basic: bool) -> Va
     {
         maps.extend(indexed.clone());
     }
+    if let Some(composition) = object["material"]["screen"].as_str() {
+        maps.insert(
+            "emissive".into(),
+            serde_json::json!({"compositionId": composition}),
+        );
+    }
     if basic {
         let source = maps.get("emissive").or_else(|| maps.get("color")).cloned();
         maps.clear();
@@ -18,6 +24,29 @@ pub(super) fn overrides(object: &Value, index: Option<usize>, basic: bool) -> Va
         }
     }
     serde_json::json!({"maps": maps})
+}
+/// A screen emits its composition with white gain, independently of the
+/// underlying finish's emission color, matching the Studio source contract.
+pub(super) fn screen(
+    object: &Value,
+    index: Option<usize>,
+    material: &mut Material,
+    gpu: &mut GpuMaterial,
+    basic: bool,
+) {
+    if basic || !object["material"]["screen"].is_string() {
+        return;
+    }
+    let intensity = index
+        .and_then(|i| object["sourceMaterialProperties"][i.to_string()].get("emissionIntensity"))
+        .or_else(|| object["materialProperties"].get("emissionIntensity"))
+        .map(val)
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or_else(|| n(&object["material"]["p"], "emissiveIntensity", 1.))
+        .max(0.);
+    material.emission = Vec3::splat(intensity);
+    gpu.emit[..3].fill(intensity);
 }
 impl DocumentSource {
     fn material_image(&self, source: &Value) -> Result<Arc<Vec<u8>>, String> {
@@ -58,6 +87,8 @@ impl DocumentSource {
     }
     pub(super) fn bind_material_maps(
         &self,
+        request: &SceneRequest,
+        owner: &str,
         material: &Value,
         gpu: &mut GpuMaterial,
         layers: &mut Vec<Vec<u8>>,
@@ -71,17 +102,28 @@ impl DocumentSource {
             if source.is_null() {
                 continue;
             }
-            let id = source
-                .as_str()
-                .ok_or("Live layer/group material capture is not connected yet")?;
-            let key = (format!("image:{id}"), 0);
+            let key = (
+                if let Some(id) = source.as_str() {
+                    format!("image:{id}")
+                } else {
+                    if !matches!(slot.as_str(), "color" | "emissive") {
+                        return Err("Live material sources support color and emissive maps".into());
+                    }
+                    self.captured_material(request, owner, source)?.0
+                },
+                0,
+            );
             let index = if let Some(index) = indices.get(&key) {
                 *index
             } else {
                 if layers.len() >= 256 {
                     return Err("Studio map array exceeds 256 layers".into());
                 }
-                let pixels = self.material_image(source)?;
+                let pixels = if source.is_string() {
+                    self.material_image(source)?
+                } else {
+                    self.captured_material(request, owner, source)?.1
+                };
                 let index = layers.len();
                 layers.push((*pixels).clone());
                 indices.insert(key, index);

@@ -131,6 +131,7 @@ fn cache_key_includes_every_content_coordinate() {
             ..k
         },
         policy::CacheKey { content: 2, ..k },
+        policy::CacheKey { studio_view:1, ..k },
         policy::CacheKey { revision: 4, ..k },
         policy::CacheKey { width: 101, ..k },
         policy::CacheKey { height: 101, ..k },

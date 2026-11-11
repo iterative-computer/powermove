@@ -305,6 +305,19 @@ pub(crate) fn effect_steps_raster<'d>(
     prefix: Option<usize>,
     raster: Option<crate::composite::effects::SourceRaster>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
+    effect_steps_frame(scope, effects, layer, time, scale, prefix, raster, None)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn effect_steps_frame<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    prefix: Option<usize>,
+    raster: Option<crate::composite::effects::SourceRaster>,
+    space: Option<crate::composite::effects::OwnerSpace>,
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
     for (fx_index, fx) in node::array_or_empty(node::member(Some(layer), "fx"))?
@@ -391,7 +404,10 @@ pub(crate) fn effect_steps_raster<'d>(
                 )));
                 continue;
             }
-            match raster.map_or_else(|| owner(scope, layer, time, scale), |r| Ok(Ok(r.owner())))? {
+            match raster.map_or_else(
+                || owner_space(scope, layer, time, scale, space),
+                |r| Ok(Ok(r.owner())),
+            )? {
                 Ok(owner) => step.owner = Some(std::sync::Arc::new(owner)),
                 Err(f) => {
                     refused.get_or_insert(f);
@@ -702,13 +718,41 @@ pub(crate) fn owner<'d>(
     time: f64,
     scale: (f64, f64),
 ) -> JsResult<Result<Owner, Feature>> {
-    let Some(bounds) = scope.size_bounds(layer, time)? else {
+    owner_space(scope, layer, time, scale, None)
+}
+fn owner_space<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    space: Option<crate::composite::effects::OwnerSpace>,
+) -> JsResult<Result<Owner, Feature>> {
+    let bounds = if let Some(bounds) = space.and_then(|s| s.bounds) {
+        Some(pm_eval::space3d::Rect {
+            x0: bounds.x,
+            y0: bounds.y,
+            x1: bounds.x + bounds.width,
+            y1: bounds.y + bounds.height,
+        })
+    } else {
+        scope.size_bounds(layer, time)?
+    };
+    let Some(bounds) = bounds else {
         return Ok(Err(Feature::Definition(
             "effect owner bounds unavailable".into(),
         )));
     };
-    let offset = scope.size_anchor_offset(layer, time)?;
-    let world = scope.world_matrix(layer, time)?;
+    let offset = if space.is_some_and(|s| s.bounds.is_some()) {
+        Default::default()
+    } else {
+        scope.size_anchor_offset(layer, time)?
+    };
+    let world = if let Some(space) = space {
+        space.world
+    } else {
+        scope.world_matrix(layer, time)?
+    };
+    let scale = if space.is_some() { (1., 1.) } else { scale };
     let scaled = [
         world[0] * scale.0,
         world[1] * scale.1,

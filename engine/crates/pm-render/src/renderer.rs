@@ -9,6 +9,8 @@ use std::time::Instant;
 mod chrome;
 mod layer_raster;
 mod media_prepare;
+mod material_capture;
+pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCaptureStats};
 mod source;
 mod source_video;
 pub use layer_raster::{LayerPixels, LayerRaster};
@@ -289,6 +291,7 @@ fn build_options(
     offline_cards: bool,
 ) -> plan::BuildOptions {
     plan::BuildOptions {
+        material: None,
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
         shader_fallback,
@@ -494,6 +497,7 @@ pub struct Renderer {
     /// Source-monitor and filmstrip targets/readbacks reused only by the
     /// source path. Composition frame-reuse and its lease stay independent.
     source_reuse: source::SourceReuse,
+    material: material_capture::State,
     /// Bind groups kept across frames (`crate::binds`).
     binds: crate::binds::BindCache,
 }
@@ -546,6 +550,7 @@ impl Renderer {
             prefix: Default::default(),
             frame_reuse: FrameReuse::default(),
             source_reuse: source::SourceReuse::default(),
+            material: Default::default(),
             binds: crate::binds::BindCache::default(),
         }
     }
@@ -1492,6 +1497,8 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
+        self.material.trim(bytes.min(128*1024*1024));
+        let bytes=bytes.saturating_sub(self.material.stats.retained_bytes);
         // Kept bind groups hold their views (and textures) alive.
         self.binds.clear();
         // An export's kept staging buffer, frame target and pixels (the
@@ -1991,8 +1998,7 @@ impl Renderer {
             .unwrap_or_else(|| comp.clone());
         let seconds = comp.seconds_at(time.get());
         let (w, h) = (request.output_size.width, request.output_size.height);
-        let scale = request
-            .scale
+        let scale = self.material.scale.or(request.scale)
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         // Overruns measured on earlier frames disable their programs now.
         self.effects
@@ -2019,12 +2025,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(
+            plan::BuildOptions { material:self.material.plan, ..build_options(
                 &comp,
                 request,
                 self.shaders.fallback_runner,
                 self.isolate_layers,
-            ),
+            ) },
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );

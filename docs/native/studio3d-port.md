@@ -39,7 +39,12 @@ remaining noise/performance work in this order: (1) viewer surface picking,
 (2) per-layer failure isolation, (3) persisted/undoable text extrusion and
 Front/Bevel/Side/Back materials, (4) layer/group/composition material capture,
 (5) one/two/four views with per-view camera and tier, (6) Studio backdrop,
-(7) framed, grounded import placement. This lane adds no visual controls.
+(7) framed, grounded import placement. Round two (`1107d800a`) confirmed
+picking and failure isolation in the app. Immediately after import placement:
+fix Quality fog making the foreground black, the shadow catcher's black void
+(possibly shared with the Studio backdrop), and Fast terrain rendering darker
+than Quality. Then resume noise/edges and the approved native performance gates.
+This lane adds no visual controls.
 
 ## Capability audit
 
@@ -83,20 +88,20 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Parent/group transforms, anchors, opacity and solo | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Per-layer and group 3D switches | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | 2D solids/images/video/text/shapes/precomps in 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Flat text/shapes remain flat until extrusion enabled | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Text outlines, font loading/fallback and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Shape extrusion, compound paths and holes | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Animated extrusion depth/bevel and quality | Shared engine present; row integration unverified | P | K | K | P | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
+| Flat text/shapes remain flat until extrusion enabled | Native opt-in routing checked; disabled artwork retains its existing renderer | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Text outlines, font loading/fallback and holes | Native broker/full-face outlines, four surfaces and counters checked; image-only glyphs report errors | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Shape extrusion, compound paths and holes | Native compound fill rules and expanded strokes; stroked caps subtract fill overlap | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
+| Animated extrusion depth/bevel and quality | Native geometry channels evaluated; kernel/keyframe/expression paths registered | Native `d.extrusion` / `set_extrusion` | PMV checked | Compound edits checked | Surface ops and channel readback checked | Read geometry/surfaces/channels → `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`, ordinary animation |
 | Angular/concave/convex bevels, inner hole bevel depth | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Front/Bevel/Side/Back independent materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | PBR color/roughness/metalness/emission/opacity | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Color/normal/roughness/metalness/emissive/AO image maps | Native retained-image and indexed replacement checks | Connected image sources; live capture pending | Tested sparse records | Tested | Tested | Read maps/source material IDs → `update_object` material.maps or sourceMaterials; live sources pending |
+| Color/normal/roughness/metalness/emissive/AO image maps | Native retained-image and indexed replacement checks | Image and bounded live source captures connected | Tested sparse records | Tested | Tested | Read maps/source material IDs → `update_object` material.maps or sourceMaterials; capture failures reported per layer |
 | Source materials versus whole-model overrides | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Material opacity/roughness/metallic/emission color/intensity/ambient response | Native sparse values, source IDs and rendered emission checked | Connected | Tested PMV | Tested Undo/Redo | Tested | `update_object` patch `materialProperties` / `sourceMaterialProperties`; `mi.*` / `mi.index.*` channel edits |
-| Live composition textures on named model materials | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Live layer material sources in same composition | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Layer material source timing, masks, effects; transform/opacity excluded | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
-| Material source missing/loading/relink/undo/save lifecycle | Shared engine present; row integration unverified | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Live composition textures on named model materials | Native composition capture; per-receiver clocks and sparse source-material bindings checked | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Live layer material sources in same composition | Native hidden layer/group captures checked; source canvas ignores root transform/opacity | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Layer material source timing, masks, effects; transform/opacity excluded | Native masks/effects owner space, descendant visibility and source clocks checked | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
+| Material source missing/loading/relink/undo/save lifecycle | Per-receiver errors, source/file invalidation and PMV/Undo checked; relink UI verification pending | P | K | K | P | Material channels, slots, source dependencies → `apply_material`; new slot/source edits pending |
 | Sun/parallel, point and spot lights | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light distance/decay, spot angle/penumbra and visibility | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Light cast-shadow toggle, model cast/receive-shadow toggles | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -118,14 +123,14 @@ Hidden prototypes and distance LOD retain shared geometry.
 
 | Capability | Engine | Document / kernel ops | Persistence | Undo | MCP / agent | UI hook (reads → commands) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Groups as Base Color or Emissive | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Cycles and local links | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Stable group source canvas | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Safe group capture | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Groups as Base Color or Emissive | Native bounded subtree capture with hidden root; masks/effects and stable canvas checked | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Cycles and local links | Native recursive source/precomp/matte/effect graph validation; per-receiver failure | P (validated state; rendering pending) | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Stable group source canvas | Native duration/frame-grid/key-time union with bounded evaluation cache | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Safe group capture | Native nested-precomp 3D-descendant rejection checked | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Camera/UV-driven detail | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Capture budgets | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Texture sharing/replacement | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
-| Static capture reuse | Shared engine present; row integration unverified | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
+| Static capture reuse | Source-only keys and receiver-specific clocks checked across immutable adapters | G | U | U | G | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Evaluated bounds and bounds null | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Comp navigation clocks | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Imported paint alpha | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
@@ -149,7 +154,7 @@ Hidden prototypes and distance LOD retain shared geometry.
 | Front / Bevel / Side / Back | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Camera depth of field/focus | Shared lens; native focus/defocus checks | P | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
 | Camera iris controls | Shared iris; native defocus check | P (render connected; broader parity pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
-| Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; multiple views pending |
+| Multiple views | Native 1/2/4 pane state, six orthographic axes, named/custom cameras and independent picking checked | G | U | U | G | Read `Views` / `Pane` → `ViewCommand`, `Views::apply_to`, `Viewer::studio_camera` / `studio_state`; UI arrangement pending |
 | glTF embedded animation | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
 | FBX with embedded animation | Shared `pm-import-fbx`; geometry/material render verified | P (skin/clip data retained; broader animation scenes pending) | Tested original + GLB round trip | Tested | `import_media` accepts FBX; model-source edits | Import worker → `import::prepare` / archive receipt → `Scene3dCommand::Import`; MCP import + `add_object` |
 | 2D layers casting shadows onto 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
@@ -1134,6 +1139,259 @@ recovery after replacing the document. **35 native scene/export** and **28
 native Studio** tests pass (two manual diagnostics ignored); the app builds in
 **53.62 s**. Existing Refine, imports, physical maps, World/fog, terrain/scatter,
 source replacement, picking and export regressions remain green.
+
+### UI dependency 3: native text and shape extrusion
+
+The native document retains the pinned Electron `layer.d.extrusion` version-one
+contract. Absent settings read as disabled without changing old projects.
+`set_extrusion { target, patch }` accepts `enabled`, `depth`, `bevelStyle`
+(`none`, `angular`, `concave`, `convex`), `bevelDepth`, `holeBevelDepth` and
+geometry `quality` (`draft`, `standard`, `high`). Enabling also sets the ordinary
+layer's `threeD` switch in the same kernel transaction. Disabling preserves that
+switch, as the source contract does. Geometry quality is separate from render
+quality.
+
+Front, Bevel, Side and Back have sparse independent properties and maps.
+`set_surface_material_properties` (alias `set_material_properties`) accepts
+`target`, `surface` or `materialIndex` 0–3, and `patch`: `color`, `opacity`,
+`roughness`, `metallic`, `emissionColor`, `emissionIntensity`, `ambientResponse`.
+Null clears an override and restores inheritance. `set_surface_material_map`
+(alias `set_material_map`) takes the same surface address plus `slot` and `map`;
+null removes it. Durable images render now; live layer/group/composition maps
+remain dependent on item 4. Color and Emissive are the live-source slots.
+
+All channel writes cross ordinary kernel property/keyframe/expression handling:
+`geo.KEY` and `ms.SURFACE.KEY`. Whole-content staging, the 3D switch and channel
+writes share one Undo entry. Save/reopen retains both authoring data and history.
+The MCP catalog exposes these operations and `get_3d_scene` returns the
+`extrusions` data, extrusion layer records and channel paths. UI reads
+`pm_scene3d::extrusion::{parse,channels,SURFACES}` plus those ordinary channels,
+and calls `Scene3dCommand::Apply`/`edit_3d`; no panel or control was designed.
+
+`pm-geom3d::extrusion` ports compound caps/counters, four material groups,
+continuous cap/perimeter/depth UVs, angular/concave/convex bevel profiles and
+hole bevel scaling. It rejects invalid coordinates and enforces the 500,000
+vertex budget during generation. The native adapter caches geometry separately
+from world transforms and material values, and bounds retained outline geometry.
+Ordinary model layers skip outline preparation on the immutable tree before any
+JSON copy. The follow-up passes both extrusion integration tests (1.19 s) and
+an app rebuild (111 s; shared dependencies were rebuilt without flag changes).
+
+Text uses the existing native render-thread font broker and the same full-face
+outline painter as flat text, including its font selection, variations, style
+ranges and character layout. Anchored glyph coordinates pass through the
+source's six-unit composition bridge and full native `world3D` transform.
+Bitmap/image-only glyphs report a layer error because they have no vector
+outline. Shapes reuse native editable-path/primitive fills and strokes; compound
+fill rules survive, and stroked areas are subtracted from fill caps before
+extrusion. The native compositor receives the path-traced layer, rather than a
+second flat copy. Empty artwork receives a transparent compositor answer.
+
+Validation so far: **29 kernel tests**, **11 MCP tests**, the engine's compound
+hole/four-surface regression and the native glyph/compositor regression pass.
+The last regression checks all four material groups, geometry/attribute reuse,
+real extrusion depth and authored red emission replacing flat blue paint.
+The full **37 native scene/export tests pass in 40.76 s**, including shape
+fill/stroke extrusion, empty text, per-layer isolation, picking and existing
+material/environment/import regressions. The final native app build passes in
+**31.29 s**. Evidence stays outside Git in the lane's extrusion test/build logs.
+
+### UI dependency 4 — native layer/group/composition material captures
+
+The typed Studio compositor source now prepares texture dependencies before
+rendering or surface picking. Its retained capture renderer shares the viewer's
+wgpu device and ordinary native compositor; the app needs no Electron host.
+`material.maps.color` / `.emissive`, indexed `sourceMaterials`, and extrusion
+surface maps accept `{layerId}` (local artwork/group) or `{compositionId}`.
+`material.screen` emits its composition with white gain and the saved emission
+intensity. Existing `update_object` and `set_surface_material_map` commands own
+these saved records and their ordinary kernel Undo/Redo. No UI was added.
+
+Layer capture excludes the source root's transform and opacity, draws a hidden
+root, and preserves descendant visibility, timing, transforms, opacity, masks,
+effects and nested compositions. Groups use one source-local canvas unioned over
+the group's duration, frame grid and property keys. Empty groups stay transparent.
+Missing sources, 3D descendants (also in nested precomps), receiver feedback,
+matte/effect dependency cycles and excessive nesting become per-receiver errors.
+They do not blank healthy 3D layers. Sources are read without editing the document.
+
+Composition maps sample the receiver's source clock, floor to the source frame
+grid and clamp to its duration. Local layer/group maps use composition time.
+The cache fingerprints supplying graphs, dependency clocks, asset/file versions,
+fonts, effect definitions and color settings. Static pixels survive playback and
+receiver-only edits; entrances/exits and source edits invalidate them. Matching
+source images share texture-array storage, including color/emissive reuse. The
+existing eighteen-slot imported-map replacement retains UV/sampling metadata.
+
+Capture admission rejects more than 4,194,304 pixels before allocation. Retained
+pixels are LRU bounded to 128 MiB; the generic capture API accepts a zero cache
+budget and participates in renderer trimming. Native maps currently request
+1024²: camera/UV-driven resolution buckets and wiring the app-wide preview cache
+allowance remain follow-up work. Animated capture currently reads straight RGBA
+back to the CPU before the Studio array upload; static capture avoids this after
+the first frame. GPU-direct material capture needs performance measurement.
+Sparse named/source-material overrides work; the separate authored `slots` array
+still needs its native adapter. These limits do not establish full material
+performance/close-up parity with the Electron reference.
+
+UI reads the saved source address and `ViewerStatus.layer_failures`; commands
+remain `update_object` (maps, screen or indexed `sourceMaterials`) and
+`set_surface_material_map` for Front/Bevel/Side/Back. A failed source can be
+replaced or cleared through those same commands. Screen choices can use this
+native capture path once the UI lane consumes this increment.
+
+Checks: **42 native Metal scene/export tests** pass in **10.75 s**, including
+five material-capture regressions. They cover hidden groups, stable duration
+canvas, mask/effect coordinates, child visibility, source-only reuse across
+adapters, receiver clocks, screen emission, nested 3D/cycle rejection, zero
+retention and oversized admission. **30 native kernel scene tests** pass in
+**0.27 s**, including material-source Undo/Redo and PMV reopening. The GPUI app
+build passes in **24.26 s**. These are functional checks, not new fps or export
+budget measurements.
+
+### UI dependency 5 — independent native views
+
+The engine/data lane adopts the UI lane's `FreeView`/`Viewer::studio_view`
+API and extends it without changing any controls. `studio::Views` is validated,
+serializable transient data for **1, 2 or 4** panes. Each `Pane` has a `camera`
+and `tier`; `Views::active()` identifies the selected pane. Hidden pane settings
+survive layout reductions. Commands are `ViewCommand::SetLayout {count}`,
+`Activate {pane}`, `SetCamera {pane,camera}` and `SetTier {pane,tier}`; JSON uses
+camelCase operation names. Indices are 0–3. These commands edit viewer state,
+never the shot or its Undo history.
+
+`ViewCamera` supports `Active`, `Layer {id}`, `Custom {view: FreeView}`, and
+`Orthographic {axis, center, span}`. Axis is Front/Left/Top/Back/Right/Bottom;
+span is vertical scene units. The native source supplies a valid basis even at
+the poles, disables depth of field for orthographic views, and evaluates a named
+camera's animated channels and hierarchy from the immutable kernel snapshot.
+A missing named camera is an explicit query/render error. Viewer overrides apply
+to that viewer's composition; supplying compositions retain their own cameras.
+
+The UI owns surface creation and arrangement. Create ordinary `EngineService`
+viewers for the visible panes, then call `Views::apply_to(&viewers)`. It validates
+all handles first and updates distinct viewers on one service atomically.
+Unchanged data preserves in-flight frames. Release hidden viewer handles when
+reducing the visible count; the `Views` data retains their settings. Per-handle
+commands/queries are `Viewer::studio_camera`, `studio_pane` and `studio_state`.
+Existing `studio_preview` and `studio_view(Option<FreeView>)` remain compatible.
+`studio_view_at`/`studio_camera_at` accept the input event's host timestamp for
+input-to-pixel measurement. Cache identities include camera, tier and font
+generation, and surface picking takes exactly the pane's camera and tier.
+
+Captures/exports retain the active composition camera. No panels, pane placement,
+colours or control behaviour were designed here. The designer binds the view
+model/commands to its UI and session preferences; no document migration is needed.
+
+Checks: **45 native Metal scene/export tests** pass in **11.52 s**, including
+four simultaneous worker camera/tier/pick states, every orthographic pole,
+named-camera selection, invalid poses and supplying-composition isolation.
+The view-command/serialization unit check and camera-sensitive frame-cache
+check both pass. The GPUI app build passes in **22.42 s**. No on-screen fps
+or input percentile is claimed by these functional tests.
+
+### UI dependency 6 — studio backdrop and shadow catcher
+
+The black backdrop had two native glue gaps: `Scene.backdrop` was always zero,
+and every surface output discarded uncovered pixels. Native now carries the
+saved environment background in display sRGB, or the pinned Studio source's
+existing `#F6F5F8` backdrop when its catcher is enabled. Lighting remains scene
+linear. This ports an existing renderer value; it adds no new visual choice.
+
+Exactly one healthy primary surface owns the studio void, chosen from the
+composition's layer order. A visible World keeps ownership of the environment.
+The Studio service permits that surface's existing output to include the void
+and rejects multiple owners. An explicit background can be opaque without
+turning on the catcher. With both disabled, uncovered pixels remain transparent.
+The catcher stays at the scene's lowest bound and no floor proxy is introduced.
+This also fixes the round-two **shadow catcher black void** report.
+
+OIDN was biasing even the nominally flat sky part of its shade image. The engine
+now preserves exact shade outside the floor, and native Refine/Final skip the
+shade network entirely when there is no catcher. Actual floor shadow/caustic
+shading still uses the denoiser. No quality threshold or render deadline changed.
+
+Checks: **46 native Metal scene/export tests** pass in **11.12 s**, including
+12 background/catcher/tier combinations (Live, Refine and Final), transparency,
+explicit black and saved/default colors. **29 native Studio checks** pass;
+the new ownership check proves that only its designated surface includes the
+void and duplicate owners fail. **51 shared engine unit tests** pass. A fresh
+Blender/Cycles reference run passes **all 11 existing regression tolerances**;
+the first reference-reuse attempt correctly refused a different floating-point
+export and fresh references were rendered. The app build passes in **118 s**.
+These checks do not establish independent Cycles environment matching or the
+native performance gates.
+
+The post-fix no-visible-noise regression also passes both checks in **20.26 s**:
+at 192×128 against fresh 4096-spp references, Final luminance RMS is **0.00166**
+(teapot), **0.00554** (glass), **0.00237** (chrome), with smooth residual RMS
+**0.00161 / 0.00321 / 0.00219**. This small-image acceptance is separate from
+the pending 1080p native export budget and the owner's chrome caustic complaint.
+A final app rebuild after the defensive background-color parsing change passes
+in **13.09 s**.
+
+### UI dependency 7 — import placement
+
+Every admitted OBJ/glTF/FBX/CAD-converted model now lands on the world ground
+plane, including imports into an existing rig and imports with studio setup off.
+Its normalized bounds are measured once on the admission/recovery worker and
+stored as versioned `native3dBounds` asset metadata. Placement reads that small
+record on the kernel actor; it does not decode files or pose meshes there.
+
+Existing ordinary models keep their positions. The new model gets a clear
+interval beside their bounds along the current camera's horizontal right axis.
+Current hierarchy transforms are evaluated. Studio imports reuse and frame the
+existing camera/lens around the models, converting the pose through its parent
+space; an empty project retains the existing initial studio rig. Locked cameras
+and generated edits' protected camera channels are preserved. Imports without
+studio setup leave the rig/camera unchanged. Asset addition, placement and any
+camera setup remain **one kernel transaction and one Undo**.
+
+Old native/Electron assets without the new record use their normalized unit-fit
+envelope for spacing and still bind their retained archives without rewriting
+saved data. The stored bounds describe the initial pose; swept animation,
+extruded artwork, terrain-aware placement and nature/scatter collision avoidance
+remain follow-ups. Terrain/World/fog/scatter are excluded from the product row;
+`place_on` remains the explicit operation for a different receiving surface.
+`auto_studio` can take an explicit model `target` for initial import framing;
+its existing no-target behaviour still frames all models, regardless of selection.
+
+The designer's import command and native MCP import path already use
+`Scene3dCommand::Import`, so no UI changes are needed. The same retained asset,
+layer channels, saved composition and failure status remain the read-side hooks.
+
+Checks: **31 kernel scene tests** pass in **0.26 s**, including repeated imports,
+non-overlapping world bounds, both models touching ground, reuse of the existing
+rig, camera framing, one-step Undo/Redo, PMV reopen/history, locked camera,
+no-studio imports and pre-bounds archive recovery. **8 native scene unit tests**
+and **46 native Metal scene/export tests** pass (the latter **11.14 s**).
+The app build passes in **22.38 s**.
+
+### Round-two engine finding — Quality fog blackening
+
+Reproduced a dense white volume lit only by the existing legacy ambient
+environment: with a foreground surface, mean centre RGB was **0.00011** in
+Refine and **0.00047** in Final, versus **0.74362** in Live. The full transport
+sampled direct HDRI/sky light at scattering events but omitted the legacy
+hemisphere. It also suppresses environment escape after a scattering event
+because direct sampling owns that contribution, so those paths became black.
+The engine now phase-samples that hemisphere when no environment map exists.
+Mapped environments keep their existing importance sampling.
+
+Native composition now gives uncovered volume radiance one healthy output
+owner even when the backdrop and sky are transparent. This also makes fog-only
+compositions render without inventing a proxy plane. Camera visibility of the
+sky does not disable independent Fog layers; disabling the Fog layer still
+removes it. These are render fixes with no authored state or UI changes.
+
+The same 64×64 reproduction now measures Refine **0.58551**, Final **0.62373**
+with a foreground surface, and **0.58229 / 0.62345** without one. This is a
+regression for missing illumination, not a claim of Cycles fog matching.
+**47 native scene/export checks** pass in **11.27 s**; the focused volume test
+also passes with Metal RT disabled (**0.97 s**). **29 native Studio checks**
+and **51 engine unit checks** pass, and all **11 Cycles yardstick tolerances**
+pass using the existing validated references. The native app build passes in
+**21.04 s**.
 
 ## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
 

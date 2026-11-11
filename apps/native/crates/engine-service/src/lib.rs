@@ -351,7 +351,7 @@ struct View {
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
     studio_preview: studio::Preview,
-    studio_view: Option<studio::FreeView>,
+    studio_view: studio::ViewCamera,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -586,13 +586,57 @@ impl Viewer {
     /// Transient Free View for Studio 3D layers (3d-studio.md §4). `None`
     /// looks through the composition's camera. Never edits the document.
     pub fn studio_view(&self, view: Option<studio::FreeView>) -> Result<()> {
+        self.studio_camera(view.into())
+    }
+    pub fn studio_view_at(&self, view: Option<studio::FreeView>, input: f64) -> Result<()> {
+        self.studio_camera_at(view.into(), input)
+    }
+    pub fn studio_camera(&self, camera: studio::ViewCamera) -> Result<()> {
+        self.studio_camera_traced(camera, None)
+    }
+    pub fn studio_camera_at(&self, camera: studio::ViewCamera, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.studio_camera_traced(camera, Some(input))
+    }
+    fn studio_camera_traced(&self, camera: studio::ViewCamera, input: Option<f64>) -> Result<()> {
+        camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
-            if v.studio_view != view {
-                v.studio_view = view;
+            if v.studio_view != camera {
+                v.studio_view = camera;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+                if let Some(input) = input {
+                    v.input = Some(input);
+                    v.pipeline = trace::Pipeline {
+                        request: trace::now(),
+                        ..Default::default()
+                    };
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_pane(&self, pane: studio::Pane) -> Result<()> {
+        pane.camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                v.studio_view = pane.camera;
+                v.studio_preview = pane.tier;
                 v.stamp.sequence += 1;
                 v.dirty = true;
             }
             Ok(())
+        })
+    }
+    pub fn studio_state(&self) -> Result<studio::Pane> {
+        let state = self.shared.state.lock().unwrap();
+        let view = state
+            .views
+            .get(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        Ok(studio::Pane {
+            camera: view.studio_view.clone(),
+            tier: view.studio_preview,
         })
     }
     /// Transient Studio worker tier, independent of viewer resolution.
@@ -1093,7 +1137,7 @@ impl EngineService {
                 resources: Arc::default(),
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
-                studio_view: None,
+                studio_view: studio::ViewCamera::Active,
                 adapt_drags: false,
                 skim: None,
                 skim_input: None,
@@ -1264,7 +1308,7 @@ struct Work {
     scene: Scene,
     spec: FrameSpec,
     studio_preview: studio::Preview,
-    studio_view: Option<studio::FreeView>,
+    studio_view: studio::ViewCamera,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -2067,7 +2111,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     v.studio_preview
                 },
-                studio_view: if capture { None } else { v.studio_view },
+                studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -2138,7 +2182,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 ..Default::default()
             }));
             engine.studio_preview(studio_preview);
-            engine.studio_view(studio_view);
+            engine.studio_camera(studio_view);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);

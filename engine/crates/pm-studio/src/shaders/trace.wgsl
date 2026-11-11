@@ -464,6 +464,13 @@ fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   }
   if(map_count()>0u){let d=sample_environment_direction();let pdf=environment_pdf(d);
     if(pdf>0.){e+=environment(d)*transmittance(p,d,BIG)*phase_hg(dot(rd,d),g)/pdf;}}
+  else {
+    // The native studio also lights scenes with its legacy hemisphere. Volume
+    // paths suppress the phase-sampled escape term after NEE, so omitting this
+    // branch made every scattered ambient-only path black in Refine/Final.
+    // Sample the phase itself: its PDF cancels the phase factor exactly.
+    let d=sample_hg(rd,g);e+=environment(d)*transmittance(p,d,BIG);
+  }
   return e;
 }
 fn medium_direct_live(p:vec3f,rd:vec3f,g:f32)->vec3f {

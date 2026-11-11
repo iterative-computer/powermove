@@ -274,6 +274,17 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
     scene["objects"] = json!(objects);
     scene["lights"] = json!(lights);
     let mut resolved = schema::parse_scene(scene)?;
+    let mut extrusions=vec![];
+    for layer in layers {
+        if layer["d"].get("extrusion").is_none() || !crate::extrusion::eligible(layer){continue;}
+        let mut data=crate::extrusion::parse(&layer["d"]["extrusion"])?;
+        for (path,prop) in crate::extrusion::channels(layer) {
+            let value=ev.value(layer,&path,prop,time)?;let parts:Vec<_>=path.split('.').collect();
+            if parts[0]=="geo"{data["p"][parts[1]]=schema::channel(value);}else{data["surfaces"][parts[1]]["properties"][parts[2]]=schema::channel(value);}
+        }
+        extrusions.push(json!({"id":layer["id"],"name":layer["name"],"threeD":layer["threeD"],"extrusion":data}));
+    }
+    if !extrusions.is_empty(){resolved["extrusions"]=json!(extrusions);}
     if comp.get("studioQuality").is_some() {
         resolved["studioQuality"] = crate::quality::get(comp)?;
     }
@@ -578,6 +589,8 @@ pub(crate) fn studio_plan(
                 .iter()
                 .filter(|l| schema::role(l) == Some(Role::Object))
                 .collect::<Vec<_>>();
+            let target=args["target"].as_str().or(args["id"].as_str());
+            let models:Vec<_>=models.into_iter().filter(|l|target.is_none_or(|id|l["id"]==id)).collect();
             let b = union(
                 models
                     .iter()

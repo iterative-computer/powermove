@@ -196,14 +196,10 @@ impl StudioService {
             }
             // An empty procedural layer still owes the compositor a transparent
             // answer. When it has geometry, its ordinary mask already owns it.
-            if outputs.iter().any(|(id, _, _)| *id == layer.id) {
-                if layer.include_void {
-                    return Err("Surface layer cannot own the World output".into());
-                }
-                continue;
-            }
+            if let Some(output)=outputs.iter_mut().find(|(id,_,_)|*id==layer.id){output.2|=layer.include_void;continue;}
             outputs.push((layer.id, extracted.layers.len() as u32, layer.include_void));
         }
+        if outputs.iter().filter(|(_,_,void)|*void).count()>1{return Err("Studio backdrop has multiple output owners".into());}
         let reset = self
             .previous
             .as_ref()
@@ -283,10 +279,8 @@ impl StudioService {
             // Ordinary native layers leave uncovered/alpha-tested samples for
             // the compositor. Product sets retain their authored opaque void.
             r.set_void(
-                input
-                    .scene
-                    .shadow_catcher
-                    .then(|| input.scene.backdrop.to_array()),
+                input.view.backdrop_opaque.unwrap_or(input.scene.shadow_catcher)
+                    .then(||input.scene.backdrop.to_array()),
             );
             let c = input.scene.camera;
             let (f, right, up) = input
@@ -753,11 +747,13 @@ fn prepare_oidn(
         } else {
             crate::oidn::Quality::High
         });
+        let catcher=renderer.has_shadow_catcher();
         renderer.prepare_frame(
             0,
             Some(&|color, shade, albedo, normal| {
+                let mut layers=vec![color];if catcher{layers.push(shade);}
                 denoiser.run_layers_interruptible(
-                    &mut [color, shade],
+                    &mut layers,
                     albedo,
                     normal,
                     4,

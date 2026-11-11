@@ -82,6 +82,35 @@ pub fn coverage_path(placed: &PlacedPath, to_page: Affine) -> BezPath {
     }
 }
 
+/// Compound nonzero filled contours for vector consumers such as extrusion.
+/// Each shape begins with its outer boundary followed by its counters/holes.
+/// Uses the same synthetic/style outline and stroke expansion as flat text.
+pub fn filled_contours(placed: &PlacedPath, transform: Affine, tolerance: f64) -> Vec<Vec<Vec<[f64;2]>>> {
+    filled_contours_rule(placed,transform,tolerance,false)
+}
+pub fn filled_contours_rule(placed: &PlacedPath, transform: Affine, tolerance: f64, even_odd:bool) -> Vec<Vec<Vec<[f64;2]>>> {
+    let matrix=transform*placed.transform;
+    let tolerance=tolerance.max(1e-4);
+    let lines=match &placed.style {
+        PathStyle::Fill=>flatten_transformed(&placed.path,matrix,tolerance),
+        PathStyle::Stroke(stroke)=>{
+            let expanded=kurbo::stroke(placed.path.iter(),stroke,&StrokeOpts::default(),local_coverage_tolerance(matrix,tolerance));
+            flatten_transformed(&expanded,matrix,tolerance)
+        }
+    };
+    let mut resolver=NonzeroResolver::default();
+    let (active,_)=resolver.parse(&lines);
+    if active==0{return vec![];}
+    resolver.overlay.reinit_with_subj(&resolver.contours[..active]);
+    resolver.overlay.overlay(OverlayRule::Subject,if even_odd{FillRule::EvenOdd}else{FillRule::NonZero})
+}
+/// Removes stroke coverage from fill caps, avoiding coplanar surfaces.
+pub fn contour_difference(subject:&[Vec<[f64;2]>],clip:&[Vec<[f64;2]>])->Vec<Vec<Vec<[f64;2]>>>{
+    let mut overlay=FloatOverlay::<[f64;2],i64>::new_empty(Default::default(),Default::default(),0);
+    overlay.reinit_with_subj_and_clip(subject,clip);
+    overlay.overlay(OverlayRule::Difference,FillRule::NonZero)
+}
+
 fn flatten_transformed(path: &BezPath, transform: Affine, tolerance: f64) -> BezPath {
     let mut count = 0usize;
     kurbo::flatten(path.iter().map(|el| transform * el), tolerance, |_| {

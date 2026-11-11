@@ -13,7 +13,7 @@ pub mod svg_float;
 pub mod svg_sample;
 
 use pm_eval::transform::Mat2d;
-use pm_eval::{JsResult, JsValue, Scope};
+use pm_eval::{node, JsResult, JsValue, Scope};
 use pm_model::Node;
 use pm_vector::kurbo::{Affine, Cap, Join, PathEl, Point};
 use pm_vector::path::{PathColors, PathLayer, PathNode};
@@ -281,6 +281,39 @@ pub fn paths_scene(layer: &PathLayer, colors: &[PathColors], world: &Mat2d) -> C
     let mut scene = CoverageScene::default();
     scene.push_paths(layer, Affine::new(*world), &fills, &strokes);
     scene
+}
+
+/// The existing shape/path fills and expanded strokes as compound extrusion
+/// outlines in layer pixels. Stroke-covered fill is removed before cap creation.
+pub fn extrusion_outlines<'d>(scope:&mut Scope<'_, 'd>,layer:&'d Node,time:f64,tolerance:f64)->Result<Vec<pm_geom3d::extrusion::Outline>,String>{
+    use pm_text::render::scene::{PlacedPath,PathStyle,filled_contours_rule,contour_difference};
+    let identity=[1.,0.,0.,1.,0.,0.];
+    let has_paths=node::array(node::member(node::member(Some(layer),"d"),"paths")).is_some_and(|p|!p.is_empty());
+    let scene=if has_paths {
+        let (_,colors,paths)=paths(scope,layer,time).map_err(|e|e.message)?;
+        paths_scene(&paths,&colors,&identity)
+    }else{
+        let content=scope.ev.resolve_drawn_content(scope.comp,layer,time).map_err(|e|e.message)?;
+        let (content,colors)=shape_content(&content);
+        match shape_scene(&content,&colors,&identity){Some(scene)=>scene,None=>return Ok(vec![])}
+    };
+    let mut paints=vec![];let mut stroke_contours=vec![];
+    for item in scene.items {
+        if item.color[3]<=0.{continue;}
+        let (style,even_odd,stroke)=match item.style{ItemStyle::Fill(rule)=>(PathStyle::Fill,rule==FillRule::EvenOdd,false),ItemStyle::Stroke(stroke)=>(PathStyle::Stroke(stroke),false,true)};
+        let placed=PlacedPath{path:std::sync::Arc::new(item.path),transform:item.transform,style};
+        let contours=filled_contours_rule(&placed,Affine::IDENTITY,tolerance,even_odd);
+        if stroke{stroke_contours.extend(contours.iter().flat_map(|s|s.iter().cloned()));}
+        paints.push((contours,item.color,stroke));
+    }
+    let mut outlines=vec![];
+    for (shapes,color,stroke) in paints {
+        for shape in shapes {
+            let shapes=if !stroke && !stroke_contours.is_empty(){contour_difference(&shape,&stroke_contours)}else{vec![shape]};
+            for mut shape in shapes{if shape.is_empty(){continue;}outlines.push(pm_geom3d::extrusion::Outline{outer:shape.remove(0),holes:shape,color});}
+        }
+    }
+    Ok(outlines)
 }
 
 /// A layer's editable paths: nodes, colors, and geometry.
