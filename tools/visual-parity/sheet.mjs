@@ -56,33 +56,43 @@ function heat(v) {
   return [255, 255, 255 * (t - 2 / 3) * 3];
 }
 
-const rows = [];
-const v2ByTime = new Map(v2.samples.map((s) => [s.time.toFixed(3), s]));
-for (const s of v1.samples) {
-  const key = s.time.toFixed(3);
-  const label = s.file.replace(/\.png$/, '');
-  const row = { time: s.time, label, v1: `v1/${s.file}`, viewer: viewerByTime.get(key), note: notes[label] };
-  const other = v2ByTime.get(key);
-  if (!other) { row.missing = 'no V2 frame'; rows.push(row); continue; }
-  row.v2 = `v2/${other.file}`;
-  const a = decodePng(path.join(dir, row.v1)), b = decodePng(path.join(dir, row.v2));
-  if (a.width !== b.width || a.height !== b.height) { row.missing = `size ${a.width}x${a.height} vs ${b.width}x${b.height}`; rows.push(row); continue; }
+// Visible difference of two frames; writes the heat map when `diff` is given.
+function compare(fileA, fileB, diff) {
+  const a = decodePng(fileA), b = decodePng(fileB);
+  if (a.width !== b.width || a.height !== b.height) return { error: `size ${a.width}x${a.height} vs ${b.width}x${b.height}` };
   const fa = blur3(a), fb = blur3(b);
-  const px = Buffer.alloc(a.width * a.height * 4);
+  const px = diff ? Buffer.alloc(a.width * a.height * 4) : null;
   let visible = 0, sum = 0, max = 0;
   for (let i = 0, j = 0; i < fa.length; i += 3, j += 4) {
     const d = Math.max(Math.abs(fa[i] - fb[i]), Math.abs(fa[i + 1] - fb[i + 1]), Math.abs(fa[i + 2] - fb[i + 2]));
     sum += d; if (d > max) max = d; if (d > THRESHOLD) visible++;
-    const [r, g, bb] = heat(d);
-    px[j] = r; px[j + 1] = g; px[j + 2] = bb; px[j + 3] = 255;
+    if (px) { const [r, g, bb] = heat(d); px[j] = r; px[j + 1] = g; px[j + 2] = bb; px[j + 3] = 255; }
   }
-  row.diff = `diff/${label}.png`;
-  writeFileSync(path.join(dir, row.diff), encodePng(a.width, a.height, px));
-  row.visible = visible / (a.width * a.height);
-  row.mean = sum / (a.width * a.height);
-  row.max = max;
+  if (px) writeFileSync(diff, encodePng(a.width, a.height, px));
+  return { visible: visible / (a.width * a.height), mean: sum / (a.width * a.height), max };
+}
+
+// With a delivered reference (ref/, ref-frames.mjs) both apps are judged
+// against it and the heat map is V2's; without one, V2 against v1.
+const ref = existsSync(path.join(dir, 'ref/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'ref/manifest.json'), 'utf8')) : null;
+const refByTime = new Map((ref?.samples ?? []).map((s) => [s.time.toFixed(3), `ref/${s.file}`]));
+const rows = [];
+const v2ByTime = new Map(v2.samples.map((s) => [s.time.toFixed(3), s]));
+for (const s of v1.samples) {
+  const key = s.time.toFixed(3);
+  if (ref && !refByTime.has(key)) continue;
+  const label = s.file.replace(/\.png$/, '');
+  const row = { time: s.time, label, v1: `v1/${s.file}`, ref: refByTime.get(key), viewer: viewerByTime.get(key), note: notes[label] };
+  const other = v2ByTime.get(key);
+  if (!other) { row.missing = 'no V2 frame'; rows.push(row); continue; }
+  row.v2 = `v2/${other.file}`;
+  const base = row.ref ?? row.v1;
+  const result = compare(path.join(dir, base), path.join(dir, row.v2), path.join(dir, `diff/${label}.png`));
+  if (result.error) { row.missing = result.error; rows.push(row); continue; }
+  Object.assign(row, result, { diff: `diff/${label}.png` });
+  if (row.ref) row.v1vs = compare(path.join(dir, row.ref), path.join(dir, row.v1)).visible;
   rows.push(row);
-  console.log(`${label} visible ${(row.visible * 100).toFixed(2)}% mean ${row.mean.toFixed(2)} max ${max.toFixed(0)}`);
+  console.log(`${label} V2 visible ${(row.visible * 100).toFixed(2)}%${row.ref ? ` (v1 ${(row.v1vs * 100).toFixed(2)}%)` : ''} mean ${row.mean.toFixed(2)} max ${row.max.toFixed(0)}`);
 }
 
 const pct = (v) => (v === undefined ? '—' : `${(v * 100).toFixed(2)} %`);
@@ -99,25 +109,25 @@ body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:13px/1.4 -a
 h1{font-size:20px;margin:0 0 4px}p{margin:0 0 12px;color:var(--muted)}
 table{border-collapse:collapse;width:100%}td,th{border-top:1px solid var(--line);padding:6px;vertical-align:top;text-align:left}
 th{font-weight:600;color:var(--muted)}img{width:100%;display:block;cursor:zoom-in}
-.cols td.img{width:${viewer ? 23 : 31}%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
+.cols td.img{width:${Math.floor(92 / (3 + (ref ? 1 : 0) + (viewer ? 1 : 0)))}%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
 .note{color:var(--muted);max-width:40ch}.summary{color:var(--fg);max-width:90ch}
 </style></head><body>
-<h1>${esc(title)}: v1.2.0 | V2</h1>
-<p>${esc(v1.project.w)}×${esc(v1.project.h)} at ${esc(fps)} fps, ${rows.length} samples. v1: ${esc(v1.source)}. V2: ${esc(v2.source ?? 'missing')}.
+<h1>${esc(title)}: ${ref ? 'delivered video | ' : ''}v1.2.0 | V2</h1>
+<p>${esc(v1.project.w)}×${esc(v1.project.h)} at ${esc(fps)} fps, ${rows.length} samples. ${ref ? `Reference: ${esc(ref.source)}; the heat map is V2 against it, and v1 is scored against it too. ` : ''}v1: ${esc(v1.source)}. V2: ${esc(v2.source ?? 'missing')}.
 Visible = share of pixels whose 3×3-averaged colour still differs by more than ${THRESHOLD}/255 in a channel. Heat: black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` The last column is ${esc(viewer.source)}: for looking, not measured.` : ''}</p>
 ${summary.map((p) => `<p class="summary">${esc(p)}</p>`).join('\n')}
 <h2>Ranked by visible difference</h2>
-<table><tr><th>Time</th><th>Visible</th><th>Mean</th><th>Cause or accepted reason</th></tr>
-${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</td><td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(r.note ?? '')}</td></tr>`).join('\n')}
-${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="3">${esc(r.missing)}</td></tr>`).join('\n')}
+<table><tr><th>Time</th><th>Visible${ref ? ' (V2 vs video)' : ''}</th>${ref ? '<th>v1 vs video</th>' : ''}<th>Mean</th><th>Cause or accepted reason</th></tr>
+${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</td>${ref ? `<td class="num">${pct(r.v1vs)}</td>` : ''}<td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(r.note ?? '')}</td></tr>`).join('\n')}
+${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="${ref ? 4 : 3}">${esc(r.missing)}</td></tr>`).join('\n')}
 </table>
 <h2>Frames</h2>
-<table class="cols"><tr><th>Time</th><th>v1.2.0</th><th>V2</th><th>Difference</th>${viewer ? '<th>V2 viewer, paused (screen)</th>' : ''}</tr>
+<table class="cols"><tr><th>Time</th>${ref ? '<th>Delivered video</th>' : ''}<th>v1.2.0</th><th>V2</th><th>Difference</th>${viewer ? '<th>V2 viewer, paused (screen)</th>' : ''}</tr>
 ${rows.map((r) => `<tr id="${r.label}"><td class="num">${tc(r.time, fps)}<br>${r.time.toFixed(3)} s<br><span class="${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</span><div class="note">${esc(r.note ?? r.missing ?? '')}</div></td>
-<td class="img"><a href="${r.v1}"><img loading="lazy" src="${r.v1}" alt="v1 ${r.time}"></a></td>
+${ref ? `<td class="img"><a href="${r.ref}"><img loading="lazy" src="${r.ref}" alt="video ${r.time}"></a></td>` : ''}<td class="img"><a href="${r.v1}"><img loading="lazy" src="${r.v1}" alt="v1 ${r.time}"></a></td>
 <td class="img">${r.v2 ? `<a href="${r.v2}"><img loading="lazy" src="${r.v2}" alt="V2 ${r.time}"></a>` : ''}</td>
 <td class="img">${r.diff ? `<a href="${r.diff}"><img loading="lazy" src="${r.diff}" alt="difference ${r.time}"></a>` : ''}</td>${viewer ? `<td class="img">${r.viewer ? `<a href="${r.viewer}"><img loading="lazy" src="${r.viewer}" alt="V2 viewer ${r.time}"></a>` : ''}</td>` : ''}</tr>`).join('\n')}
 </table></body></html>`;
 writeFileSync(path.join(dir, 'index.html'), html);
-writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, visible, mean, max, note }) => ({ time, label, visible, mean, max, note })), null, 1));
+writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, visible, v1vs, mean, max, note }) => ({ time, label, visible, v1vs, mean, max, note })), null, 1));
 console.log(path.join(dir, 'index.html'));

@@ -16,7 +16,10 @@ node tools/visual-parity/v2-frames.mjs --app <lane>/Powermove.app --profile <V2 
 #    the viewer canvas in the native-resolution window screenshot). Capture v1 at the viewer's
 #    render size (--width) into its own directory to compare viewer with viewer.
 node tools/visual-parity/viewer-frames.mjs --pid <pid> --window <id> --rect x,y,w,h --out "$S/paper"
-# 5. The sheet.
+# 5. Optional: a delivered video of the project (what was posted) as the reference column;
+#    project time t is video frame round((t + offset) × rate). Find the offset by matching frames.
+node tools/visual-parity/ref-frames.mjs --video posted.mp4 --out "$S/paper" [--offset 0]
+# 6. The sheet.
 node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes.json] [--summary summary.txt]
 ```
 
@@ -35,5 +38,8 @@ node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes
   Compare a viewer capture only with v1 at that size, never with the export.
 - Times: every `--step` seconds, the last frame, and `--times` (seconds, or
   `s:ff` timecode at the project rate). V2 reuses v1's list.
+- With `ref/`, the heat map is V2 against the delivered video and v1 is
+  scored against it too, so a difference both apps share (a font missing on
+  this Mac, compression) is told apart from one V2 alone has.
 - `notes.json` maps a sample label (`t13_458`) to its cause or the reason a
   difference is accepted; nothing is accepted without one.
