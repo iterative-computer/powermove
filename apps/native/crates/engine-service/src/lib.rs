@@ -130,6 +130,9 @@ pub struct MediaCatalog {
     /// in Automatic in place of their originals (Final Cut's optimized
     /// media). Exports never read them.
     pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// High-resolution originals whose preview should use a ready HD proxy.
+    /// Runtime-only policy; never serialized into the project.
+    pub automatic_proxies: std::collections::BTreeSet<String>,
     /// Always Play Original: these assets never play a proxy or optimized
     /// media, in any mode.
     pub play_original: std::collections::BTreeSet<String>,
@@ -141,7 +144,7 @@ pub struct MediaCatalog {
 /// originals whatever this says; only an explicit draft export uses proxies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaMode {
-    /// Originals, and a proxy for a clip whose original is missing.
+    /// HD proxies for large sources, otherwise originals/optimized media.
     #[default]
     Automatic,
     /// Originals only: a clip whose original is missing is offline.
@@ -175,6 +178,13 @@ impl MediaCatalog {
         let mut paths = BTreeMap::new();
         for map in order {
             paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if mode == MediaMode::Automatic {
+            for id in &self.automatic_proxies {
+                if let Some(proxy) = self.proxies.get(id) {
+                    paths.insert(id.clone(), proxy.clone());
+                }
+            }
         }
         for id in &self.play_original {
             match self.originals.get(id) {
