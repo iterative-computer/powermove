@@ -115,6 +115,8 @@ fn a_migrated_copy_finds_media_its_v1_project_file_holds() {
     let (config, id) = migrated(&root, "Embedded.pmv", &file, |_| {});
     let kernel = open(&config, &id);
     assert_eq!(bytes(&kernel, &root), Some(embedded_bytes(&file)));
+    // The copy takes the media, not the file: it is no file's project.
+    assert_eq!(kernel.project("copy").unwrap().store().path(), None);
     // The original's file is read, never written or locked.
     assert_eq!(fs::read(&file).unwrap(), before);
     assert!(!pm_kernel::locks::project_lock_path(&file).exists());
@@ -262,4 +264,31 @@ fn a_v1_project_file_opened_directly_shows_its_embedded_media() {
             "{saved}"
         );
     }
+}
+
+/// Closing the copy keeps the media it read from the original's file in the
+/// library, so the copy still has them once that file is gone.
+#[test]
+fn the_copy_keeps_embedded_media_after_the_original_file_is_gone() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let file = root.join("Embedded.pmv");
+    fs::copy(fixture("Embedded.pmv"), &file).unwrap();
+    let expected = embedded_bytes(&file);
+    let (config, id) = migrated(&root, "Embedded.pmv", &file, |_| {});
+    let mut kernel = open(&config, &id);
+    let session = kernel.session_metadata("copy").unwrap().handle.clone();
+    kernel.shell(ShellCall::Close(session)).unwrap();
+    fs::remove_file(&file).unwrap();
+    kernel
+        .shell(ShellCall::Open {
+            id: "copy".into(),
+            source: SessionSource::Library {
+                profile: config.native_profile.clone(),
+                project: id.clone(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    assert_eq!(bytes(&kernel, &root), Some(expected));
 }

@@ -70,8 +70,9 @@ fn candidates(
     }
 }
 
-/// The file at `path` reduced to the media this library copy may use, or
-/// `None` when it lends none (or is unreadable, or fails its checksums).
+/// The media of the file at `path` this library copy may use, as an untitled
+/// file's table, or `None` when it lends none (or is unreadable, or fails its
+/// checksums).
 /// **Blocking**: reads and hashes the file.
 pub(crate) fn for_copy(
     path: &Path,
@@ -142,7 +143,12 @@ pub(crate) fn for_copy(
             file.media.remove(&id);
         }
     }
-    (!file.media.is_empty()).then_some(file)
+    // Only the media: the copy is a library project, not this file (its
+    // name, version and envelope stay the original's).
+    (!file.media.is_empty()).then(|| ProjectFile {
+        media: file.media,
+        ..ProjectFile::untitled()
+    })
 }
 
 /// Whether the item's bytes are proven: by the file's checksum (verified at
