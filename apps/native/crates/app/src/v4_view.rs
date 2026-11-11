@@ -438,13 +438,8 @@ impl SurfaceView {
             {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
-            let options = node
-                .props
-                .get("options")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
+            let options = native_options(node);
+            control.update(cx, |v, cx| v.update(&value, &options, view.disabled, cx));
             return;
         }
         let label = node
@@ -460,12 +455,7 @@ impl SurfaceView {
                 .and_then(Value::as_str)
                 .unwrap_or(label)
         );
-        let options = node
-            .props
-            .get("options")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let options = native_options(node);
         let button_role = node
             .props
             .get("metadata")
@@ -1377,9 +1367,14 @@ impl SurfaceView {
         if let Some(focus) = self.focus.get(&id) {
             let t = &self.table.tokens;
             let (ring, color) = (px(t.metrics.border * 2.), rgb(t.colors.focus));
+            // A tracked handle carries its own tab settings (the element's
+            // are ignored): `tabIndex` -1 stays focusable but out of the Tab
+            // order, as on the web (a segmented control's other segments).
+            let tab = node.tab_index.unwrap_or(0);
+            let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
             element = element
                 .track_focus(focus)
-                .tab_index(node.tab_index.unwrap_or(0))
+                .tab_index(tab.max(0))
                 .focus_visible_style(move |s| s.ring(ring).ring_color(color));
         }
         element = self.interactive(element, node, cx);
@@ -1565,6 +1560,9 @@ impl SurfaceView {
             if let Some(expanded) = ax.expanded {
                 element = element.aria_expanded(expanded);
             }
+            if let Some(toggled) = ax.toggled {
+                element = element.aria_toggled(toggled);
+            }
         }
         if let Some(semantic) = &node.semantic {
             element =
@@ -1729,6 +1727,14 @@ impl SurfaceView {
             });
         }
         element
+    }
+    /// The node holding keyboard focus (tests).
+    #[cfg(test)]
+    pub(crate) fn focused_node(&self, window: &Window) -> Option<Id> {
+        self.focus
+            .iter()
+            .find(|(_, h)| h.is_focused(window))
+            .map(|(id, _)| *id)
     }
     fn key_down(
         &mut self,
@@ -1962,6 +1968,7 @@ impl SurfaceView {
             }
         }
         if let Some(focus) = self.focus.get(&id) {
+            let focus = &focus.clone().tab_stop(true).tab_index(0);
             wrapper = wrapper.track_focus(focus).tab_index(0);
         }
         if node.number.is_some() {
@@ -2056,14 +2063,26 @@ struct Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = &self.tokens;
+        // Line 1 names the thing (with its shortcut); an optional line 2,
+        // after a newline, says what it does (HIG help tags), in secondary.
+        let (name, help) = match self.title.split_once('\n') {
+            Some((name, help)) => (SharedString::from(name.to_owned()), Some(help.to_owned())),
+            None => (self.title.clone(), None),
+        };
         div()
+            .flex()
+            .flex_col()
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
-            .child(self.title.clone())
+            .max_w(px(t.metrics.value_column * 2.))
+            .child(name)
+            .when_some(help, |d, help| {
+                d.child(div().text_color(rgb(t.colors.secondary)).child(help))
+            })
     }
 }
 /// What to announce: statuses that appeared or changed since the last frame,
@@ -2086,6 +2105,35 @@ pub(crate) fn status_announcements(
     };
     *seen = Some(current);
     messages
+}
+/// A pop-up's rows, with the checkmarks its kit metadata carries (the
+/// frozen option shape has only `v`, `label` and `disabled`).
+fn native_options(node: &pm_surface::Node) -> Vec<Value> {
+    let mut options = node
+        .props
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let menu = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("menu"))
+        .and_then(Value::as_array);
+    if let Some(menu) = menu {
+        for option in options.iter_mut().filter(|o| o.is_object()) {
+            let checked = menu
+                .iter()
+                .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"))
+                .and_then(|m| m.get("checked"))
+                .cloned();
+            if let (Some(checked), Some(o)) = (checked, option.as_object_mut()) {
+                o.insert("checked".into(), checked);
+            }
+        }
+    }
+    options
 }
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;

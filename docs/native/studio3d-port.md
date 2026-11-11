@@ -1556,3 +1556,102 @@ The translated/tilted index-matched photon-energy check passes (**0.49 s**) and
 all **11 existing Cycles yardstick tolerances** pass against retained references.
 No Cycles fog/sky/subsurface/sheen matching claim is added. The larger fixed-map
 bootstrap cost is included in subsequent timing; Final remains uncapped.
+
+## Designer section (Opus UI lane, `feat/na-studio3d-ui`)
+
+Presentation follows `docs/native/design/surfaces/3d-studio.md`. Screenshots stay
+outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
+
+### Built
+
+| Area | What the person sees | Data / command |
+| --- | --- | --- |
+| Layer ▸ Add 3D Layer (menu bar, viewer context menu) | Cube … Icosphere · Softbox, Spotlight, Bulb, Sun, Camera · Sky, Fog Volume, Terrain · Pine/Oak/Birch Trees, Bushes, Grass, Rocks. One Undo `Add <thing>`; the new layer is selected | `Scene3dCommand::Apply` with `add_object`, `add_light`, `add_camera`, `set_world`, `add_fog`, `add_terrain`, `add_scatter` and a host layer ID (`pm_panel_studio3d::properties::add_layer`) |
+| Sensible defaults | Terrain is natural, eroded ground; nature scatters onto the selected surface or terrain and adds a terrain when there is none; a new landscape with no camera gets an overview camera | the same Apply commands in one transaction |
+| Properties header | `Cube · 3D Shape`, `Key · Softbox`, `World · Sky`, `Pine Trees · Scatter`; no 2D alignment strip, canvas size, masks or effects on 3D layers | `studio` flag on the inspector target |
+| 3D transform | Position, Rotation and Scale % with X/Y/Z | `position.*`, `rotation.*`, `scale.*` channels |
+| World | Lighting (Physical Sky / HDRI / None), Preset, Show in Camera, Sun Height/Direction/Strength/Size, Haze, Clouds, Ground, Brightness, Rotation, closed Atmosphere group | `set_world` (`mode`, `preset`, `p.visible`); `world.*` channels |
+| Fog, Terrain, Scatter | Shape; Natural Ground, Ridged Peaks, Height, Feature Size, Erosion, Size and Ground groups; Scatters / On, Count, Density, Seed, Variation, Placement | `update_fog`, `update_terrain`; `fog.*`, `terrain.*`, `scatter.*` channels |
+| Material | Finish shelf (11 swatches, no selected state, Undo `Finish: <name>`), Screen, PBR rows, Texture Maps from imported images, Material Options (Casts Shadows On/Off/Only, Accepts Shadows, Accepts Lights, Appears in Reflections) | `apply_material`, `update_object` maps, `set_material_options` |
+| Composition | 3D Scene: Sky and Render Quality (Draft, Preview, Production, Final) with a note of samples, bounces and caustics | `set_world`, `set_render_quality` |
+| Export sheet | `3D Quality` row (`Composition · <preset>` or a per-export preset); the summary ends `3D <preset>, about <time>` | option `studioQuality` → `ExportRequest.studio_quality`; estimate from the M5 worker timings above |
+| Timeline | Kind badges per §1: model `cube` on blue, light `lightbulb` and camera `camera` on gray | the layer's `definition` |
+| Viewer 3D group (round 2) | Camera / Free View · Move, Rotate, Scale, Orbit, Pan, Zoom, Light · Frame · Fast / Quality, shown only with 3D layers | UI state `studioLook`, `studioTool`, `studioTier`; `studio.frame` command; F frames in a studio comp |
+| Selection and gizmos | Click selects what's drawn (engine pick), empty click deselects; projected bounds and Move/Rotate/Scale handles; ⌃ snap, ⇧ fine, Esc restores; Undo `Move/Rotate/Scale 3D Layer(s)` | `Viewer::pick_surface` (Click) on the displayed frame; drags are gesture `Step`s of ordinary transform channels |
+| Navigation | ⌥-drag/middle-drag orbit, ⇧⌥-drag pan, ⌥-scroll zoom; the first gesture switches to Free View; no Undo | transient `FreeView{eye,target,zoom}` → `Viewer::studio_view`, never written to the document |
+| Light tool | Click a model: adds a softbox aimed there (`Add Softbox`) or re-aims the selected light (`Aim Light`) | `add_light` / `update_light` with position and target from the pick |
+| Arrow nudges | 0.1 scene units a press, 1 with ⇧, up is up | `nudgeSelection` writes `position.x/y` in scene units for 3D layers |
+| Defaults (review notes) | First shape in an unlit scene gets sky, key softbox and floor; Pine Trees etc. frame as a postcard; Finish swatches are shaded spheres; Scatter rows are Object / Surface pickers | `starter()`, `overview_camera`, `landscape_sky`, `finish_swatch`, `scatter.model|surface` → `update_scatter` |
+| Extrude (round 3) | Properties ▸ Extrude on text and shape layers: one click for depth, a rounded bevel and Front / Bevel / Side / Back; per-surface Color, Roughness, Metalness and Color Map | `set_extrusion`, `set_surface_material_properties`, `set_surface_material_map`; `geo.*` and `ms.SURFACE.*` channels (`pm_panel_studio3d::extrude`) |
+| Layers as materials | Color and Emissive maps list 2D layers, groups and compositions; Screen is enabled again | `update_object` maps `{layerId}` / `{compositionId}`; menu values `layer:<id>` and `comp:<id>` |
+| 1/2/4 views | Views pop-up, View ▸ 3D and the collapsed `3D` pull-down. Pane 1 is the editor viewer; the others are embedded viewers with a camera and preview pull-down each | UI `studioViews`; shell `viewer_split` and `viewer_tiles`; `Viewer::studio_pane` with `ViewCamera::Orthographic` framed on the scene's bounds (`app/src/studio_panes.rs`) |
+| Light panel | Add with the kind to add, the light's name and kind, and Brightness / Size / Distance / Spread | `light::projection` on the viewer model; `studio.light` → `light.adjust.*`; UI `studioLightKind`, `studioLightAdd` |
+
+### Plumbing added for the UI
+
+- `engine/crates/pm-eval/src/address.rs`: Studio's `environmentProperties`
+  (World, fog, terrain and regions, scatter, material options) are addressable
+  property keys, as in the pinned source's `layer3DProperties`. Without it,
+  Properties could not read, write or keyframe those channels.
+- `pm_panel_studio3d::properties`: `add_layer`, `scene_summary`,
+  `export_quality`, `estimate_seconds_per_frame`, `about`, `environment`,
+  `finishes`. `view::commands` handles `scene.quality`, `scene.sky`, `world.*`,
+  `fog.shape`, `terrain.*` and `options.*` with specific Undo names.
+- Shell: the `new3d` submenu. Submenu parents in auto-enabling menus keep the
+  submenu's own action; this also re-enables View ▸ Tools, which was disabled.
+- Viewer chrome: `viewer.studio.tier` (`live` | `refine`) writes `studioTier`;
+  the bar shows Fast | Quality only with 3D layers (§2 item 5).
+- `engine-service`: `studio::FreeView` and `Viewer::studio_view(Option<FreeView>)`
+  render the transient view; it is part of the studio content and cache keys,
+  and `surface.rs` applies it to picks so clicks match what's shown.
+- `pm_panel_studio3d::viewport`: CPU scene/eye model (projection, rays, box
+  pick, framing) for gizmo geometry and the bounds-pick fallback;
+  `app/src/gizmo3d.rs` draws the handles as viewer overlay lines.
+- v4 views forward AccessKit `toggled` to GPUI (`aria_toggled`), so radio
+  buttons and toggles report checked to VoiceOver everywhere.
+- Panel facts carry the viewer's `layerFailures`; panels republish when the
+  status line changes. Inspector: disclosure replies are applied (groups
+  previously never opened), section `note`, `finishes`, hidden rows and a
+  target `error`.
+
+### Engine findings from the UI pass (for the engine lane)
+
+- **One bad layer blanks the whole 3D set.** (Fixed by UI dependency 2
+  above; kept for the record.) `studio/native.rs` `scene()`
+  returns an error for the entire scene when one object's mesh can't be
+  built (`self.mesh(&object["source"])?`, e.g. a `roundedBox` primitive) or
+  when an object uses a Screen material or part offsets. The viewer then
+  reports every 3D layer as not drawn. The requirement is that a broken
+  model, font or texture affects only its own layer: skip that object and
+  report a `LayerFailure` for its layer ID only. Properties already shows
+  the per-layer error and names the culprit on the other layers.
+- Until composition capture lands, Properties offers Screen compositions
+  disabled ("Screens aren’t available in this version yet.") because
+  choosing one stops the whole scene from drawing.
+- Set Up Studio (`auto_studio`) adds the softboxes and camera, but the
+  seamless set draws as a black void in the native renderer.
+- Agents' `edit_3d` without a label is now named for the operation
+  (`Add Softbox`, `Sky`, `Add Terrain`, `Set Up Studio`…); UI edits carry
+  specific names (`Add Pine Trees`, `Import Bottle.obj`, `Finish: Gold`,
+  `3D Quality: Final`, `Add Shot: Push-In`).
+
+### Engine findings from round 2
+
+- Fog (`fogDensity` on the world) darkens the foreground to near black in
+  Quality, so the landscape defaults use no fog.
+- The shadow catcher draws a black void; the first-shape starter uses a
+  plain Floor plane instead.
+- Fast (Live) draws terrain noticeably darker than Quality. (Fixed by 3077a4128.)
+
+### Still open for the designer
+
+- Status capsule (§3): needs refine progress (samples done / target) in
+  `ViewerStatus`.
+- Light panel: log sliders (the kit has no `NSSlider`), the Aim segment, and
+  motion. Views: navigation and selection in the extra panes.
+- 3D handles for extruded text and shapes.
+- Export: adopt the export time-estimate state when it lands.
+- Engine notes from round 3: one cube face shows a live map mirrored (box
+  UVs); Fast shows speckle on extruded faces in an orthographic Front view.
+- See `design/reviews/na-studio3d-ui.md` § Round 3 for the keyboard fix
+  (v4 tab stops, focus-visible) and what's left there.

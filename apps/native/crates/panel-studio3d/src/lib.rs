@@ -1,8 +1,10 @@
 //! Worker-side panel adapter. All document edits run on pm-kernel; no JS waits,
 //! document mirror writes, renderer substitutes, or platform handles live here.
+pub mod extrude;
 mod fields;
 mod light;
 pub mod view;
+pub mod viewport;
 use pm_kernel::{
     Ack, Call, Caller, Command, GestureCall, KernelHandle, Published, QueryMirror, Reply, Request,
     Scene3dCommand, WriteBody,
@@ -13,10 +15,15 @@ use std::sync::Arc;
 /// Properties' 3D section (3d-studio.md §8) for one selected 3D layer: its
 /// keyframeable fields and the typed edits behind its pop-ups and checkboxes.
 pub mod properties {
-    pub use crate::fields::Field;
+    pub use crate::fields::{Field, environment};
+    pub use crate::view::{
+        NATURE, QUALITY, SKIES, about, add_layer, add_models, estimate_seconds_per_frame,
+        export_quality, new_menu, scatter_options, scene_summary, set_up_studio, shots,
+    };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};
     pub use pm_scene3d::schema::Role;
+    pub use pm_scene3d::service::presets as finishes;
     use serde_json::Value;
     /// The role and its channel fields (stored keys, Title Case labels,
     /// ranges and groups), or `None` for a layer that isn't 3D.
@@ -36,6 +43,25 @@ pub mod properties {
         arg: Value,
     ) -> Result<(String, Vec<Command>)> {
         view::commands(p, time, id, arg)
+    }
+    /// The Light panel (3d-studio.md §6) for the selection: the light's name,
+    /// kind and rows, or the hint when no light is selected or Add is armed.
+    pub fn light_panel(p: &Published, time: f64, kind: &str, add: bool) -> Result<Value> {
+        let kind = match kind {
+            "spot" => "spot",
+            "point" => "point",
+            "sun" => "sun",
+            _ => "area",
+        };
+        crate::light::projection(
+            p,
+            time,
+            &crate::light::Settings {
+                aim: "reflect",
+                add,
+                kind,
+            },
+        )
     }
     /// `Screen`'s options: None, then the project's compositions, those that
     /// would play inside themselves disabled.

@@ -391,11 +391,22 @@ impl Controller {
                 .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
         });
         // Auto's measured resolution; 0 until a frame has drawn.
+        // Layers left out of the frame on screen, by ID, so Properties can say
+        // so on that layer only (3d-studio.md §10).
+        let failures: serde_json::Map<String, Value> = status
+            .as_ref()
+            .map(|s| {
+                s.layer_failures
+                    .iter()
+                    .map(|f| (f.layer.clone(), json!(f.message)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let effective = status
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"layerFailures":failures,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
             "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
@@ -653,13 +664,27 @@ impl Controller {
         }
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
-            let stage = [bounds.w as f64, body_h as f64];
+            // With Studio 3D views the main viewer is the first pane.
+            let split = self.host.borrow().viewer_split.get();
+            let (body_w, body_h) = if split > 1 {
+                let r = pm_shell::layout::Rect {
+                    x: 0.,
+                    y: 0.,
+                    w: bounds.w,
+                    h: body_h,
+                };
+                let first = pm_shell::layout::view_tiles(r, split, t.metrics.border * 2.)[0];
+                (first.w, first.h)
+            } else {
+                (bounds.w, body_h)
+            };
+            let stage = [body_w as f64, body_h as f64];
             if self.view.stage != stage {
                 // The chrome's Fit readout and zoom steps measure this slot.
                 self.view.stage = stage;
                 cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
             }
-            let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
+            let fit = crate::panels::fit_scale(body_w, body_h, self.dimensions, t.metrics.inset);
             let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
             if self.view.scale.replace(scale) != scale
                 && let Some(gizmos) = &self.builtins.gizmos
@@ -1495,6 +1520,30 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn pick_surface(
+        &self,
+        at: [f32; 2],
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        let c = self.0.upgrade()?;
+        let viewer = c.read(cx).viewer.as_ref()?;
+        let frame = viewer.status().frame?;
+        viewer
+            .pick_surface(
+                frame.stamp,
+                frame.time,
+                at,
+                pm_engine_service::SurfaceQueryKind::Click,
+            )
+            .ok()
+    }
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            let _ = viewer.studio_view(view);
+        }
+    }
     fn input(&self, at: f64, cx: &mut App) {
         if let Some(c) = self.0.upgrade()
             && let Some(viewer) = &c.read(cx).viewer
@@ -1514,16 +1563,31 @@ impl crate::gizmo::Host for ControllerDelegate {
         // and Null have no native command yet) and what extensions add to it.
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
-                let entries = vec![pm_shell::MenuEntry::submenu(
-                    "New",
-                    vec![
-                        pm_shell::MenuEntry::item("Solid", "newSolid"),
-                        pm_shell::MenuEntry::item("Shape Layer", "newShape"),
-                        pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
-                        pm_shell::MenuEntry::separator(),
-                        pm_shell::MenuEntry::item("Composition…", "newComposition"),
-                    ],
-                )];
+                let entries = vec![
+                    pm_shell::MenuEntry::submenu(
+                        "New",
+                        vec![
+                            pm_shell::MenuEntry::item("Solid", "newSolid"),
+                            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+                            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                            pm_shell::MenuEntry::separator(),
+                            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+                        ],
+                    ),
+                    // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
+                    pm_shell::MenuEntry::submenu(
+                        "Add 3D Layer",
+                        pm_shell::menu::new3d()
+                            .into_iter()
+                            .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+                                Some(kind) => {
+                                    pm_shell::MenuEntry::item(i.label, format!("new3d:{kind}"))
+                                }
+                                None => pm_shell::MenuEntry::separator(),
+                            })
+                            .collect(),
+                    ),
+                ];
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
                 if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
                     v.host.borrow().context_menu(&entries, at.0, at.1);

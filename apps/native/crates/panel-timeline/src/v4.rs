@@ -433,8 +433,11 @@ pub fn project_window(
                     let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
                     value["layer"] = json!(id);
-                    value["layerKind"] = json!(layer.kind);
-                    value["labelColor"] = json!(crate::render::Label::for_kind(&layer.kind).name());
+                    let definition = layer.definition.as_deref();
+                    value["layerKind"] =
+                        json!(crate::render::display_kind(&layer.kind, definition));
+                    value["labelColor"] =
+                        json!(crate::render::Label::for_layer(&layer.kind, definition).name());
                     value["index"] = if layer.group.is_some() {
                         Value::Null
                     } else {

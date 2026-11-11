@@ -1886,7 +1886,7 @@ impl ModelPresenter for Presenter {
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
-        Label::for_kind(&layer.kind)
+        Label::for_layer(&layer.kind, layer.definition.as_deref())
     }
     fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
         if layer

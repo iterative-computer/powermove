@@ -222,8 +222,9 @@ pub fn layer_menu_rows() -> Vec<serde_json::Value> {
         .collect()
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 24] = [
+pub const PLANNED: [&str; 25] = [
     "newSolid",
+    "new3d",
     "newShape",
     "newAdjustment",
     "selectAll",
@@ -355,6 +356,8 @@ pub fn transform_roots<'a>(layers: &'a [LayerInfo], selected: &[String]) -> Hash
         .map(|l| l.id.as_str())
         .collect()
 }
+/// Scene units per composition pixel of a keyboard nudge on a 3D layer.
+const STUDIO_NUDGE: f64 = 0.1;
 /// One keyboard step in composition pixels, mapped into each layer's parent.
 fn nudge(
     published: &Published,
@@ -373,14 +376,22 @@ fn nudge(
     let roots = transform_roots(layers, &unlocked);
     let mut commands = vec![];
     for layer in layers.iter().filter(|l| roots.contains(l.id.as_str())) {
-        let q = mirror.queries();
-        let (Ok(world), Ok(local)) = (
-            q.world_matrix(None, &layer.id, time),
-            q.local_matrix(None, &layer.id, time),
-        ) else {
-            continue;
+        let studio = crate::gizmo::is_studio(published, &layer.id);
+        let step = if studio {
+            // A 3D layer moves in scene units, up is up: 0.1 per arrow and
+            // 1 with ⇧ (whose step is ten pixels), the ⌃-snap unit (§5).
+            Some([delta[0] * STUDIO_NUDGE, -delta[1] * STUDIO_NUDGE])
+        } else {
+            let q = mirror.queries();
+            let (Ok(world), Ok(local)) = (
+                q.world_matrix(None, &layer.id, time),
+                q.local_matrix(None, &layer.id, time),
+            ) else {
+                continue;
+            };
+            crate::gizmo::parent_delta(&world, &local, delta)
         };
-        let Some(step) = crate::gizmo::parent_delta(&world, &local, delta) else {
+        let Some(step) = step else {
             continue;
         };
         for (channel, offset) in [("position.x", step[0]), ("position.y", step[1])] {
@@ -395,7 +406,12 @@ fn nudge(
             else {
                 continue;
             };
-            let mut set = SetProperty::new(&layer.id, channel, Value::Number(value + offset), time);
+            let next = if studio {
+                ((value + offset) * 1000.).round() / 1000.
+            } else {
+                value + offset
+            };
+            let mut set = SetProperty::new(&layer.id, channel, Value::Number(next), time);
             set.preserve_hand_edits = false;
             set.mark_intent = true;
             commands.push(PropertyCommand::Set(set).into());
@@ -449,6 +465,19 @@ pub fn command_plan(
         })
     };
     match name {
+        "new3d" => {
+            // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
+            // new layer is selected so Properties shows it.
+            let kind = args.first().and_then(serde_json::Value::as_str)?;
+            let id = new_id("L");
+            let (label, commands, select) =
+                pm_panel_studio3d::properties::add_layer(published, time, kind, &id).ok()?;
+            Some(Plan {
+                label,
+                commands,
+                select: Some(vec![select]),
+            })
+        }
         "newSolid" => Some(new_layer(published, "solid", "Solid", false, time)),
         "newShape" => Some(new_layer(published, "shape", "Shape", true, time)),
         "newAdjustment" => Some(new_layer(

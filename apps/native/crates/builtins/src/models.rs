@@ -220,6 +220,7 @@ impl Backend {
         self.sync()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        self.native.properties.failures = self.native.facts["layerFailures"].clone();
         self.native.properties.snapshot(
             self.model.as_mut().ok_or("No open project")?,
             time,
@@ -437,6 +438,24 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
+        // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
+        let mut model = model;
+        if model["studio"]["tool"] == "light" {
+            let ui = |k: &str| {
+                p.ui_state
+                    .viewer
+                    .get(k)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let kind = ui("studioLightKind").unwrap_or_else(|| "area".into());
+            let add = ui("studioLightAdd").as_deref() == Some("on");
+            let time = self.native.facts["time"].as_f64().unwrap_or(0.);
+            if let Ok(light) = pm_panel_studio3d::properties::light_panel(&p, time, &kind, add) {
+                model["studio"]["light"] = light;
+                model["studio"]["lightKind"] = json!(kind);
+            }
+        }
         Ok(
             json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
         )
@@ -984,6 +1003,7 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "studioQuality",
                 "preset",
                 "presetName"
             ]))?;
@@ -1032,6 +1052,13 @@ impl Backend {
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
         self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_render::composite::project_color(root).is_ok_and(|c|c.mode==pm_protocol::color::ColorMode::Hdr),"summary":plan.summary});
+        // A composition with 3D layers offers a per-export 3D quality; the sheet
+        // names the composition's own preset as the default choice.
+        if let Some((_, label)) =
+            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
+        {
+            self.native.export["project"]["studio"] = json!({ "saved": label });
+        }
         self.native.export["presets"] = json!(
             self.kernel
                 .state()

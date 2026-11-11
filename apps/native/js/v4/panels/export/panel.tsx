@@ -18,6 +18,7 @@ import {
   rows,
   shows,
   sidecars,
+  studioQualities,
 } from "./spec";
 const { token } = UI;
 const text = {
@@ -140,7 +141,13 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             : undefined
         }
         binding={s.bindings[key]}
-        value={key === "dynamicRange" ? (o[key] ?? "sdr") : o[key]}
+        value={
+          key === "dynamicRange"
+            ? (o[key] ?? "sdr")
+            : key === "studioQuality"
+              ? (o[key] ?? "composition")
+              : o[key]
+        }
         options={options}
         disabled={busy}
         onChange={(e) => edit(key, e.value as Options[typeof key])}
@@ -459,6 +466,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   : null}
               </Group>
               <Group label="Rendering">
+                {p.studio && o.format !== "json"
+                  ? select("studioQuality", studioQualities(p.studio.saved))
+                  : null}
                 {shows(o, "mblur") ? toggle("mblur") : null}
                 {shows(o, "audio") ? toggle("audio") : null}
                 {shows(o, "alpha") ? toggle("alpha") : null}

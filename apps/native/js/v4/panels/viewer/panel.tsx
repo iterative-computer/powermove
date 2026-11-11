@@ -1,6 +1,8 @@
 import {
   EmptyState,
+  NumberField,
   PopUpButton,
+  SegmentedControl,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -81,7 +83,7 @@ export function ViewerPanel({
   const spoken = (text: string) => text.replace(/ %$/, " percent");
   // D3: an unnamed composition is spoken as "Untitled Composition"; the authored
   // empty name is never rewritten.
-  const value = `${m.name || "Untitled Composition"}, ${percent(m.shownZoom)} percent, ${effective ? `${spoken(effective)} resolution, ` : ""}${m.selectionCount} layers selected`;
+  const value = `${m.name || "Untitled Composition"}, ${percent(m.shownZoom)} percent, ${effective ? `${spoken(effective)} resolution, ` : ""}${m.selectionCount} ${m.selectionCount === 1 ? "layer" : "layers"} selected`;
   // The same two pop-ups (same ids) live in the docked bar or, in Focus and
   // full screen, in the ViewerOverlay capsule (viewer-chrome.md §2 Overlay),
   // so keyboard focus follows them across presentations (design review D5).
@@ -134,6 +136,217 @@ export function ViewerPanel({
       </PopUpButton>
     </>
   );
+  // 3d-studio.md §2: Look Through, Tool, Axes, Frame, Views and Preview,
+  // leading the bar, only while the composition has 3D layers. Tooltips are
+  // two lines: the name (with its shortcut), then what it does.
+  const looks = [
+    { id: "camera", label: "Camera", help: "See exactly what the shot renders." },
+    { id: "free", label: "Free View", help: "Look around without changing the shot." },
+  ];
+  const tools = [
+    { id: "move", label: "Move", symbol: "move.3d", help: "Drag the selection, or one arrow for one axis." },
+    { id: "rotate", label: "Rotate", symbol: "rotate.3d", help: "Turn the selection by its rings." },
+    { id: "scale", label: "Scale", symbol: "scale.3d", help: "Resize the selection." },
+    { id: "orbit", label: "Orbit", symbol: "view.3d", help: "Drag to circle the view. Anytime: ⌥-drag." },
+    { id: "pan", label: "Pan", symbol: "hand.raised", help: "Drag to slide the view. Anytime: ⇧⌥-drag." },
+    { id: "zoom", label: "Zoom", symbol: "plus.magnifyingglass", help: "Drag to move closer. Anytime: ⌥-scroll." },
+    { id: "light", label: "Light", symbol: "lightbulb", help: "Click a model to put light there." },
+  ];
+  const views = [
+    { id: "1", label: "One View", short: "1 View", help: "One view of the scene." },
+    { id: "2", label: "Two Views", short: "2 Views", help: "Side by side, each with its own camera." },
+    { id: "4", label: "Four Views", short: "4 Views", help: "The shot, top, front and side." },
+  ];
+  const tiers = [
+    { id: "live", label: "Fast", help: "Real-time preview. Exports stay full quality." },
+    { id: "refine", label: "Quality", help: "Path-traced, as it will export." },
+  ];
+  const object = m.studio?.axes === "object";
+  // 3d-studio.md §6: the Light panel, top-leading over the stage while Light
+  // is the tool. Values are the model's; a pull is one Undo ("Light Size").
+  const light = m.studio?.tool === "light" ? m.studio.light : undefined;
+  const kinds = [
+    { v: "area", label: "Softbox" },
+    { v: "spot", label: "Spotlight" },
+    { v: "point", label: "Bulb" },
+    { v: "sun", label: "Sun" },
+  ];
+  const lightPanel = light ? (
+    <div
+      id="viewer.studio.lightPanel"
+      role="group"
+      label="Light Tool"
+      style={{
+        position: "absolute",
+        left: token("metrics.gap"),
+        top: token("metrics.gap"),
+        width: token("metrics.popover_width"),
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        gap: token("metrics.gap"),
+        padding: token("metrics.inset"),
+        background: token("colors.floating"),
+        borderRadius: token("metrics.control_radius"),
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap") }}>
+        <ToolbarItem
+          id="viewer.studio.lightAdd"
+          label="Add"
+          title={"Add\nThen click a model to put it there."}
+          active={light.settings.add}
+          onClick={() => actions.drive("viewer.studio.lightAdd", light.settings.add ? "off" : "on")}
+        >
+          Add
+        </ToolbarItem>
+        <PopUpButton
+          id="viewer.studio.lightKind"
+          data-pm-variant="inline"
+          binding="viewer.studio.lightKind"
+          label="Light to Add"
+          value={m.studio?.lightKind ?? "area"}
+          style={popupStyle}
+          options={kinds}
+          onChange={(event) => actions.drive("viewer.studio.lightKind", event.value)}
+        />
+      </div>
+      {light.hint ? (
+        <text style={{ color: token("colors.muted"), fontSize: token("typography.body") }}>
+          {light.hint}
+        </text>
+      ) : (
+        <>
+          <div style={{ display: "flex", flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: token("metrics.gap") }}>
+            <text style={{ color: token("colors.text"), fontSize: token("typography.title"), fontWeight: token("typography.semibold_weight") }}>
+              {light.name ?? ""}
+            </text>
+            <text style={{ color: token("colors.muted"), fontSize: token("typography.minimum") }}>
+              {light.kind ?? ""}
+            </text>
+          </div>
+          {light.rows.map((row) => (
+            <div
+              key={row.id}
+              style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap"), height: token("metrics.row") }}
+            >
+              <text
+                title={`${row.label}\n${row.tooltip}`}
+                style={{ color: token("colors.secondary"), fontSize: token("typography.body"), whiteSpace: "nowrap" }}
+              >
+                {row.label}
+              </text>
+              <NumberField
+                id={`viewer.studio.light.${row.id}`}
+                label={row.label}
+                title={`${row.label}\n${row.tooltip}`}
+                binding={`viewer.studio.light.${row.id}`}
+                value={Math.round(row.value * 100) / 100}
+                min={row.min}
+                max={row.max}
+                step={row.max > 100 ? 0.5 : 0.05}
+                precision={row.value < 10 ? 2 : row.value < 100 ? 1 : 0}
+                unit={row.id === "spread" ? "°" : ""}
+                disabled={light.locked}
+                style={{ width: token("metrics.value_column") }}
+                onChange={(e) => actions.drive(`viewer.studio.light.${row.id}`, Number(e.value))}
+              />
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  ) : null;
+  const studio = !m.studio ? null : m.studio.compact ? (
+    // Narrower than the group: one 3D pull-down, same items and order.
+    <PopUpButton
+      id="viewer.studio.menu"
+      data-pm-variant="inline"
+      binding="viewer.studio.menu"
+      title={"3D\nCamera, tools, axes, views and preview."}
+      label="3D"
+      display="3D"
+      value={null}
+      style={popupStyle}
+      options={[
+        ...looks.map((o) => ({ v: `look:${o.id}`, label: o.label, checked: (m.studio?.look ?? "camera") === o.id })),
+        { separator: true },
+        ...tools.map((o) => ({ v: `tool:${o.id}`, label: o.label, checked: (m.studio?.tool ?? "move") === o.id })),
+        { separator: true },
+        { v: "axes:scene", label: "Scene Axes", checked: !object },
+        { v: "axes:object", label: "Object Axes", checked: object },
+        { v: "frame", label: "Frame" },
+        { separator: true },
+        ...views.map((o) => ({ v: `views:${o.id}`, label: o.label, checked: (m.studio?.views ?? "1") === o.id })),
+        { separator: true },
+        ...tiers.map((o) => ({ v: `tier:${o.id}`, label: o.label, checked: m.studio?.tier === o.id })),
+      ]}
+      onChange={(event) => actions.drive("viewer.studio.menu", event.value)}
+    />
+  ) : (
+    <div
+      id="viewer.studio"
+      role="group"
+      label="3D"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: token("metrics.gap"),
+      }}
+    >
+      <SegmentedControl
+        id="viewer.studio.look"
+        label="Look Through"
+        value={m.studio.look ?? "camera"}
+        options={looks}
+        onChange={(value) => actions.drive("viewer.studio.look", value)}
+      />
+      <SegmentedControl
+        id="viewer.studio.tool"
+        label="Tool"
+        value={m.studio.tool ?? "move"}
+        options={tools}
+        onChange={(value) => actions.drive("viewer.studio.tool", value)}
+      />
+      <ToolbarItem
+        id="viewer.studio.axes"
+        label={object ? "Object Axes" : "Scene Axes"}
+        title={
+          object
+            ? "Object Axes\nHandles line up with the object. Click for the scene’s."
+            : "Scene Axes\nHandles line up with the scene. Click for the object’s."
+        }
+        metadata={{ symbol: object ? "cube" : "globe" }}
+        onClick={() => actions.drive("viewer.studio.axes", object ? "scene" : "object")}
+      />
+      <ToolbarItem
+        id="viewer.studio.frame"
+        label="Frame"
+        title={"Frame (F)\nFit the selection, or everything."}
+        metadata={{ symbol: "viewfinder" }}
+        onClick={() => actions.drive("viewer.studio.frame")}
+      />
+      <PopUpButton
+        id="viewer.studio.views"
+        data-pm-variant="inline"
+        binding="viewer.studio.views"
+        title={"Views\nOne view, two side by side, or four."}
+        label="Views"
+        value={m.studio.views ?? "1"}
+        style={popupStyle}
+        options={views.map((o) => ({ v: o.id, label: o.short, detail: o.help }))}
+        onChange={(event) => actions.drive("viewer.studio.views", event.value)}
+      />
+      <SegmentedControl
+        id="viewer.studio.tier"
+        label="Preview"
+        value={m.studio.tier}
+        options={tiers}
+        onChange={(value) => actions.drive("viewer.studio.tier", value)}
+      />
+    </div>
+  );
   return (
     <div
       id="viewer"
@@ -156,9 +369,10 @@ export function ViewerPanel({
             gap: token("metrics.gap"),
             paddingLeft: token("metrics.inset"),
             paddingRight: token("metrics.gap"),
-            justifyContent: source ? "space-between" : "end",
+            justifyContent: source || studio ? "space-between" : "end",
           }}
         >
+          {!source && studio}
           {source && (
             <div
               style={{
@@ -250,6 +464,7 @@ export function ViewerPanel({
           label="Transform gizmos"
           style={{ position: "absolute", inset: "fill" }}
         />
+        {lightPanel}
       </div>
       {!source && m.canvasLost && (
         <ToolbarItem
