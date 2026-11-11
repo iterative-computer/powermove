@@ -99,11 +99,10 @@ fn ruler_scissors_work_area_render_states_and_three_diamonds_are_explicit() {
     );
     assert!(f.ops.iter().any(|o| o.shape == "stripes-45"));
     assert!(f.ops.iter().any(|o| o.id == "kept:3" && o.stroke == 0.));
-    assert!(
-        !f.ops
-            .iter()
-            .any(|o| o.id == "render:0" || o.id == "render:4")
-    );
+    // Needs render shows in the warning colour; stale frames don't show.
+    let needs = f.ops.iter().find(|o| o.id == "render:0").unwrap();
+    assert_eq!(needs.color, t.colors.warning);
+    assert!(!f.ops.iter().any(|o| o.id == "render:4"));
     let mut reduced = t.clone();
     reduced.accessibility.reduce_motion = true;
     let f = scene(&reduced)

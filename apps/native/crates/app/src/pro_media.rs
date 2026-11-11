@@ -58,8 +58,12 @@ pub struct Preferences {
     pub format: ProxyFormat,
     pub location: Option<PathBuf>,
     /// Settings › Media › Render Files Limit, in GB: rendered frames past it
-    /// go oldest first (kept frames never).
+    /// go least recently used first (kept frames never).
     pub render_limit_gb: u32,
+    /// Settings › General › Playback › Background Rendering.
+    pub background_render: bool,
+    /// Its delay after the last interaction, in seconds.
+    pub background_delay_s: u32,
 }
 
 impl Default for Preferences {
@@ -70,6 +74,8 @@ impl Default for Preferences {
             format: ProxyFormat::ProResProxy,
             location: None,
             render_limit_gb: 25,
+            background_render: true,
+            background_delay_s: 5,
         }
     }
 }
@@ -86,6 +92,13 @@ pub type Row = (
 /// Settings › Media › Render Files Limit's choices, in GB.
 const RENDER_LIMITS: [(u32, &str); 4] =
     [(10, "10 GB"), (25, "25 GB"), (50, "50 GB"), (100, "100 GB")];
+/// Settings › General › Playback › Start Rendering After's choices, in seconds.
+const BACKGROUND_DELAYS: [(u32, &str); 4] = [
+    (3, "3 Seconds"),
+    (5, "5 Seconds"),
+    (10, "10 Seconds"),
+    (30, "30 Seconds"),
+];
 
 impl Preferences {
     /// Settings › Media's rows: id, label, detail, and choices (value,
@@ -142,6 +155,43 @@ impl Preferences {
         ]
     }
 
+    /// Settings › General › Playback's rows, kept with these media settings
+    /// (this Mac's): Background Rendering and its delay. The delay shows
+    /// only while background rendering is on.
+    pub fn playback_rows(&self) -> Vec<Row> {
+        let mut rows = vec![(
+            "media.backgroundRender",
+            "Background Rendering",
+            "While you're away, render parts that can't play in real time, so they play smoothly at full quality.",
+            serde_json::json!(self.background_render),
+            vec![
+                (serde_json::json!(true), "On"),
+                (serde_json::json!(false), "Off"),
+            ],
+        )];
+        if self.background_render {
+            rows.push((
+                "media.backgroundDelay",
+                "Start Rendering After",
+                "How long Powermove waits after you last edit, play or scrub.",
+                serde_json::json!(self.background_delay_s),
+                BACKGROUND_DELAYS
+                    .iter()
+                    .map(|(s, label)| (serde_json::json!(s), *label))
+                    .collect(),
+            ));
+        }
+        rows
+    }
+
+    /// What the render cache's background rendering does.
+    pub fn background(&self) -> pm_engine_service::render_cache::Background {
+        pm_engine_service::render_cache::Background {
+            enabled: self.background_render,
+            delay: std::time::Duration::from_secs(u64::from(self.background_delay_s)),
+        }
+    }
+
     /// Sets the row `id` to `value`; an unknown row or value is refused.
     pub fn set(&mut self, id: &str, value: &serde_json::Value) -> Result<(), String> {
         let bad = |_| "Invalid setting value".to_owned();
@@ -163,6 +213,19 @@ impl Preferences {
                     return Err("Invalid setting value".into());
                 }
                 self.render_limit_gb = gb;
+            }
+            "media.backgroundRender" => {
+                self.background_render = value.as_bool().ok_or("Invalid setting value")?;
+            }
+            "media.backgroundDelay" => {
+                let seconds: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
+                if !BACKGROUND_DELAYS
+                    .iter()
+                    .any(|(choice, _)| *choice == seconds)
+                {
+                    return Err("Invalid setting value".into());
+                }
+                self.background_delay_s = seconds;
             }
             _ => return Err("Settings service is unavailable for this row".into()),
         }
@@ -1565,14 +1628,19 @@ impl crate::session::Controller {
     /// Settings › Media's rows and storage, for the Settings panel.
     pub(crate) fn media_settings_fact(&self) -> serde_json::Value {
         let prefs = self.pro_media.preferences();
-        let rows: Vec<serde_json::Value> = prefs
-            .rows()
-            .into_iter()
-            .map(|(id, label, detail, value, options)| {
-                serde_json::json!({"id":id,"label":label,"detail":detail,"value":value,
-                    "options":options.into_iter().map(|(v, label)| serde_json::json!({"v":v,"label":label})).collect::<Vec<_>>()})
-            })
-            .collect();
+        let row = |(id, label, detail, value, options): Row| {
+            serde_json::json!({"id":id,"label":label,"detail":detail,"value":value,
+                "options":options.into_iter().map(|(v, label)| serde_json::json!({"v":v,"label":label})).collect::<Vec<_>>()})
+        };
+        let mut rows: Vec<serde_json::Value> = prefs.rows().into_iter().map(row).collect();
+        rows.extend(prefs.playback_rows().into_iter().map(|r| {
+            let switch = r.0 == "media.backgroundRender";
+            let mut r = row(r);
+            r["section"] = "general".into();
+            r["group"] = "Playback".into();
+            r["control"] = if switch { "switch" } else { "choice" }.into();
+            r
+        }));
         let usage = self.pro_media.cached_usage();
         serde_json::json!({
             "rows": rows,
@@ -1681,6 +1749,14 @@ impl crate::session::Controller {
         if let Some(id) = input["write"].as_str() {
             if let Err(error) = self.pro_media.set_preference(id, &input["value"]) {
                 self.message = error;
+            }
+            if id.starts_with("media.background") {
+                self.engine
+                    .render_cache()
+                    .set_background(self.pro_media.preferences().background());
+            }
+            if id == "media.renderLimit" {
+                crate::session::sync_render_storage(&self.pro_media, &self.engine);
             }
             self.update_builtins(cx);
             return;
@@ -2379,7 +2455,7 @@ mod tests {
             (prefs.size, prefs.create),
             (ProxySize::P720, Create::WhenNeeded)
         );
-        for (_, _, _, value, options) in prefs.rows() {
+        for (_, _, _, value, options) in prefs.rows().into_iter().chain(prefs.playback_rows()) {
             assert!(options.iter().any(|(v, _)| *v == value));
         }
         assert!(prefs.creates_on_import(3840, 2160, 8));

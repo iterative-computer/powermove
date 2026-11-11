@@ -2028,3 +2028,37 @@ fn module_graphs_keep_esm_semantics_cycles_and_dynamic_import() {
     assert_eq!(eval(&r, &source), "synthetic");
     close(&r);
 }
+
+/// FinalizationRegistry callbacks run while a realm lives: V8 posts their
+/// cleanup as a platform task, which runs only when the isolate's owner pumps
+/// the platform (review: a realm's finalizers never ran before teardown, so
+/// everything they release piled up for the whole session).
+#[test]
+fn finalization_callbacks_run_during_a_session() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("finalize".into()))
+        .unwrap();
+    eval(
+        &r,
+        "globalThis.finalized=0;globalThis.registry=new FinalizationRegistry(()=>{globalThis.finalized++});
+         (()=>{for(let i=0;i<64;i++)registry.register({i},i)})();0",
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finalized = 0;
+    while Instant::now() < deadline {
+        // Garbage enough for full collections.
+        eval(
+            &r,
+            "(()=>{let keep=0;for(let i=0;i<64;i++){keep+=new Array(65536).fill(i).length}return keep})()",
+        );
+        finalized = eval(&r, "finalized").parse::<u32>().unwrap();
+        if finalized > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(finalized > 0, "no finalizer ran while the realm lived");
+    close(&r);
+}

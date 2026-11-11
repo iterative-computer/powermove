@@ -21,8 +21,8 @@ pub(crate) struct BindCache {
     textures: HashMap<wgpu::TextureView, (wgpu::BindGroup, u64)>,
     quads: HashMap<(wgpu::Buffer, u64), (wgpu::BindGroup, u64)>,
     resamples: HashMap<(wgpu::TextureView, wgpu::TextureView), (wgpu::BindGroup, u64)>,
-    /// Compatibility rasters' textures on this renderer's device
-    /// (`crate::compat::upload_cached`).
+    /// Compatibility rasters' textures on this renderer's device, kept while
+    /// frames draw them ([`crate::compat::Uploads`]).
     pub compat: crate::compat::Uploads,
     frame: u64,
 }
@@ -40,6 +40,19 @@ impl BindCache {
         self.textures.retain(|_, (_, used)| *used == frame);
         self.quads.retain(|_, (_, used)| *used == frame);
         self.resamples.retain(|_, (_, used)| *used == frame);
+        self.compat.end_frame(frame);
+    }
+
+    /// The texture of a compatibility raster this frame draws.
+    pub fn compat_view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raster: &std::sync::Arc<crate::compat::CompatRaster>,
+        precision: pm_protocol::color::Precision,
+    ) -> wgpu::TextureView {
+        self.compat
+            .view(device, queue, raster, precision, self.frame)
     }
 
     pub fn clear(&mut self) {

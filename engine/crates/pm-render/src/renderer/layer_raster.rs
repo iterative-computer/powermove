@@ -69,6 +69,42 @@ fn js_density(w: f64, h: f64, scale: f64) -> f64 {
     min(min(scale, 8192.0 / w), 8192.0 / h)
 }
 
+/// The texels of `texture`, which holds the canvas pixels `[x, y, w, h]` =
+/// `held`, that lie in `window` (canvas pixels, clamped to the canvas), or
+/// all of them: the painted pixels and the canvas crop they cover. A window
+/// reads only its texels, which are the whole read's texels there.
+fn read_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    held: [u32; 4],
+    window: Option<[u32; 4]>,
+) -> Result<LayerPixels, RenderError> {
+    let Some([wx, wy, ww, wh]) = window else {
+        return Ok(LayerPixels {
+            pixels: pm_gpu::readback::read_f32(device, queue, texture)?,
+            crop: held,
+        });
+    };
+    let [hx, hy, hw, hh] = held;
+    let (x0, y0) = (wx.max(hx), wy.max(hy));
+    let (x1, y1) = (
+        wx.saturating_add(ww).min(hx + hw),
+        wy.saturating_add(wh).min(hy + hh),
+    );
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(LayerPixels {
+            pixels: Vec::new(),
+            crop: [0, 0, 0, 0],
+        });
+    }
+    let region = [x0 - hx, y0 - hy, x1 - x0, y1 - y0];
+    Ok(LayerPixels {
+        pixels: pm_gpu::readback::read_f32_region(device, queue, texture, region)?,
+        crop: [x0, y0, x1 - x0, y1 - y0],
+    })
+}
+
 impl Renderer {
     /// The raster of layer `layer` (or `content`, a layer object the caller
     /// passed) of `composition` at composition time `seconds`, at raster
@@ -83,6 +119,33 @@ impl Renderer {
         seconds: f64,
         scale: f64,
         precision: Precision,
+    ) -> Result<Option<LayerRaster>, RenderError> {
+        self.layer_raster_window(
+            document,
+            composition,
+            layer,
+            content,
+            seconds,
+            scale,
+            precision,
+            None,
+        )
+    }
+
+    /// [`Self::layer_raster`] with only the canvas pixels in `window`
+    /// (`[x, y, w, h]`) painted into `pixels`: the same raster and geometry,
+    /// and at those pixels the same values, without reading back the rest.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layer_raster_window(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        content: Option<&Node>,
+        seconds: f64,
+        scale: f64,
+        precision: Precision,
+        window: Option<[u32; 4]>,
     ) -> Result<Option<LayerRaster>, RenderError> {
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
@@ -224,7 +287,9 @@ impl Renderer {
             for t in taken {
                 self.pool.give(t);
             }
-            let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+            let [cx0, cy0, cx1, cy1] = quad.plan.crop;
+            let held = [cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0)];
+            let pixels = read_pixels(&self.device, &self.queue, view.texture(), held, window)?;
             // The pixels are placed in the whole canvas (only its inked part
             // is painted, and the quad shrinks to it for compositing), so
             // the surface's box and anchor are the whole canvas's, as
@@ -251,16 +316,12 @@ impl Renderer {
                     (quad.ax + x0 * sx, quad.ay + y0 * sy),
                 )
             });
-            // `LayerPixels` places the painted crop by `[x, y, w, h]`;
-            // the text plan's crop is `[x0, y0, x1, y1]` (an ink crop away
-            // from the canvas's corner read with the wrong stride drew
-            // streaks in `render.raster()`).
-            let [cx0, cy0, cx1, cy1] = crop;
+            // `LayerPixels` places the painted crop by `[x, y, w, h]`
+            // (`held`); the text plan's crop is `[x0, y0, x1, y1]` (an ink
+            // crop away from the canvas's corner read with the wrong stride
+            // drew streaks in `render.raster()`).
             return Ok(Some(LayerRaster {
-                pixels: LayerPixels {
-                    pixels,
-                    crop: [cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0)],
-                },
+                pixels,
                 canvas,
                 box_size,
                 anchor,
@@ -280,7 +341,7 @@ impl Renderer {
                 &layer_paths.layer_to_pixels(&raster).as_coeffs(),
             );
             drop(scope);
-            let pixels = self.paint_scene(scene, canvas, precision)?;
+            let pixels = self.paint_scene(scene, canvas, precision, window)?;
             let b = layer_paths.bounds;
             return Ok(Some(LayerRaster {
                 canvas,
@@ -309,7 +370,7 @@ impl Renderer {
             &colors.stroke_color,
         );
         let canvas = (g.width as u32, g.height as u32);
-        let pixels = self.paint_scene(scene, canvas, precision)?;
+        let pixels = self.paint_scene(scene, canvas, precision, window)?;
         let s = g.selection;
         Ok(Some(LayerRaster {
             canvas,
@@ -329,13 +390,22 @@ impl Renderer {
         scene: pm_vector::render::scene::CoverageScene,
         canvas: (u32, u32),
         precision: Precision,
+        window: Option<[u32; 4]>,
     ) -> Result<LayerPixels, RenderError> {
         let crop = [0, 0, canvas.0, canvas.1];
         let rect = pm_vector::render::scene::PixelRect::new(0, 0, canvas.0, canvas.1);
         if scene.pixel_bounds(rect).is_none() {
-            return Ok(LayerPixels {
-                pixels: vec![0.0; canvas.0 as usize * canvas.1 as usize * 4],
-                crop,
+            // Nothing is inked: the canvas is transparent (a window of it
+            // holds no painted pixels).
+            return Ok(match window {
+                None => LayerPixels {
+                    pixels: vec![0.0; canvas.0 as usize * canvas.1 as usize * 4],
+                    crop,
+                },
+                Some(_) => LayerPixels {
+                    pixels: Vec::new(),
+                    crop: [0, 0, 0, 0],
+                },
             });
         }
         let view = self
@@ -347,7 +417,6 @@ impl Renderer {
                 precision,
             )
             .map_err(RenderError::Media)?;
-        let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
-        Ok(LayerPixels { pixels, crop })
+        read_pixels(&self.device, &self.queue, view.texture(), crop, window)
     }
 }

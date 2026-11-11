@@ -6,9 +6,17 @@ use pm_recorder::{
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, Mutex},
 };
+
+/// A kept document, its open composition, and how many rasters keep it.
+type Pin = (Arc<pm_model::Document>, String, usize);
+/// Documents kept for windowed base rasters at most (distinct revisions).
+pub(crate) const MAX_PINNED_REVISIONS: usize = 8;
+/// Windowed base rasters keeping a document at most: the realm releases
+/// them as it collects them; past this, bases are read whole instead.
+const MAX_PINS: usize = 4096;
 
 #[derive(Default)]
 struct State {
@@ -76,6 +84,10 @@ pub type CanvasText = Box<dyn TextProvider + Send>;
 pub struct NativeHost {
     state: Mutex<State>,
     kernel: Mutex<crate::adapter::KernelAdapter>,
+    /// Documents windowed base rasters were made from, by revision, with how
+    /// many such rasters the realm still holds: loading one later paints the
+    /// frame it was returned for, not the project as it is now.
+    pins: Mutex<HashMap<u64, Pin>>,
     transport: crate::transport::Transport,
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
@@ -100,6 +112,19 @@ struct Capture {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 /// Straight RGBA8 to premultiplied, as a canvas's backing store holds it.
+/// Straight RGBA8 rows put into a canvas and read back as an answer reads
+/// a canvas: premultiplied rows.
+pub(crate) fn canvas_round_trip(width: u32, height: u32, straight: Vec<u8>) -> Result<Vec<u8>> {
+    let pixels = ImageData::from_rgba(width, height, straight).map_err(host_error)?;
+    let mut canvas = Canvas::new(0, width, height).map_err(host_error)?;
+    canvas
+        .put_image_data(pixels, 0, 0, None)
+        .map_err(host_error)?;
+    let read = canvas
+        .get_image_data(0, 0, width as i32, height as i32)
+        .map_err(host_error)?;
+    Ok(premultiply(read.bytes()))
+}
 fn premultiply(straight: &[u8]) -> Vec<u8> {
     let mut out = straight.to_vec();
     for px in out.chunks_exact_mut(4) {
@@ -181,6 +206,7 @@ impl NativeHost {
         Self {
             state: Mutex::new(State::default()),
             kernel: Mutex::new(kernel),
+            pins: Mutex::default(),
             transport,
             events,
             text: Mutex::new(None),
@@ -246,12 +272,56 @@ impl NativeHost {
     /// `render.raster(layer, scale, time, uploaded, crop)`'s base: the layer as
     /// the engine paints it, with today's geometry, as a recorder canvas.
     /// Args: `[{id, content?, composition?}, scale, time, crop?]`.
-    fn base_raster(&self, args: &Value) -> Result<Value> {
+    fn base_raster(&self, args: &Value, revision: Option<u64>) -> Result<Value> {
+        let Some(reply) = self.base_reply(args, revision, None)? else {
+            return Ok(Value::Null);
+        };
+        let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
+        Ok(
+            json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
+            "height":reply.height,"w":reply.size.0,"h":reply.size.1,
+            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,"uv":reply.uv,
+            "selection":reply.selection.map(|[x0,y0,x1,y1]| json!({"x0":x0,"y0":y0,"x1":x1,"y1":y1})),
+            "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
+        )
+    }
+    /// Keeps the project's document as it is now while a windowed base
+    /// raster answered from it lives (one count per raster): its revision,
+    /// or `None` without a project or past the caps (the realm then reads
+    /// that raster whole now, as an override's canvas).
+    fn pin(&self) -> Option<u64> {
+        let (revision, document, open) = self.kernel.lock().unwrap().revision_document().ok()?;
+        let mut pins = self.pins.lock().unwrap();
+        let held: usize = pins.values().map(|pin| pin.2).sum();
+        if held >= MAX_PINS || (!pins.contains_key(&revision) && pins.len() >= MAX_PINNED_REVISIONS)
+        {
+            return None;
+        }
+        pins.entry(revision).or_insert((document, open, 0)).2 += 1;
+        Some(revision)
+    }
+    /// The engine's base raster for `render.raster`'s `args`, or only its
+    /// `window` (of the whole raster): of the pinned document of `revision`
+    /// if there is one, else of the project as it is.
+    fn base_reply(
+        &self,
+        args: &Value,
+        revision: Option<u64>,
+        window: Option<[u32; 4]>,
+    ) -> Result<Option<crate::BaseRasterReply>> {
         let hooks = self.rasters.lock().unwrap().clone().ok_or_else(|| {
             Error::Host("render.raster needs the engine, which this host does not have".into())
         })?;
         let spec = &args[0];
-        let (document, open) = self.kernel.lock().unwrap().document()?;
+        let pinned = revision.and_then(|r| {
+            let pins = self.pins.lock().unwrap();
+            pins.get(&r)
+                .map(|(document, open, _)| (document.clone(), open.clone()))
+        });
+        let (document, open) = match pinned {
+            Some(pinned) => pinned,
+            None => self.kernel.lock().unwrap().document()?,
+        };
         let number = |i: usize, default: f64| {
             args.get(i)
                 .and_then(Value::as_f64)
@@ -269,7 +339,7 @@ impl NativeHost {
             ),
             _ => None,
         };
-        let reply = (hooks.base)(crate::BaseRasterRequest {
+        (hooks.base)(crate::BaseRasterRequest {
             document,
             composition: spec["composition"].as_str().map_or(open, str::to_owned),
             layer: spec["id"].as_str().unwrap_or_default().to_owned(),
@@ -277,19 +347,53 @@ impl NativeHost {
             seconds: number(2, self.transport.time()),
             scale: number(1, 1.).max(1e-6),
             crop,
+            window,
         })
-        .map_err(Error::Host)?;
-        let Some(reply) = reply else {
-            return Ok(Value::Null);
+        .map_err(Error::Host)
+    }
+    /// An untouched base raster an override returned without the frame's
+    /// crop (`{baseWindow: {args, window}}`): the whole raster's answer with
+    /// only the window painted, its pixels what the whole canvas's answer
+    /// has there (the same canvas round trip, by pixel).
+    fn base_window_answer(&self, request: &Value) -> crate::RasterAnswer {
+        let at = |k: &str| {
+            request["window"][k]
+                .as_f64()
+                .filter(|v| *v >= 0.)
+                .map(|v| v as u32)
         };
-        let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
-        Ok(
-            json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
-            "height":reply.height,"w":reply.size.0,"h":reply.size.1,
-            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,"uv":reply.uv,
-            "selection":reply.selection.map(|[x0,y0,x1,y1]| json!({"x0":x0,"y0":y0,"x1":x1,"y1":y1})),
-            "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
-        )
+        let Some(window) = (|| Some([at("x")?, at("y")?, at("width")?, at("height")?]))() else {
+            return crate::RasterAnswer::Unavailable("The raster window is not readable".into());
+        };
+        let reply =
+            match self.base_reply(&request["args"], request["revision"].as_u64(), Some(window)) {
+                Ok(Some(reply)) => reply,
+                // As the canvas of a base raster that drew nothing.
+                Ok(None) => {
+                    return crate::RasterAnswer::Failed(
+                        "The override returned a canvas the engine cannot read".into(),
+                    );
+                }
+                Err(error) => return crate::RasterAnswer::Unavailable(error.to_string()),
+            };
+        let held = reply.window.unwrap_or([0, 0, reply.width, reply.height]);
+        let pixels = if held[2] == 0 || held[3] == 0 {
+            Ok(Vec::new())
+        } else {
+            canvas_round_trip(held[2], held[3], reply.straight_rgba)
+        };
+        match pixels {
+            Ok(pixels) => crate::RasterAnswer::Raster {
+                width: reply.width,
+                height: reply.height,
+                premultiplied_rgba: pixels,
+                size: [reply.size.0, reply.size.1],
+                anchor: [reply.anchor.0, reply.anchor.1],
+                uv: reply.uv,
+                window: Some(held),
+            },
+            Err(error) => crate::RasterAnswer::Unavailable(error.to_string()),
+        }
     }
     /// One batch of override answers: `{batch, answers: [{native} | {hidden} |
     /// {retry} | {error} | {surface, w, h, anchorX, anchorY, uv?}]}`, the
@@ -304,9 +408,22 @@ impl NativeHost {
         let items = input["answers"]
             .as_array()
             .ok_or(Error::Invalid("raster answers"))?;
+        // Base windows paint on the engine before the canvases are read.
+        let mut windows: Vec<Option<crate::RasterAnswer>> = items
+            .iter()
+            .map(|item| {
+                item["baseWindow"]
+                    .is_object()
+                    .then(|| self.base_window_answer(&item["baseWindow"]))
+            })
+            .collect();
         let mut answers = Vec::with_capacity(items.len());
         let mut state = self.state.lock().unwrap();
-        for item in items {
+        for (i, item) in items.iter().enumerate() {
+            if let Some(answer) = windows[i].take() {
+                answers.push(answer);
+                continue;
+            }
             let surface = item["surface"]
                 .as_str()
                 .and_then(|id| state.surfaces.get_mut(id));
@@ -339,6 +456,7 @@ impl NativeHost {
                     let (width, height) = canvas.size();
                     match canvas.get_image_data(0, 0, width as i32, height as i32) {
                         Ok(pixels) => crate::RasterAnswer::Raster {
+                            window: None,
                             width,
                             height,
                             premultiplied_rgba: premultiply(pixels.bytes()),
@@ -1503,7 +1621,23 @@ impl EngineProxy for NativeHost {
                 return self.wait_capture(&budget);
             }
             "kernel.query" if input["method"] == "render.raster" => {
-                return self.base_raster(&input["args"]["args"]);
+                return self
+                    .base_raster(&input["args"]["args"], input["args"]["revision"].as_u64());
+            }
+            "kernel.query" if input["method"] == "render.rasterPin" => {
+                return Ok(self.pin().map_or(Value::Null, |revision| json!(revision)));
+            }
+            "kernel.query" if input["method"] == "render.rasterUnpin" => {
+                if let Some(revision) = input["args"]["revision"].as_u64() {
+                    let mut pins = self.pins.lock().unwrap();
+                    if let Some(pin) = pins.get_mut(&revision) {
+                        pin.2 -= 1;
+                        if pin.2 == 0 {
+                            pins.remove(&revision);
+                        }
+                    }
+                }
+                return Ok(Value::Null);
             }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "compat.producing" => {

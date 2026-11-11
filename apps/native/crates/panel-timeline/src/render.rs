@@ -1125,7 +1125,7 @@ impl Scene {
             }
         }
         for (i, b) in self.bars.iter().enumerate() {
-            if matches!(b.state, BarState::Missing | BarState::Stale) {
+            if b.state == BarState::Stale {
                 continue;
             }
             if let Some(r) = span(v.x(b.from), v.x(b.to), 0., 3., v) {
@@ -1137,15 +1137,16 @@ impl Scene {
                         "rect"
                     },
                     r,
-                    if b.state == BarState::Rendering {
-                        c.muted
-                    } else {
-                        c.success
+                    match b.state {
+                        BarState::Rendering => c.muted,
+                        // Needs render: can't play in real time yet.
+                        BarState::Missing => c.warning,
+                        _ => c.success,
                     },
                 );
                 o.opacity = match b.state {
                     BarState::Rendering if t.accessibility.reduce_motion => 0.5,
-                    BarState::Rendered => 0.7,
+                    BarState::Rendered | BarState::Missing => 0.7,
                     _ => 1.,
                 };
                 ops.push(o);

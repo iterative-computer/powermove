@@ -72,6 +72,29 @@ fn every_semantic_key_input_invalidates_cache_identity() {
     bad.width = 0;
     assert!(bad.digest().is_err());
 }
+/// The limit removes the least recently used frame: one played since it
+/// was written stays, an older unplayed one goes.
+#[test]
+fn cache_quota_evicts_the_least_recently_used_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = RenderCache::open(dir.path(), 106).unwrap();
+    let a = key();
+    let mut b = a.clone();
+    b.ticks += 1;
+    let mut d = a.clone();
+    d.ticks += 2;
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    c.put(&a, b"12345").unwrap();
+    pause();
+    c.put(&b, b"12345").unwrap();
+    pause();
+    c.touch(&a).unwrap();
+    pause();
+    c.put(&d, b"12345").unwrap();
+    assert!(c.get(&a).unwrap().is_some(), "played: kept");
+    assert!(c.get(&b).unwrap().is_none(), "least recently used: removed");
+    assert!(c.get(&d).unwrap().is_some());
+}
 #[test]
 fn cache_quota_evicts_only_unkept_derived_frames() {
     let dir = tempfile::tempdir().unwrap();

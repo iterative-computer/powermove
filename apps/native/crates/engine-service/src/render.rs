@@ -97,7 +97,7 @@ impl FrameSpec {
             1.
         }
     }
-    fn render_size(&self) -> Size {
+    pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
     }
@@ -446,6 +446,13 @@ impl Engine {
         self.fonts = Some(fonts);
         self.font_generation = None;
         self.clear_cache();
+    }
+    /// The font registry generation the next frame draws with: fonts sync
+    /// from the broker first, so the disk render cache observes a font
+    /// change before the frame it would affect looks for a disk frame.
+    pub(crate) fn font_generation(&mut self) -> Option<u64> {
+        self.sync_fonts();
+        self.font_generation
     }
     fn sync_fonts(&mut self) {
         if let Some(fonts) = &self.fonts
@@ -1085,6 +1092,18 @@ mod sampling_tests {
 #[cfg(test)]
 mod lifetime_tests {
     use super::*;
+    /// A font installed or removed is the generation the disk render
+    /// cache observes at once, before any frame renders with it.
+    #[test]
+    fn the_font_generation_follows_the_broker_before_a_frame() {
+        let mut engine = Engine::new(Gpu::new("font-generation-test").unwrap()).unwrap();
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_generation(1);
+        engine.set_fonts(pm_render::text::host::RenderFonts::new(broker.clone()));
+        assert_eq!(engine.font_generation(), Some(1));
+        broker.set_generation(2);
+        assert_eq!(engine.font_generation(), Some(2));
+    }
     #[test]
     fn delayed_metal_completion_retains_the_actual_source_texture() {
         let mut engine = Engine::new(Gpu::new("completion-lease-test").unwrap()).unwrap();

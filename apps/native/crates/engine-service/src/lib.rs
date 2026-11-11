@@ -5,6 +5,7 @@ pub mod clock;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
+mod frame_inputs;
 pub mod jobs;
 pub mod layers;
 pub mod media;
@@ -1194,7 +1195,13 @@ struct Flight {
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
+    /// A playing frame's index and key in the disk render cache: gaps
+    /// between played frames are dropped frames (`DiskFrames::dropped`).
+    played: Option<(i64, [u8; 32])>,
 }
+/// A jump of more frames than this (2 s at 24 fps) between played frames
+/// is a seek, not a stall; a short seek taken for one only renders more.
+const DROPS_AT_MOST: i64 = 48;
 /// One frame taken from the shared state, drawn without its lock.
 struct Work {
     id: u64,
@@ -1413,8 +1420,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
+    shared.disk.set_activity(shared.interactive.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
+    // Each view's last played frame (disk render cache index).
+    let mut played: std::collections::HashMap<u64, i64> = Default::default();
     let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
     let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
         Ok(recorder) => Some(recorder),
@@ -1586,6 +1596,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         cost
                     };
                     r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                }
+                // Frames skipped between two played ones at normal speed
+                // didn't play in real time: background rendering renders
+                // them.
+                match f.played {
+                    Some((n, id))
+                        if r.transport.rate() == pm_protocol::common::PlaybackRate::NORMAL =>
+                    {
+                        if let Some(before) = played.insert(f.id, n)
+                            && n > before + 1
+                            && n - before <= DROPS_AT_MOST
+                        {
+                            shared.disk.dropped(before, (n, id));
+                        }
+                    }
+                    _ => {
+                        played.remove(&f.id);
+                    }
                 }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
@@ -2097,12 +2125,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 .compat()
                 .filter(|store| store.producing_now())
                 .map(|store| store.cache_identity());
+            shared.disk.viewing(spec.render_size());
+            // Fonts sync before the cache observes: a font change is seen
+            // before this frame looks for a disk frame.
+            let fonts = engine.font_generation();
             if shared.disk.observe(
                 &scene,
                 engine.definitions(),
                 overrides,
                 engine.tone_identity(),
+                fonts,
                 stamp.doc_id,
+                spec.time,
             ) && let Some(recorder) = &recorder
             {
                 recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
@@ -2251,6 +2285,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         if let Some(r) = runtime.get_mut(&id) {
                             r.last = Some((stamp, spec.time));
                         }
+                        let played = (spec.moment == Moment::Playing)
+                            .then(|| shared.disk.frame_id(&scene, spec.time))
+                            .flatten();
                         flights.push_back(Flight {
                             id,
                             stamp,
@@ -2259,6 +2296,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             input,
                             audio_host,
                             pipeline,
+                            played,
                         });
                     }
                     Ok(None) => {

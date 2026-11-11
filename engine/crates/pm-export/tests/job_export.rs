@@ -1457,6 +1457,7 @@ impl pm_render::compat::CompatRasters for CountRaster {
             size: [40.0, 40.0],
             uv: [0.0, 0.0, 1.0, 1.0],
             data: Arc::new([level, level, level, 255].repeat(16)),
+            window: None,
         }))
     }
 }

@@ -9,7 +9,7 @@ use pm_compat_runner::host::RasterInbox;
 use pm_compat_runner::{BaseRasterReply, BaseRasterRequest, RasterAnswer, RasterHooks};
 use pm_engine_service::EngineService;
 use pm_engine_service::compat::{
-    BaseRequest, CompatAnswer, CompatStore, Reply, hidden_raster, override_raster,
+    BaseRequest, CompatAnswer, CompatStore, Reply, hidden_raster, override_raster_window,
 };
 use pm_engine_service::jobs::{CompatJobNeed, CompatReply, JobSession, OverrideAnswers};
 use pm_kernel::{KernelHandle, Published};
@@ -93,9 +93,11 @@ fn answer_of(answer: RasterAnswer) -> Reply {
             size,
             anchor,
             uv,
-        } => Reply::Draw(override_raster(
+            window,
+        } => Reply::Draw(override_raster_window(
             width,
             height,
+            window,
             premultiplied_rgba,
             size,
             anchor,
@@ -150,6 +152,12 @@ impl Overrides {
                     width,
                     height,
                 }),
+                window: request.window.map(|[x, y, width, height]| PixelRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                }),
             })?;
             Ok(painted.map(|r| BaseRasterReply {
                 width: r.width,
@@ -160,6 +168,7 @@ impl Overrides {
                 selection: r.selection,
                 font_offset: r.font_offset,
                 uv: r.uv,
+                window: r.window,
             }))
         });
         let (store, batches) = (self.jobs.store.clone(), self.jobs.batches.clone());
@@ -265,6 +274,17 @@ impl JobOverrides {
         }
         session.answer_overrides(self.answers(job, revision, frozen, look, cancel));
     }
+    /// [`Self::pin`] from the project as it is published now (background
+    /// rendering's fills, frozen from the viewer's scene a moment ago).
+    pub(crate) fn pin_current(&self, session: &mut JobSession) {
+        if let Some(published) = self
+            .kernel
+            .published(&self.project)
+            .filter(|p| p.snapshot.doc_id == self.doc_id)
+        {
+            self.pin(session, &published, false);
+        }
+    }
     /// What answers job `job`'s needs (see [`Self::pin`]).
     fn answers(
         &self,
@@ -354,6 +374,10 @@ impl JobOverrides {
                         "The project's extensions could not answer for the export's revision"
                             .into(),
                     ),
+                    // Export frames never crop, so their answers are whole.
+                    RasterAnswer::Raster {
+                        window: Some(_), ..
+                    } => Err("An export frame was answered with a raster window".into()),
                     RasterAnswer::Raster {
                         width,
                         height,
@@ -361,6 +385,7 @@ impl JobOverrides {
                         size,
                         anchor,
                         uv,
+                        window: None,
                     } => Ok(CompatReply::Raster {
                         width,
                         height,

@@ -1016,6 +1016,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 10574848,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "stripes-45",
           "bounds": [
@@ -3975,6 +3993,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 10574848,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "rect",
           "bounds": [
@@ -6808,6 +6844,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 10574848,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "stripes-45",
           "bounds": [
@@ -9752,6 +9806,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 10574848,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "rect",
           "bounds": [
@@ -12822,6 +12894,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 16096779,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "stripes-45",
           "bounds": [
@@ -15781,6 +15871,24 @@
           "clip": null
         },
         {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 16096779,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
           "id": "render:1",
           "shape": "rect",
           "bounds": [
@@ -18611,6 +18719,24 @@
             "name": "Cue",
             "seconds": 3.25
           },
+          "clip": null
+        },
+        {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 16096779,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
           "clip": null
         },
         {
@@ -21555,6 +21681,24 @@
             "name": "Cue",
             "seconds": 3.25
           },
+          "clip": null
+        },
+        {
+          "id": "render:0",
+          "shape": "rect",
+          "bounds": [
+            320.0,
+            0.0,
+            100.0,
+            3.0
+          ],
+          "color": 16096779,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
           "clip": null
         },
         {

@@ -2333,6 +2333,12 @@ impl Renderer {
     }
 
     /// Reads a frame's color back as premultiplied f32 RGBA, top-down.
+    /// GPU bytes held by compatibility rasters' textures (the rasters the
+    /// last two frames drew).
+    pub fn compat_texture_bytes(&self) -> u64 {
+        self.binds.compat.bytes()
+    }
+
     pub fn read_rgba(&self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
         Ok(pm_gpu::readback::read_f32(
             &self.device,

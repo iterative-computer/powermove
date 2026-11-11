@@ -23,6 +23,33 @@ pub(crate) fn install(disk: pm_engine_service::render_cache::DiskFrames) {
     let _ = DISK.set(disk);
 }
 
+/// Background rendering's fills: this executable's `--engine-job`, raster
+/// overrides answered by the window whose document it renders, and none
+/// while an export renders. Each window calls it; the first host stays.
+pub(crate) fn serve_background(
+    engine: &pm_engine_service::EngineService,
+    windows: crate::raster_overrides::OverrideWindows,
+) {
+    // Unit tests' executables are not the app and render no jobs.
+    if cfg!(test) {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    engine.render_cache().set_background_host(Some(
+        pm_engine_service::render_cache::BackgroundHost {
+            executable,
+            pin: std::sync::Arc::new(move |doc_id, session| {
+                if let Some(jobs) = windows.of(doc_id) {
+                    jobs.pin_current(session);
+                }
+            }),
+            busy: std::sync::Arc::new(pm_engine_service::jobs::exports_running),
+        },
+    ));
+}
+
 /// Wakes when the render bar changes.
 pub(crate) fn watch() -> async_channel::Receiver<()> {
     let (tx, rx) = async_channel::bounded(1);

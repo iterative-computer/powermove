@@ -154,7 +154,7 @@ impl Backend {
     }
     /// Settings › Media: proxy preferences and storage, from the host's
     /// `mediaSettings` fact (this Mac's, so shown without a project).
-    fn media_rows(&mut self) -> Result<Vec<Value>, String> {
+    pub(crate) fn media_rows(&mut self) -> Result<Vec<Value>, String> {
         let media = self.native.facts["mediaSettings"].clone();
         if media.is_null() {
             return Ok(vec![]);
@@ -165,13 +165,17 @@ impl Backend {
         let leases = self.fields(&Value::Array(
             choices.iter().map(|r| r["id"].clone()).collect(),
         ))?;
+        // A row may name its own place and control (Settings › General ›
+        // Playback's background rendering lives with these settings).
         let mut rows: Vec<Value> = choices
             .iter()
             .map(|r| {
-                json!({"id":r["id"],"section":"media","group":"Proxies","label":r["label"],
-                    "control":"choice","value":r["value"],"options":r["options"],
-                    "detail":r["detail"],"binding":leases[r["id"].as_str().unwrap_or_default()],
-                    "disabled":false})
+                let or =
+                    |key: &str, default: &str| r[key].as_str().map_or(json!(default), |v| json!(v));
+                json!({"id":r["id"],"section":or("section","media"),"group":or("group","Proxies"),
+                    "label":r["label"],"control":or("control","choice"),"value":r["value"],
+                    "options":r["options"],"detail":r["detail"],
+                    "binding":leases[r["id"].as_str().unwrap_or_default()],"disabled":false})
             })
             .collect();
         let used = &media["used"];

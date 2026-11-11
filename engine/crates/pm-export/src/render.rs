@@ -1161,6 +1161,42 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
 /// (`Renderer::unsupported_with_media`): the definitions the job embeds
 /// (contract 10; set on the renderer before planning) draw its effects,
 /// transitions, and extension layers, and its fonts its text.
+/// The request an export renders each frame with. The disk render cache
+/// fills through it too, so a cached frame is the exported one.
+pub fn frame_request(
+    s: &ExportSettings,
+    alpha: AlphaOutput,
+    output_tone: Option<pm_render::OutputTone>,
+) -> RenderRequest {
+    RenderRequest {
+        output_size: s.size,
+        scale: None,
+        region: None,
+        preview_canvas: false,
+        precision: s.precision,
+        depth_id: false,
+        // Today's alpha exports render without the composition background.
+        background: alpha == AlphaOutput::None,
+        export: true,
+        view: None,
+        // Today's export counts: 16 samples opaque, 20 with alpha (the
+        // composition's `motionBlurSamples` when set).
+        motion_blur: if s.motion_blur {
+            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
+                pm_protocol::frame::MotionBlurKind::Export
+            } else {
+                pm_protocol::frame::MotionBlurKind::AlphaExport
+            })
+        } else {
+            pm_render::motion::MotionBlur::Off
+        },
+        sampling: pm_render::sampling::Sampling::Final,
+        output_kind: OutputKind::Final,
+        origin: None,
+        output_tone,
+    }
+}
+
 pub fn plan_export_for(job: &ExportJob, renderer: &Renderer) -> Result<ExportPlan, JobError> {
     plan_export_checked(job, &|doc, composition, media| {
         let mut list = renderer.unsupported_with_media(doc, composition, media);
@@ -1312,33 +1348,7 @@ fn plan_export_checked(
         mode: job.mode,
     };
     spec.validate()?;
-    let request = RenderRequest {
-        output_size: s.size,
-        scale: None,
-        region: None,
-        preview_canvas: false,
-        precision: s.precision,
-        depth_id: false,
-        // Today's alpha exports render without the composition background.
-        background: alpha == AlphaOutput::None,
-        export: true,
-        view: None,
-        // Today's export counts: 16 samples opaque, 20 with alpha (the
-        // composition's `motionBlurSamples` when set).
-        motion_blur: if s.motion_blur {
-            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
-                pm_protocol::frame::MotionBlurKind::Export
-            } else {
-                pm_protocol::frame::MotionBlurKind::AlphaExport
-            })
-        } else {
-            pm_render::motion::MotionBlur::Off
-        },
-        sampling: pm_render::sampling::Sampling::Final,
-        output_kind: OutputKind::Final,
-        origin: None,
-        output_tone,
-    };
+    let request = frame_request(s, alpha, output_tone);
     Ok(ExportPlan {
         spec,
         timeline,

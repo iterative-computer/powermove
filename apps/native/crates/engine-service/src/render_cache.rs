@@ -1,28 +1,40 @@
 //! Disk render cache (plan section 1, pro media): a composition's frames as
-//! the paused viewer draws them, rendered in the background (View › Render
-//! Selection), kept in Storage › Renders, and shown by playback and scrubbing
-//! instead of rendering them again.
+//! the paused viewer draws them, rendered in the background, kept in
+//! Storage › Renders, and shown by playback and scrubbing instead of
+//! rendering them again.
 //!
-//! - **Identity.** Frames are keyed by a fingerprint of everything that draws
-//!   them: the canonical document, the contributed definitions, each media
-//!   file's content (sampled) and stamp, the installed fonts, the viewer's
-//!   output tone, the running renderer binary, and (with raster overrides)
-//!   this session's override wrappers. Any change misses every frame; frames
-//!   of an earlier state stay until the limit or Clear… removes them.
+//! - **Identity.** A frame is keyed by a global fingerprint (the contributed
+//!   definitions, each media file's content (sampled) and stamp, the
+//!   installed fonts, the viewer's output tone, the running renderer binary,
+//!   and (with raster overrides) the override wrappers' code) and by the
+//!   digest of the document parts that frame draws from
+//!   (`crate::frame_inputs`): an edit misses only the frames it touched.
+//!   Frames of an earlier state stay until the limit (least recently used
+//!   first) or Clear… removes them.
 //! - **Rendering** runs in an `--engine-job` child (`jobs::fill_cache`) with
 //!   the export's admission gate and its exact override answers, writing to
-//!   the folder captured when it started. The viewer's engine thread never
-//!   renders, reads or writes cache frames itself: reads come from a reader
-//!   thread ahead of the playhead.
-//! - **Generations** fence everything asynchronous: a fingerprint, a fill's
-//!   progress or a read lands only if no observation, storage change or
-//!   deletion came after it started.
+//!   the folder captured when it started. View › Render Selection renders a
+//!   range; **background rendering** renders, once the viewer has been idle
+//!   for the delay in Settings, the chunks of the open composition that
+//!   can't play in real time (measured: by the viewer as it plays, and by
+//!   the child's probes), playhead first, then the work area, then the
+//!   rest. Its child gets no GPU time and no override answers until the
+//!   viewer has been idle for the delay again, so any interaction pauses it
+//!   at once; an edit that changes its frames, an export, or Settings
+//!   stops it. One fill runs at a time; Render Selection replaces a
+//!   background one.
+//! - The viewer's engine thread never renders, reads or writes cache frames
+//!   itself: reads come from a reader thread ahead of the playhead.
+//! - **Generations** fence fingerprints and indexes: they land only if no
+//!   observation, storage change or deletion came after they started. A
+//!   fill's frames land by key, while the storage they were written to is
+//!   current.
 //! - The shared state is never held across disk IO; the render bar reads a
 //!   snapshot published on every change.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -44,6 +56,26 @@ const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
 const AHEAD: i64 = 6;
 const READY_FRAMES: usize = 8;
+/// Background rendering judges and renders the composition in chunks of
+/// about this long.
+const CHUNK_SECONDS: f64 = 0.5;
+/// A frame that costs this share of its interval or more can't be counted
+/// on to play in real time (the viewer also presents; calibrated on Paper
+/// against the frames live playback dropped).
+const BUDGET_SHARE: f64 = 0.9;
+/// The playhead's neighbourhood background rendering starts with.
+const NEAR_BEHIND: f64 = 1.;
+const NEAR_AHEAD: f64 = 5.;
+/// A background fill waits paused for the person at most this long; then
+/// its child stops (and gives back its memory) until they are idle again.
+const PAUSED_AT_MOST: Duration = Duration::from_secs(20);
+/// A background fill that failed is not tried again on the same state
+/// sooner than this.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// The cost a frame playback dropped stands for: more than any budget.
+const DROPPED_US: f64 = 1e9;
+/// Measured costs and refusals kept, by frame key, at most.
+const KNOWN_AT_MOST: usize = 200_000;
 
 /// What a fill child renders: frames by time and key, into `dir`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,11 +85,43 @@ pub struct CacheFill {
     pub width: u32,
     pub height: u32,
     pub frames: Vec<CacheFrame>,
+    /// Background rendering: GPU microseconds a frame may cost and still
+    /// play in real time; chunks whose probes cost less are not stored.
+    #[serde(default)]
+    pub budget_us: Option<f64>,
+    /// One frame's length in ticks: a probe is warmed by the frame before it.
+    #[serde(default)]
+    pub frame_ticks: i64,
+    /// Probes draw at this share of the composition's size: the viewer's.
+    #[serde(default = "whole_size")]
+    pub probe_scale: f64,
+}
+fn whole_size() -> f64 {
+    1.
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheFrame {
     pub ticks: i64,
     pub key: RenderKey,
+    /// The chunk it belongs to (a chunk's frames are contiguous in the
+    /// fill, its probes first).
+    #[serde(default)]
+    pub chunk: u32,
+    #[serde(default)]
+    pub probe: bool,
+}
+/// What a fill child did with its frame `at` (an index into
+/// [`CacheFill::frames`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameReport {
+    pub at: u32,
+    /// Its GPU time, when it was drawn.
+    pub cost_us: Option<f64>,
+    pub stored: bool,
+    /// It can't be drawn exactly (a layer failed): not stored, not asked
+    /// for again in this state.
+    pub refused: bool,
 }
 
 /// A fill child's failure when the volume is nearly full.
@@ -69,6 +133,9 @@ pub const LIMIT_FULL: &str =
 
 /// One media file's stamp: path, length, modification time, inode.
 type Stamp = (PathBuf, u64, u128, u64);
+/// A frame's key digest: the global fingerprint, its inputs' digest and its
+/// time.
+type FrameId = [u8; 32];
 
 /// The composition state a fingerprint is taken of.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +146,9 @@ struct Identity {
     comp: String,
     tone: Option<String>,
     overrides: Option<u64>,
+    /// The engine's font registry generation: an installed or removed font
+    /// is observed again (the fingerprint reads the font files).
+    fonts: Option<u64>,
     media: Vec<Stamp>,
 }
 impl Identity {
@@ -104,6 +174,8 @@ struct Frames {
     source: Source,
     /// `None` while it is being taken.
     fingerprint: Option<[u8; 32]>,
+    /// Each frame's key digest (empty while the fingerprint is taken).
+    ids: Arc<Vec<FrameId>>,
     size: Size,
     rate: Rate,
     count: i64,
@@ -119,11 +191,20 @@ impl Frames {
         let n = self.rate.frame_of(time.get());
         (self.ticks(n)? == time && (0..self.count).contains(&n)).then_some(n)
     }
+    /// The frame showing at `time`.
+    fn at(&self, time: Ticks) -> i64 {
+        self.rate
+            .frame_of(time.get())
+            .clamp(0, (self.count - 1).max(0))
+    }
+    fn id(&self, n: i64) -> Option<FrameId> {
+        self.fingerprint?;
+        self.ids.get(usize::try_from(n).ok()?).copied()
+    }
     fn key(&self, n: i64) -> Option<RenderKey> {
-        let fingerprint = self.fingerprint?;
         Some(RenderKey {
-            graph: fingerprint,
-            media: fingerprint,
+            graph: self.id(n)?,
+            media: self.fingerprint?,
             ticks: self.ticks(n)?.get(),
             width: self.size.width,
             height: self.size.height,
@@ -131,6 +212,124 @@ impl Frames {
             renderer_version: renderer_identity().into(),
         })
     }
+    fn seconds(&self, n: i64) -> f64 {
+        self.ticks(n)
+            .map_or(0., |t| t.get() as f64 / TICKS_PER_SECOND as f64)
+    }
+    /// GPU microseconds a frame may cost and still play in real time.
+    fn budget_us(&self) -> f64 {
+        (self.seconds(1) - self.seconds(0)) * 1e6 * BUDGET_SHARE
+    }
+    fn chunk_len(&self) -> i64 {
+        let fps = 1. / (self.seconds(1) - self.seconds(0)).max(1e-6);
+        ((fps * CHUNK_SECONDS).round() as i64).max(1)
+    }
+}
+
+/// Whether a chunk can play in real time, as far as is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Need {
+    Unknown,
+    Light,
+    Heavy,
+    /// A frame in it can't be drawn exactly: left alone.
+    Refused,
+}
+
+/// What is known about frames' cost, beyond the frames themselves.
+#[derive(Default)]
+struct Known {
+    /// GPU (or viewer frame) microseconds, by frame key: the most measured.
+    costs: HashMap<FrameId, f64>,
+    refused: HashSet<FrameId>,
+    /// The last cost measured at each frame of the open composition,
+    /// whatever its key: an edit inside a heavy range still needs render.
+    hints: HashMap<i64, f64>,
+    /// The composition the hints are of: id, rate, frame count.
+    hints_of: Option<(String, Rate, i64)>,
+}
+impl Known {
+    fn cost(&mut self, frames: &Frames, n: Option<i64>, id: FrameId, cost: f64) {
+        if self.costs.len() >= KNOWN_AT_MOST {
+            self.costs.clear();
+        }
+        // The same key is the same inputs: the worst measure stands (a
+        // viewer frame measured late under load still needs render).
+        let worst = self.costs.entry(id).or_insert(cost);
+        *worst = worst.max(cost);
+        if let Some(n) = n
+            && frames.id(n) == Some(id)
+        {
+            self.hints.insert(n, cost);
+        }
+    }
+    fn refuse(&mut self, id: FrameId) {
+        if self.refused.len() >= KNOWN_AT_MOST {
+            self.refused.clear();
+        }
+        self.refused.insert(id);
+    }
+    /// Chunk `[a, b)`'s need: frames playback dropped, or all of at least
+    /// two measured frames (one in a one-frame chunk) at the budget or
+    /// over, make it heavy (one slow sample among fast ones is noise, not a
+    /// range that can't play); enough measured otherwise make it light;
+    /// unmeasured under its keys, what its frames measured before an edit
+    /// decides the same way.
+    fn need(&self, frames: &Frames, a: i64, b: i64) -> Need {
+        let budget = frames.budget_us();
+        let ids: Vec<FrameId> = (a..b).filter_map(|n| frames.id(n)).collect();
+        if ids.iter().any(|id| self.refused.contains(id)) {
+            return Need::Refused;
+        }
+        let enough = (b - a).min(2) as usize;
+        let heavy = |costs: &[f64]| {
+            costs.iter().any(|c| *c >= DROPPED_US)
+                || (costs.len() >= enough && costs.iter().all(|c| *c >= budget))
+        };
+        let known: Vec<f64> = ids
+            .iter()
+            .filter_map(|id| self.costs.get(id).copied())
+            .collect();
+        let before: Vec<f64> = (a..b).filter_map(|n| self.hints.get(&n).copied()).collect();
+        if heavy(&known) {
+            Need::Heavy
+        } else if known.len() >= enough {
+            Need::Light
+        } else if heavy(&before) {
+            Need::Heavy
+        } else {
+            Need::Unknown
+        }
+    }
+}
+
+/// Settings › General › Playback: Background Rendering and its delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Background {
+    pub enabled: bool,
+    pub delay: Duration,
+}
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            delay: Duration::from_secs(5),
+        }
+    }
+}
+/// Answers a fill's raster overrides for a document (see [`BackgroundHost`]).
+pub type Pin = Arc<dyn Fn(u64, &mut crate::jobs::JobSession) + Send + Sync>;
+/// What background rendering needs from the app.
+#[derive(Clone)]
+pub struct BackgroundHost {
+    /// The executable whose `--engine-job` renders.
+    pub executable: PathBuf,
+    /// Answers a fill's raster overrides for document `doc_id`, as Render
+    /// Selection does.
+    pub pin: Pin,
+    /// Something else is rendering for the person (an export): background
+    /// rendering stops and waits.
+    pub busy: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 /// What the timeline's render bar and the Render task show.
@@ -139,26 +338,34 @@ pub struct RenderBars {
     /// Rises whenever anything below changes.
     pub revision: u64,
     pub composition: Option<String>,
-    /// Seconds, half-open, ordered; unrendered stretches are left out.
+    /// Seconds, half-open, ordered; stretches neither rendered nor known to
+    /// need rendering are left out.
     pub bars: Vec<(f64, f64, BarState)>,
     /// The current fill: frames queued and rendered, whether it runs, and why
     /// it stopped (`disk_full`: the volume or the limit was full).
     pub queued: u64,
     pub done: u64,
     pub running: bool,
+    /// The current fill is background rendering, not Render Selection.
+    pub background: bool,
     pub error: Option<String>,
     pub disk_full: bool,
 }
 
 #[derive(Default)]
 struct Fill {
+    serial: u64,
+    /// The observation it rendered from.
     generation: u64,
+    background: bool,
+    /// Frames shown as rendering (Render Selection's).
     queued: BTreeSet<i64>,
     total: u64,
     done: u64,
     running: bool,
     error: Option<String>,
     disk_full: bool,
+    ended: Option<Instant>,
 }
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -170,9 +377,12 @@ struct State {
     root: Option<(PathBuf, u64)>,
     cache: Option<Arc<RenderCache>>,
     /// Rises with every new observation, storage or deletion: fences
-    /// fingerprints, fills and reads that started before it.
+    /// fingerprints and indexes that started before it.
     generation: u64,
+    /// Rises with every storage change or deletion: fences fills' frames.
+    storage: u64,
     frames: Option<Frames>,
+    known: Known,
     media_checked: Option<Instant>,
     indexed: Option<Instant>,
     fill: Fill,
@@ -181,12 +391,19 @@ struct State {
     /// scrubbing back): read-ahead follows the motion.
     last_read: Option<i64>,
     backward: bool,
+    /// The time the viewer drew last, and the size it rendered at.
+    playhead: Option<Ticks>,
+    viewer: Option<Size>,
+    activity: Option<crate::jobs::Activity>,
+    background: Background,
+    host: Option<BackgroundHost>,
 }
 
 struct Running {
     /// The fill's child, if it started.
     job: Option<crate::jobs::JobControl>,
     thread: std::thread::JoinHandle<()>,
+    background: bool,
 }
 
 struct Inner {
@@ -194,6 +411,9 @@ struct Inner {
     published: Mutex<Arc<RenderBars>>,
     running: Mutex<Option<Running>>,
     reader: Reader,
+    /// The background delay in milliseconds, read live by fill children.
+    delay_ms: Arc<AtomicU64>,
+    scheduling: std::sync::Once,
 }
 
 /// What Keep Rendered (or its undo) did to a range.
@@ -219,6 +439,10 @@ impl Default for DiskFrames {
                 published: Mutex::default(),
                 running: Mutex::default(),
                 reader: Reader::start(),
+                delay_ms: Arc::new(AtomicU64::new(
+                    Background::default().delay.as_millis() as u64
+                )),
+                scheduling: std::sync::Once::new(),
             }),
         }
     }
@@ -244,6 +468,7 @@ fn snapshot(state: &State) -> RenderBars {
         queued: fill.total,
         done: fill.done,
         running: fill.running,
+        background: fill.background,
         error: fill.error.clone(),
         disk_full: fill.disk_full,
         ..RenderBars::default()
@@ -252,11 +477,6 @@ fn snapshot(state: &State) -> RenderBars {
         return out;
     };
     out.composition = Some(frames.identity.comp.clone());
-    let seconds = |n: i64| {
-        frames
-            .ticks(n)
-            .map_or(0., |t| t.get() as f64 / TICKS_PER_SECOND as f64)
-    };
     let mut marks: Vec<(i64, BarState)> = frames
         .present
         .iter()
@@ -278,9 +498,23 @@ fn snapshot(state: &State) -> RenderBars {
                 .map(|n| (*n, BarState::Rendering)),
         )
         .collect();
+    // Chunks known not to play in real time: needs render.
+    if frames.fingerprint.is_some() {
+        let step = frames.chunk_len();
+        for a in (0..frames.count).step_by(step as usize) {
+            let b = (a + step).min(frames.count);
+            if state.known.need(frames, a, b) == Need::Heavy {
+                marks.extend(
+                    (a..b)
+                        .filter(|n| !frames.present.contains(n) && !fill.queued.contains(n))
+                        .map(|n| (n, BarState::Missing)),
+                );
+            }
+        }
+    }
     marks.sort_by_key(|m| m.0);
     for (n, bar) in marks {
-        let (from, to) = (seconds(n), seconds(n + 1));
+        let (from, to) = (frames.seconds(n), frames.seconds(n + 1));
         match out.bars.last_mut() {
             Some(last) if last.2 == bar && (last.1 - from).abs() < 1e-9 => last.1 = to,
             _ => out.bars.push((from, to, bar)),
@@ -297,6 +531,30 @@ impl DiskFrames {
     /// Wakes the engine thread when frames land (playback reads them).
     pub(crate) fn set_wake(&self, wake: std::sync::mpsc::SyncSender<()>) {
         self.inner.state.lock().unwrap().wake = Some(wake);
+    }
+    /// The viewer's activity: background rendering waits for it to be idle.
+    pub(crate) fn set_activity(&self, activity: crate::jobs::Activity) {
+        self.inner.state.lock().unwrap().activity = Some(activity);
+    }
+    /// Settings › General › Playback. Turning it off stops a background fill
+    /// (on the scheduler's thread, never the caller's).
+    pub fn set_background(&self, background: Background) {
+        self.inner
+            .delay_ms
+            .store(background.delay.as_millis() as u64, Ordering::Release);
+        self.inner.state.lock().unwrap().background = background;
+    }
+    /// What background rendering renders with; set once the app can answer
+    /// overrides. Starts the scheduler.
+    pub fn set_background_host(&self, host: Option<BackgroundHost>) {
+        self.inner.state.lock().unwrap().host = host;
+        let weak = Arc::downgrade(&self.inner);
+        self.inner.scheduling.call_once(|| {
+            std::thread::Builder::new()
+                .name("pm-render-background".into())
+                .spawn(move || schedule(weak))
+                .ok();
+        });
     }
     fn with<R>(&self, f: impl FnOnce(&mut State) -> (R, bool)) -> R {
         let mut state = self.inner.state.lock().unwrap();
@@ -325,6 +583,7 @@ impl DiskFrames {
             s.root = root;
             s.cache = cache;
             s.generation += 1;
+            s.storage += 1;
             // Observed again (and fingerprinted against the new folder).
             s.frames = None;
             s.fill = Fill::default();
@@ -365,19 +624,23 @@ impl DiskFrames {
         Ok(())
     }
 
-    /// The engine thread's current scene. A new composition state (scene,
-    /// output tone, override wrappers, or, looked at every 2 s, a media
-    /// file's stamp) takes a new fingerprint off this thread and finds its
-    /// frames on disk. Returns whether it did.
+    /// The engine thread's current scene, drawn at `time`. A new
+    /// composition state (scene, output tone, override wrappers, or, looked
+    /// at every 2 s, a media file's stamp) takes a new fingerprint off this
+    /// thread and finds its frames on disk. Returns whether it did.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe(
         &self,
         scene: &Scene,
         definitions: &[DefinitionSnapshot],
         overrides: Option<u64>,
         tone: Option<String>,
+        fonts: Option<u64>,
         doc_id: u64,
+        time: Ticks,
     ) -> bool {
-        let state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock().unwrap();
+        state.playhead = Some(time);
         if state.cache.is_none() {
             return false;
         }
@@ -385,6 +648,7 @@ impl DiskFrames {
             f.identity.scene_matches(scene)
                 && f.identity.tone == tone
                 && f.identity.overrides == overrides
+                && f.identity.fonts == fonts
         });
         let recheck = state
             .media_checked
@@ -418,6 +682,7 @@ impl DiskFrames {
             comp: scene.comp.clone(),
             tone,
             overrides,
+            fonts,
             media,
         };
         let source = Source {
@@ -427,16 +692,29 @@ impl DiskFrames {
         };
         state.generation += 1;
         let generation = state.generation;
+        // Until its keys are known, the bar keeps showing what it showed.
+        let (present, kept) = state
+            .frames
+            .take()
+            .filter(|f| f.identity.comp == identity.comp && f.count == count)
+            .map(|f| (f.present, f.kept))
+            .unwrap_or_default();
         state.frames = Some(Frames {
             identity: identity.clone(),
             source: source.clone(),
             fingerprint: None,
+            ids: Arc::default(),
             size,
             rate,
             count,
-            present: HashSet::new(),
-            kept: HashSet::new(),
+            present,
+            kept,
         });
+        let of = (identity.comp.clone(), rate, count);
+        if state.known.hints_of.as_ref() != Some(&of) {
+            state.known.hints.clear();
+            state.known.hints_of = Some(of);
+        }
         bump(&mut state, &self.inner.published);
         let cache = state.cache.clone().expect("checked above");
         drop(state);
@@ -445,10 +723,32 @@ impl DiskFrames {
             .name("pm-render-cache".into())
             .spawn(move || {
                 let fingerprint = fingerprint(&source, &identity);
+                let inputs = crate::frame_inputs::frame_digests(
+                    &source.scene.doc,
+                    &identity.comp,
+                    rate,
+                    count,
+                    // Override code can read anything in the document.
+                    identity.overrides.is_some(),
+                )
+                .unwrap_or_default();
+                // A frame is its inputs at its time.
+                let ids: Vec<FrameId> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, d)| {
+                        let mut id = blake3::Hasher::new();
+                        id.update(&fingerprint);
+                        id.update(d);
+                        id.update(&rate.frame_start(n as i64).unwrap_or(-1).to_le_bytes());
+                        *id.finalize().as_bytes()
+                    })
+                    .collect();
                 let template = Frames {
                     identity,
                     source,
                     fingerprint: Some(fingerprint),
+                    ids: Arc::new(ids),
                     size,
                     rate,
                     count,
@@ -476,10 +776,69 @@ impl DiskFrames {
         true
     }
 
+    /// The key digest of the frame `scene` shows at `time`, when known: a
+    /// viewer frame's measured cost lands under it ([`Self::measured`]).
+    pub(crate) fn frame_id(&self, scene: &Scene, time: Ticks) -> Option<(i64, FrameId)> {
+        let state = self.inner.state.lock().unwrap();
+        let frames = state.frames.as_ref()?;
+        if !frames.identity.scene_matches(scene) {
+            return None;
+        }
+        let n = frames.index(time)?;
+        Some((n, frames.id(n)?))
+    }
+    /// The viewer drew at this size: background probes measure frames as
+    /// it draws them.
+    pub(crate) fn viewing(&self, size: Size) {
+        self.inner.state.lock().unwrap().viewer = Some(size);
+    }
+    /// Playback skipped the frames between `before` and `n` (`id` is
+    /// frame `n`'s key, so the skip is of the current state): they didn't
+    /// play in real time and need render.
+    pub(crate) fn dropped(&self, before: i64, (n, id): (i64, FrameId)) {
+        let mut state = self.inner.state.lock().unwrap();
+        let state = &mut *state;
+        let Some(frames) = state.frames.as_ref().filter(|f| f.id(n) == Some(id)) else {
+            return;
+        };
+        let mut changed = false;
+        for k in before + 1..n {
+            if let Some(kid) = frames.id(k) {
+                let step = frames.chunk_len();
+                let a = k - k % step;
+                let b = (a + step).min(frames.count);
+                let was = state.known.need(frames, a, b);
+                state.known.cost(frames, Some(k), kid, DROPPED_US);
+                changed |= state.known.need(frames, a, b) != was;
+            }
+        }
+        if changed {
+            bump(state, &self.inner.published);
+        }
+    }
+    /// A frame known to cost `cost_us` (tests).
+    #[cfg(test)]
+    fn measured(&self, (n, id): (i64, FrameId), cost_us: f64) {
+        let mut state = self.inner.state.lock().unwrap();
+        let state = &mut *state;
+        let Some(frames) = state.frames.as_ref() else {
+            return;
+        };
+        let step = frames.chunk_len();
+        let a = n - n % step;
+        let b = (a + step).min(frames.count);
+        let before = state.known.need(frames, a, b);
+        state.known.cost(frames, Some(n), id, cost_us);
+        if state.known.need(frames, a, b) != before {
+            bump(state, &self.inner.published);
+        }
+    }
+
     /// Render Selection: the composition's frames in `[from, to)` seconds that
     /// are not on disk render in an `--engine-job` child (`executable`),
     /// admitted around viewer `activity` as exports are, its raster overrides
-    /// answered as `overrides` sets up. Returns the frames queued.
+    /// answered as `overrides` sets up. A background fill stops for it.
+    /// Returns the frames queued.
     pub fn start_fill(
         &self,
         from: f64,
@@ -488,65 +847,97 @@ impl DiskFrames {
         activity: crate::jobs::Activity,
         overrides: impl FnOnce(&mut crate::jobs::JobSession),
     ) -> Result<u64, String> {
-        let mut running = self.inner.running.lock().unwrap();
-        if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
-            return Err("A render is already running.".into());
-        }
+        let frames = {
+            let state = self.inner.state.lock().unwrap();
+            let frames = ready(&state)?;
+            frame_range(frames, from, to)
+                .filter(|n| !frames.present.contains(n))
+                .filter_map(|n| Some((n, cache_frame(frames, n, 0, false)?)))
+                .collect::<Vec<_>>()
+        };
+        self.launch(frames, None, executable, activity, overrides)
+    }
+
+    /// Starts a fill of `frames` (index, frame); `budget_us` makes it a
+    /// background fill. Returns the frames queued.
+    fn launch(
+        &self,
+        frames: Vec<(i64, CacheFrame)>,
+        budget_us: Option<f64>,
+        executable: &Path,
+        activity: crate::jobs::Activity,
+        overrides: impl FnOnce(&mut crate::jobs::JobSession),
+    ) -> Result<u64, String> {
+        let background = budget_us.is_some();
+        let mut running = loop {
+            let mut running = self.inner.running.lock().unwrap();
+            match running.as_ref() {
+                Some(r) if !r.thread.is_finished() => {
+                    if background || !r.background {
+                        return Err("A render is already running.".into());
+                    }
+                    // Render Selection replaces background rendering.
+                    let r = running.take().expect("checked");
+                    drop(running);
+                    stop(r);
+                }
+                _ => break running,
+            }
+        };
         let mut state = self.inner.state.lock().unwrap();
-        let frames = state
-            .frames
-            .as_ref()
-            .ok_or("Open a composition to render.")?;
-        if frames.fingerprint.is_none() {
-            return Err("Still reading the composition. Try again in a moment.".into());
-        }
-        if frames.identity.tone.is_some() {
-            return Err(
-                "Rendering to disk isn't available while the viewer tone-maps HDR for this display."
-                    .into(),
-            );
-        }
+        let frames_now = ready(&state)?;
         let (dir, quota) = state
             .root
             .clone()
             .ok_or("No storage for rendered frames.")?;
-        let missing: Vec<(i64, CacheFrame)> = frame_range(frames, from, to)
-            .filter(|n| !frames.present.contains(n))
-            .filter_map(|n| {
-                Some((
-                    n,
-                    CacheFrame {
-                        ticks: frames.ticks(n)?.get(),
-                        key: frames.key(n)?,
-                    },
-                ))
-            })
+        // Keys from an observation since are another state's: plan again.
+        let frames: Vec<(i64, CacheFrame)> = frames
+            .into_iter()
+            .filter(|(n, f)| frames_now.key(*n).as_ref() == Some(&f.key))
             .collect();
-        if missing.is_empty() {
+        if frames.is_empty() {
             return Ok(0);
         }
-        let (source, size, rate) = (frames.source.clone(), frames.size, frames.rate);
-        let generation = state.generation;
+        let order: Vec<(i64, FrameId)> = frames.iter().map(|(n, f)| (*n, f.key.graph)).collect();
+        let (source, size, rate) = (frames_now.source.clone(), frames_now.size, frames_now.rate);
+        let serial = state.fill.serial + 1;
         state.fill = Fill {
-            generation,
-            queued: missing.iter().map(|m| m.0).collect(),
-            total: missing.len() as u64,
+            serial,
+            generation: state.generation,
+            background,
+            queued: if background {
+                BTreeSet::new()
+            } else {
+                frames.iter().map(|m| m.0).collect()
+            },
+            total: frames.len() as u64,
             running: true,
             ..Fill::default()
         };
+        let storage = state.storage;
+        // Probes measure frames at the size the viewer draws them.
+        let probe_scale = state.viewer.map_or(1., |v| {
+            (f64::from(v.width) / f64::from(size.width.max(1))).clamp(0.05, 1.)
+        });
         bump(&mut state, &self.inner.published);
         drop(state);
-        let order: Vec<i64> = missing.iter().map(|m| m.0).collect();
         let fill = CacheFill {
             dir,
             quota,
             width: size.width,
             height: size.height,
-            frames: missing.into_iter().map(|m| m.1).collect(),
+            frames: frames.into_iter().map(|m| m.1).collect(),
+            budget_us,
+            frame_ticks: rate.frame_start(1).unwrap_or(0),
+            probe_scale,
         };
+        let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill)
             .and_then(|request| {
                 let mut session = crate::jobs::JobSession::new(request);
+                if background {
+                    session.in_background(delay);
+                }
                 overrides(&mut session);
                 crate::jobs::ExportHandle::start_scheduled(executable, session, activity)
             })
@@ -558,9 +949,13 @@ impl DiskFrames {
         let weak = Arc::downgrade(&self.inner);
         let thread = std::thread::Builder::new()
             .name("pm-render-fill".into())
-            .spawn(move || run_fill(weak, generation, order, started))
+            .spawn(move || run_fill(weak, serial, storage, order, started))
             .map_err(|e| e.to_string())?;
-        *running = Some(Running { job, thread });
+        *running = Some(Running {
+            job,
+            thread,
+            background,
+        });
         Ok(self.inner.published.lock().unwrap().queued)
     }
 
@@ -569,11 +964,93 @@ impl DiskFrames {
     pub fn cancel_fill(&self) {
         let running = self.inner.running.lock().unwrap().take();
         if let Some(running) = running {
-            if let Some(job) = running.job {
-                job.cancel();
-            }
-            let _ = running.thread.join();
+            stop(running);
         }
+    }
+
+    /// One look of the background scheduler (see the module).
+    fn tick(&self, watch: &mut Watch) {
+        let (host, config, activity, generation) = {
+            let state = self.inner.state.lock().unwrap();
+            (
+                state.host.clone(),
+                state.background,
+                state.activity.clone(),
+                state.generation,
+            )
+        };
+        let Some(activity) = activity else { return };
+        let epoch = activity.epoch();
+        if activity.busy() || epoch != watch.seen {
+            watch.seen = epoch;
+            watch.active_at = Instant::now();
+            watch.active_since.get_or_insert(watch.active_at);
+        }
+        let idle = watch.active_at.elapsed() >= config.delay && !activity.busy();
+        if idle {
+            watch.active_since = None;
+        }
+        let allowed = config.enabled && host.as_ref().is_some_and(|h| !(h.busy)());
+        let running = self
+            .inner
+            .running
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|r| !r.thread.is_finished())
+            .map(|r| r.background);
+        let fill = {
+            let state = self.inner.state.lock().unwrap();
+            (
+                state.fill.generation,
+                state.fill.error.is_some(),
+                state.fill.ended,
+            )
+        };
+        match running {
+            Some(true) => {
+                // Paused long enough: its child gives its memory back.
+                let paused_long = watch
+                    .active_since
+                    .is_some_and(|at| at.elapsed() >= PAUSED_AT_MOST);
+                if !allowed || fill.0 != generation || paused_long {
+                    self.cancel_fill();
+                }
+                return;
+            }
+            Some(false) => return,
+            None => {}
+        }
+        let (Some(host), true, true) = (host, allowed, idle) else {
+            return;
+        };
+        if fill.1 && fill.0 == generation && fill.2.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
+            return;
+        }
+        let planned = {
+            let state = self.inner.state.lock().unwrap();
+            ready(&state)
+                .ok()
+                .filter(|f| f.identity.tone.is_none())
+                .map(|frames| {
+                    (
+                        plan(frames, &state.known, state.playhead),
+                        frames.budget_us(),
+                        frames.source.doc_id,
+                    )
+                })
+        };
+        let Some((frames, budget, doc_id)) = planned.filter(|p| !p.0.is_empty()) else {
+            return;
+        };
+        let pin = host.pin.clone();
+        let _ = self.launch(
+            frames,
+            Some(budget),
+            &host.executable,
+            activity,
+            |session| pin(doc_id, session),
+        );
     }
 
     /// Keep Rendered: the rendered frames in `[from, to)` are pinned against
@@ -635,6 +1112,7 @@ impl DiskFrames {
         self.cancel_fill();
         let plan = self.with(|s| {
             s.generation += 1;
+            s.storage += 1;
             s.fill = Fill::default();
             let (Some(cache), Some(frames)) = (s.cache.clone(), s.frames.as_mut()) else {
                 return (None, true);
@@ -706,6 +1184,146 @@ impl DiskFrames {
     }
 }
 
+/// The open composition's frames, if a fill can start from them.
+fn ready(state: &State) -> Result<&Frames, String> {
+    let frames = state
+        .frames
+        .as_ref()
+        .ok_or("Open a composition to render.")?;
+    if frames.fingerprint.is_none() || frames.ids.is_empty() {
+        return Err("Still reading the composition. Try again in a moment.".into());
+    }
+    if frames.identity.tone.is_some() {
+        return Err(
+            "Rendering to disk isn't available while the viewer tone-maps HDR for this display."
+                .into(),
+        );
+    }
+    Ok(frames)
+}
+
+fn cache_frame(frames: &Frames, n: i64, chunk: u32, probe: bool) -> Option<CacheFrame> {
+    Some(CacheFrame {
+        ticks: frames.ticks(n)?.get(),
+        key: frames.key(n)?,
+        chunk,
+        probe,
+    })
+}
+
+/// Background rendering's next fill: chunks not on disk that are known not
+/// to play in real time (all their missing frames), and chunks not judged
+/// yet (their first and last missing frames as probes, then the rest), in
+/// order: the playhead's neighbourhood, the work area, then the rest,
+/// nearest first, ahead before behind.
+fn plan(frames: &Frames, known: &Known, playhead: Option<Ticks>) -> Vec<(i64, CacheFrame)> {
+    let step = frames.chunk_len();
+    let p = playhead.map_or(0, |t| frames.at(t));
+    let interval = (frames.seconds(1) - frames.seconds(0)).max(1e-9);
+    let seconds = |s: f64| (s / interval).round() as i64;
+    let near = (p - seconds(NEAR_BEHIND), p + seconds(NEAR_AHEAD));
+    let work = work_area(frames).unwrap_or((0, frames.count));
+    let mut chunks: Vec<(u8, i64, i64)> = (0..frames.count)
+        .step_by(step as usize)
+        .map(|a| {
+            let b = (a + step).min(frames.count);
+            let tier = if a < near.1 && b > near.0 {
+                0
+            } else if a < work.1 && b > work.0 {
+                1
+            } else {
+                2
+            };
+            let distance = if b > p {
+                (a - p).max(0)
+            } else {
+                2 * (p - b + 1)
+            };
+            (tier, distance, a)
+        })
+        .collect();
+    chunks.sort();
+    let mut out = Vec::new();
+    for (_, _, a) in chunks {
+        let b = (a + step).min(frames.count);
+        let missing: Vec<i64> = (a..b).filter(|n| !frames.present.contains(n)).collect();
+        let (Some(&first), Some(&last)) = (missing.first(), missing.last()) else {
+            continue;
+        };
+        let chunk = (a / step) as u32;
+        let probes: Vec<i64> = match known.need(frames, a, b) {
+            Need::Light | Need::Refused => continue,
+            Need::Heavy => vec![],
+            Need::Unknown if first == last => vec![first],
+            Need::Unknown => vec![first, last],
+        };
+        let rest = missing.iter().filter(|n| !probes.contains(n));
+        for (n, probe) in probes
+            .iter()
+            .map(|n| (*n, true))
+            .chain(rest.map(|n| (*n, false)))
+        {
+            if let Some(frame) = cache_frame(frames, n, chunk, probe) {
+                out.push((n, frame));
+            }
+        }
+    }
+    out
+}
+
+/// The composition's work area, in frames.
+fn work_area(frames: &Frames) -> Option<(i64, i64)> {
+    let comp = pm_eval::Comp::resolve(&frames.source.scene.doc, &frames.identity.comp).ok()?;
+    let work = comp.member("work")?;
+    let number = |i: usize| pm_eval::node::to_number(work.at(i));
+    let (a, b) = (number(0), number(1));
+    if !(a.is_finite() && b.is_finite() && b > a) {
+        return None;
+    }
+    Some((
+        frame_range(frames, a, b).start,
+        frame_range(frames, a, b).end,
+    ))
+}
+
+/// The background scheduler's view of the person's activity.
+struct Watch {
+    seen: u64,
+    active_at: Instant,
+    /// When the current stretch of activity began (`None` while idle).
+    active_since: Option<Instant>,
+}
+
+/// The background scheduler: looks ten times a second while the cache lives.
+fn schedule(inner: Weak<Inner>) {
+    let mut watch = Watch {
+        seen: 0,
+        active_at: Instant::now(),
+        active_since: None,
+    };
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let Some(inner) = inner.upgrade() else { return };
+        DiskFrames { inner }.tick(&mut watch);
+    }
+}
+
+fn stop(running: Running) {
+    if let Some(job) = running.job {
+        job.cancel();
+    }
+    let _ = running.thread.join();
+}
+
+/// The project's export default for motion blur (`exportDefaults.mblur`,
+/// on unless turned off, as the Export sheet reads it).
+fn export_motion_blur(doc: &pm_model::Document) -> bool {
+    doc.root()
+        .and_then(|r| r.get("exportDefaults"))
+        .and_then(|d| d.get("mblur"))
+        .is_none_or(|m| !matches!(m.kind(), pm_model::NodeKind::Bool(false)))
+}
+
 /// The fill child's request: the viewer's scene as an export job (png
 /// settings stand in for delivery; the child renders `fill`'s frames only).
 fn fill_request(
@@ -718,13 +1336,15 @@ fn fill_request(
         common::{FrameRate, SessionId, TickRange},
         priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, QualityTier},
     };
-    let first = fill.frames.first().map_or(0, |f| f.ticks);
-    let last = fill.frames.last().map_or(0, |f| f.ticks);
+    let first = fill.frames.iter().map(|f| f.ticks).min().unwrap_or(0);
+    let last = fill.frames.iter().map(|f| f.ticks).max().unwrap_or(0);
     let step = rate.frame_start(1).unwrap_or(1).max(1);
     let fps = (TICKS_PER_SECOND as f64 / step as f64 * 1000.).round() as u32;
     let settings = ExportSettings {
         format: ExportFormat::PngSequence { sixteen_bit: true },
-        alpha: AlphaOutput::Straight,
+        // Cached frames are the export's: opaque (the viewer shows the
+        // background), with the project's export motion blur.
+        alpha: AlphaOutput::None,
         quality: QualityTier::High,
         size: Size::new(fill.width, fill.height),
         frame_rate: FrameRate::new(fps, 1000),
@@ -734,7 +1354,7 @@ fn fill_request(
         },
         audio: false,
         audio_index_playhead: None,
-        motion_blur: false,
+        motion_blur: export_motion_blur(&source.scene.doc),
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
@@ -765,7 +1385,8 @@ fn fill_request(
             ..Default::default()
         },
         disk_reserve: crate::jobs::DISK_RESERVE,
-        bypass_missing_effects: true,
+        // Cached frames are exact: a missing effect is never left out.
+        bypass_missing_effects: false,
         without_offline: true,
         preview: false,
         cache: Some(fill),
@@ -783,50 +1404,74 @@ fn pm_kernel_free_id() -> pm_protocol::common::JobId {
     .into()
 }
 
-/// The fill thread: follows the child, lands its progress while the
-/// generation it started at is current, and records how it ended.
+/// The fill thread: follows the child and lands what it reports: costs and
+/// refusals by key, stored frames while their storage is current and their
+/// key is the frame's, progress while the fill is the current one.
 fn run_fill(
     inner: Weak<Inner>,
-    generation: u64,
-    order: Vec<i64>,
+    serial: u64,
+    storage: u64,
+    order: Vec<(i64, FrameId)>,
     started: Result<crate::jobs::ExportHandle, String>,
 ) {
     use pm_protocol::priority::JobState;
-    let land = |done: usize, end: Option<(Option<String>, bool)>| {
+    let land = |reports: Vec<FrameReport>, done: u64, end: Option<(Option<String>, bool)>| {
         let Some(inner) = inner.upgrade() else { return };
         let mut state = inner.state.lock().unwrap();
-        if state.generation != generation || state.fill.generation != generation {
+        let state = &mut *state;
+        let current = state.fill.serial == serial;
+        for report in reports {
+            let Some(&(n, id)) = order.get(report.at as usize) else {
+                continue;
+            };
+            if let Some(frames) = state.frames.as_mut() {
+                if let Some(cost) = report.cost_us {
+                    state.known.cost(frames, Some(n), id, cost);
+                }
+                if report.stored && state.storage == storage && frames.id(n) == Some(id) {
+                    frames.present.insert(n);
+                }
+            }
+            if report.refused {
+                state.known.refuse(id);
+            }
+            if current {
+                state.fill.queued.remove(&n);
+            }
+        }
+        if !current {
             return;
         }
-        if let Some(frames) = state.frames.as_mut() {
-            frames.present.extend(order.iter().take(done));
-        }
-        for n in order.iter().take(done) {
-            state.fill.queued.remove(n);
-        }
-        state.fill.done = state.fill.done.max(done as u64);
+        state.fill.done = state.fill.done.max(done);
         if let Some((error, disk_full)) = end {
             state.fill.running = false;
             state.fill.queued.clear();
             state.fill.error = error;
             state.fill.disk_full = disk_full;
+            state.fill.ended = Some(Instant::now());
         }
-        bump(&mut state, &inner.published);
+        bump(state, &inner.published);
     };
     let handle = match started {
         Ok(handle) => handle,
-        Err(error) => return land(0, Some((Some(error), false))),
+        Err(error) => return land(vec![], 0, Some((Some(error), false))),
     };
     let total = order.len() as f64;
     let mut status = handle.status();
     while !status.state.is_terminal() {
-        land((status.progress * total).round() as usize, None);
+        land(
+            handle.take_frames(),
+            (status.progress * total).round() as u64,
+            None,
+        );
         status = handle.next_status(&status);
     }
-    let landed = (status.progress * total).floor() as usize;
+    let landed = (status.progress * total).floor() as u64;
+    // Every frame report comes before the terminal status.
+    let reports = handle.take_frames();
     let end = match handle.wait().map(|status| status.state) {
         Err(error) => (landed, Some(error.to_string()), false),
-        Ok(JobState::Done) => (order.len(), None, false),
+        Ok(JobState::Done) => (order.len() as u64, None, false),
         Ok(JobState::Cancelled) => (landed, None, false),
         Ok(_) => {
             let message = status.error.map(|e| e.message).unwrap_or_default();
@@ -835,7 +1480,7 @@ fn run_fill(
             (landed, Some(message), full)
         }
     };
-    land(end.0, Some((end.1, end.2)));
+    land(reports, end.0, Some((end.1, end.2)));
     // The limit may have evicted older frames as these landed.
     if let Some(inner) = inner.upgrade() {
         let _ = DiskFrames { inner }.reindex(true);
@@ -891,6 +1536,10 @@ impl Reader {
                     let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
                         crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
                     });
+                    if data.is_some() {
+                        // Played frames are the last the limit removes.
+                        let _ = ask.cache.touch(&ask.key);
+                    }
                     let mut ready = shared.lock().unwrap();
                     ready.asked.remove(&ask.id);
                     if let Some(data) = data {
@@ -1066,13 +1715,14 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
     }
 }
 
-/// The fingerprint of everything that draws the composition's frames.
+/// The fingerprint of everything that draws the composition's frames
+/// besides the document, whose parts each frame draws from are in its key
+/// (`crate::frame_inputs`).
 fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v2");
-    if let Some(root) = source.scene.doc.root() {
-        hash.update(&pm_model::hash::canonical_digest_parallel(root));
-    }
+    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v4");
     hash.update(identity.comp.as_bytes());
+    // Frames are rendered as exported: with or without its motion blur.
+    hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
     hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
     for (asset, path) in &source.scene.media.paths {
         hash.update(asset.as_bytes());
@@ -1183,8 +1833,8 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        assert!(disk.observe(&scene, &[], None, None, 1));
-        assert!(!disk.observe(&scene, &[], None, None, 1));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        assert!(!disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         let time = write_frame(&disk, 30);
         let bars = settle(&disk, |b| !b.bars.is_empty());
@@ -1229,7 +1879,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        assert!(disk.observe(&scene, &[], None, None, 1));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
         let read_already = |n: i64| {
@@ -1265,18 +1915,26 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1);
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let time = write_frame(&disk, 30);
         assert!(read_eventually(&disk, &scene, time).is_some());
-        assert!(disk.observe(&scene, &[], None, Some("Pq".into()), 1));
+        assert!(disk.observe(
+            &scene,
+            &[],
+            None,
+            Some("Pq".into()),
+            None,
+            1,
+            Ticks::new(0).unwrap()
+        ));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_none());
-        assert!(disk.observe(&scene, &[], Some(3), None, 1));
+        assert!(disk.observe(&scene, &[], Some(3), None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_none());
         // Back to the first state: its frame is found again.
-        assert!(disk.observe(&scene, &[], None, None, 1));
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_some());
     }
@@ -1293,7 +1951,7 @@ mod tests {
         disk.set_storage(Some((PathBuf::from(dir), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], Some(7), None, 1);
+        disk.observe(&scene, &[], Some(7), None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let time = write_frame(&disk, 30);
         assert!(read_eventually(&disk, &scene, time).is_some());
@@ -1318,11 +1976,11 @@ mod tests {
         let scene = scene();
         let relaunched = DiskFrames::default();
         relaunched.set_storage(Some((frames, u64::MAX))).unwrap();
-        relaunched.observe(&scene, &[], Some(7), None, 1);
+        relaunched.observe(&scene, &[], Some(7), None, None, 1, Ticks::new(0).unwrap());
         ready(&relaunched);
         let time = relaunched.with(|s| (s.frames.as_ref().unwrap().ticks(30).unwrap(), false));
         assert!(read_eventually(&relaunched, &scene, time).is_some());
-        assert!(relaunched.observe(&scene, &[], Some(8), None, 1));
+        assert!(relaunched.observe(&scene, &[], Some(8), None, None, 1, Ticks::new(0).unwrap()));
         ready(&relaunched);
         assert!(read_eventually(&relaunched, &scene, time).is_none());
     }
@@ -1345,7 +2003,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1);
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         let queued = disk
             .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {})
@@ -1379,7 +2037,7 @@ mod tests {
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
-        disk.observe(scene, &[], None, None, 1);
+        disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
@@ -1411,7 +2069,7 @@ mod tests {
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
-        disk.observe(&scene, &[], None, None, 1);
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
@@ -1442,6 +2100,118 @@ mod tests {
         );
     }
 
+    /// A cached frame is the exported frame: the cache's pixels through the
+    /// export's own 16-bit conversion (its dither too) are the samples of a
+    /// 16-bit PNG export of the same time, both through the real children.
+    #[test]
+    fn a_cached_frame_is_the_exported_frame() {
+        use pm_export::convert::{ConvertParams, WorkingFrame, convert};
+        use pm_export::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+        let exe = job_binary();
+        // An animated layer with motion blur: the paused viewer's samples
+        // (12) and the export's (16) differ, so only the export's request
+        // gives the exported bytes.
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["mblur"] = true.into();
+        let scene = scene_from(&project.to_string());
+        let at = Ticks::new(Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        let cached = filled_frame(&scene);
+        // The same frame exported as a 16-bit PNG, as the app exports it
+        // (opaque, dithered, the project's motion blur).
+        let out = tempfile::tempdir().unwrap();
+        let frames = {
+            let (w, h) = (640, 360);
+            CacheFill {
+                dir: out.path().into(),
+                quota: 0,
+                width: w,
+                height: h,
+                frames: vec![CacheFrame {
+                    ticks: at.get(),
+                    key: RenderKey {
+                        graph: [0; 32],
+                        media: [0; 32],
+                        ticks: at.get(),
+                        width: w,
+                        height: h,
+                        format: FORMAT.into(),
+                        renderer_version: String::new(),
+                    },
+                    chunk: 0,
+                    probe: false,
+                }],
+                budget_us: None,
+                frame_ticks: 0,
+                probe_scale: 1.,
+            }
+        };
+        let source = Source {
+            scene: scene.clone(),
+            definitions: vec![],
+            doc_id: 1,
+        };
+        let mut request = fill_request(&source, Rate::FPS_30, frames).unwrap();
+        request.cache = None;
+        request.destination = out.path().join("still");
+        if let pm_protocol::priority::JobSpec::Export { settings, .. } = &mut request.spec {
+            settings.format =
+                pm_protocol::priority::ExportFormat::PngSequence { sixteen_bit: true };
+            settings.dither = true;
+        }
+        let export = crate::jobs::ExportHandle::start(&exe, request).unwrap();
+        let status = export.wait().unwrap();
+        assert_eq!(
+            status.state,
+            pm_protocol::priority::JobState::Done,
+            "{status:?}"
+        );
+        let png = walk_png(out.path()).expect("the exported frame");
+        let (_, decoded) = pm_export::png::read(&png, true).unwrap();
+        let decoded = decoded.unwrap();
+        let exported = decoded.planes[0].u16().unwrap();
+        let working: Vec<f32> = cached
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
+        let expected = convert(
+            &WorkingFrame {
+                width: 640,
+                height: 360,
+                rgba: &working,
+            },
+            InputFormat::Rgba16,
+            &ConvertParams {
+                working: WorkingEncoding::Standard,
+                alpha: AlphaOutput::None,
+                tags: ColorTags::SrgbImage,
+                dither: true,
+                frame: 0,
+            },
+        )
+        .unwrap();
+        let expected = expected.planes[0].u16().unwrap();
+        let differing = expected
+            .iter()
+            .zip(exported)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 0, "of {} samples", expected.len());
+    }
+    fn walk_png(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk_png(&path) {
+                    return Some(found);
+                }
+            } else if path.extension().is_some_and(|e| e == "png") {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     /// Delete Rendered Frames while a fill runs: the fill stops first, so no
     /// frame is written after the deletion and the bar stays empty.
     #[test]
@@ -1459,7 +2229,7 @@ mod tests {
         disk.set_storage(Some((frames_dir.clone(), 1 << 30)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1);
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
         disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
@@ -1478,6 +2248,267 @@ mod tests {
         assert!(bars.bars.is_empty() && !bars.running, "{bars:?}");
     }
 
+    /// The fixture with its layers in sequence: L001 at 0-1 s, L002 at
+    /// 1-2 s, the rest at 2-3 s.
+    fn sequenced(edit: impl FnOnce(&mut serde_json::Value)) -> Scene {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        for layer in project["layers"].as_array_mut().unwrap() {
+            let from = match layer["id"].as_str().unwrap() {
+                "L001" => 0,
+                "L002" => 1,
+                _ => 2,
+            };
+            layer["from"] = from.into();
+            layer["dur"] = 1.into();
+        }
+        edit(&mut project);
+        scene_from(&project.to_string())
+    }
+    fn job_binary() -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        exe.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pm-engine-service")
+    }
+    fn present(disk: &DiskFrames) -> BTreeSet<i64> {
+        let state = disk.inner.state.lock().unwrap();
+        state
+            .frames
+            .as_ref()
+            .unwrap()
+            .present
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// An edit misses only the frames it changed: a frame drawn from
+    /// other layers is still read after it.
+    #[test]
+    fn an_edit_keeps_the_frames_it_did_not_touch() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = sequenced(|_| {});
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let (early, late) = (write_frame(&disk, 10), write_frame(&disk, 80));
+        assert_eq!(present(&disk), BTreeSet::from([10, 80]));
+        // L002 (1-2 s) moves: frame 80 (2.67 s) and 10 (0.33 s) don't show it.
+        let mut edited = sequenced(|p| p["layers"][7]["p"]["opacity"]["v"] = 10.into());
+        edited.content = 2;
+        assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        assert!(read_eventually(&disk, &edited, early).is_some());
+        assert!(read_eventually(&disk, &edited, late).is_some());
+        // The layers at 2-3 s change: frame 80 misses, frame 10 doesn't.
+        let mut edited = sequenced(|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into());
+        edited.content = 3;
+        assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        assert_eq!(present(&disk), BTreeSet::from([10]));
+        assert!(read_eventually(&disk, &edited, early).is_some());
+        assert!(read_eventually(&disk, &edited, late).is_none());
+    }
+
+    /// With raster overrides producing, an edit anywhere misses every
+    /// frame: the override's reads of the document aren't tracked.
+    #[test]
+    fn with_overrides_an_edit_misses_every_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = sequenced(|_| {});
+        disk.observe(&scene, &[], Some(7), None, None, 1, t0);
+        ready(&disk);
+        write_frame(&disk, 10);
+        assert_eq!(present(&disk), BTreeSet::from([10]));
+        // The layers at 2-3 s change; frame 10 (0.33 s) doesn't draw them.
+        let mut edited = sequenced(|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into());
+        edited.content = 2;
+        assert!(disk.observe(&edited, &[], Some(7), None, None, 1, t0));
+        ready(&disk);
+        assert!(present(&disk).is_empty());
+    }
+
+    /// A font installed or removed (the engine's font generation moves)
+    /// is observed again, so frames are fingerprinted against the fonts
+    /// installed now.
+    #[test]
+    fn a_font_change_is_observed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, Some(1), 1, t0));
+        ready(&disk);
+        assert!(!disk.observe(&scene, &[], None, None, Some(1), 1, t0));
+        assert!(disk.observe(&scene, &[], None, None, Some(2), 1, t0));
+    }
+
+    /// A chunk needs render when all its measured probes cost the budget
+    /// (90 % of a frame) or more; one slow probe among fast ones is noise.
+    #[test]
+    fn a_chunk_is_heavy_when_all_its_probes_are_slow() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        let measure =
+            |n: i64, ms: f64| disk.measured(disk.frame_id(&scene, at(n)).unwrap(), ms * 1e3);
+        // Chunk 0-14: one probe slow, one fast.
+        measure(0, 40.);
+        measure(14, 5.);
+        // Chunk 15-29: both slow.
+        measure(15, 31.);
+        measure(29, 45.);
+        assert_eq!(disk.bars().bars, vec![(0.5, 1., BarState::Missing)]);
+        let state = disk.inner.state.lock().unwrap();
+        let frames = state.frames.as_ref().unwrap();
+        assert_eq!(state.known.need(frames, 0, 15), Need::Light);
+        assert_eq!(state.known.need(frames, 15, 30), Need::Heavy);
+    }
+
+    /// Frames playback skipped need render; a skip reported for another
+    /// state (frame 14's key from before an edit) is ignored.
+    #[test]
+    fn dropped_frames_need_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let t0 = Ticks::new(0).unwrap();
+        let scene = scene();
+        disk.observe(&scene, &[], None, None, None, 1, t0);
+        ready(&disk);
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        let (_, stale) = disk.frame_id(&scene, at(40)).unwrap();
+        disk.dropped(10, (14, stale));
+        assert!(disk.bars().bars.is_empty());
+        disk.dropped(10, disk.frame_id(&scene, at(14)).unwrap());
+        // Frames 11-13 are in the first 0.5 s chunk.
+        assert_eq!(disk.bars().bars, vec![(0., 0.5, BarState::Missing)]);
+    }
+
+    /// Background rendering through the real child, once the viewer is
+    /// idle: the chunk known not to play in real time renders and is stored
+    /// whole, chunks known to play are left alone, and nothing more is
+    /// asked for after.
+    #[test]
+    fn background_rendering_stores_only_what_cannot_play() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        let activity = crate::jobs::Activity::default();
+        disk.set_activity(activity.clone());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        // Measured costs, injected so the outcome never depends on this
+        // machine's speed: every 0.5 s chunk played in real time (two fast
+        // frames each) except chunk 45-59, where playback dropped frame 50.
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        for a in (0..90).step_by(15) {
+            for n in [a, a + 14] {
+                disk.measured(disk.frame_id(&scene, at(n)).unwrap(), 1_000.);
+            }
+        }
+        disk.measured(disk.frame_id(&scene, at(50)).unwrap(), DROPPED_US);
+        assert_eq!(disk.bars().bars, vec![(1.5, 2., BarState::Missing)]);
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(200),
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        // The chunk that can't play renders whole; nothing else is asked for.
+        settle(&disk, |b| {
+            b.bars == vec![(1.5, 2., BarState::Rendered)] && !b.running
+        });
+        assert_eq!(present(&disk), (45..60).collect());
+        let fills = disk.inner.state.lock().unwrap().fill.serial;
+        assert_eq!(fills, 1, "one fill, of that chunk only");
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            disk.inner.state.lock().unwrap().fill.serial,
+            fills,
+            "nothing left"
+        );
+    }
+
+    /// Any viewer activity pauses a background fill at once (no frame
+    /// beyond the one in flight), and it goes on once idle again; an export
+    /// stops it.
+    #[test]
+    fn interaction_pauses_background_rendering_and_an_export_stops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        let activity = crate::jobs::Activity::default();
+        disk.set_activity(activity.clone());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        // Every chunk measured too slow: all 90 frames render.
+        for n in (0..90).step_by(15) {
+            let at = Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+            disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
+        }
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(300),
+        });
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exporting = busy.clone();
+        activity.set(true);
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(move || exporting.load(Ordering::Acquire)),
+        }));
+        // Busy: nothing starts.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(present(&disk).is_empty() && !disk.bars().running);
+        activity.set(false);
+        settle(&disk, |_| present(&disk).len() >= 3);
+        // The person scrubs: at most the frame in flight lands.
+        activity.set(true);
+        std::thread::sleep(Duration::from_millis(200));
+        let paused = present(&disk).len();
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(present(&disk).len() <= paused + 1, "paused");
+        assert!(disk.bars().running, "paused, not stopped");
+        // Idle again: it goes on.
+        activity.set(false);
+        settle(&disk, |_| present(&disk).len() > paused + 3);
+        // An export starts: the fill stops and nothing starts again.
+        busy.store(true, Ordering::Release);
+        settle(&disk, |b| !b.running);
+        let stopped = present(&disk).len();
+        assert!(stopped < 90);
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(present(&disk).len(), stopped);
+        busy.store(false, Ordering::Release);
+        settle(&disk, |_| present(&disk).len() == 90);
+    }
+
     /// A fingerprint taken for an observation that something newer replaced
     /// never lands (here: storage changed while it was taken).
     #[test]
@@ -1487,7 +2518,7 @@ mod tests {
         disk.set_storage(Some((dir.path().join("a"), u64::MAX)))
             .unwrap();
         let scene = scene();
-        disk.observe(&scene, &[], None, None, 1);
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         disk.set_storage(Some((dir.path().join("b"), u64::MAX)))
             .unwrap();
         std::thread::sleep(Duration::from_millis(300));

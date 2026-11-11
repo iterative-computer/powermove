@@ -41,14 +41,35 @@ pub(crate) const FLAGS: &str = if cfg!(feature = "macos-sandbox") {
 } else {
     concat!(v8_flags!(), ";sandbox=false")
 };
+/// The process's V8 platform: its foreground tasks for an isolate run only
+/// when that isolate's owner pumps them ([`pump_platform`]).
+static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
 pub(crate) fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         v8::V8::set_flags_from_string(v8_flags!());
         let platform = v8::new_default_platform(0, false).make_shared();
+        PLATFORM.set(platform.clone()).ok();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
     });
+}
+/// Foreground tasks V8 posts for an isolate run at most this many per settle.
+const PLATFORM_TASKS: usize = 64;
+/// Runs the foreground tasks V8 posted for this isolate (FinalizationRegistry
+/// cleanup, heap and compiler follow-ups): the default platform runs them only
+/// when the owner pumps its message loop, which nothing else does. Called on
+/// the owner between tasks, with the isolate locked; the microtasks their
+/// callbacks queue run after them. Whether any ran.
+fn pump_platform(s: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> bool {
+    let Some(platform) = PLATFORM.get() else {
+        return false;
+    };
+    let mut ran = 0;
+    while ran < PLATFORM_TASKS && v8::Platform::pump_message_loop(platform, s, false) {
+        ran += 1;
+    }
+    ran > 0
 }
 pub(crate) fn snapshot(kind: SnapshotKind) -> Arc<Vec<u8>> {
     initialize();
@@ -1214,6 +1235,9 @@ impl Vm {
         let tc = std::pin::pin!(v8::TryCatch::new(cs));
         let s = &mut tc.init();
         s.perform_microtask_checkpoint();
+        if pump_platform(s) {
+            s.perform_microtask_checkpoint();
+        }
         self.quota.guard.check(s);
         if s.is_execution_terminating() || self.quota.guard.exceeded.load(Ordering::Acquire) {
             return Err(if self.quota.guard.exceeded.load(Ordering::Acquire) {

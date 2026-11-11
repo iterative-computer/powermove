@@ -11,6 +11,8 @@ pub enum ReadbackError {
     Format(wgpu::TextureFormat),
     #[error("map failed: {0}")]
     Map(String),
+    #[error("readback region {0:?} is outside the texture")]
+    Region([u32; 4]),
 }
 
 /// IEEE 754 binary16 to f32 (exact).
@@ -85,6 +87,25 @@ pub fn read_f32(
     texture: &wgpu::Texture,
 ) -> Result<Vec<f32>, ReadbackError> {
     Readback::default().read_f32(device, queue, texture)
+}
+
+/// [`read_f32`] of the `[x, y, w, h]` region of `texture` (mip 0): the same
+/// channels as the whole texture's at those texels, tightly packed, top-down.
+pub fn read_f32_region(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    region: [u32; 4],
+) -> Result<Vec<f32>, ReadbackError> {
+    let format = texture.format();
+    layout(format)?;
+    Readback::default().with_mapped_region(
+        device,
+        queue,
+        texture,
+        region,
+        |data, row, padded, h| decode_f32(format, data, row, padded, h, Vec::new()),
+    )
 }
 
 /// Decodes mapped rows of `format` (`row` useful bytes of `h` rows spaced
@@ -499,11 +520,30 @@ impl Readback {
         texture: &wgpu::Texture,
         convert: impl FnOnce(&[u8], usize, usize, usize) -> T,
     ) -> Result<T, ReadbackError> {
+        let region = [0, 0, texture.width(), texture.height()];
+        self.with_mapped_region(device, queue, texture, region, convert)
+    }
+
+    /// [`Self::with_mapped_rows`] of the `[x, y, w, h]` region of `texture`.
+    pub fn with_mapped_region<T>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        [x, y, w, h]: [u32; 4],
+        convert: impl FnOnce(&[u8], usize, usize, usize) -> T,
+    ) -> Result<T, ReadbackError> {
         let format = texture.format();
         let bpp = format
             .block_copy_size(None)
             .ok_or(ReadbackError::Format(format))?;
-        let (w, h) = (texture.width(), texture.height());
+        if w == 0
+            || h == 0
+            || x.checked_add(w).is_none_or(|r| r > texture.width())
+            || y.checked_add(h).is_none_or(|b| b > texture.height())
+        {
+            return Err(ReadbackError::Region([x, y, w, h]));
+        }
         let row = (w * bpp) as usize;
         let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
@@ -526,7 +566,10 @@ impl Readback {
             label: Some("pm readback"),
         });
         encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                ..texture.as_image_copy()
+            },
             wgpu::TexelCopyBufferInfo {
                 buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -609,6 +652,35 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
+    }
+
+    #[test]
+    fn a_region_reads_the_whole_texture_s_texels_there() {
+        let gpu = crate::Gpu::new("readback region test").unwrap();
+        // 70 texels wide: rows need padding, and so does a region's.
+        let (w, h) = (70u32, 9u32);
+        let texture = source(&gpu.device, wgpu::TextureFormat::Rgba16Float, w, h);
+        let bytes: Vec<u8> = (0..w * h * 4)
+            .flat_map(|i| (0x3800u16 + (i % 997) as u16).to_le_bytes())
+            .collect();
+        upload(&gpu.queue, &texture, &bytes);
+        let whole = read_f32(&gpu.device, &gpu.queue, &texture).unwrap();
+        for [x, y, rw, rh] in [[0, 0, w, h], [3, 2, 61, 5], [69, 8, 1, 1]] {
+            let part = read_f32_region(&gpu.device, &gpu.queue, &texture, [x, y, rw, rh]).unwrap();
+            let expected: Vec<f32> = (y..y + rh)
+                .flat_map(|row| {
+                    let at = ((row * w + x) * 4) as usize;
+                    whole[at..at + (rw * 4) as usize].to_vec()
+                })
+                .collect();
+            assert_eq!(part, expected, "region {x},{y} {rw}x{rh}");
+        }
+        for outside in [[0, 0, w + 1, 1], [69, 8, 2, 1], [0, 0, 0, 1]] {
+            assert!(matches!(
+                read_f32_region(&gpu.device, &gpu.queue, &texture, outside),
+                Err(ReadbackError::Region(_))
+            ));
+        }
     }
 
     #[test]
