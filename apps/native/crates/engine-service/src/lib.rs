@@ -870,11 +870,7 @@ impl EngineService {
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
-        let layer_rasters = compat::LayerRasters::start(
-            gpu.device.clone(),
-            gpu.queue.clone(),
-            Some(fonts.clone()),
-        )?;
+        let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
         // Built-in definitions load first thing on the service thread
         // (`run`): the app's window doesn't wait for a cold shader cache.
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
