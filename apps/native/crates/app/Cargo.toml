@@ -71,6 +71,9 @@ pm-panel-timeline = { path = "../panel-timeline" }
 [[test]]
 name = "text_commands"
 harness = false
+[[test]]
+name = "close_guard_gpui"
+harness = false
 
 [[example]]
 name = "pm-corpus"

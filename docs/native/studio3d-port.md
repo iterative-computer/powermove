@@ -2067,8 +2067,8 @@ Integrated UI round 4 (`d72d3ab2c`) before validating lifecycle and export.
 The shell installed its unconditional close callback after the application's
 save/durability callback. GPUI retains one callback, so the close button removed
 the window without closing its kernel session. A subsequent Quit closed the
-remaining visible project but could not release the library. Reproduced with
-two copied project windows and the exact library-release error. The shell now
+remaining visible project but could not release the library. Reproduced the
+exact library-release error after a copied session's close-button action. The shell now
 retains the application's callback; the application forgets the window session
 only after its durable close succeeds.
 
@@ -2085,5 +2085,8 @@ regressions passed; the Error Log regression passed. An explicitly supplied
 disposable walkthrough profile opens with 12 accepted undo-history entries.
 The recovered portable copy preserves the document, history and embedded media
 byte for byte, with all container checksums verified. The original profile is
-untouched. The real shell close-callback regression and final running-app
-verification are pending; no new performance acceptance is claimed yet.
+untouched. The real shell close-callback regression also passes: a factory's
+close refusal keeps its window alive. Running-app verification opened the
+walkthrough project from Home, opened a second project in a separate window,
+closed the second with its close button, retained the first project, and quit
+normally. No new performance acceptance is claimed yet.
