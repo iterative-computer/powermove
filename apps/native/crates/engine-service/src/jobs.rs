@@ -1450,11 +1450,10 @@ fn fill_cache(
             continue;
         }
         // Every frame of a chunk that can't play, its probes too, exactly.
-        for i in first..end {
+        for (i, frame) in frames.iter().enumerate().take(end).skip(first) {
             if refused(i) {
                 continue;
             }
-            let frame = &frames[i];
             let drawn = draw(renderer, frame)?;
             if let Some(bytes) = &drawn {
                 store(frame, bytes)?;

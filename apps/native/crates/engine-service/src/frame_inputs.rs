@@ -302,11 +302,14 @@ impl Index {
     }
 }
 
+/// A named composition's digest, and the compositions and assets it names.
+type NamedComp = ([u8; 32], Vec<String>, Vec<String>);
+
 /// Compositions and assets by id, digested once, with what a named
 /// composition names in turn.
 struct Named<'a> {
     root: &'a Node,
-    comps: HashMap<String, Option<([u8; 32], Vec<String>, Vec<String>)>>,
+    comps: HashMap<String, Option<NamedComp>>,
     assets: HashMap<String, Option<[u8; 32]>>,
     /// Assets named from inside named compositions.
     assets_seen: BTreeSet<String>,
@@ -339,7 +342,7 @@ impl<'a> Named<'a> {
         }
         out
     }
-    fn comp(&mut self, id: &str) -> Option<([u8; 32], Vec<String>, Vec<String>)> {
+    fn comp(&mut self, id: &str) -> Option<NamedComp> {
         let root = self.root;
         self.comps
             .entry(id.to_owned())

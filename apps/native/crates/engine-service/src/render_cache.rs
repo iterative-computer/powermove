@@ -317,6 +317,8 @@ impl Default for Background {
         }
     }
 }
+/// Answers a fill's raster overrides for a document (see [`BackgroundHost`]).
+pub type Pin = Arc<dyn Fn(u64, &mut crate::jobs::JobSession) + Send + Sync>;
 /// What background rendering needs from the app.
 #[derive(Clone)]
 pub struct BackgroundHost {
@@ -324,7 +326,7 @@ pub struct BackgroundHost {
     pub executable: PathBuf,
     /// Answers a fill's raster overrides for document `doc_id`, as Render
     /// Selection does.
-    pub pin: Arc<dyn Fn(u64, &mut crate::jobs::JobSession) + Send + Sync>,
+    pub pin: Pin,
     /// Something else is rendering for the person (an export): background
     /// rendering stops and waits.
     pub busy: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -626,6 +628,7 @@ impl DiskFrames {
     /// composition state (scene, output tone, override wrappers, or, looked
     /// at every 2 s, a media file's stamp) takes a new fingerprint off this
     /// thread and finds its frames on disk. Returns whether it did.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe(
         &self,
         scene: &Scene,
