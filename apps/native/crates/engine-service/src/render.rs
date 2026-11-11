@@ -198,6 +198,11 @@ pub struct Engine {
     scopes: Option<crate::scopes::Tap>,
     /// The disk render cache playback reads (`crate::render_cache`).
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
+    last_frame: Instant,
+    idle_released: bool,
+    memory_client: crate::memory::Registration,
+    memory_request: Arc<std::sync::atomic::AtomicU64>,
+    budgeted_surfaces: u64,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -223,6 +228,100 @@ pub struct Submission {
     pub compat_late: Vec<CompatNeed>,
 }
 impl Engine {
+    pub fn memory_usage(&self) -> crate::memory::CacheUsage {
+        let media = self.renderer.media_usage();
+        crate::memory::CacheUsage {
+            target_pool_bytes: self.renderer.target_pool_bytes(),
+            target_pool_idle: self.renderer.target_pool_idle(),
+            targets_created: self.renderer.target_pool_created(),
+            image_bytes: self.renderer.image_cache_bytes(),
+            converted_frame_bytes: self.renderer.converted_frame_bytes(),
+            decoded_frame_bytes: media.frame_cache as u64,
+            decoder_bytes: media.decoders as u64,
+            decoder_sessions: media.sessions,
+            decoder_pool_free_bytes: media.pool.free_bytes as u64,
+            surface_bytes: self
+                .pool
+                .iter()
+                .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
+                .sum(),
+            text_bytes: self.renderer.text_cache_bytes(),
+            vector_bytes: self.renderer.vector_cache_bytes(),
+            pyramid_bytes: self.renderer.pyramid_bytes(),
+            geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
+                + self.renderer.scene3d_resident().map_bytes,
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.renderer.clear_draw_reuse();
+        self.renderer.release_idle_targets();
+        self.renderer.release_idle_media();
+        self.cache.clear();
+        self.pool.retain(|surface| Arc::strong_count(surface) > 1);
+        self.offscreen = None;
+        self.idle_released = true;
+        crate::memory::pressure_relief();
+    }
+
+    pub fn maintain_memory(&mut self) -> bool {
+        self.govern_memory();
+        if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
+            self.release_idle_memory();
+            return true;
+        }
+        false
+    }
+
+    pub fn govern_memory(&mut self) {
+        use std::sync::atomic::Ordering;
+        let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
+        let surfaces = self.memory_usage().surface_bytes;
+        let share = self.memory_client.grant();
+        if request != u64::MAX || surfaces != self.budgeted_surfaces {
+            self.budgeted_surfaces = surfaces;
+            // In-flight surfaces are pinned. Divide only the remainder,
+            // so every independently reusable cache shares the same allowance.
+            let cache = share.saturating_sub(surfaces);
+            self.renderer
+                .apply_media_lease(pm_media::decode::service::MediaLease {
+                    frame_cache: (cache * 15 / 100) as usize,
+                    decoders: (cache / 4) as usize,
+                });
+            self.renderer.set_image_cache_budget(cache / 5);
+            self.renderer.set_converted_frame_budget(cache / 10);
+            self.renderer.set_target_pool_budget(cache / 10);
+            self.renderer.set_vector_cache_budget(cache / 20, 512);
+            self.renderer.trim(cache / 20);
+            if request != u64::MAX {
+                self.cache.clear();
+                self.pool.retain(|s| Arc::strong_count(s) > 1);
+            }
+            if crate::memory::pressure() == crate::memory::Pressure::Critical {
+                self.release_idle_memory();
+                self.renderer.trim(0);
+                self.renderer.set_image_cache_budget(share / 5);
+                crate::memory::pressure_relief();
+            }
+        }
+        let u = self.memory_usage();
+        self.memory_client
+            .report(pm_protocol::lease::LeaseCategories {
+                frame_cache: crate::memory::bytes(u.decoded_frame_bytes),
+                render_cache: crate::memory::bytes(
+                    u.pyramid_bytes
+                        + u.target_pool_bytes
+                        + u.image_bytes
+                        + u.converted_frame_bytes
+                        + u.text_bytes
+                        + u.vector_bytes,
+                ),
+                surface_pool: crate::memory::bytes(u.surface_bytes),
+                decoders: crate::memory::bytes(u.decoder_bytes),
+                geometry_3d: crate::memory::bytes(u.geometry_bytes),
+                ..Default::default()
+            });
+    }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {
@@ -333,7 +432,16 @@ impl Engine {
         let pipeline = metal
             .new_render_pipeline_state(&desc)
             .map_err(|s| anyhow!(s))?;
+        let memory_request = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let pending = memory_request.clone();
+        let memory_client = crate::memory::Registration::new(12, move |share, _| {
+            pending.store(share, std::sync::atomic::Ordering::Release);
+        });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+        renderer.apply_media_lease(pm_media::decode::service::MediaLease {
+            frame_cache: 24 << 20,
+            decoders: 32 << 20,
+        });
         renderer.set_draw_reuse(true);
         renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
@@ -354,8 +462,8 @@ impl Engine {
             renderer,
             metal,
             pipeline,
-            pool: Vec::with_capacity(11),
-            cache: VecDeque::with_capacity(8),
+            pool: Vec::with_capacity(4),
+            cache: VecDeque::with_capacity(4),
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
@@ -374,6 +482,11 @@ impl Engine {
             scope_frames: None,
             scopes: None,
             disk: None,
+            last_frame: Instant::now(),
+            idle_released: false,
+            memory_client,
+            memory_request,
+            budgeted_surfaces: u64::MAX,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -521,6 +634,9 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.renderer.set_preview_media(false);
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         self.sync_studio(scene)?;
         self.sync_fonts();
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
@@ -561,6 +677,9 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        self.govern_memory();
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         objc2::rc::autoreleasepool(|_| {
             self.encode_inner(scene, spec, layer, overlays, capture, trace)
         })
@@ -593,8 +712,7 @@ impl Engine {
         // by submitted consumers still protect their storage until completion.
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
-        let hit = self
-            .cache_enabled
+        let hit = (self.cache_enabled && !spec.exact)
             .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
         let mut stand_ins = false;
@@ -606,7 +724,7 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && spec.moment != Moment::Paused;
+        let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
         let disk = looked
             .then(|| self.disk.as_ref()?.read(scene, time))
             .flatten()
@@ -626,12 +744,25 @@ impl Engine {
             found
         } else {
             let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-            let capacity = ((128 * 1024 * 1024 / bytes).clamp(1, 8)) as usize;
+            let capacity = ((48 * 1024 * 1024 / bytes).clamp(1, 4)) as usize;
             while self.cache.len() >= capacity {
                 self.cache.pop_front();
             }
             self.pool
                 .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+            // At most three submitted consumers plus the next producer.
+            // Evict cached frames to make room before allocating another surface.
+            while self.pool.len() >= 4
+                && !self
+                    .pool
+                    .iter()
+                    .any(|s| s.size == size && Arc::strong_count(s) == 1)
+                && !self.cache.is_empty()
+            {
+                self.cache.pop_front();
+                self.pool
+                    .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+            }
             let free = self
                 .pool
                 .iter()
@@ -640,7 +771,7 @@ impl Engine {
             let surface = match free {
                 Some(s) => s,
                 None => {
-                    anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                    anyhow::ensure!(self.pool.len() < 4, "bounded source pool exhausted");
                     let s = Arc::new(ExportedSurface::create(
                         &self.gpu.device,
                         &SurfaceRequest {
@@ -673,8 +804,15 @@ impl Engine {
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
-                self.renderer.set_scrub(spec.moment == Moment::Scrub);
-                self.renderer.set_playback(spec.decode_deadline);
+                self.renderer.set_preview_media(!spec.exact);
+                self.renderer.set_draw_reuse(!spec.exact);
+                self.renderer
+                    .set_scrub(!spec.exact && spec.moment == Moment::Scrub);
+                self.renderer.set_playback(if spec.exact {
+                    None
+                } else {
+                    spec.decode_deadline
+                });
                 self.renderer.set_isolate_layers(true);
                 if let Some(store) = &self.compat_document {
                     store.begin_frame(spec.moment);
@@ -717,7 +855,7 @@ impl Engine {
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
                 // A frame with stand-ins is not the exact picture of its time.
-                if self.cache_enabled && !stand_ins {
+                if self.cache_enabled && !spec.exact && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
                         surface: surface.clone(),

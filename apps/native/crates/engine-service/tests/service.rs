@@ -206,6 +206,35 @@ fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
     assert_eq!(drawn[90 * 320 + 160], [0., 1., 0.]);
     assert_eq!(drawn[0], actual[0]);
 }
+
+#[test]
+fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do_not() {
+    use pm_engine_service::MediaMode;
+    let mut catalog = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        optimized: [("large".into(), "full-size.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("hd.mov")
+    );
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Originals)["large"].to_str(),
+        Some("original.mov")
+    );
+    assert_eq!(
+        catalog.export_paths(false).paths["large"].to_str(),
+        Some("original.mov")
+    );
+    catalog.play_original.insert("large".into());
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("original.mov")
+    );
+}
 #[test]
 fn worker_exact_cache_and_revision_resize_retirement() {
     let s = snapshot();

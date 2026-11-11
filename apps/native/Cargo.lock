@@ -4856,6 +4856,7 @@ dependencies = [
  "pm-gpu",
  "pm-kernel",
  "pm-media",
+ "pm-memory",
  "pm-model",
  "pm-perf",
  "pm-promedia",
@@ -5073,6 +5074,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-memory"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pm-protocol",
 ]
 
 [[package]]
@@ -5462,6 +5471,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_transformer",
+ "pm-memory",
  "serde_json",
  "sha2",
  "url",

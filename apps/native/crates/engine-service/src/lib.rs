@@ -8,6 +8,7 @@ pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
 pub mod media;
+pub mod memory;
 pub mod policy;
 mod present;
 pub mod qos;
@@ -129,6 +130,9 @@ pub struct MediaCatalog {
     /// in Automatic in place of their originals (Final Cut's optimized
     /// media). Exports never read them.
     pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// High-resolution originals whose preview should use a ready HD proxy.
+    /// Runtime-only policy; never serialized into the project.
+    pub automatic_proxies: std::collections::BTreeSet<String>,
     /// Always Play Original: these assets never play a proxy or optimized
     /// media, in any mode.
     pub play_original: std::collections::BTreeSet<String>,
@@ -140,7 +144,7 @@ pub struct MediaCatalog {
 /// originals whatever this says; only an explicit draft export uses proxies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaMode {
-    /// Originals, and a proxy for a clip whose original is missing.
+    /// HD proxies for large sources, otherwise originals/optimized media.
     #[default]
     Automatic,
     /// Originals only: a clip whose original is missing is offline.
@@ -174,6 +178,13 @@ impl MediaCatalog {
         let mut paths = BTreeMap::new();
         for map in order {
             paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if mode == MediaMode::Automatic {
+            for id in &self.automatic_proxies {
+                if let Some(proxy) = self.proxies.get(id) {
+                    paths.insert(id.clone(), proxy.clone());
+                }
+            }
         }
         for id in &self.play_original {
             match self.originals.get(id) {
@@ -1422,6 +1433,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
+        engine.govern_memory();
         engine.poll();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
@@ -1904,7 +1916,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
                 comp: v.config.composition.clone(),
-                media: v.paths.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else {
+                    v.paths.clone()
+                },
                 content: v.content,
             };
             cursor = id;
@@ -2283,7 +2299,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
-            let _ = wakes.recv_timeout(timeout);
+            if engine.maintain_memory() {
+                for r in runtime.values() {
+                    if let Some(audio) = &r.transport.audio {
+                        audio.send(audio::AudioCtl::MemoryPressure);
+                    }
+                }
+            }
+            let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }
     drop(flights); // Command completion handlers hold their source leases.
@@ -2295,6 +2318,60 @@ pub struct Headless {
     engine: render::Engine,
 }
 impl Headless {
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.engine.memory_usage()
+    }
+
+    /// Submit a preview frame without allocating a CPU pixel readback.
+    pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        self.preview_with_pump(scene, spec, || {})
+    }
+
+    /// Pump the main-thread font broker between transient frame refusals.
+    pub fn preview_with_pump(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        mut pump: impl FnMut(),
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            pump();
+            match self.engine.frame(
+                scene,
+                spec,
+                None,
+                &OverlayGeometry::default(),
+                false,
+                Arc::default(),
+            ) {
+                Ok(Some(s)) => {
+                    s.commit();
+                    s.complete()?;
+                    anyhow::ensure!(
+                        s.failures.is_empty(),
+                        "memory benchmark frame omitted {} layers",
+                        s.failures.len()
+                    );
+                    return Ok(());
+                }
+                Ok(None) => anyhow::bail!("no headless surface"),
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.engine.release_idle_memory();
+    }
+    pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
+        memory::simulate_pressure(pressure);
+        self.engine.govern_memory();
+        self.engine.poll();
+    }
     pub fn new() -> Result<Self> {
         Ok(Self {
             engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,

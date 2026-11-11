@@ -273,7 +273,7 @@ pub struct SourceCache {
     blocks: Arc<Mutex<Blocks>>,
     ready: Condvar,
     work: Arc<Condvar>,
-    budget: usize,
+    budget: AtomicU64,
     next_id: AtomicU64,
     decoded: AtomicU64,
     hits: AtomicU64,
@@ -330,9 +330,11 @@ impl SourceCache {
             blocks: Arc::default(),
             ready: Condvar::new(),
             work: Arc::new(Condvar::new()),
-            budget: budget_bytes
-                .min(crate::chromium::TODAYS_BUDGET as usize)
-                .max(BLOCK * 8 * 4),
+            budget: AtomicU64::new(
+                budget_bytes
+                    .min(crate::chromium::TODAYS_BUDGET as usize)
+                    .max(BLOCK * 8 * 4) as u64,
+            ),
             next_id: AtomicU64::new(1),
             decoded: AtomicU64::new(0),
             hits: AtomicU64::new(0),
@@ -569,6 +571,14 @@ impl SourceCache {
         self.trim_pressure(std::time::Duration::ZERO);
     }
 
+    pub fn set_budget(&self, bytes: usize) {
+        self.budget.store(
+            bytes.min(crate::chromium::TODAYS_BUDGET as usize) as u64,
+            Ordering::Relaxed,
+        );
+        self.memory_pressure();
+    }
+
     /// A live playback also protects the input it is reading and the input
     /// its look-ahead and prepared starts still want: blocks read, checked
     /// or asked for again within [`PLAYBACK_PRESSURE_HOT`]. A prefetched
@@ -647,7 +657,7 @@ impl SourceCache {
         ) {
             blocks.bytes -= old.block.bytes();
         }
-        while blocks.bytes > self.budget && blocks.map.len() > 1 {
+        while blocks.bytes as u64 > self.budget.load(Ordering::Relaxed) && blocks.map.len() > 1 {
             let Some((&oldest, _)) = blocks
                 .map
                 .iter()

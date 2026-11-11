@@ -241,11 +241,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= dims.x || id.y >= dims.y) {
         return;
     }
-    let xy = vec2<i32>(id.xy);
-    let v = textureLoad(luma, xy, 0);
+    let input_dims = textureDimensions(luma);
+    // Keep the exact path's original arithmetic. Preview conversion alone
+    // supplies a smaller destination and samples at its pixel centres.
+    let source = (vec2<f32>(id.xy) + vec2<f32>(0.5)) * vec2<f32>(input_dims) / vec2<f32>(dims) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(source));
+    let hi = vec2<i32>(input_dims) - vec2<i32>(1);
+    let a = clamp(base, vec2<i32>(0), hi);
+    let b = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi);
+    let c = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi);
+    let d = clamp(base + vec2<i32>(1), vec2<i32>(0), hi);
+    let t = fract(source);
+    var v = textureLoad(luma, vec2<i32>(id.xy), 0);
+    if (any(input_dims != dims)) {
+        v = mix(mix(textureLoad(luma, a, 0), textureLoad(luma, b, 0), t.x),
+                mix(textureLoad(luma, c, 0), textureLoad(luma, d, 0), t.x), t.y);
+    }
     var stored: vec4<f32>;
     if (P.a.x == 1u) {
-        let cbcr = chroma_sample(id.x, id.y);
+        var cbcr = chroma_sample(id.x, id.y);
+        if (any(input_dims != dims)) {
+            cbcr = mix(mix(chroma_sample(u32(a.x), u32(a.y)), chroma_sample(u32(b.x), u32(b.y)), t.x),
+                       mix(chroma_sample(u32(c.x), u32(c.y)), chroma_sample(u32(d.x), u32(d.y)), t.x), t.y);
+        }
         let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
         let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
         if (P.hdr.y == 1.0) { stored = vec4<f32>(bt2020_cl_rgb(ycc), v.a); }

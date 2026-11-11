@@ -22,7 +22,7 @@ pub struct ProxyRecipe {
 }
 
 impl ProxyRecipe {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     pub fn new(
         requested_format: ProxyFormat,
@@ -42,7 +42,11 @@ impl ProxyRecipe {
             ProxySize::Full => source_height,
             ProxySize::Half => (source_height / 2).max(1),
             ProxySize::Quarter => (source_height / 4).max(1),
-            ProxySize::P1080 => 1080,
+            // Fit the whole HD box, including ultrawide and portrait media.
+            // VideoToolbox memory follows coded pixels, not the viewer crop.
+            ProxySize::P1080 => {
+                ((u64::from(source_height) * 1920) / u64::from(source_width)).clamp(1, 1080) as u32
+            }
             ProxySize::P720 => 720,
         };
         let height = max_height.min(source_height);
@@ -413,6 +417,22 @@ fn disk_reserve(capacity: u64) -> u64 {
 
 #[cfg(test)]
 mod cancel_tests {
+    #[test]
+    fn hd_proxy_fits_both_dimensions_and_keeps_aspect() {
+        use super::*;
+        for (w, h, expected) in [
+            (3840, 2160, (1920, 1080)),
+            (3840, 1080, (1920, 540)),
+            (2160, 3840, (608, 1080)),
+            (640, 360, (640, 360)),
+        ] {
+            let recipe =
+                ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false)
+                    .unwrap();
+            assert_eq!((recipe.width, recipe.height), expected);
+            assert!(recipe.width <= 1920 && recipe.height <= 1080);
+        }
+    }
     use super::*;
     use std::cell::Cell;
 

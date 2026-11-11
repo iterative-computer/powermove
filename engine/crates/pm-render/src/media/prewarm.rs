@@ -434,6 +434,8 @@ impl MediaCache {
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
     ) -> Result<bool, MediaFailure> {
+        self.source_seen
+            .insert(path.to_path_buf(), std::time::Instant::now());
         self.drain_prepared();
         let current = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;

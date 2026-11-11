@@ -635,7 +635,9 @@ pub(crate) fn from_container(
                 .and_then(|h| History::from_saved(h, open_comp.as_deref()))
         },
     );
-    Ok(OpenedProject {
+    // Free the parsed history tree before asking malloc to return pages.
+    drop(raw_history);
+    let opened = OpenedProject {
         file: ProjectFile {
             path,
             format,
@@ -654,7 +656,9 @@ pub(crate) fn from_container(
         document: pm_model::Document::new(Some(canonical), 1),
         open_comp,
         history,
-    })
+    };
+    crate::memory::pressure_relief();
+    Ok(opened)
 }
 
 /// `normalizeCompositions` (main `core/validate/project.ts`): a project from

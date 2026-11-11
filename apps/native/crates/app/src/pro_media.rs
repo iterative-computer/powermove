@@ -363,6 +363,9 @@ struct State {
     jobs: BTreeMap<TaskId, Job>,
     /// Why the running encode waits (low disk, playback or an export).
     waiting: Option<(TaskId, pm_proxy::PauseReason)>,
+    /// Runtime facts, independent of the saved project and user proxy intent.
+    preview_checked: HashSet<String>,
+    preview_large: HashSet<String>,
 }
 
 type IoJob = Box<dyn FnOnce(&Arc<Inner>) + Send>;
@@ -1116,6 +1119,8 @@ impl ProMedia {
                     present: HashSet::new(),
                     jobs: BTreeMap::new(),
                     waiting: None,
+                    preview_checked: HashSet::new(),
+                    preview_large: HashSet::new(),
                 }),
                 profile,
                 objects,
@@ -1215,17 +1220,61 @@ impl ProMedia {
     /// rendition files exist. `Renditions` follows when anything changed.
     pub fn identify(&self, project: String, originals: Vec<(String, PathBuf)>) {
         self.inner.io(move |inner| {
-            let mut changed = false;
+            let mut changed = inner.refresh_present();
             let stop = AtomicBool::new(false);
+            let mut previews = Vec::new();
             for (asset, path) in &originals {
                 if let Ok(content) = inner.content_of(path, &stop) {
                     changed |= inner.note(&project, asset, path, &content);
+                    let unchecked = !inner
+                        .state
+                        .lock()
+                        .unwrap()
+                        .preview_checked
+                        .contains(&content);
+                    if unchecked {
+                        let large = pm_media::probe::probe(path)
+                            .ok()
+                            .and_then(|p| p.probe.video)
+                            .is_some_and(|v| v.width > 1920 || v.height > 1080);
+                        let mut state = inner.state.lock().unwrap();
+                        state.preview_checked.insert(content.clone());
+                        if large {
+                            state.preview_large.insert(content.clone());
+                            changed = true;
+                        }
+                    }
+                    let state = inner.state.lock().unwrap();
+                    let original_only = state
+                        .index
+                        .play_original
+                        .get(&project)
+                        .is_some_and(|ids| ids.contains(asset));
+                    let ready = state
+                        .index
+                        .contents
+                        .get(&content)
+                        .and_then(|r| r.proxy.as_ref())
+                        .is_some_and(|proxy| state.present.contains(&proxy.path));
+                    if state.preview_large.contains(&content) && !original_only && !ready {
+                        previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
+                    }
                 }
             }
             changed |= inner.refresh_present();
             if changed {
                 inner.save();
                 let _ = inner.events.try_send(Event::Renditions);
+            }
+            if !previews.is_empty() {
+                // This derived preview does not change Create Proxies on
+                // Import, or any authored proxy/export preference.
+                let prefs = Preferences {
+                    size: ProxySize::P1080,
+                    format: ProxyFormat::ProResProxy,
+                    ..inner.preferences()
+                };
+                let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
             }
         });
     }
@@ -1249,6 +1298,9 @@ impl ProMedia {
             let Some(r) = state.index.contents.get(&content) else {
                 continue;
             };
+            if state.preview_large.contains(&content) {
+                media.automatic_proxies.insert(asset.clone());
+            }
             if let Some(proxy) = present(r.proxy.as_ref()) {
                 media.proxies.entry(asset.clone()).or_insert(proxy);
             }

@@ -1343,6 +1343,31 @@ impl Renderer {
         self.media.bytes
     }
 
+    pub fn image_cache_bytes(&self) -> u64 {
+        self.media.image_bytes()
+    }
+
+    /// Explicit viewer opt-in; CLI exact/reference and export paths keep
+    /// native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, enabled: bool) {
+        self.media.preview_media = enabled;
+        self.media.draw_edge = None;
+    }
+
+    pub fn set_image_cache_budget(&mut self, bytes: u64) {
+        self.media.trim_images(bytes);
+    }
+    pub fn set_converted_frame_budget(&mut self, bytes: u64) {
+        self.media.trim_frames(bytes);
+    }
+    pub fn set_target_pool_budget(&mut self, bytes: u64) {
+        self.pool.set_free_budget(bytes);
+        self.pyramids.set_budget(bytes);
+    }
+    pub fn converted_frame_bytes(&self) -> u64 {
+        self.media.frame_bytes()
+    }
+
     /// Nominal texel bytes of cached text rasters.
     pub fn text_cache_bytes(&self) -> u64 {
         self.text_gpu.cached_bytes()
@@ -1506,11 +1531,17 @@ impl Renderer {
     /// kept bottom of the last frame (`crate::frame_prefix`), and every
     /// content cache stay; the next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
+        self.media.retire_cold_sessions();
         let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
         self.pyramids.clear();
         self.binds.clear();
         before - self.pool.bytes()
+    }
+
+    pub fn release_idle_media(&mut self) {
+        self.media.release_idle_frames();
+        self.binds.clear();
     }
 
     /// Native SVG fallback diagnostic for the most recently resolved SVG.
@@ -2054,6 +2085,9 @@ impl Renderer {
         // The previous frame's vector textures become evictable, and the
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
+        self.pool.begin_frame();
+        self.media.begin_frame();
+        self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();
         let mut encoder = self
