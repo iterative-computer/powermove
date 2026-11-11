@@ -275,6 +275,10 @@ enum ParentMessage {
     Compat {
         id: u64,
         answers: std::result::Result<Vec<WireAnswer>, String>,
+        /// Microseconds the answer was held for viewer activity (background
+        /// work): not the frame's cost.
+        #[serde(default)]
+        deferred_us: u64,
     },
     Cancel,
 }
@@ -641,15 +645,21 @@ impl ExportHandle {
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
                         // Background work runs extensions only while the
                         // person is away, as it renders.
+                        let held = std::time::Instant::now();
                         if let Some(delay) = &idle {
                             interactive.wait_idle(&cancel, delay, &mut seen, &mut active_at);
                         }
+                        let deferred_us = held.elapsed().as_micros() as u64;
                         let answered = match &overrides {
                             Some(answer) => answer(&needs),
                             None => Err("No window has this project's extensions open".into()),
                         };
                         let answers = wire_answers(id.as_str(), ask, answered);
-                        reply(&ParentMessage::Compat { id: ask, answers });
+                        reply(&ParentMessage::Compat {
+                            id: ask,
+                            answers,
+                            deferred_us,
+                        });
                     }
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
@@ -804,7 +814,14 @@ pub fn run_child() -> Result<()> {
                     let _ = grant.send(whole_frame);
                     continue;
                 }
-                Ok(ParentMessage::Compat { id, answers }) => match replies.reply(id, answers) {
+                Ok(ParentMessage::Compat {
+                    id,
+                    answers,
+                    deferred_us,
+                }) => match {
+                    replies.deferred_us.fetch_add(deferred_us, Ordering::AcqRel);
+                    replies.reply(id, answers)
+                } {
                     Ok(()) => continue,
                     Err(e) => e,
                 },
@@ -998,6 +1015,7 @@ pub fn run_child() -> Result<()> {
                 &mut |frame| {
                     let _ = send(&mut std::io::stdout().lock(), &ChildMessage::Frame(frame));
                 },
+                &rasters.deferred_us,
             );
         }
         let job = pm_export::render::ExportJob {
@@ -1102,6 +1120,8 @@ struct JobRasters {
     next: std::sync::atomic::AtomicU64,
     waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answers>>>,
     answered: Mutex<JobAnswers>,
+    /// Microseconds the parent held answers for viewer activity, so far.
+    deferred_us: AtomicU64,
 }
 type Answers = std::result::Result<Vec<WireAnswer>, String>;
 type JobKey = (String, String, u64, u64);
@@ -1290,6 +1310,7 @@ fn fill_cache(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
     report: &mut dyn FnMut(crate::render_cache::FrameReport),
+    deferred: &AtomicU64,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
     if fill.budget_us.is_some() {
@@ -1327,6 +1348,8 @@ fn fill_cache(
         let time = pm_protocol::common::Ticks::new(frame.ticks)?;
         let request = spec.request(&scene)?;
         gate.take_measured();
+        gate.take_waited();
+        let deferred_before = deferred.load(Ordering::Acquire);
         let (started, cpu) = (std::time::Instant::now(), crate::trace::thread_cpu_ms());
         let read = match pm_export::render::render_frame_reusing(
             renderer,
@@ -1346,7 +1369,11 @@ fn fill_cache(
         let (gpu_us, submissions, untimed) = gate.take_measured();
         let cost = Sample {
             gpu_us,
-            wall_us: started.elapsed().as_secs_f64() * 1e6,
+            wall_us: own_time(
+                started.elapsed().as_secs_f64() * 1e6,
+                gate.take_waited(),
+                deferred.load(Ordering::Acquire) - deferred_before,
+            ),
             cpu_us: (crate::trace::thread_cpu_ms() - cpu) * 1e3,
             submissions,
             untimed,
@@ -1496,6 +1523,13 @@ fn fill_cache(
     Ok(fill.dir.clone())
 }
 
+/// A probe's own time in microseconds: its whole draw (`wall_us`) less the
+/// time it waited for GPU grants and for override answers the parent held
+/// for viewer activity: deferral for the person is never a frame's cost.
+fn own_time(wall_us: f64, waited_us: f64, deferred_us: u64) -> f64 {
+    (wall_us - waited_us - deferred_us as f64).max(0.)
+}
+
 /// Whether a GPU grant admits the rest of a frame: an export's, once the
 /// viewer has been quiet for [`QUIET`]; background work's never: it is
 /// granted right after the viewer is seen idle and only in bounded units
@@ -1596,6 +1630,9 @@ struct ChildGate {
     /// Microseconds measured since [`ChildGate::take_measured`] last ran,
     /// the submissions they came from, and how many had no GPU timestamps.
     measured: Mutex<(f64, u32, u32)>,
+    /// Microseconds spent waiting for grants (the viewer's turn) since
+    /// [`ChildGate::take_waited`] last ran: not a frame's own time.
+    waited_us: Mutex<f64>,
 }
 impl ChildGate {
     fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
@@ -1603,7 +1640,12 @@ impl ChildGate {
             permits: Mutex::new(permits),
             costs: Mutex::default(),
             measured: Mutex::default(),
+            waited_us: Mutex::default(),
         }
+    }
+    /// Microseconds waited for grants since the last call.
+    fn take_waited(&self) -> f64 {
+        std::mem::take(&mut *self.waited_us.lock().unwrap())
     }
     /// The measured time of the submissions finished since the last call
     /// (one frame's GPU time when taken around it), their count, and how
@@ -1619,11 +1661,21 @@ impl pm_export::render::GpuGate for ChildGate {
             costs.frame_units = costs.frame_units.max(units);
         }
         send(&mut std::io::stdout().lock(), &ChildMessage::Gpu).ok()?;
+        let asked = std::time::Instant::now();
         let permits = self.permits.lock().unwrap();
+        let admitted = || {
+            *self.waited_us.lock().unwrap() += asked.elapsed().as_secs_f64() * 1e6;
+        };
         while !cancel.load(Ordering::Acquire) {
             match permits.recv_timeout(std::time::Duration::from_millis(5)) {
-                Ok(true) => return Some(units),
-                Ok(false) => return Some(self.costs.lock().unwrap().bounded(units)),
+                Ok(true) => {
+                    admitted();
+                    return Some(units);
+                }
+                Ok(false) => {
+                    admitted();
+                    return Some(self.costs.lock().unwrap().bounded(units));
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return None,
             }
@@ -1696,6 +1748,26 @@ mod tests {
         assert_eq!(divisible.bounded(63), 1, "cost grows with the band");
         assert_eq!(divisible.bounded(62), 1, "tested once");
     }
+    /// A draw that waited for its grant (the viewer's turn), or for override
+    /// answers held for the person, doesn't count that wait as its own time.
+    #[test]
+    fn a_probe_never_counts_its_wait_for_the_viewer() {
+        let (permit, permits) = std::sync::mpsc::channel();
+        let gate = ChildGate::new(permits);
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            permit.send(true).unwrap();
+        });
+        use pm_export::render::GpuGate;
+        assert_eq!(gate.admit(0, 4, &AtomicBool::new(false)), Some(4));
+        late.join().unwrap();
+        let waited = gate.take_waited();
+        assert!(waited >= 290_000., "{waited}");
+        assert_eq!(gate.take_waited(), 0.);
+        // A 450 ms draw that waited 300 ms for its grant and had 100 ms of
+        // answers held: 50 ms of its own.
+        assert_eq!(own_time(450_000., 300_000., 100_000), 50_000.);
+    }
     /// An activity that lands while a background grant is being checked
     /// and sent waits for it; one that landed first stops it, so nothing
     /// is sent once the person has acted.
@@ -1719,7 +1791,10 @@ mod tests {
             epoch_during_send = activity.epoch();
             drop(play);
         }));
-        assert_eq!(epoch_during_send, seen, "no activity landed inside the grant");
+        assert_eq!(
+            epoch_during_send, seen,
+            "no activity landed inside the grant"
+        );
         let start = std::time::Instant::now();
         while activity.epoch() == seen {
             assert!(start.elapsed() < std::time::Duration::from_secs(2));

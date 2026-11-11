@@ -2255,13 +2255,19 @@ mod tests {
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
-        let scene = scene();
+        // At 10 fps (a 90 ms budget), so a loaded machine's probes of the
+        // fixture's light frames stay light.
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["fps"] = 10.into();
+        let scene = scene_from(&project.to_string());
         let activity = crate::jobs::Activity::default();
         disk.set_activity(activity.clone());
         disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        // The viewer played frame 50 too slowly (chunk 45-59 at 30 fps).
-        let at = Ticks::new(Rate::FPS_30.frame_start(50).unwrap()).unwrap();
+        // Playback dropped frame 17 (chunk 15-19 at 10 fps).
+        let rate = Rate::new(10_000, 1000).unwrap();
+        let at = Ticks::new(rate.frame_start(17).unwrap()).unwrap();
         disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
         assert_eq!(disk.bars().bars, vec![(1.5, 2., BarState::Missing)]);
         disk.set_background(Background {
@@ -2301,7 +2307,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(present(&disk), (45..60).collect());
+        assert_eq!(present(&disk), (15..20).collect());
         let fills = disk.inner.state.lock().unwrap().fill.serial;
         std::thread::sleep(Duration::from_millis(600));
         assert_eq!(
