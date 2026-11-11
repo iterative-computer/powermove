@@ -12,8 +12,12 @@ node tools/visual-parity/v1-frames.mjs --profile "$S/v1-clone" --project Paper.p
 # 3. V2 frames: the lane app (pm-gui launch with --electron-profile <another clone> to migrate it,
 #    profile folder named com.zellzoi.powermove.native-beta) has the project open; the app's MCP renders.
 node tools/visual-parity/v2-frames.mjs --app <lane>/Powermove.app --profile <V2 profile> --project Paper.pmv --out "$S/paper"
-# 4. The sheet.
-node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes.json]
+# 4. Optional: the paused viewer as a person sees it (the lane app shows the project; --rect is
+#    the viewer canvas in the native-resolution window screenshot). Capture v1 at the viewer's
+#    render size (--width) into its own directory to compare viewer with viewer.
+node tools/visual-parity/viewer-frames.mjs --pid <pid> --window <id> --rect x,y,w,h --out "$S/paper"
+# 5. The sheet.
+node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes.json] [--summary summary.txt]
 ```
 
 - v1 frames are the exporter's frames (`renderToPixels` with the export
@@ -24,6 +28,11 @@ node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes
   whose extension isn't installed; for such a profile use `--via stills`
   (`render_frames`, at most 1280 wide, missing effects bypassed as the viewer
   does) and capture v1 with `--width 1280`.
+- v1 waits until the project's user-extension effects have registered; any
+  still missing are logged and listed in the manifest.
+- v1's viewer renders at composition × min(1, zoom × backing scale) ×
+  quality, and effects see that render's pixels; V2's viewer does the same.
+  Compare a viewer capture only with v1 at that size, never with the export.
 - Times: every `--step` seconds, the last frame, and `--times` (seconds, or
   `s:ff` timecode at the project rate). V2 reuses v1's list.
 - `notes.json` maps a sample label (`t13_458`) to its cause or the reason a

@@ -58,6 +58,25 @@ try {
     return { name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur };
   });
   log(`opened ${info.name} ${info.w}x${info.h} ${info.fps} fps ${info.dur}s`);
+  // User extensions register after the built-ins: wait until the project's
+  // effect definitions stop arriving (none missing, or no change for 10 s),
+  // or the first frames are drawn with those effects bypassed.
+  const missingNow = () => page.evaluate(() => {
+    const out = new Set();
+    for (const comp of [window.PM.proj, ...Object.values(window.PM.proj.comps || {})]) for (const layer of comp.layers) {
+      for (const fx of layer.fx || []) if (!window.PM.FX?.[fx.type]) out.add(fx.type);
+    }
+    return [...out].sort();
+  });
+  let missing = await missingNow();
+  for (let quiet = 0, waited = 0; missing.length && quiet < 10_000 && waited < 90_000; waited += 500) {
+    await page.waitForTimeout(500);
+    const next = await missingNow();
+    quiet = next.join() === missing.join() ? quiet + 500 : 0;
+    missing = next;
+  }
+  if (missing.length) log(`effects without a definition (bypassed): ${missing.join(', ')}`);
+  info.missingEffects = missing;
   const times = sampleTimes(info, args);
   // --width renders smaller, as v1's viewer below Full and its agent stills do.
   const width = Number(args.width) || info.w, height = Math.round(width * info.h / info.w);
@@ -71,6 +90,9 @@ try {
     log(`${time.toFixed(3)}s ${r.stable ? 'stable' : 'UNSTABLE'} after ${r.renders} renders${r.prepareError ? ` prepareError ${r.prepareError}` : ''}`);
   }
   writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: `v1.2.0 export path, ${width}x${height}`, project: info, pending, samples }, null, 1));
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
 } finally {
   // v1's quit barrier can wait on the renderer forever; the clone needs no clean quit.
   const pid = app.process().pid;

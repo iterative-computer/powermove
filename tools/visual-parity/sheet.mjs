@@ -1,6 +1,6 @@
 // The visual parity contact sheet (README.md).
 //
-//   node tools/visual-parity/sheet.mjs --dir <out> [--title Paper] [--notes notes.json]
+//   node tools/visual-parity/sheet.mjs --dir <out> [--title Paper] [--notes notes.json] [--summary summary.txt]
 //
 // Reads <dir>/v1/manifest.json and <dir>/v2/manifest.json, writes a heat map
 // per sample to <dir>/diff/ and <dir>/index.html: rows are times, columns are
@@ -18,8 +18,12 @@ for (let i = 0; i < argv.length; i += 2) opt[argv[i].replace(/^--/, '')] = argv[
 const dir = path.resolve(opt.dir);
 const title = opt.title ?? path.basename(dir);
 const notes = opt.notes && existsSync(opt.notes) ? JSON.parse(readFileSync(opt.notes, 'utf8')) : {};
+// Paragraphs (blank-line separated) shown under the title: the findings.
+const summary = opt.summary && existsSync(opt.summary) ? readFileSync(opt.summary, 'utf8').trim().split(/\n\s*\n/) : [];
 const v1 = JSON.parse(readFileSync(path.join(dir, 'v1/manifest.json'), 'utf8'));
 const v2 = existsSync(path.join(dir, 'v2/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'v2/manifest.json'), 'utf8')) : { samples: [] };
+const viewer = existsSync(path.join(dir, 'v2viewer/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'v2viewer/manifest.json'), 'utf8')) : null;
+const viewerByTime = new Map((viewer?.samples ?? []).map((s) => [s.time.toFixed(3), `v2viewer/${s.file}`]));
 mkdirSync(path.join(dir, 'diff'), { recursive: true });
 
 const THRESHOLD = 16;
@@ -57,7 +61,7 @@ const v2ByTime = new Map(v2.samples.map((s) => [s.time.toFixed(3), s]));
 for (const s of v1.samples) {
   const key = s.time.toFixed(3);
   const label = s.file.replace(/\.png$/, '');
-  const row = { time: s.time, label, v1: `v1/${s.file}`, note: notes[label] };
+  const row = { time: s.time, label, v1: `v1/${s.file}`, viewer: viewerByTime.get(key), note: notes[label] };
   const other = v2ByTime.get(key);
   if (!other) { row.missing = 'no V2 frame'; rows.push(row); continue; }
   row.v2 = `v2/${other.file}`;
@@ -95,23 +99,24 @@ body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:13px/1.4 -a
 h1{font-size:20px;margin:0 0 4px}p{margin:0 0 12px;color:var(--muted)}
 table{border-collapse:collapse;width:100%}td,th{border-top:1px solid var(--line);padding:6px;vertical-align:top;text-align:left}
 th{font-weight:600;color:var(--muted)}img{width:100%;display:block;cursor:zoom-in}
-.cols td.img{width:31%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
-.note{color:var(--muted);max-width:40ch}
+.cols td.img{width:${viewer ? 23 : 31}%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
+.note{color:var(--muted);max-width:40ch}.summary{color:var(--fg);max-width:90ch}
 </style></head><body>
 <h1>${esc(title)}: v1.2.0 | V2</h1>
 <p>${esc(v1.project.w)}×${esc(v1.project.h)} at ${esc(fps)} fps, ${rows.length} samples. v1: ${esc(v1.source)}. V2: ${esc(v2.source ?? 'missing')}.
-Visible = share of pixels whose 3×3-averaged colour still differs by more than ${THRESHOLD}/255 in a channel. Heat: black = same, blue → red → yellow = larger. Click an image for full size.</p>
+Visible = share of pixels whose 3×3-averaged colour still differs by more than ${THRESHOLD}/255 in a channel. Heat: black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` The last column is ${esc(viewer.source)}: for looking, not measured.` : ''}</p>
+${summary.map((p) => `<p class="summary">${esc(p)}</p>`).join('\n')}
 <h2>Ranked by visible difference</h2>
 <table><tr><th>Time</th><th>Visible</th><th>Mean</th><th>Cause or accepted reason</th></tr>
 ${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</td><td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(r.note ?? '')}</td></tr>`).join('\n')}
 ${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="3">${esc(r.missing)}</td></tr>`).join('\n')}
 </table>
 <h2>Frames</h2>
-<table class="cols"><tr><th>Time</th><th>v1.2.0</th><th>V2</th><th>Difference</th></tr>
+<table class="cols"><tr><th>Time</th><th>v1.2.0</th><th>V2</th><th>Difference</th>${viewer ? '<th>V2 viewer, paused (screen)</th>' : ''}</tr>
 ${rows.map((r) => `<tr id="${r.label}"><td class="num">${tc(r.time, fps)}<br>${r.time.toFixed(3)} s<br><span class="${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</span><div class="note">${esc(r.note ?? r.missing ?? '')}</div></td>
 <td class="img"><a href="${r.v1}"><img loading="lazy" src="${r.v1}" alt="v1 ${r.time}"></a></td>
 <td class="img">${r.v2 ? `<a href="${r.v2}"><img loading="lazy" src="${r.v2}" alt="V2 ${r.time}"></a>` : ''}</td>
-<td class="img">${r.diff ? `<a href="${r.diff}"><img loading="lazy" src="${r.diff}" alt="difference ${r.time}"></a>` : ''}</td></tr>`).join('\n')}
+<td class="img">${r.diff ? `<a href="${r.diff}"><img loading="lazy" src="${r.diff}" alt="difference ${r.time}"></a>` : ''}</td>${viewer ? `<td class="img">${r.viewer ? `<a href="${r.viewer}"><img loading="lazy" src="${r.viewer}" alt="V2 viewer ${r.time}"></a>` : ''}</td>` : ''}</tr>`).join('\n')}
 </table></body></html>`;
 writeFileSync(path.join(dir, 'index.html'), html);
 writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, visible, mean, max, note }) => ({ time, label, visible, mean, max, note })), null, 1));
