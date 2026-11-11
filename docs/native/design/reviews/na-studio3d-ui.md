@@ -47,7 +47,7 @@ inspector section.
 | One value column, row height, insets | ✅ all new rows use `InspectorRow` |
 | Nothing clipped | ✅ after fixes: the quality detail moved from a status row to a full-width section note; the finish shelf wraps into balanced rows (the kit has no `flexWrap`); 3D Scale drops the 2D link button so three values fit; Export's 3D help shortened to one line |
 | Panel matches spec | ⚠️ §8 asks for a push button for Set Up Studio and a pull-down for Add Shot; the kit has neither in the inspector, so Set Up Studio is a section action and Add Shot a pop-up whose first row is a disabled `Add Shot…` title |
-| Error icon baseline | ⚠️ the triangle sits a point high against the first text line |
+| Error icon baseline | ✅ the triangle is centred on the first line of the message |
 
 ## 4. Typography and numbers
 

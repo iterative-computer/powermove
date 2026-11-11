@@ -710,6 +710,8 @@ export function InspectorPanel({
                   style={{
                     color: token("colors.danger"),
                     symbolSize: token("metrics.symbol_inline"),
+                    // Centred on the first line of the message, not its top.
+                    paddingTop: token("metrics.inner_radius"),
                   }}
                 />
                 <text
