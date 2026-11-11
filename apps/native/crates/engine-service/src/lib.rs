@@ -1094,6 +1094,12 @@ struct Runtime {
     /// The picture the refinement is drawn for; any newer one (a seek, an
     /// edit, play) is drawn fast again.
     full_for: Option<Stamp>,
+    /// What the last paused picture at the drawable's size took, worker to
+    /// GPU completion (µs): a refinement costing about this × the scale
+    /// squared within one band's budget draws whole.
+    paused_us: Option<f64>,
+    /// What refinement bands cost, for the document state they measured.
+    refine_costs: Option<((u64, u64, u64), crate::jobs::Costs)>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1596,6 +1602,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         cost
                     };
                     r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                    if f.spec.moment == Moment::Paused && f.spec.scale == 1. {
+                        r.paused_us = Some((t.completed - t.worker_start) * 1e6);
+                    }
                 }
                 // Frames skipped between two played ones at normal speed
                 // didn't play in real time: background rendering renders
@@ -1792,6 +1801,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     full_owed: None,
                     full_due: false,
                     full_for: None,
+                    paused_us: None,
+                    refine_costs: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -2165,11 +2176,61 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
-            let result = provider
-                .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
-                .and_then(|overlays| {
-                    engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
-                });
+            // A refinement draws in bands into the frame cache first, giving
+            // way to anything newer between bands; the frame then shows it.
+            let refined = match runtime.get(&id) {
+                Some(r) if !capture && spec.scale > 1. && r.full_for == Some(stamp) => {
+                    // What bands cost is learned per document state, as a
+                    // fill learns it per job: once bands cost a whole frame,
+                    // later refinements draw whole without probing.
+                    let state = (stamp.doc_id, stamp.revision, scene.content);
+                    let mut costs = match r.refine_costs {
+                        Some((at, costs)) if at == state => costs,
+                        _ => crate::jobs::Costs::default(),
+                    };
+                    let cheap = r.paused_us.is_some_and(|us| {
+                        us * spec.scale * spec.scale <= crate::jobs::BAND_BUDGET_US
+                    });
+                    let stop = || {
+                        shared
+                            .state
+                            .lock()
+                            .unwrap()
+                            .views
+                            .get(&id)
+                            .is_none_or(|v| v.stamp != stamp)
+                    };
+                    let started = trace::now();
+                    let refined = if cheap {
+                        engine.refine_bands = 0;
+                        Ok(true)
+                    } else {
+                        engine.refine(&scene, spec, &mut costs, &stop)
+                    };
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.refine_costs = Some((state, costs));
+                    }
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "refine_bands": engine.refine_bands,
+                            "given_way": matches!(refined, Ok(false)),
+                            "started": started, "ended": trace::now(), "viewer_id": id,
+                        }));
+                    }
+                    refined
+                }
+                _ => Ok(true),
+            };
+            let result = match refined {
+                Ok(true) => provider
+                    .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
+                    .and_then(|overlays| {
+                        engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
+                    }),
+                // Given way: the newer picture is drawn next.
+                Ok(false) => Ok(None),
+                Err(e) => Err(e),
+            };
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;

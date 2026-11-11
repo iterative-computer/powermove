@@ -205,6 +205,11 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
+    /// A refinement band's target ([`Engine::refine`]).
+    strip: Option<Arc<ExportedSurface>>,
+    /// The last refinement's band count (0: drawn whole by its frame), for
+    /// the diagnostic trace.
+    pub(crate) refine_bands: u32,
     pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
@@ -403,6 +408,8 @@ impl Engine {
             cache: VecDeque::with_capacity(8),
             offscreen: None,
             cache_enabled: true,
+            strip: None,
+            refine_bands: 0,
             studio_content: None,
             lost,
             failed,
@@ -677,33 +684,7 @@ impl Engine {
             trace.lock().unwrap().cache_hit = true;
             found
         } else {
-            let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-            let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
-            while self.cache.len() >= capacity {
-                self.cache.pop_front();
-            }
-            self.pool
-                .retain(|s| s.size == size || Arc::strong_count(s) > 1);
-            let free = self
-                .pool
-                .iter()
-                .find(|s| s.size == size && Arc::strong_count(s) == 1)
-                .cloned();
-            let surface = match free {
-                Some(s) => s,
-                None => {
-                    anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
-                    let s = Arc::new(ExportedSurface::create(
-                        &self.gpu.device,
-                        &SurfaceRequest {
-                            size,
-                            format: SurfaceFormat::Rgba16Float,
-                        },
-                    )?);
-                    self.pool.push(s.clone());
-                    s
-                }
-            };
+            let surface = self.cache_surface(size)?;
             if let Some((_, pixels)) = disk {
                 self.gpu.queue.write_texture(
                     surface.texture.as_image_copy(),
@@ -913,6 +894,232 @@ impl Engine {
             stand_ins,
             compat_late,
         }))
+    }
+    /// A pooled surface of `size` for a frame the cache will hold, making
+    /// room in the cache first.
+    fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
+        let bytes = u64::from(size.width) * u64::from(size.height) * 8;
+        let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
+        while self.cache.len() >= capacity {
+            self.cache.pop_front();
+        }
+        self.pool
+            .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        let free = self
+            .pool
+            .iter()
+            .find(|s| s.size == size && Arc::strong_count(s) == 1)
+            .cloned();
+        Ok(match free {
+            Some(s) => s,
+            None => {
+                anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                let s = Arc::new(ExportedSurface::create(
+                    &self.gpu.device,
+                    &SurfaceRequest {
+                        size,
+                        format: SurfaceFormat::Rgba16Float,
+                    },
+                )?);
+                self.pool.push(s.clone());
+                s
+            }
+        })
+    }
+    /// Draws a paused picture's refinement (`spec`, at the composition's
+    /// size) into the frame cache in bands, as background fills submit
+    /// them ([`crate::jobs::Costs`]): each band is waited for, then `stop`
+    /// is asked, so a newer interaction waits behind at most one band
+    /// (Metal cannot preempt a submission). Where bands cost about a whole
+    /// frame (each band builds the frame's plan; a precomp renders whole for
+    /// any region), the rest draws whole, and so do later refinements with
+    /// the same `costs`. The
+    /// next [`Engine::frame`] of `spec` presents it from the cache.
+    /// `Ok(false)`: stopped; `Ok(true)`: the frame will find it, or draws
+    /// it itself (a cache that's off, a stand-in that isn't exact).
+    pub fn refine(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        costs: &mut crate::jobs::Costs,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<bool> {
+        use pm_export::render::BAND_ROWS;
+        use pm_protocol::common::PixelRect;
+        self.refine_bands = 0;
+        if !self.cache_enabled {
+            return Ok(true);
+        }
+        self.sync_studio(scene)?;
+        self.sync_fonts();
+        let size = spec.render_size();
+        let key = crate::policy::CacheKey {
+            content: scene.content,
+            revision: scene.doc.revision(),
+            time: spec.time.get(),
+            width: size.width,
+            height: size.height,
+            crop: spec.output.crop,
+            moment: spec.moment,
+        };
+        if self.cache.iter().any(|c| c.key == key) {
+            return Ok(true);
+        }
+        let mut request = spec.request(scene)?;
+        request.output_tone = self.output_tone;
+        let area = request.region.unwrap_or(PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        });
+        let total = area.height.div_ceil(BAND_ROWS).max(1);
+        costs.frame_units = costs.frame_units.max(total);
+        let whole_at_once = costs.indivisible
+            || costs
+                .whole_us
+                .is_some_and(|us| us <= crate::jobs::BAND_BUDGET_US);
+        if whole_at_once {
+            return Ok(true);
+        }
+        let surface = self.cache_surface(size)?;
+        self.renderer.set_scrub(false);
+        self.renderer.set_playback(None);
+        self.renderer.set_isolate_layers(true);
+        if let Some(store) = &self.compat_document {
+            store.begin_frame(Moment::Paused);
+        }
+        let drawn = self.refine_bands(
+            scene, spec.time, &request, area, &surface, costs, total, stop,
+        );
+        self.renderer.set_isolate_layers(false);
+        let late = self
+            .compat_document
+            .as_ref()
+            .map(|store| store.end_frame())
+            .unwrap_or_default();
+        let Some(failures) = drawn? else {
+            return Ok(false);
+        };
+        // A stand-in is not the exact picture: the frame draws it itself.
+        if late.is_empty() {
+            self.cache.push_back(CachedFrame {
+                key,
+                surface,
+                failures: failures.into(),
+            });
+        }
+        Ok(true)
+    }
+    /// A band's own target, kept for the next band of its size.
+    fn band_surface(&mut self, width: u32, height: u32) -> Result<Arc<ExportedSurface>> {
+        let size = Size::new(width, height);
+        if let Some(strip) = self.strip.as_ref().filter(|s| s.size == size) {
+            return Ok(strip.clone());
+        }
+        let strip = Arc::new(ExportedSurface::create(
+            &self.gpu.device,
+            &SurfaceRequest {
+                size,
+                format: SurfaceFormat::Rgba16Float,
+            },
+        )?);
+        self.strip = Some(strip.clone());
+        Ok(strip)
+    }
+    /// [`Engine::refine`]'s bands: `None` when `stop` said so.
+    #[allow(clippy::too_many_arguments)]
+    fn refine_bands(
+        &mut self,
+        scene: &Scene,
+        spec_time: Ticks,
+        request: &pm_render::RenderRequest,
+        area: pm_protocol::common::PixelRect,
+        surface: &ExportedSurface,
+        costs: &mut crate::jobs::Costs,
+        total: u32,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Option<Vec<LayerFailure>>> {
+        use pm_export::render::BAND_ROWS;
+        let mut failures = Vec::new();
+        let mut y = 0;
+        while y < area.height {
+            if y > 0 && stop() {
+                return Ok(None);
+            }
+            let remaining = (area.height - y).div_ceil(BAND_ROWS);
+            let units = costs.bounded(remaining).clamp(1, remaining);
+            let rows = (units * BAND_ROWS).min(area.height - y);
+            let whole = y == 0 && rows == area.height;
+            let mut band = request.clone();
+            band.region = Some(pm_protocol::common::PixelRect {
+                y: area.y + y,
+                height: rows,
+                ..area
+            });
+            let started = std::time::Instant::now();
+            let rendered = if whole {
+                band.region = request.region;
+                self.renderer.render_into(
+                    &scene.doc,
+                    &scene.comp,
+                    spec_time,
+                    &band,
+                    scene.media.as_ref(),
+                    &Target::wrap(surface.texture.clone()),
+                    None,
+                )?
+            } else {
+                let strip = self.band_surface(area.width, rows)?;
+                let rendered = self.renderer.render_into(
+                    &scene.doc,
+                    &scene.comp,
+                    spec_time,
+                    &band,
+                    scene.media.as_ref(),
+                    &Target::wrap(strip.texture.clone()),
+                    None,
+                )?;
+                let mut encoder =
+                    self.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("refine band"),
+                        });
+                encoder.copy_texture_to_texture(
+                    strip.texture.as_image_copy(),
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &surface.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: area.width,
+                        height: rows,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.gpu.queue.submit([encoder.finish()]);
+                rendered
+            };
+            self.renderer.wait_idle();
+            if let Some(error) = self.failed.lock().unwrap().take() {
+                bail!("The GPU refused this frame: {error}");
+            }
+            costs.record(
+                if whole {
+                    total
+                } else {
+                    rows.div_ceil(BAND_ROWS)
+                },
+                started.elapsed().as_secs_f64() * 1e6,
+            );
+            failures.extend(rendered.failures);
+            self.refine_bands += 1;
+            y += rows;
+        }
+        Ok(Some(failures))
     }
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
@@ -1173,6 +1380,73 @@ mod lifetime_tests {
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
     }
+    /// A refinement drawn in bands is the frame drawn whole, pixel for
+    /// pixel; a stop between bands leaves nothing in the cache.
+    #[test]
+    fn a_banded_refinement_is_the_whole_frame_and_gives_way_between_bands() {
+        let mut engine = Engine::new(Gpu::new("refine-bands-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
+        };
+        let cached = |engine: &Engine| {
+            let surface = engine.cache.back().unwrap().surface.clone();
+            pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture)
+                .unwrap()
+        };
+        // Whole, as a frame draws it.
+        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+        while engine
+            .frame(
+                &scene,
+                spec,
+                None,
+                &Default::default(),
+                false,
+                trace.clone(),
+            )
+            .unwrap()
+            .is_none()
+        {}
+        let whole = cached(&engine);
+        engine.cache.clear();
+        // Stopped after its first band: nothing is kept.
+        let mut costs = crate::jobs::Costs::default();
+        assert!(!engine.refine(&scene, spec, &mut costs, &|| true).unwrap());
+        assert!(engine.cache.is_empty());
+        // In bands: the same pixels.
+        let mut costs = crate::jobs::Costs::default();
+        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
+        assert_eq!(engine.cache.len(), 1);
+        let banded = cached(&engine);
+        assert_eq!(banded.len(), 640 * 360 * 4);
+        let worst = whole
+            .iter()
+            .zip(&banded)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(worst < 1e-3, "banded differs by {worst}");
+    }
+
     #[test]
     fn only_a_traced_frame_counts_its_work() {
         let mut engine = Engine::new(Gpu::new("work-count-test").unwrap()).unwrap();
