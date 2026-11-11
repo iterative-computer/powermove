@@ -123,6 +123,7 @@ fn cache_key_includes_every_content_coordinate() {
         height: 100,
         crop: None,
         moment: policy::Moment::Paused,
+        studio_view: 0,
     };
     for other in [
         policy::CacheKey {

@@ -13,6 +13,29 @@ pub use pm_studio3d_engine::service::{
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
 
+/// A viewer's transient Free View (3d-studio.md §4): where the editor camera
+/// stands and looks. It never edits the document; captures and exports use
+/// the composition's camera. `zoom` scales the lens as the camera's zoom does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeView {
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub zoom: f64,
+}
+impl FreeView {
+    /// Exact bits, for cache identities.
+    pub fn key(view: Option<Self>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Some(v) = view {
+            for x in v.eye.iter().chain(v.target.iter()).chain([v.zoom].iter()) {
+                x.to_bits().hash(&mut h);
+            }
+            1u8.hash(&mut h);
+        }
+        h.finish()
+    }
+}
 /// Transient viewer state. Final uses the composition's saved noise/sample
 /// policy; selecting a tier never edits the composition or export override.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,8 +98,20 @@ pub fn attach_with_preview(
     request: &SceneRequest,
     preview: Preview,
 ) -> Result<(), String> {
+    attach_with_view(renderer, doc, media, request, preview, None)
+}
+/// As `attach_with_preview`, seen from a viewer's Free View when it has one.
+#[cfg(feature = "kernel")]
+pub fn attach_with_view(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    view: Option<FreeView>,
+) -> Result<(), String> {
     use pm_studio3d_engine::compositor::Source;
-    let source = DocumentSource::new(doc, media.clone());
+    let source = DocumentSource::new(doc, media.clone()).with_view(view);
     let tier = match preview {
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },

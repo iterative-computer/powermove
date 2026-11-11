@@ -15,7 +15,11 @@ export interface ViewerModel {
   empty: boolean;
   selectionCount: number;
   /** Present when the composition has Studio 3D layers: the preview tier. */
-  studio?: { tier: "live" | "refine" } | null;
+  studio?: {
+    tier: "live" | "refine";
+    tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
+    look?: "camera" | "free";
+  } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */
 export interface ViewerHostFacts {

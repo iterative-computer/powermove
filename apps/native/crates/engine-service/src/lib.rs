@@ -348,6 +348,7 @@ struct View {
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
     studio_preview: studio::Preview,
+    studio_view: Option<studio::FreeView>,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -579,6 +580,18 @@ impl Viewer {
         self.shared.wake.try_send(()).ok();
         Ok(())
     }
+    /// Transient Free View for Studio 3D layers (3d-studio.md §4). `None`
+    /// looks through the composition's camera. Never edits the document.
+    pub fn studio_view(&self, view: Option<studio::FreeView>) -> Result<()> {
+        self.edit(|v| {
+            if v.studio_view != view {
+                v.studio_view = view;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
     /// Transient Studio worker tier, independent of viewer resolution.
     pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
         self.edit(|v| {
@@ -751,7 +764,10 @@ impl Viewer {
             v.enqueue(cmd)?;
             if let Some(input) = input {
                 v.input = Some(input);
-                v.pipeline = trace::Pipeline { request: trace::now(), ..Default::default() };
+                v.pipeline = trace::Pipeline {
+                    request: trace::now(),
+                    ..Default::default()
+                };
             }
             Ok(())
         })
@@ -1073,6 +1089,7 @@ impl EngineService {
                 resources: Arc::default(),
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+                studio_view: None,
                 adapt_drags: false,
                 skim: None,
                 skim_input: None,
@@ -1237,6 +1254,7 @@ struct Work {
     scene: Scene,
     spec: FrameSpec,
     studio_preview: studio::Preview,
+    studio_view: Option<studio::FreeView>,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -2030,6 +2048,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     v.studio_preview
                 },
+                studio_view: if capture { None } else { v.studio_view },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -2075,6 +2094,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             scene,
             spec,
             studio_preview,
+            studio_view,
             layer,
             overlays,
             provider,
@@ -2099,6 +2119,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 ..Default::default()
             }));
             engine.studio_preview(studio_preview);
+            engine.studio_view(studio_view);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
@@ -2638,22 +2659,34 @@ mod worker_tests {
         drawn(&v);
         let stamp = v.stamp();
         for invalid in [0., -1., f64::NAN, f64::INFINITY] {
-            assert!(v.command_at(TransportCommand::Step { frames: 1 }, invalid).is_err());
+            assert!(
+                v.command_at(TransportCommand::Step { frames: 1 }, invalid)
+                    .is_err()
+            );
         }
-        assert_eq!(v.stamp(), stamp, "invalid origins must not enqueue commands");
+        assert_eq!(
+            v.stamp(),
+            stamp,
+            "invalid origins must not enqueue commands"
+        );
         let input = trace::now();
-        v.command_at(TransportCommand::Step { frames: 1 }, input).unwrap();
+        v.command_at(TransportCommand::Step { frames: 1 }, input)
+            .unwrap();
         v.capture_next().unwrap();
         let frame = drawn(&v).frame.unwrap();
         assert_eq!(frame.input_host_seconds, Some(input));
-        assert_eq!(frame.time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+        assert_eq!(
+            frame.time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
         v.command(TransportCommand::Step { frames: 1 }).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
     }
     #[test]
     fn identical_safe_areas_preserve_an_in_flight_frame() {
-        let service = EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
         let v = shapes_viewer(&service, None);
         v.capture_next().unwrap();
         drawn(&v);
@@ -2663,7 +2696,8 @@ mod worker_tests {
             entered.send(()).unwrap();
             barrier.recv_timeout(Duration::from_secs(10)).unwrap();
         }));
-        v.command_at(TransportCommand::Step { frames: 1 }, trace::now()).unwrap();
+        v.command_at(TransportCommand::Step { frames: 1 }, trace::now())
+            .unwrap();
         v.capture_next().unwrap();
         signal.recv_timeout(Duration::from_secs(10)).unwrap();
         let before = v.stamp();
@@ -2671,9 +2705,15 @@ mod worker_tests {
         let after = v.stamp();
         release.send(()).unwrap();
         let status = drawn(&v);
-        assert_eq!(before, after, "unchanged guides/gizmos must not invalidate the frame");
+        assert_eq!(
+            before, after,
+            "unchanged guides/gizmos must not invalidate the frame"
+        );
         assert_eq!(status.stale_rejections, 0);
-        assert_eq!(status.frame.unwrap().time.get(), pm_time::Rate::FPS_30.frame_start(1).unwrap());
+        assert_eq!(
+            status.frame.unwrap().time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

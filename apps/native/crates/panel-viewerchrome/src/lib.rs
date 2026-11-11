@@ -147,7 +147,7 @@ impl ViewModel {
             Action::Fit => Chrome::write_navigation(&mut ui, self.chrome.navigation.fit())?,
             Action::Navigate(navigation) => Chrome::write_navigation(&mut ui, navigation)?,
             Action::Quality(quality) => Chrome::write_quality(&mut ui, quality)?,
-            Action::StudioTier(tier) => put(&mut ui.viewer, "studioTier", Value::from(tier))?,
+            Action::StudioUi(key, value) => put(&mut ui.viewer, key, Value::from(value))?,
             Action::ToggleControls => put(
                 &mut ui.viewer,
                 "showControls",
@@ -307,11 +307,42 @@ impl ViewModel {
                     .as_str()
                     .ok_or(Error::Invalid("quality argument"))?,
             )?),
-            "viewer.studio.tier" => Action::StudioTier(match argument.as_str() {
-                Some("live") => "live",
-                Some("refine") => "refine",
-                _ => return Err(Error::Invalid("studio tier")),
-            }),
+            "viewer.studio.tier" => Action::StudioUi(
+                "studioTier",
+                match argument.as_str() {
+                    Some("live") => "live",
+                    Some("refine") => "refine",
+                    _ => return Err(Error::Invalid("studio tier")),
+                },
+            ),
+            "viewer.studio.tool" => Action::StudioUi(
+                "studioTool",
+                match argument.as_str() {
+                    Some("move") => "move",
+                    Some("rotate") => "rotate",
+                    Some("scale") => "scale",
+                    Some("orbit") => "orbit",
+                    Some("pan") => "pan",
+                    Some("zoom") => "zoom",
+                    Some("light") => "light",
+                    _ => return Err(Error::Invalid("studio tool")),
+                },
+            ),
+            "viewer.studio.look" => Action::StudioUi(
+                "studioLook",
+                match argument.as_str() {
+                    Some("camera") => "camera",
+                    Some("free") => "free",
+                    _ => return Err(Error::Invalid("studio look")),
+                },
+            ),
+            "viewer.studio.frame" => {
+                no_arg()?;
+                Action::Host(HostAction::Command {
+                    id: "studio.frame".into(),
+                    args: vec![],
+                })
+            }
             "viewer.controls" => {
                 no_arg()?;
                 Action::ToggleControls
@@ -584,8 +615,9 @@ pub enum Action {
     Fit,
     Navigate(Navigation),
     Quality(Quality),
-    /// Studio 3D preview tier (`live` = Fast, `refine` = Quality), 3d-studio.md §2.
-    StudioTier(&'static str),
+    /// A Studio 3D viewer setting in UI state (3d-studio.md §2): `studioTier`
+    /// (`live` = Fast, `refine` = Quality), `studioTool`, `studioLook`.
+    StudioUi(&'static str, &'static str),
     ToggleControls,
     ToggleGuides,
     ToggleSafeAreas,

@@ -543,7 +543,14 @@ impl Properties {
                 if a != "static" && animation != "key-at-playhead" {
                     animation = a;
                 }
-                axes.push(json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
+                // Three narrow wells hold four characters: one place below
+                // ten (-1.7), none above (-12). Typing still sets exact values.
+                let shown = if value.abs() >= 10. {
+                    value.round()
+                } else {
+                    (value * 10.).round() / 10.
+                };
+                axes.push(json!({"binding":self.lease(model,path,binding)?,"value":shown,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
             }
             if !axes.is_empty() {
                 // Three axes fill the value column; no room for a link button.

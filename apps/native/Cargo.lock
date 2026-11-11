@@ -5163,6 +5163,7 @@ dependencies = [
  "pm-recorder",
  "pm-render",
  "pm-runtime-v8",
+ "pm-scene3d",
  "pm-services",
  "pm-shell",
  "pm-store-host",

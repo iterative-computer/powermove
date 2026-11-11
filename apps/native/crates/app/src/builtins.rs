@@ -1506,6 +1506,13 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            let _ = viewer.studio_view(view);
+        }
+    }
     fn input(&self, at: f64, cx: &mut App) {
         if let Some(c) = self.0.upgrade()
             && let Some(viewer) = &c.read(cx).viewer

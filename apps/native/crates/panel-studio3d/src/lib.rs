@@ -3,6 +3,7 @@
 mod fields;
 mod light;
 pub mod view;
+pub mod viewport;
 use pm_kernel::{
     Ack, Call, Caller, Command, GestureCall, KernelHandle, Published, QueryMirror, Reply, Request,
     Scene3dCommand, WriteBody,

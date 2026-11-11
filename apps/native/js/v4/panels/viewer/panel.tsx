@@ -135,19 +135,65 @@ export function ViewerPanel({
       </PopUpButton>
     </>
   );
-  // 3d-studio.md §2 item 5: Fast | Quality, shown only with 3D layers.
-  // Fast is the live path; Quality refines toward what the export renders.
+  // 3d-studio.md §2: Look Through, Tool, Frame and Preview, leading the
+  // bar, only while the composition has 3D layers.
+  const gap = <div role="presentation" style={{ width: token("metrics.gap") }} />;
   const studio = m.studio ? (
-    <SegmentedControl
-      id="viewer.studio.tier"
-      label="Preview"
-      value={m.studio.tier}
-      options={[
-        { id: "live", label: "Fast" },
-        { id: "refine", label: "Quality" },
-      ]}
-      onChange={(value) => actions.drive("viewer.studio.tier", value)}
-    />
+    <div
+      id="viewer.studio"
+      role="group"
+      label="3D"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: token("metrics.gap"),
+      }}
+    >
+      <SegmentedControl
+        id="viewer.studio.look"
+        label="Look Through"
+        value={m.studio.look ?? "camera"}
+        options={[
+          { id: "camera", label: "Camera" },
+          { id: "free", label: "Free View" },
+        ]}
+        onChange={(value) => actions.drive("viewer.studio.look", value)}
+      />
+      <SegmentedControl
+        id="viewer.studio.tool"
+        label="Tool"
+        value={m.studio.tool ?? "move"}
+        options={[
+          { id: "move", label: "Move", symbol: "move.3d" },
+          { id: "rotate", label: "Rotate", symbol: "rotate.3d" },
+          { id: "scale", label: "Scale", symbol: "scale.3d" },
+          { id: "orbit", label: "Orbit", symbol: "view.3d" },
+          { id: "pan", label: "Pan", symbol: "hand.raised" },
+          { id: "zoom", label: "Zoom", symbol: "plus.magnifyingglass" },
+          { id: "light", label: "Light", symbol: "lightbulb" },
+        ]}
+        onChange={(value) => actions.drive("viewer.studio.tool", value)}
+      />
+      <ToolbarItem
+        id="viewer.studio.frame"
+        label="Frame"
+        title="Frame (F). Fit the selection, or everything."
+        metadata={{ symbol: "viewfinder" }}
+        onClick={() => actions.drive("viewer.studio.frame")}
+      />
+      {gap}
+      <SegmentedControl
+        id="viewer.studio.tier"
+        label="Preview"
+        value={m.studio.tier}
+        options={[
+          { id: "live", label: "Fast" },
+          { id: "refine", label: "Quality" },
+        ]}
+        onChange={(value) => actions.drive("viewer.studio.tier", value)}
+      />
+    </div>
   ) : null;
   return (
     <div

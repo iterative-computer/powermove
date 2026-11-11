@@ -35,6 +35,8 @@ pub struct DocumentSource {
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
+    /// A viewer's Free View; `None` renders the composition's camera.
+    view: Option<super::FreeView>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
     material_images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
@@ -77,12 +79,17 @@ impl DocumentSource {
             resources: Mutex::default(),
             resolved: Mutex::default(),
             quality_override: None,
+            view: None,
             environment_maps: Mutex::default(),
             height_maps: Mutex::default(),
             material_images: Mutex::default(),
             vertex_attributes: Mutex::default(),
             scatter_placements: Mutex::default(),
         }
+    }
+    pub fn with_view(mut self, view: Option<super::FreeView>) -> Self {
+        self.view = view;
+        self
     }
     /// Resolve one export's override without editing the saved composition.
     pub fn with_quality_override(
@@ -403,7 +410,15 @@ impl SceneSource for DocumentSource {
                 || point(cp, "target"),
                 |p| v3(p[0] as f32, p[1] as f32, p[2] as f32),
             );
-        let fov = 2. * ((n(cp, "fov", 45.).to_radians() / 2.).tan() / n(cp, "zoom", 1.)).atan();
+        // Free View stands the editor camera elsewhere; the lens stays the shot's.
+        let (eye, target, zoom) = match self.view {
+            Some(view) => {
+                let f = |p: [f64; 3]| v3(p[0] as f32, p[1] as f32, p[2] as f32);
+                (f(view.eye), f(view.target), view.zoom as f32)
+            }
+            None => (eye, target, n(cp, "zoom", 1.)),
+        };
+        let fov = 2. * ((n(cp, "fov", 45.).to_radians() / 2.).tan() / zoom).atan();
         let e = &r.scene["environment"];
         let ep = &e["p"];
         let env = color(ep, "ambientColor", "#FFFFFF") * n(ep, "ambient", 0.5);
@@ -789,7 +804,8 @@ impl SceneSource for DocumentSource {
                 _ => return Err("Unsupported Studio light".into()),
             }
         }
-        let basis = r.camera_up.map(|up| {
+        // An authored roll belongs to the shot; Free View stays level.
+        let basis = r.camera_up.filter(|_| self.view.is_none()).map(|up| {
             let f = (target - eye).normalize();
             let right = f
                 .cross(v3(up[0] as f32, up[1] as f32, up[2] as f32))
@@ -816,8 +832,7 @@ impl SceneSource for DocumentSource {
                 floor_y,
                 shadows: e["shadows"] != false,
                 ambient,
-                orthographic_span: (c["projection"] == "orthographic")
-                    .then(|| 3. / n(cp, "zoom", 1.)),
+                orthographic_span: (c["projection"] == "orthographic").then(|| 3. / zoom),
                 clip_planes: Some([n(cp, "near", 0.01), n(cp, "far", 1000.)]),
                 iris: [
                     n(cp, "irisShape", 0.),

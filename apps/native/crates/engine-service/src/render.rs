@@ -166,8 +166,9 @@ pub struct Engine {
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64, String, crate::studio::Preview)>,
+    studio_content: Option<(usize, u64, String, crate::studio::Preview, u64)>,
     studio_preview: crate::studio::Preview,
+    studio_view: Option<crate::studio::FreeView>,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
@@ -235,6 +236,7 @@ impl Engine {
         next.mastering = self.mastering;
         next.cache_enabled = self.cache_enabled;
         next.studio_preview = self.studio_preview;
+        next.studio_view = self.studio_view;
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
@@ -363,6 +365,7 @@ impl Engine {
             cache_enabled: true,
             studio_content: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+            studio_view: None,
             lost,
             failed,
             waker,
@@ -460,12 +463,17 @@ impl Engine {
     pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
         self.studio_preview = preview;
     }
+    /// Each viewer supplies its Free View too; captures pass `None`.
+    pub fn studio_view(&mut self, view: Option<crate::studio::FreeView>) {
+        self.studio_view = view;
+    }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
         let key = (
             Arc::as_ptr(&scene.doc) as usize,
             scene.content,
             scene.comp.clone(),
             self.studio_preview,
+            crate::studio::FreeView::key(self.studio_view),
         );
         if self.studio_content.as_ref() != Some(&key) {
             // A bad contribution draws nothing and is reported; frames carry on.
@@ -487,7 +495,7 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
             #[cfg(feature = "kernel")]
-            crate::studio::attach_with_preview(
+            crate::studio::attach_with_view(
                 &mut self.renderer,
                 scene.doc.clone(),
                 scene.media.as_ref(),
@@ -499,6 +507,7 @@ impl Engine {
                     height: 1,
                 },
                 self.studio_preview,
+                self.studio_view,
             )
             .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines
@@ -616,6 +625,7 @@ impl Engine {
             crop: output.crop,
             moment: spec.moment,
             studio_preview: self.studio_preview,
+            studio_view: crate::studio::FreeView::key(self.studio_view),
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.

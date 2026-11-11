@@ -91,6 +91,8 @@ pub struct CacheKey {
     pub crop: Option<Crop>,
     pub moment: Moment,
     pub studio_preview: crate::studio::Preview,
+    /// `FreeView::key` of the viewer's Free View.
+    pub studio_view: u64,
 }
 impl CacheKey {
     pub fn same_content(self, other: Self) -> bool {
@@ -100,6 +102,7 @@ impl CacheKey {
             && self.height == other.height
             && self.crop == other.crop
             && self.studio_preview == other.studio_preview
+            && self.studio_view == other.studio_view
     }
 }
 

@@ -1824,6 +1824,15 @@ impl Controller {
         if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
             return true;
         }
+        // View ▸ 3D ▸ Frame and the viewer bar's Frame: Free View fits the
+        // selection, or everything.
+        if cmd.name == "studio.frame" {
+            // The gizmo reads the Controller, so it runs after this update.
+            if let Some(g) = self.builtins.gizmos.clone() {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            }
+            return true;
+        }
         // The viewer's context menu names its New 3D kind in the command.
         if let Some(kind) = cmd.name.strip_prefix("new3d:") {
             if kind == "import" {

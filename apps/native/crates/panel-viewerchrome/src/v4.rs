@@ -117,8 +117,19 @@ impl Session {
                     Some("refine") => "refine",
                     _ => "live",
                 };
+                let read = |k: &str, d: &'static str| {
+                    model
+                        .ui
+                        .viewer
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .map(|s| Value::from(s))
+                        .unwrap_or_else(|| Value::from(d))
+                };
                 let mut m = Map::new();
                 m.insert("tier", Value::from(tier));
+                m.insert("tool", read("studioTool", "move"));
+                m.insert("look", read("studioLook", "camera"));
                 Value::Object(m)
             } else {
                 Value::Null
