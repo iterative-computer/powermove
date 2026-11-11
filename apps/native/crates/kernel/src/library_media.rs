@@ -31,11 +31,19 @@ pub(crate) fn hydrate(root: &Node, history: &crate::History, media: &mut MediaTa
             }
         }
     }
-    for record in history.records() {
-        for op in record.forward.iter().chain(record.inverse.iter()) {
-            history_assets(op, &mut wanted);
-        }
-    }
+    history_assets(history, |id, asset| {
+        wanted.push((
+            id.to_owned(),
+            asset
+                .get("storageKey")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            asset
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ))
+    });
     let mut proxy_only = None;
     for (id, storage_key, fingerprint) in wanted {
         if media.get(&id).is_some() {
@@ -56,44 +64,43 @@ pub(crate) fn hydrate(root: &Node, history: &crate::History, media: &mut MediaTa
 }
 
 /// Asset records an undo step would put back: `assets.<id>` leaves, and any
-/// inserted or patched object that names its media key.
-fn history_assets(op: &Op, out: &mut Vec<(String, Option<String>, Option<String>)>) {
-    fn walk(v: &Value, id: Option<&str>, out: &mut Vec<(String, Option<String>, Option<String>)>) {
+/// inserted or patched object that names its media key, with their asset id.
+pub(crate) fn history_assets(history: &crate::History, mut f: impl FnMut(&str, &Value)) {
+    fn walk(v: &Value, id: Option<&str>, f: &mut impl FnMut(&str, &Value)) {
         match v {
             Value::Object(m) => {
-                let key = m.get("storageKey").and_then(Value::as_str);
-                let fingerprint = m.get("fingerprint").and_then(Value::as_str);
                 if let Some(id) = m.get("id").and_then(Value::as_str).or(id)
-                    && (key.is_some() || fingerprint.is_some())
+                    && (m.get("storageKey").and_then(Value::as_str).is_some()
+                        || m.get("fingerprint").and_then(Value::as_str).is_some())
                 {
-                    out.push((
-                        id.to_owned(),
-                        key.map(str::to_owned),
-                        fingerprint.map(str::to_owned),
-                    ));
+                    f(id, v);
                 }
                 for (_, v) in m.iter() {
-                    walk(v, None, out);
+                    walk(v, None, f);
                 }
             }
-            Value::Array(a) => a.iter().for_each(|v| walk(v, None, out)),
+            Value::Array(a) => a.iter().for_each(|v| walk(v, None, f)),
             _ => {}
         }
     }
-    match op {
-        Op::Leaf(patch) => {
-            let id = match patch.path.as_slice() {
-                [.., PathPart::Key(parent), PathPart::Key(id)] if *parent == "assets" => {
-                    id.as_str()
+    for record in history.records() {
+        for op in record.forward.iter().chain(record.inverse.iter()) {
+            match op {
+                Op::Leaf(patch) => {
+                    let id = match patch.path.as_slice() {
+                        [.., PathPart::Key(parent), PathPart::Key(id)] if *parent == "assets" => {
+                            id.as_str()
+                        }
+                        _ => None,
+                    };
+                    if let Some(value) = &patch.value {
+                        walk(value, id, &mut f);
+                    }
                 }
-                _ => None,
-            };
-            if let Some(value) = &patch.value {
-                walk(value, id, out);
+                Op::Insert { value, .. } => walk(value, None, &mut f),
+                _ => {}
             }
         }
-        Op::Insert { value, .. } => walk(value, None, out),
-        _ => {}
     }
 }
 
@@ -165,6 +172,22 @@ fn text(node: Option<&Node>) -> Option<&str> {
         NodeKind::String(s) => s.as_str(),
         _ => None,
     }
+}
+
+/// Whether the store holds bytes for the asset (as [`hydrate`] would find them).
+pub(crate) fn holds(
+    id: &str,
+    storage_key: Option<&str>,
+    fingerprint: Option<&str>,
+    store: &Path,
+) -> bool {
+    stored(
+        id,
+        storage_key.map(str::to_owned),
+        fingerprint.map(str::to_owned),
+        store,
+    )
+    .is_some()
 }
 
 /// The asset's stored bytes and the media key that found them.
