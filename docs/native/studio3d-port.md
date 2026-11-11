@@ -125,7 +125,7 @@ nature nodes is not finished; those nodes return an explicit unsupported error.
 | Camera iris controls | Shared engine present; row integration unverified | P (validated state; rendering pending) | K | K | P | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | Multiple views | Shared engine present; row integration unverified | G | U | U | G | Camera/iris channels, transient views → `set_camera`, navigation; iris render transport and multiple views pending |
 | glTF embedded animation | Shared engine present; row integration unverified | P | K | K | P | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
-| FBX with embedded animation | Shared engine present; row integration unverified | G | U | U | G | Import progress, retained asset, parts → worker admission + `Scene3dCommand::Import` |
+| FBX with embedded animation | Shared `pm-import-fbx`; geometry/material render verified | P (skin/clip data retained; broader animation scenes pending) | Tested original + GLB round trip | Tested | `import_media` accepts FBX; model-source edits | Import worker → `import::prepare` / archive receipt → `Scene3dCommand::Import`; MCP import + `add_object` |
 | 2D layers casting shadows onto 3D | Shared engine present; row integration unverified | P | K | K | P | Resolved model/light/camera and selection → `edit_3d`; ordinary property/keyframe commands |
 | Render passes | Shared engine present; row integration unverified | G | U | U | G | Saved quality, tier, progress → `set_render_quality`, export `studioQuality`; automatic tier scheduling pending |
 
@@ -176,13 +176,13 @@ The kernel is the only document writer.
 
 | Gate | Required | Current native evidence |
 | --- | --- | --- |
-| Rust renderer and native regressions | Pass | 123 renderer/host checks; 18 adapter checks; 7 native scene/export checks pass |
+| Rust renderer and native regressions | Pass | 123 renderer/host checks; 18 adapter checks; 8 native scene/export checks pass |
 | Bounded Cycles yardstick | Pass | All 11 scenes pass; included in the 123 renderer checks |
 | Live presented rate | ≥60 fps | Unmeasured |
 | Input → pixel p95 | ≤50 ms | Unmeasured |
 | Refine | 32 spp + OIDN ≤2 s | Engine 4.8–7.0 s; full app unmeasured |
 | Production | 1080p ≤3 s/frame, no visible noise | Engine diagnostic exceeds target; full app unmeasured |
-| Save/reopen and Undo | Every authored operation | 24 kernel, 17 document, 2 source-contract and 9 MCP checks pass; broader Electron project compatibility pending |
+| Save/reopen and Undo | Every authored operation | 25 kernel, 17 document, 2 source-contract and 9 MCP checks pass; broader Electron project compatibility pending |
 | Electron project compatibility | Same evaluated scene | Pending |
 
 Upstream diagnostic measurements in the pinned `docs/studio/native-host.md`
@@ -327,7 +327,7 @@ of OIDN/TBB/licenses remains a separate gate; dev builds use installed libraries
 The data checkpoint adds the pinned World/fog/terrain/scatter/material-option schemas,
 material/part sparse data, iris channels, ordinary actor/property paths, quality
 presets, MCP operation metadata/readback and source validation. Its targeted
-checks pass: **24 kernel**, **17 document**, **2 source-contract**, **9 MCP**.
+checks pass: **25 kernel**, **17 document**, **2 source-contract**, **9 MCP**; plus **21 import** checks.
 They prove exact Undo/Redo, protected edits, atomic failure, saved quality and
 PMV reopening. The old source oracle is retained; its 16-light case is explicitly
 superseded by Studio's 4096-light budget. No scene rendering claim follows from
@@ -343,7 +343,7 @@ Still required for full scene parity: wire new scene nodes and
 hidden prototypes into native extraction; world/HDRI source loading; terrain,
 scatter/LOD, atmosphere and volume translation; material source capture and all
 imported maps; iris/orthographic transport; quality motion-blur sample integration and automatic
-paused Refine scheduling; FBX native import; render passes;
+paused Refine scheduling; broader imported animation/map parity; render passes;
 noise convergence/filter/edge checks and native presentation/input measurements.
 The standalone engine supports more than the native document adapter currently
 translates. Treat the capability matrix as partial until each row has evidence.
@@ -353,7 +353,7 @@ Source checkpoints (first staged on `feat/na-studio3d-wip`, then integrated): `f
 `1dcfc3270` (document/MCP authoring), `492226f10` (explicit failure while new
 render translations are pending). The last checkpoint adds a separate passing
 native regression that prevents environment placeholders from being drawn as
-ordinary planes. All seven native scene/export regressions pass after the quality bridge.
+ordinary planes. All eight native scene/export regressions pass after the quality and FBX bridges.
 The data and quality checkpoints are now integrated into `feat/na-studio3d`.
 
 
@@ -405,7 +405,7 @@ CPU backend's ISPC/TBB; its Metal backend needs Xcode 15+ and CMake 3.21+.
 git clone --branch v2.5.1 --depth 1 --recurse-submodules \
   https://github.com/RenderKit/oidn.git "$OIDN_SRC"
 git -C "$OIDN_SRC" lfs pull
-cmake -S "$OIDN_SRC" -B "$OIDN_BUILD" -G Ninja \
+flock /tmp/pm-build.lock cmake -S "$OIDN_SRC" -B "$OIDN_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DOIDN_DEVICE_METAL=ON -DOIDN_DEVICE_CPU=ON \
   -DOIDN_DEVICE_SYCL=OFF -DOIDN_DEVICE_CUDA=OFF -DOIDN_DEVICE_HIP=OFF \
@@ -423,3 +423,58 @@ runtime paths, then repeat the stage split and image comparisons using that
 bundle. The current binding uses host images and default-device selection;
 merely copying a Metal dylib does not complete this work.
 [OIDN device and buffer API](https://github.com/RenderKit/oidn/blob/v2.5.1/doc/api.md).
+
+
+### Native FBX checkpoint
+
+- `c2cc177cb` moves the pinned FBX converter and its fixtures whole into
+  `engine/crates/pm-import-fbx`. The Electron host and native import use that
+  single implementation, with the same ufbx 0.11.5 pin. No renderer or shader
+  change is included in that engine-only commit.
+- `d865b301a` admits native FBX files, retains the original alongside a converted
+  GLB, and recognizes FBX in native MCP media import. Existing raw FBX assets can
+  also render from retained paths with unrelated cache-file extensions; saved
+  format/name metadata chooses the decoder.
+
+The worker uses an 8 MiB stack and the converter's existing 256 MiB input,
+geometry, allocation and time budgets. It opens no sibling files. Embedded
+materials, skin/joint records and baked animation reach the existing glTF
+loader. External-texture admission and broader animation/material-map parity
+still need real-project coverage.
+
+Checks: **21 native import tests**, **25 kernel scene tests** (including exact
+FBX original/GLB save-reopen and Undo/Redo), and **8 native GPU/export tests**
+pass. The new GPU test verifies the FBX source's Coral material reaches both
+the compositor and windowless export. Eight GPU/export checks take **15.76 s**;
+the final GPUI app build takes **30.05 s**. The shared renderer/host/import suite
+still reports **123 passing checks**, with all **11 Cycles scenes** passing.
+FBX's three checks moved from the host into the shared crate; they are not
+counted twice. Two earlier reruns refused the yardstick's own 5.5 GB storage
+reserve before rendering; the completed rerun passed after this lane's own
+outputs/intermediates were removed. No guard was weakened.
+
+Native import command hook: run `pm_scene3d::import::prepare` on a worker,
+admit through `import::archive::Archive`, then send the receipt in
+`Scene3dCommand::Import`. The actor owns the asset/layer, media journal and
+history changes. MCP can import a `.fbx` as media and reference its asset ID in
+`edit_3d`'s `add_object` source. File chooser presentation belongs to the designer.
+
+### Storage stop and remaining acceptance
+
+The final app build completed with approximately **4.7 GB** free. No further
+build/test/render was started below the owner's 5 GB floor. Only artifacts
+proven to originate in this lane's recorded locked runs were removed; unmatched
+shared executables and the other checkout were retained. Raw EXR/array/scene
+intermediates are removed from this lane's evidence after scoring, while logs,
+summary metrics and comparison PNGs remain outside Git.
+
+The port remains incomplete. New World/fog/terrain/scatter/nature and sparse
+material/part records are authored and saved but their native render translation
+is not finished. World preset-only edits still need upstream preset defaults;
+full cross-composition source-cycle analysis is pending. Remaining gates include
+material source capture, extended imported maps, iris/orthographic transport,
+quality shutter samples and automatic idle Refine, complete Electron scene
+round trips, pixel filtering/extra edge sampling/enamel/no-visible-noise grading,
+and measured native presentation/input latency. The measured Production/Refine
+limits above remain open. No on-screen fps, input p95 or packaging acceptance
+is claimed from headless tests or an app build.
