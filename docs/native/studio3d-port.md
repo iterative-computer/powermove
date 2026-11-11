@@ -1329,3 +1329,40 @@ at 192×128 against fresh 4096-spp references, Final luminance RMS is **0.00166*
 the pending 1080p native export budget and the owner's chrome caustic complaint.
 A final app rebuild after the defensive background-color parsing change passes
 in **13.09 s**.
+
+### UI dependency 7 — import placement
+
+Every admitted OBJ/glTF/FBX/CAD-converted model now lands on the world ground
+plane, including imports into an existing rig and imports with studio setup off.
+Its normalized bounds are measured once on the admission/recovery worker and
+stored as versioned `native3dBounds` asset metadata. Placement reads that small
+record on the kernel actor; it does not decode files or pose meshes there.
+
+Existing ordinary models keep their positions. The new model gets a clear
+interval beside their bounds along the current camera's horizontal right axis.
+Current hierarchy transforms are evaluated. Studio imports reuse and frame the
+existing camera/lens around the models, converting the pose through its parent
+space; an empty project retains the existing initial studio rig. Locked cameras
+and generated edits' protected camera channels are preserved. Imports without
+studio setup leave the rig/camera unchanged. Asset addition, placement and any
+camera setup remain **one kernel transaction and one Undo**.
+
+Old native/Electron assets without the new record use their normalized unit-fit
+envelope for spacing and still bind their retained archives without rewriting
+saved data. The stored bounds describe the initial pose; swept animation,
+extruded artwork, terrain-aware placement and nature/scatter collision avoidance
+remain follow-ups. Terrain/World/fog/scatter are excluded from the product row;
+`place_on` remains the explicit operation for a different receiving surface.
+`auto_studio` can take an explicit model `target` for initial import framing;
+its existing no-target behaviour still frames all models, regardless of selection.
+
+The designer's import command and native MCP import path already use
+`Scene3dCommand::Import`, so no UI changes are needed. The same retained asset,
+layer channels, saved composition and failure status remain the read-side hooks.
+
+Checks: **31 kernel scene tests** pass in **0.26 s**, including repeated imports,
+non-overlapping world bounds, both models touching ground, reuse of the existing
+rig, camera framing, one-step Undo/Redo, PMV reopen/history, locked camera,
+no-studio imports and pre-bounds archive recovery. **8 native scene unit tests**
+and **46 native Metal scene/export tests** pass (the latter **11.14 s**).
+The app build passes in **22.38 s**.

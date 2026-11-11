@@ -589,6 +589,8 @@ pub(crate) fn studio_plan(
                 .iter()
                 .filter(|l| schema::role(l) == Some(Role::Object))
                 .collect::<Vec<_>>();
+            let target=args["target"].as_str().or(args["id"].as_str());
+            let models:Vec<_>=models.into_iter().filter(|l|target.is_none_or(|id|l["id"]==id)).collect();
             let b = union(
                 models
                     .iter()

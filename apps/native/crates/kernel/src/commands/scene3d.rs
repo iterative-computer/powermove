@@ -9,6 +9,8 @@ use super::{
     values,
 };
 use crate::error::CommandError;
+#[path="scene3d_import.rs"]
+mod import_placement;
 use pm_model::Value;
 use pm_scene3d::{
     operations::{Action, Plan},
@@ -77,7 +79,9 @@ impl Scene3dCommand {
                     .lookup(&["assets".into(), asset_id.as_str().into()])
                     .ok_or_else(|| invalid("3D import metadata is missing"))?
                     .to_value();
-                if current != pm_scene3d::to_model(&import_metadata(asset_id, receipt)) {
+                let mut expected=import_metadata(asset_id,receipt);
+                if current.get("native3dBounds").is_none(){expected.as_object_mut().unwrap().remove("native3dBounds");}
+                if current != pm_scene3d::to_model(&expected) {
                     return Err(invalid("3D import source changed; recover again"));
                 }
                 Ok(())
@@ -980,13 +984,10 @@ fn import(
         false,
         None,
     )?;
+    import_placement::place(cx, comp, layer_id, receipt, time, setup_studio)?;
     if empty && setup_studio {
-        let mut assets = pm_scene3d::geometry::LoadedAssets::default();
-        assets.insert_shared(asset_id.into(), metadata, receipt.model());
-        for operation in [
-            serde_json::json!({"operation":"drop_to_floor","target":layer_id}),
-            serde_json::json!({"operation":"auto_studio"}),
-        ] {
+        let assets = import_placement::AssetBounds;
+        for operation in [serde_json::json!({"operation":"auto_studio","target":layer_id})] {
             let snapshot = crate::Snapshot {
                 doc_id: 0,
                 revision: 0,
@@ -1026,7 +1027,7 @@ fn original_ids(id: &str, receipt: &pm_scene3d::import::archive::Receipt) -> Vec
 fn import_metadata(id: &str, receipt: &pm_scene3d::import::archive::Receipt) -> serde_json::Value {
     let b = receipt.primary();
     let sources=receipt.originals().iter().zip(original_ids(id,receipt)).map(|(b,source_id)|serde_json::json!({"id":source_id,"name":b.name(),"mime":b.mime(),"size":b.length(),"sha256":b.hash()})).collect::<Vec<_>>();
-    serde_json::json!({"id":id,"name":b.name(),"kind":"model","format":b.name().rsplit('.').next().unwrap_or(""),"size":b.length(),"persisted":true,"revision":b.hash(),"native3dSources":sources})
+    serde_json::json!({"id":id,"name":b.name(),"kind":"model","format":b.name().rsplit('.').next().unwrap_or(""),"size":b.length(),"persisted":true,"revision":b.hash(),"native3dSources":sources,"native3dBounds":{"version":1,"bounds":pm_scene3d::geometry::bounds_json(receipt.bounds())}})
 }
 pub(crate) fn import_media(command: &crate::Command) -> Vec<crate::project_io::MediaEntry> {
     let (asset_id, receipt) = match command {
