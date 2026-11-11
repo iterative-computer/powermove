@@ -16,7 +16,7 @@ pub struct CacheUsage {
     pub vector_bytes: u64,
 }
 
-/// TASK_VM_INFO's stable prefix through phys_footprint (revision 0).
+/// TASK_VM_INFO's stable prefix through phys_footprint (revision 1).
 #[cfg(target_os = "macos")]
 pub fn phys_footprint() -> Option<u64> {
     unsafe extern "C" {

@@ -773,6 +773,16 @@ const fn extended_light(transfer: Transfer) -> bool {
     is_hdr_signal(transfer) || pm_color::camera_log::is_log(transfer)
 }
 
+fn preview_size(native: (u32, u32), edge: Option<u32>) -> (u32, u32) {
+    let scale = edge.map_or(1., |e| {
+        (f64::from(e) / f64::from(native.0.max(native.1).max(1))).min(1.)
+    });
+    (
+        ((f64::from(native.0) * scale).round() as u32).max(1),
+        ((f64::from(native.1) * scale).round() as u32).max(1),
+    )
+}
+
 /// The texture format a converted video frame is stored in: the project's
 /// working format, and never below half float for deeper-than-8-bit or HDR
 /// sources, so 10-bit codes and light above white are not cut to 8 bits.
@@ -918,6 +928,41 @@ fn convert_format(
     still_chroma: bool,
     packed: Option<&pm_media::frame::PixelFormat>,
 ) -> Target {
+    convert_format_scaled(
+        device,
+        queue,
+        pipelines,
+        encoder,
+        normalized,
+        color,
+        working,
+        precision,
+        factors,
+        reuse,
+        format,
+        still_chroma,
+        packed,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_format_scaled(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipelines: &Pipelines,
+    encoder: &mut wgpu::CommandEncoder,
+    normalized: &Normalized,
+    color: &SourceColor,
+    working: WorkingEncoding,
+    precision: Precision,
+    factors: Factors,
+    reuse: Option<Target>,
+    format: wgpu::TextureFormat,
+    still_chroma: bool,
+    packed: Option<&pm_media::frame::PixelFormat>,
+    size: Option<(u32, u32)>,
+) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
         Normalized::YCbCr { luma, chroma } => (
@@ -926,7 +971,7 @@ fn convert_format(
             Some((factors, chroma.width(), chroma.height())),
         ),
     };
-    let (w, h) = (luma.width(), luma.height());
+    let (w, h) = size.unwrap_or((luma.width(), luma.height()));
     let out = reuse
         .filter(|t| t.width() == w && t.height() == h && t.format() == format)
         .unwrap_or_else(|| {
@@ -1021,6 +1066,7 @@ struct ImageKey {
     linear: bool,
     /// HDR light kept (an HDR project) rather than tone mapped.
     hdr_light: bool,
+    edge: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1035,6 +1081,7 @@ struct FrameKey {
     reading: u64,
     linear: bool,
     hdr_light: bool,
+    edge: Option<u32>,
 }
 
 /// The frame cache of a renderer without a lease share: export jobs,
@@ -1071,6 +1118,10 @@ pub struct MediaCache {
     free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
+    image_seen: BTreeMap<ImageKey, u64>,
+    image_budget: u64,
+    pub(crate) preview_media: bool,
+    pub(crate) draw_edge: Option<u32>,
     /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
     stills: stills::StillPrefetch,
     /// Open video sources with the file's size and modification time when
@@ -1113,7 +1164,7 @@ impl MediaCache {
             ..ServiceConfig::default()
         }));
         MediaCache {
-            pool: FramePool::new(64 << 20),
+            pool: FramePool::new(8 << 20),
             viewer: ViewerDecode::new(service.clone()),
             source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
             service,
@@ -1130,6 +1181,10 @@ impl MediaCache {
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
+            image_seen: BTreeMap::new(),
+            image_budget: 48 << 20,
+            preview_media: false,
+            draw_edge: None,
             stills: Default::default(),
             sources: BTreeMap::new(),
             source_seen: BTreeMap::new(),
@@ -1169,6 +1224,24 @@ impl MediaCache {
         precision: Precision,
         interpret: Option<&Interpretation>,
     ) -> Result<Target, MediaFailure> {
+        self.image_scaled(
+            device, queue, pipelines, encoder, path, working, precision, interpret, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn image_scaled(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        edge: Option<u32>,
+    ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
         let key = ImageKey {
@@ -1179,8 +1252,10 @@ impl MediaCache {
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
             hdr_light: self.hdr_light,
+            edge,
         };
         if let Some(t) = self.images.get(&key) {
+            self.image_seen.insert(key.clone(), self.frame_epoch);
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(t.clone());
         }
@@ -1194,9 +1269,28 @@ impl MediaCache {
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
         probe_interpreted_image(path, interp).map_err(issue)?;
-        let mut still = match self.stills.take(path, (len, modified)) {
-            Some(still) => still,
-            None => pm_media::image::read(path, &self.pool).map_err(failed)?,
+        // Subsample only ordinary SDR. Deep, HDR, custom gamma/profile and
+        // interpreted sources retain their native reader and float storage.
+        let facts = still_facts(path).map_err(issue)?;
+        let simple = !facts.deep
+            && !facts.planar
+            && facts.color.gamma.is_none()
+            && facts.color.cicp.is_none()
+            && facts.color.chromaticities.is_none()
+            && matches!(
+                facts.color.icc_class,
+                None | Some(pm_media::image::icc::IccClass::Srgb)
+            )
+            && interpret.is_none();
+        let preview = edge.filter(|_| simple);
+        let mut still = match preview {
+            Some(edge) => pm_media::image::imageio::read_preview(path, &self.pool, edge)
+                .or_else(|_| pm_media::image::read(path, &self.pool))
+                .map_err(failed)?,
+            None => match self.stills.take(path, (len, modified)) {
+                Some(still) => still,
+                None => pm_media::image::read(path, &self.pool).map_err(failed)?,
+            },
         };
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {
@@ -1225,7 +1319,21 @@ impl MediaCache {
                 .normalize(queue, encoder, &imported)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?
         };
-        let format = video_storage(precision, if deep { 16 } else { 8 }, false);
+        // Standard stores sRGB code values in UNORM (an sRGB GPU view
+        // would decode them a second time). Opaque identity conversion is
+        // lossless for these 8-bit sources; wide/linear/HDR stay in float.
+        let compact = preview.is_some()
+            && !deep
+            && working == WorkingEncoding::Standard
+            && read.color.primaries == Primaries::Bt709
+            && read.color.transfer == Transfer::DisplayE
+            && read.color.alpha == AlphaMode::Opaque
+            && read.colorsync.is_none();
+        let format = if compact {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            video_storage(precision, if deep { 16 } else { 8 }, false)
+        };
         let mut target = convert_format(
             device,
             queue,
@@ -1281,7 +1389,9 @@ impl MediaCache {
                 || k.linear != key.linear
                 || k.hdr_light != key.hdr_light
         });
+        self.image_seen.insert(key.clone(), self.frame_epoch);
         self.images.insert(key, target.clone());
+        self.trim_images(self.image_budget);
         self.recount();
         Ok(target)
     }
@@ -1290,6 +1400,10 @@ impl MediaCache {
     /// it is cached, so the frame that first draws it does not (see
     /// `media/stills.rs`).
     pub(crate) fn prepare_image(&mut self, path: &Path) {
+        // Avoid a full-resolution prefetch defeating the viewer's thumbnail.
+        if self.preview_media {
+            return;
+        }
         let Some((len, modified)) = stamp(path) else {
             return;
         };
@@ -1529,6 +1643,16 @@ impl MediaCache {
             format!("{interp:?}{composition:?}{sequence}{override_color:?}").hash(&mut h);
             h.finish()
         };
+        let edge = if self.preview_media
+            && !export
+            && !source_exact
+            && Geometry::of(&reading, (v.width, v.height)).is_identity()
+            && !timing.deinterlaced()
+        {
+            self.draw_edge
+        } else {
+            None
+        };
         let key_of = |frame: usize| FrameKey {
             path: path.to_path_buf(),
             frame,
@@ -1538,6 +1662,7 @@ impl MediaCache {
             reading: reading_key,
             linear: working == WorkingEncoding::LinearLight,
             hdr_light: self.hdr_light,
+            edge,
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some((t, _)) = self.frames.get(&key_of(n)) {
@@ -1613,11 +1738,23 @@ impl MediaCache {
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let format = video_storage(precision, frame.format.bits, extended_light(color.transfer));
+        let preview_edge = key_of(n).edge;
+        let compact = preview_edge.is_some()
+            && frame.format.bits <= 8
+            && !self.hdr_light
+            && working == WorkingEncoding::Standard
+            && color.primaries == Primaries::Bt709
+            && !extended_light(color.transfer);
+        let format = if compact {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            video_storage(precision, frame.format.bits, extended_light(color.transfer))
+        };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
         // A converted frame retired by an earlier render (its reads are
         // submitted) is overwritten instead of allocating another.
-        let (w, h) = (frame.format.width as u32, frame.format.height as u32);
+        let native = (frame.format.width as u32, frame.format.height as u32);
+        let (w, h) = preview_size(native, preview_edge);
         let reuse = self
             .free_frames
             .iter()
@@ -1671,7 +1808,7 @@ impl MediaCache {
                 .normalize(queue, encoder, &imported)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
-        let converted = convert_format(
+        let converted = convert_format_scaled(
             device,
             queue,
             pipelines,
@@ -1685,6 +1822,7 @@ impl MediaCache {
             format,
             false,
             None,
+            Some((w, h)),
         );
         if fields.is_none() {
             importer.recycle(normalized);
@@ -1773,6 +1911,25 @@ impl MediaCache {
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    pub fn trim_images(&mut self, budget: u64) {
+        self.image_budget = budget;
+        self.image_seen
+            .retain(|key, _| self.images.contains_key(key));
+        while self.image_bytes() > budget {
+            let Some(key) = self
+                .image_seen
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.images.remove(&key);
+            self.image_seen.remove(&key);
+        }
+        self.recount();
     }
 
     pub fn image_bytes(&self) -> u64 {

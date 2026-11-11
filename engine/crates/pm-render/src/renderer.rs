@@ -1346,6 +1346,17 @@ impl Renderer {
     pub fn image_cache_bytes(&self) -> u64 {
         self.media.image_bytes()
     }
+
+    /// Explicit viewer opt-in; CLI exact/reference and export paths keep
+    /// native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, enabled: bool) {
+        self.media.preview_media = enabled;
+        self.media.draw_edge = None;
+    }
+
+    pub fn set_image_cache_budget(&mut self, bytes: u64) {
+        self.media.trim_images(bytes);
+    }
     pub fn converted_frame_bytes(&self) -> u64 {
         self.media.frame_bytes()
     }

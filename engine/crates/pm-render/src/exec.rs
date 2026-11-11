@@ -44,6 +44,18 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
+    /// Pixel density the viewer actually reads. Round to powers of two to
+    /// avoid decoding another still for every pixel of an animated scale.
+    fn source_edge(&self) -> Option<u32> {
+        if self.plane.is_some() {
+            return None;
+        }
+        let width =
+            self.matrix[0].hypot(self.matrix[1]) / (self.uv[2] - self.uv[0]).abs().max(0.0001);
+        let height =
+            self.matrix[2].hypot(self.matrix[3]) / (self.uv[3] - self.uv[1]).abs().max(0.0001);
+        Some((width.max(height).ceil().clamp(64., 16384.) as u32).next_power_of_two())
+    }
     /// Whether this draw can read beyond mip zero. Projective draws retain
     /// the full pyramid because their Jacobian changes across the quad.
     fn mip_levels(&self, texture: &wgpu::Texture, sampling: crate::sampling::Sampling) -> u32 {
@@ -509,7 +521,8 @@ impl Exec<'_> {
                     Source::Image {
                         path, interpret, ..
                     } => {
-                        match self.media.image(
+                        let edge = self.media.preview_media.then(|| r.source_edge()).flatten();
+                        match self.media.image_scaled(
                             self.device,
                             self.queue,
                             self.pipelines,
@@ -518,6 +531,7 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                             interpret.as_ref(),
+                            edge,
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
@@ -534,6 +548,8 @@ impl Exec<'_> {
                         composition_rate,
                         ..
                     } => {
+                        self.media.draw_edge =
+                            self.media.preview_media.then(|| r.source_edge()).flatten();
                         match self.media.video(
                             self.device,
                             self.queue,

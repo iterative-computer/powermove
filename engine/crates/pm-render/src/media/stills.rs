@@ -25,7 +25,7 @@ const MAX_READY: usize = 8;
 /// The decoded bytes held at most, counted from the moment the worker
 /// decodes a still, so stills on their way to the frame count too (a UHD
 /// 16-bit RGBA still is 66 MB).
-const MAX_READY_BYTES: usize = 256 << 20;
+const MAX_READY_BYTES: usize = 24 << 20;
 /// A decoded still no frame took, or asked for again, within this long is
 /// dropped: the playhead went elsewhere.
 const READY_TTL: Duration = Duration::from_secs(4);

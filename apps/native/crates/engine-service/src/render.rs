@@ -567,6 +567,7 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.renderer.set_preview_media(false);
         self.last_frame = Instant::now();
         self.idle_released = false;
         self.sync_studio(scene)?;
@@ -643,8 +644,7 @@ impl Engine {
         // by submitted consumers still protect their storage until completion.
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
-        let hit = self
-            .cache_enabled
+        let hit = (self.cache_enabled && !spec.exact)
             .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
         let mut stand_ins = false;
@@ -736,6 +736,8 @@ impl Engine {
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
+                self.renderer.set_preview_media(!spec.exact);
+                self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer.set_scrub(spec.moment == Moment::Scrub);
                 self.renderer.set_playback(spec.decode_deadline);
                 self.renderer.set_isolate_layers(true);
@@ -780,7 +782,7 @@ impl Engine {
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
                 // A frame with stand-ins is not the exact picture of its time.
-                if self.cache_enabled && !stand_ins {
+                if self.cache_enabled && !spec.exact && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
                         surface: surface.clone(),

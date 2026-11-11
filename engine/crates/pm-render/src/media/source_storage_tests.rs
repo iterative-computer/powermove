@@ -4,6 +4,97 @@
 use super::*;
 use pm_gpu::readback::{f32_to_half, half_to_f32, read_f32, read_raw};
 
+#[test]
+fn preview_scaling_preserves_aspect_and_never_upscales_exact_sources() {
+    assert_eq!(preview_size((3840, 2160), Some(1920)), (1920, 1080));
+    assert_eq!(preview_size((3024, 4032), Some(1024)), (768, 1024));
+    assert_eq!(preview_size((640, 360), Some(2048)), (640, 360));
+    assert_eq!(preview_size((3840, 2160), None), (3840, 2160));
+}
+
+#[test]
+fn subsampled_still_then_exact_read_matches_an_independent_full_read() {
+    let gpu = pm_gpu::Gpu::new("subsampled still isolation").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let mut media = MediaCache::new(&gpu.device);
+    let read = |cache: &mut MediaCache, edge| {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = cache
+            .image_scaled(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                edge,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+        (target, pixels)
+    };
+    let (small, _) = read(&mut media, Some(16));
+    assert!(small.width() <= 16 && small.height() <= 16);
+    let (full, actual) = read(&mut media, None);
+    let mut independent = MediaCache::new(&gpu.device);
+    let (reference, expected) = read(&mut independent, None);
+    assert_eq!(
+        (full.width(), full.height(), full.format()),
+        (reference.width(), reference.height(), reference.format())
+    );
+    assert_eq!(actual, expected);
+    media.trim_images(0);
+    assert_eq!(media.image_bytes(), 0);
+}
+
+#[test]
+fn preview_video_conversion_does_not_replace_the_exact_source() {
+    let gpu = pm_gpu::Gpu::new("preview source isolation").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
+    let mut media = MediaCache::new(&gpu.device);
+    let convert = |media: &mut MediaCache, preview: bool| {
+        media.preview_media = preview;
+        media.draw_edge = Some(128);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .video(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                1,
+                0.2,
+                false,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                pm_time::Rate::FPS_30,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+        media.flush();
+        (target, pixels)
+    };
+    let (exact, pixels) = convert(&mut media, false);
+    let (preview, _) = convert(&mut media, true);
+    assert!(preview.width() <= 128 && preview.height() <= 128);
+    let (again, after) = convert(&mut media, false);
+    assert_eq!(
+        (again.width(), again.height(), again.format()),
+        (exact.width(), exact.height(), exact.format())
+    );
+    assert_eq!(pixels, after);
+}
+
 /// Exercise the production source compute pass with normalized f32 RGB.
 /// Keeping the input at f32 makes an accidental half-float conversion
 /// before RGBA8 storage observable independently of a video decoder.
