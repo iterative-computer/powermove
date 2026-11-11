@@ -512,7 +512,9 @@ impl Viewer {
                 v.set_studio_preview(preview);
             }
             if snapshot.revision > v.stamp.revision {
-                v.input = v.pending_input.take();
+                if let Some(input) = v.pending_input.take() {
+                    v.input.get_or_insert(input);
+                }
                 let (actor_ms, publication_ms) = spans.unwrap_or_default();
                 v.pipeline = trace::Pipeline {
                     request: trace::now(),
@@ -1665,6 +1667,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     audio_host_seconds: f.audio_host,
                     pixels: readback.map(|_| f.submission.pixels()).or(kept),
                 });
+                // A stale, failed or dropped frame did not answer the input.
+                // Keep its origin through retries; never consume a newer one.
+                if t.gpu_ok
+                    && (t.display.is_some_and(|at| at > 0.) || f.submission.drawable.is_none())
+                    && v.input == f.input
+                {
+                    v.input = None;
+                }
                 if readback.is_some() {
                     v.capture_owed = false;
                 }
@@ -2014,7 +2024,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 due,
                 mastering: v.mastering,
                 resources: v.resources.clone(),
-                input: v.input.take(),
+                input: v.input,
                 pipeline: v.pipeline,
                 audio_host: r
                     .transport
@@ -2232,7 +2242,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.capture |= capture;
                         v.status.no_drawable += 1;
                         v.dirty = true;
-                        v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {
                             r.drawable_misses = r.drawable_misses.saturating_add(1);
                             r.not_before = trace::now() + drawable_retry(r.drawable_misses);
@@ -2241,7 +2250,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     Err(e) if render::transient(&e) => {
                         v.capture |= capture;
                         v.dirty = true;
-                        v.input = input;
                         // A raster override's layers: asked of the realm; its
                         // answers redraw (`CompatStore::answer_all`).
                         let pending = match e.downcast_ref::<pm_render::RenderError>() {
@@ -2575,6 +2583,32 @@ mod worker_tests {
                 audio: false,
             })
             .unwrap()
+    }
+    #[test]
+    fn input_origin_survives_a_stale_submission_until_a_frame_lands() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("stale-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let input = trace::now();
+        v.scrub_at(Ticks::from_whole_seconds(1), input).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Like a UI publication arriving while its first frame encodes.
+        v.studio_preview(studio::Preview::Refine).unwrap();
+        v.capture_next().unwrap();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert!(status.stale_rejections > 0);
+        assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
