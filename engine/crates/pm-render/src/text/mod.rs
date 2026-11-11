@@ -220,6 +220,38 @@ pub struct TextContext {
     /// Each plain level 1 layer's last device plan, by node address:
     /// reused while its inputs are equal.
     level1_plans: std::collections::HashMap<usize, Level1Plan>,
+    /// How heavy text draws.
+    smoothing: TextWeight,
+}
+
+/// How heavy text draws (TEXT-SMOOTH-1, docs/engine/text-render.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextWeight {
+    /// Today's macOS look, in the viewer and in exports: level 1 text and
+    /// captions as Canvas2D drew them, level 2 as CoreText with font
+    /// smoothing draws (`pm_text::render::smoothing`).
+    #[default]
+    Smoothed,
+    /// Plain outline coverage: the glyphs as designed (the raster gates'
+    /// reference arithmetic).
+    Exact,
+}
+
+impl TextWeight {
+    fn level1(self) -> pm_text::render::smoothing::Smoothing {
+        use pm_text::render::smoothing::Smoothing;
+        match self {
+            TextWeight::Smoothed => Smoothing::Canvas2d,
+            TextWeight::Exact => Smoothing::Exact,
+        }
+    }
+    fn level2(self) -> pm_text::render::smoothing::Smoothing {
+        use pm_text::render::smoothing::Smoothing;
+        match self {
+            TextWeight::Smoothed => Smoothing::CoreText,
+            TextWeight::Exact => Smoothing::Exact,
+        }
+    }
 }
 
 /// A plain level 1 text layer's device plan and what it was made from:
@@ -300,6 +332,7 @@ impl Default for TextContext {
             unsupported: Vec::new(),
             prefetched: None,
             level1_plans: Default::default(),
+            smoothing: TextWeight::default(),
         }
     }
 }
@@ -371,6 +404,18 @@ impl TextContext {
 
     pub fn has_fonts(&self) -> bool {
         self.fonts.is_some()
+    }
+
+    /// How heavy text draws; a change makes every later raster key new.
+    pub fn set_weight(&mut self, weight: TextWeight) {
+        if self.smoothing != weight {
+            self.smoothing = weight;
+            self.generation += 1;
+        }
+    }
+
+    pub fn weight(&self) -> TextWeight {
+        self.smoothing
     }
 
     /// `PM.captionsHidden`: an export without burned-in captions draws no
@@ -565,6 +610,9 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
             }
             item.opacity.to_bits().hash(&mut h);
             item.blur.to_bits().hash(&mut h);
+            for c in item.curve {
+                c.to_bits().hash(&mut h);
+            }
             match &item.content {
                 ItemContent::Coverage { paths } => {
                     0u8.hash(&mut h);
@@ -668,6 +716,8 @@ impl TextContext {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
                 unsupported: Vec::new(),
+                // Level 1 text and captions: today's Canvas2D weight.
+                smoothing: self.smoothing.level1(),
             },
             fonts,
             &mut self.unsupported,
@@ -965,6 +1015,8 @@ impl TextContext {
             outlines: &mut self.outlines,
             bitmaps: &mut self.bitmaps,
             unsupported: Vec::new(),
+            // Level 2: the macOS look (CoreText with font smoothing).
+            smoothing: self.smoothing.level2(),
         };
         for draw in &frame.draws {
             if !draw.opacity.is_finite() || draw.opacity <= 0.0 {

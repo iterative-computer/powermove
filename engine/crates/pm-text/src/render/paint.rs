@@ -282,7 +282,8 @@ fn paint_item(
         for x in rect[0].max(0)..rect[2].min(i64::from(layer.width)) {
             let mut src = match &item.content {
                 ItemContent::Coverage { .. } => {
-                    let a = coverage(x, y) * alpha;
+                    let c = super::smoothing::apply(item.curve, f64::from(coverage(x, y))) as f32;
+                    let a = c * alpha;
                     [rgb[0] * a, rgb[1] * a, rgb[2] * a, a]
                 }
                 ItemContent::Image { .. } => {

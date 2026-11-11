@@ -535,6 +535,7 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
                         } else {
                             (0., 0.)
                         },
+                        smooth: (0., 0.),
                         skew: if info.synthetic_italic {
                             pm_text::render::outline::SYNTHETIC_ITALIC_SKEW
                         } else {

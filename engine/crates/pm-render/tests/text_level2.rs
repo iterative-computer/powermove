@@ -57,6 +57,7 @@ fn main() {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
                 unsupported: Vec::new(),
+                smoothing: Default::default(),
             };
             let paint = pm_text::render::color::parse_or(color, [0.0, 0.0, 0.0, 1.0]);
             let placement = Affine::translate((320.25, 140.6)) * Affine::scale(scale);

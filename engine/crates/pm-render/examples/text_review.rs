@@ -223,6 +223,7 @@ mod review {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
                 unsupported: Vec::new(),
+                smoothing: Default::default(),
             };
             let mut refs: Vec<RefRun<'_>> = Vec::new();
             for (line, faces) in lines.iter().zip(&faces) {

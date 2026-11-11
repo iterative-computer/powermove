@@ -58,9 +58,13 @@ fn main() {
         pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1)
     };
     let mut gpu = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    gpu.text().set_weight(pm_render::text::TextWeight::Exact);
     gpu.set_text_fonts(Some(fonts()));
     gpu.text_gpu().set_coverage(Coverage::Area);
     let mut cpu = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    cpu.text().set_weight(pm_render::text::TextWeight::Exact);
     cpu.set_text_fonts(Some(fonts()));
     cpu.text_gpu().set_coverage(Coverage::Cpu);
     let mut failures = Vec::new();
@@ -192,6 +196,8 @@ fn main() {
     }
     // Without fonts a text layer is refused.
     let mut bare = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    bare.text().set_weight(pm_render::text::TextWeight::Exact);
     let doc = doc_of("text", &docs[1].2);
     let request = pm_render::RenderRequest::sized(
         pm_protocol::common::Size::new(320, 180),
@@ -218,6 +224,8 @@ fn main() {
     linear_project_text_source(&mut gpu, &mut failures);
     let fresh = || {
         let mut r = Renderer::headless().expect("a Metal device");
+        // The exact rasterizer is what this gate holds to its reference.
+        r.text().set_weight(pm_render::text::TextWeight::Exact);
         r.set_text_fonts(Some(fonts()));
         r
     };
@@ -498,6 +506,7 @@ fn linear_overlap_and_colr_source(renderer: &mut pm_render::Renderer, failures: 
         },
         color: [1.0; 4],
         opacity: 1.0,
+        curve: pm_text::render::smoothing::IDENTITY,
         blur: 0.0,
         bounds: Rect::new(112.0, 80.0, 120.0, 88.0),
     };

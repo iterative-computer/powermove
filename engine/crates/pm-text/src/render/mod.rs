@@ -18,6 +18,7 @@ pub mod outline;
 pub mod paint;
 #[cfg(feature = "render")]
 pub mod scene;
+pub mod smoothing;
 
 #[cfg(feature = "render")]
 use crate::compat::{Compat, GlyphRun, TextContent};
