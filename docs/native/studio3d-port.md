@@ -1698,3 +1698,57 @@ checks: **100 passed, 1 intentionally ignored (23.72 s)**. Their initial run
 hit eight pre-existing storage-path refusals because macOS's `/var` temporary
 path is a symlink; repeating with a canonical `/private/tmp` test directory
 passed all checks. Native app build: **19.12 s**, unchanged build profile.
+
+
+### Quiet-window performance, first measured increment (2026-11-11)
+
+The driver is now exercised on screen. It rejects stale/failed/null-display
+submissions, deduplicates display callbacks and native input origins, includes
+phase-boundary gaps, and requires 100 distinct presented inputs for input-p95
+acceptance. Offline checks cover known 120 Hz/25 ms traces, duplicate callbacks,
+a 200 ms stall, null displays and missing input. Development dylibs are passed
+with `--library-dir` after the system lock/Python launcher. The test app quits
+in the driver's cleanup path; only private project/profile copies are used.
+
+Same animated 1920×1080 product composition, **1464×824** viewer, Fit 38%, Auto
+at Full, 60 fps composition, one view, Metal RT/MetalFX. Each playback phase is
+60 s after 8 s warmup. These viewport measurements supersede the older busy
+27 fps observation for this configuration; the older viewport differed.
+
+| Measurement | Quiet baseline | Material cache + queued Live trace |
+|---|---:|---:|
+| Presented fps | 31.6245 | 32.1849 |
+| Largest presented gap | 74.999 ms | 91.666 ms |
+| Gaps at least 100 ms | 0 | 0 |
+| Render submission wall time, median / p95 | 31.624 / 34.776 ms | 31.051 / 38.840 ms |
+| Drawable acquisition, median / p95 | 0.017 / 0.030 ms | 0.016 / 0.031 ms |
+| Completion to actual display, median / p95 | 20.665 / 23.538 ms | 20.881 / 28.158 ms |
+| Native input p95 | insufficient samples | 57.074 ms, 179 inputs |
+
+The native input sequence uses paced Page Up/Down events delivered to the app,
+not perf-gate seeks. The initial arrow-key sequence produced no changed frames
+and is explicitly excluded. This measures frame-step latency; it does not yet
+establish gizmo/orbit latency. **Live and input gates remain failing.**
+
+The first measured fixes cache immutable material receiver references per
+composition and prepare material captures once per scene request/tier within
+a compositor frame. A new frame and each surface query still observe resource
+changes. Perspective MetalFX Live queues tracing directly before guides; the
+shared wgpu queue preserves ordering and the Metal-texture handoff retains its
+completion barrier. Guide timings include deferred tracing in this mode, so
+submission-only `trace_ms` is never presented as a GPU-speed gain. Orthographic
+and portable fallbacks retain their synchronized paths. Camera navigation now
+attaches the native event origin too and retains the oldest outstanding origin
+through superseded frames.
+
+Checks: 54 native Studio integration tests pass after the cache/queue changes;
+the shared two-output compositor regression verifies one preparation per frame
+and a new preparation on the next frame. Camera supersession/origin regression
+passes (1.20 s). Native app rebuild passes (14.23 s).
+
+The headless timing utility now uses the native sample floors/ceilings and no
+convergence deadline, includes Draft, uses half-resolution OIDN guides except
+Final, and measures fast PNG compression as native export does. Its `ready_ms`
+excludes output readback/PNG encoding; `frame_ms` includes both. This is a
+single Studio frame diagnostic, excluding animated shutter samples, native
+2D compositing, file writes and the surrounding export process.

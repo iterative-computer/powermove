@@ -35,6 +35,7 @@ struct Pass {
     splat_cache: Option<(SceneRequest, Vec<crate::splats::Layer>)>,
     failures: Vec<pm_render::LayerFailure>,
     capture: Option<pm_render::Renderer>,
+    prepared_materials: Option<(SceneRequest, Tier)>,
 }
 impl Pass {
     pub fn new(source: Arc<dyn Source>) -> Self {
@@ -47,15 +48,18 @@ impl Pass {
             splat_cache: None,
             failures: vec![],
             capture: None,
+            prepared_materials: None,
         }
     }
     pub fn replace_source(&mut self, source: Arc<dyn Source>) {
         self.source = source;
+        self.prepared_materials = None;
         self.cached = None;
         self.splat_cache = None;
         self.failures.clear();
     }
     pub fn begin_frame(&mut self) {
+        self.prepared_materials = None;
         self.failures.clear();
         if self
             .cached
@@ -81,8 +85,10 @@ impl Pass {
         }
     }
     fn prepare_materials(&mut self, request: &SceneRequest, tier: Tier) -> Result<(), String> {
+        if self.prepared_materials.as_ref().is_some_and(|(r,t)|r==request && *t==tier) { return Ok(()); }
         if !self.source.needs_materials(request)? {
             self.capture = None;
+            self.prepared_materials = Some((request.clone(),tier));
             return Ok(());
         }
         let service = self
@@ -107,6 +113,7 @@ impl Pass {
             self.cached = None;
             self.splat_cache = None;
         }
+        self.prepared_materials = Some((request.clone(),tier));
         Ok(())
     }
     fn render_texture(
@@ -228,6 +235,7 @@ impl Backend for Pass {
         x: f32,
         y: f32,
     ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
+        self.prepared_materials = None;
         self.prepare_materials(request, tier)?;
         self.service
             .as_mut()

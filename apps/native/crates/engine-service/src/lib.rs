@@ -614,7 +614,8 @@ impl Viewer {
                 v.stamp.sequence += 1;
                 v.dirty = true;
                 if let Some(input) = input {
-                    v.input = Some(input);
+                    let origin=v.pending_input.take().unwrap_or(input);
+                    v.input.get_or_insert(origin);
                     v.pipeline = trace::Pipeline {
                         request: trace::now(),
                         ..Default::default()
@@ -2768,6 +2769,19 @@ mod worker_tests {
         assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn camera_input_keeps_the_oldest_origin_across_superseded_frames() {
+        let service=EngineService::start(pm_gpu::Gpu::new("camera-input-origin").unwrap()).unwrap();
+        let v=shapes_viewer(&service,None);v.capture_next().unwrap();drawn(&v);
+        let (entered,signal)=std::sync::mpsc::channel();let (release,barrier)=std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap()=Some(Box::new(move||{entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();}));
+        let origin=trace::now();v.input_event(origin);
+        let mut camera=studio::FreeView{eye:[0.,0.,5.],target:[0.;3],zoom:1.};
+        v.studio_view_at(Some(camera),origin+0.001).unwrap();signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        camera.eye[0]=1.;v.studio_view_at(Some(camera),origin+0.002).unwrap();v.capture_next().unwrap();release.send(()).unwrap();
+        let status=drawn(&v);assert!(status.stale_rejections>0);assert_eq!(status.frame.unwrap().input_host_seconds,Some(origin));
+        v.capture_next().unwrap();assert_eq!(drawn(&v).frame.unwrap().input_host_seconds,None);
     }
     #[test]
     fn interactive_frame_step_retains_its_event_origin() {

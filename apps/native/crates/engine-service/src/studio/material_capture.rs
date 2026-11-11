@@ -421,6 +421,10 @@ impl DocumentSource {
         &self,
         request: &SceneRequest,
     ) -> Result<Vec<(String, Value)>, String> {
+        // Selectors belong to this immutable document; file/font/time changes
+        // affect captured pixels, not which receivers reference which sources.
+        let mut cached=self.material_references.lock().map_err(|_|"Material reference cache poisoned")?;
+        if let Some(references)=cached.get(&request.composition) { return Ok(references.as_ref().clone()); }
         let comp = Comp::resolve(&self.snapshot.document, &request.composition)
             .map_err(|e| e.to_string())?;
         let mut out = vec![];
@@ -440,6 +444,7 @@ impl DocumentSource {
                     .map(|source| (id.into(), source)),
             );
         }
+        cached.insert(request.composition.clone(),Arc::new(out.clone()));
         Ok(out)
     }
     pub(super) fn captured_material(

@@ -16,7 +16,7 @@ use pm_studio3d_engine::{
 };
 use serde_json::json;
 use std::sync::Arc;
-struct Source(Arc<mesh::Mesh>);
+struct Source(Arc<mesh::Mesh>,Arc<std::sync::atomic::AtomicUsize>);
 impl SceneSource for Source {
     fn scene(&self, _: &SceneRequest) -> Result<SceneInput, String> {
         let mut scene = pm_studio3d_engine::swatch::scene(Material::metal(Vec3::splat(0.8), 0.1));
@@ -48,6 +48,10 @@ impl SceneSource for Source {
     }
 }
 impl pm_studio3d_engine::compositor::Source for Source {
+    fn needs_materials(&self,_:&SceneRequest)->Result<bool,String>{Ok(true)}
+    fn prepare_materials(&self,_:&mut Renderer,_:&SceneRequest,_:pm_studio3d_engine::service::Tier)->Result<bool,String>{
+        self.1.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Ok(false)
+    }
     fn final_samples(&self, _: &SceneRequest) -> Result<u32, String> {
         Ok(4)
     }
@@ -66,9 +70,10 @@ fn shared_scene_trace_is_cached_and_final_does_not_retrace() {
             object3d("right", "sphere", json!({}), "#FFFFFF", 64, 64, 1.),
         ],
     ));
+    let preparations=Arc::new(std::sync::atomic::AtomicUsize::new(0));
     renderer.set_studio_source(
         Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(
-            Source(Arc::new(mesh::sphere(Vec3::ZERO, 0.7, 12, 24))),
+            Source(Arc::new(mesh::sphere(Vec3::ZERO, 0.7, 12, 24)),preparations.clone()),
         )))),
         pm_render::scene3d::provider::Settings {
             revision: document.revision(),
@@ -92,6 +97,7 @@ fn shared_scene_trace_is_cached_and_final_does_not_retrace() {
     let pixels = renderer.read_rgba(&frame).unwrap();
     assert!(pixels.chunks_exact(4).any(|p| p[3] > 0.));
 
+    assert_eq!(preparations.load(std::sync::atomic::Ordering::Relaxed),1,"prepare captures once across both outputs");
     assert_eq!(renderer.studio_counters().traces, 1);
     assert_eq!(renderer.studio_counters().geometry_uploads, 1);
     assert_eq!(renderer.studio_counters().blas_builds, 1);
@@ -107,12 +113,13 @@ fn shared_scene_trace_is_cached_and_final_does_not_retrace() {
         .unwrap();
     assert!(frame.failures.is_empty());
     assert_eq!(pixels, renderer.read_rgba(&frame).unwrap());
+    assert_eq!(preparations.load(std::sync::atomic::Ordering::Relaxed),2,"a new frame observes files and fonts again");
 
     assert_eq!(renderer.studio_counters().traces, 1);
     let mesh = Arc::new(mesh::sphere(Vec3::ZERO, 0.7, 12, 24));
     renderer.set_studio_source(
         Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(
-            Source(mesh),
+            Source(mesh,Arc::default()),
         )))),
         pm_render::scene3d::provider::Settings {
             revision: document.revision(),

@@ -393,6 +393,10 @@ impl StudioService {
         // Stills/deliveries stop at the error target or the sample ceiling.
         // The saved time limit remains a preview hint, never an export deadline.
         timings.prepare_ms = frame_start.elapsed().as_secs_f64() * 1000.;
+        #[cfg(all(feature = "metalfx", target_os = "macos"))]
+        let mut metalfx = r.live && r.metalfx_enabled && !live_guided;
+        #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
+        let metalfx = false;
         use crate::status::{RefineProgress, RefineStage};
         let refining = matches!(tier, Tier::QualityRefine { .. });
         let cancelled = std::cell::Cell::new(false);
@@ -406,6 +410,7 @@ impl StudioService {
             keep
         };
         if refining { r.trace_with_progress(samples, bounces, reset, 64, &progress); }
+        else if r.live && metalfx { r.queue_live_trace(bounces,6)?; }
         else { r.trace(samples, bounces, reset, if r.live { 6 } else { 64 }); }
         if cancelled.get() { return Err("Studio refinement superseded".into()); }
         if refining && !source.refine_progress(&request, RefineProgress {
@@ -417,10 +422,6 @@ impl StudioService {
         } else {
             0
         };
-        #[cfg(all(feature = "metalfx", target_os = "macos"))]
-        let mut metalfx = r.live && r.metalfx_enabled && !live_guided;
-        #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
-        let metalfx = false;
         #[cfg(feature = "oidn")]
         if denoise == Denoise::Oidn || matches!(tier, Tier::QualityRefine { .. }) {
             let half_guides = quality.is_some_and(|q| q.half_resolution_guides)

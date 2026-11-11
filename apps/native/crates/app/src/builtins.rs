@@ -1542,7 +1542,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         if let Some(c) = self.0.upgrade()
             && let Some(viewer) = &c.read(cx).viewer
         {
-            let _ = viewer.studio_view(view);
+            let _ = viewer.studio_view_at(view, Controller::event_time());
         }
     }
     fn input(&self, at: f64, cx: &mut App) {

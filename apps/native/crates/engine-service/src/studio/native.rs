@@ -42,6 +42,7 @@ pub struct DocumentSource {
     capture_definitions: pm_protocol::definitions::DefinitionSetSnapshot,
     capture_bindings: Mutex<Option<material_capture::Bindings>>,
     capture_plans: Mutex<HashMap<(String, String), Arc<material_capture::Plan>>>,
+    material_references: Mutex<HashMap<String, Arc<Vec<(String, Value)>>>>,
     extruded: Mutex<Vec<(String, Arc<pm_scene3d::extrusion::Extrusion>)>>,
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
@@ -93,6 +94,7 @@ impl DocumentSource {
             capture_definitions: Default::default(),
             capture_bindings: Mutex::default(),
             capture_plans: Mutex::default(),
+            material_references: Mutex::default(),
             text: Mutex::default(),
             extruded: Mutex::default(),
             snapshot: pm_kernel::Snapshot {
