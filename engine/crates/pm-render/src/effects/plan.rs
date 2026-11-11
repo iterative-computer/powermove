@@ -771,6 +771,34 @@ pub(crate) fn owner<'d>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn effect_owner_bounds_refusal_depends_on_layer_geometry_only() {
+        // This refusal predates preview media sizing and cache eviction:
+        // size_bounds supports sized layers, not text/group/path geometry.
+        // No renderer, media, font, panel or GPU state participates here.
+        let root = pm_model::json::parse(
+            r#"{
+            "id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":1,
+            "comps":{},"layers":[
+                {"id":"text","type":"text","d":{"text":"T"}},
+                {"id":"group","type":"group","d":{}},
+                {"id":"solid","type":"solid","d":{"w":80,"h":40}}
+            ]
+        }"#,
+        )
+        .unwrap();
+        let doc = pm_model::Document::new(Some(pm_model::canonical::canonical_project(root)), 1);
+        let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+        let mut ev = pm_eval::Evaluator::new();
+        let mut scope = Scope::new(&mut ev, &comp, &comp);
+        let layers = comp.layers();
+        for layer in &layers[..2] {
+            assert!(matches!(owner(&mut scope, layer, 0., (1., 1.)).unwrap(),
+                Err(Feature::Definition(message)) if message == "effect owner bounds unavailable"));
+        }
+        assert!(scope.size_bounds(&layers[2], 0.).unwrap().is_some());
+    }
+
     fn rgb(s: &str) -> [f64; 3] {
         hex2rgb(&JsString::from(s))
     }
