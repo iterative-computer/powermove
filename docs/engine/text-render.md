@@ -118,7 +118,8 @@ smoothed. `TextWeight::Exact` keeps plain coverage; the raster gates below
 judge that mode against their independent reference, and `text_weight`
 judges the default against today's measured stems
 (`tools/visual-parity/text-weight-probe.mjs`): mean 0.096 px from today
-where exact coverage is 0.479 px.
+where exact coverage is 0.479 px. Extensions' canvas text (`pm-recorder`)
+draws with the same Canvas2D weight under the same gate.
 
 ## Paint and blend domain
 

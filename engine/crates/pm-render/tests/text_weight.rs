@@ -17,54 +17,7 @@
 
 mod support;
 
-/// v1.2.0's stem coverage widths, `text-weight-probe.mjs` (2026-11-11):
-/// `(weight, white paint on black, device px, width)`.
-const TODAY: &[(u32, bool, f64, f64)] = &[
-    (400, true, 12.0, 1.306),
-    (400, true, 14.0, 1.776),
-    (400, true, 16.0, 1.898),
-    (400, true, 20.0, 2.412),
-    (400, true, 24.0, 2.604),
-    (400, true, 28.0, 2.949),
-    (400, true, 32.0, 3.608),
-    (400, true, 40.0, 4.392),
-    (400, true, 48.0, 4.961),
-    (400, true, 64.0, 6.627),
-    (400, true, 96.0, 9.447),
-    (400, false, 12.0, 1.176),
-    (400, false, 14.0, 1.333),
-    (400, false, 16.0, 1.553),
-    (400, false, 20.0, 1.922),
-    (400, false, 24.0, 2.345),
-    (400, false, 28.0, 2.769),
-    (400, false, 32.0, 3.110),
-    (400, false, 40.0, 3.914),
-    (400, false, 48.0, 4.804),
-    (400, false, 64.0, 6.161),
-    (400, false, 96.0, 8.969),
-    (700, true, 12.0, 1.961),
-    (700, true, 14.0, 2.212),
-    (700, true, 16.0, 2.784),
-    (700, true, 20.0, 3.447),
-    (700, true, 24.0, 3.945),
-    (700, true, 28.0, 4.412),
-    (700, true, 32.0, 4.973),
-    (700, true, 40.0, 6.047),
-    (700, true, 48.0, 7.612),
-    (700, true, 64.0, 9.765),
-    (700, true, 96.0, 14.365),
-    (700, false, 12.0, 1.784),
-    (700, false, 14.0, 2.114),
-    (700, false, 16.0, 2.357),
-    (700, false, 20.0, 2.945),
-    (700, false, 24.0, 3.561),
-    (700, false, 28.0, 4.235),
-    (700, false, 32.0, 4.808),
-    (700, false, 40.0, 6.027),
-    (700, false, 48.0, 7.176),
-    (700, false, 64.0, 9.510),
-    (700, false, 96.0, 13.886),
-];
+use pm_text::render::smoothing::CANVAS2D_STEMS as TODAY;
 
 /// The middle row's coverage of a centred "l" on a 256 px frame, as today's
 /// probe measures it: `(L − background) / (paint − background)`.

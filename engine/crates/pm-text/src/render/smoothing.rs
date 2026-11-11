@@ -23,9 +23,9 @@
 //! spike S4. The coverage curves are those fits' measured 17-point curves
 //! reduced to one exponent each (largest error 0.018 for white, 0.008 for
 //! black). Layout positions are unchanged (TEXT layout gates); stroke
-//! passes, bitmap and COLR glyphs are never smoothed. `pm-render`'s
-//! `text_weight` gate holds the result to today's measured stem widths
-//! (`tools/visual-parity/text-weight-probe.mjs`).
+//! passes, bitmap and COLR glyphs are never smoothed. `pm-render`'s and
+//! `pm-recorder`'s `text_weight` gates hold the result to today's measured
+//! stem widths ([`CANVAS2D_STEMS`]).
 
 /// How glyph fills are weighted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -111,6 +111,57 @@ pub fn apply(curve: [f32; 3], c: f64) -> f64 {
     let dark = 1.0 - (1.0 - c).powf(f64::from(curve[2]));
     dark + (light - dark) * f64::from(curve[0])
 }
+
+/// Today's measured weight, the data the gates hold the Canvas2D weight
+/// to: v1.2.0's Helvetica "l" stem coverage widths,
+/// `tools/visual-parity/text-weight-probe.mjs` (2026-11-11):
+/// `(weight, white paint on black, device px, width)`.
+pub const CANVAS2D_STEMS: &[(u32, bool, f64, f64)] = &[
+    (400, true, 12.0, 1.306),
+    (400, true, 14.0, 1.776),
+    (400, true, 16.0, 1.898),
+    (400, true, 20.0, 2.412),
+    (400, true, 24.0, 2.604),
+    (400, true, 28.0, 2.949),
+    (400, true, 32.0, 3.608),
+    (400, true, 40.0, 4.392),
+    (400, true, 48.0, 4.961),
+    (400, true, 64.0, 6.627),
+    (400, true, 96.0, 9.447),
+    (400, false, 12.0, 1.176),
+    (400, false, 14.0, 1.333),
+    (400, false, 16.0, 1.553),
+    (400, false, 20.0, 1.922),
+    (400, false, 24.0, 2.345),
+    (400, false, 28.0, 2.769),
+    (400, false, 32.0, 3.110),
+    (400, false, 40.0, 3.914),
+    (400, false, 48.0, 4.804),
+    (400, false, 64.0, 6.161),
+    (400, false, 96.0, 8.969),
+    (700, true, 12.0, 1.961),
+    (700, true, 14.0, 2.212),
+    (700, true, 16.0, 2.784),
+    (700, true, 20.0, 3.447),
+    (700, true, 24.0, 3.945),
+    (700, true, 28.0, 4.412),
+    (700, true, 32.0, 4.973),
+    (700, true, 40.0, 6.047),
+    (700, true, 48.0, 7.612),
+    (700, true, 64.0, 9.765),
+    (700, true, 96.0, 14.365),
+    (700, false, 12.0, 1.784),
+    (700, false, 14.0, 2.114),
+    (700, false, 16.0, 2.357),
+    (700, false, 20.0, 2.945),
+    (700, false, 24.0, 3.561),
+    (700, false, 28.0, 4.235),
+    (700, false, 32.0, 4.808),
+    (700, false, 40.0, 6.027),
+    (700, false, 48.0, 7.176),
+    (700, false, 64.0, 9.510),
+    (700, false, 96.0, 13.886),
+];
 
 /// `(device size, expansion x, expansion y = −dy, exponent after the curve)`.
 type Row = (f64, f64, f64, f64);
