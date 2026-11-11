@@ -5602,6 +5602,7 @@ dependencies = [
  "pm-render",
  "pm-studio",
  "pollster 0.4.0",
+ "serde",
  "serde_json",
  "wgpu",
 ]

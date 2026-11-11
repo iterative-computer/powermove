@@ -199,3 +199,15 @@ mod tests {
         assert_eq!(EXPORT_PREPARING, "Preparing 3D model…");
     }
 }
+
+/// Worker progress, independent of capsule copy or presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RefineStage { Sampling, Denoising, Complete }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefineProgress {
+    pub samples_done: u32,
+    pub samples_target: u32,
+    pub stage: RefineStage,
+}

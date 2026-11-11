@@ -15,6 +15,8 @@ pub use pm_render::scene3d::provider::SceneRequest;
 
 /// Interface with the scene/core lane. No kernel mutations, JS or DOM calls.
 pub trait SceneSource: Send + Sync {
+    /// False cancels a superseded viewer refinement between GPU submissions.
+    fn refine_progress(&self, _request: &SceneRequest, _progress: crate::status::RefineProgress) -> bool { true }
     fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String>;
     /// Failed contributions omitted from this immutable scene, by timeline ID.
     fn layer_failures(&self, _request: &SceneRequest) -> Result<Vec<pm_render::LayerFailure>, String> { Ok(vec![]) }

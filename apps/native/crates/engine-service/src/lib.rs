@@ -240,6 +240,7 @@ pub struct FrameReport {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    pub refine_progress: Option<studio::RefineProgress>,
     /// Explicit Studio calibration for the current immutable viewer scene.
     pub export_estimate: ExportEstimateState,
     pub frame: Option<FrameReport>,
@@ -345,6 +346,7 @@ struct View {
     surface_queries: VecDeque<surface::Pending>,
     export_estimate: Option<export_estimate::Pending>,
     export_estimate_stamp: Option<Stamp>,
+    refine_progress_stamp: Option<Stamp>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -928,6 +930,7 @@ impl Viewer {
             .get(&self.id)
             .map(|v| {
                 let mut status = v.status.clone();
+                if v.refine_progress_stamp != Some(v.stamp) { status.refine_progress = None; }
                 if v.export_estimate_stamp != Some(v.stamp) {
                     status.export_estimate = ExportEstimateState::Idle;
                 }
@@ -1137,6 +1140,7 @@ impl EngineService {
                 surface_queries: VecDeque::new(),
                 export_estimate: None,
                 export_estimate_stamp: None,
+                refine_progress_stamp: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1535,6 +1539,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         eprintln!("Built-in effect definitions failed to load: {error:#}");
         engine.definition_failure = Some(error.to_string());
     }
+    // A stable observer survives cached sources; its work identity changes per frame.
+    let progress_work = Arc::new(Mutex::new(None::<(u64, Stamp)>));
+    let progress_context = progress_work.clone();
+    let weak = Arc::downgrade(&shared);
+    engine.studio_progress = Some(Arc::new(move |_request, progress| {
+        let Some((id, stamp)) = *progress_context.lock().unwrap() else { return true; };
+        let Some(shared) = weak.upgrade() else { return false; };
+        let mut state = shared.state.lock().unwrap();
+        if state.stop || state.halted.is_some() { return false; }
+        let Some(v) = state.views.get_mut(&id) else { return false; };
+        if v.stamp != stamp { return false; }
+        if v.status.refine_progress != Some(progress) || v.refine_progress_stamp != Some(stamp) {
+            v.status.refine_progress = Some(progress);
+            v.refine_progress_stamp = Some(stamp);
+            state.notify();
+        }
+        true
+    }));
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
@@ -2252,11 +2274,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
+            *progress_work.lock().unwrap() = Some((id,stamp));
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
                     engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
                 });
+            *progress_work.lock().unwrap() = None;
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;

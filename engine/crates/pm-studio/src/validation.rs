@@ -118,7 +118,8 @@ impl GpuMaterial {
             || !unit(self.layers[2])
             || !unit(self.layers[3])
             || self.policy[0] < 0.
-            || !(0. ..=63.).contains(&self.policy[1])
+            || !(0. ..=191.).contains(&self.policy[1])
+            || (self.policy[1] as u32 & !191) != 0
             || self.policy[1].fract() != 0.
             || !unit(self.policy[2])
             || !(0. ..=6.).contains(&self.policy[3])

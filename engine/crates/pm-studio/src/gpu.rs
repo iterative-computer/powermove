@@ -820,7 +820,11 @@ impl Renderer {
     /// controls error stopping; the deadline can preempt it.
     /// No extra image buffers or GPU allocations are needed for adaptive work.
     pub fn trace_budgeted_interruptible(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool)->f64 {
-        self.trace_impl(spp,bounces,reset,clamp,min_samples,budget_ms,cancelled,true)
+        self.trace_impl(spp,bounces,reset,clamp,min_samples,budget_ms,cancelled,true,None)
+    }
+    /// Reports completed GPU sample batches. Returning false yields to newer input.
+    pub fn trace_with_progress(&mut self,spp:u32,bounces:u32,reset:bool,clamp:u32,progress:&dyn Fn(u32,u32)->bool)->f64 {
+        self.trace_impl(spp,bounces,reset,clamp,0,0,&||false,true,Some(progress))
     }
     /// Queue one Live sample without a CPU completion barrier. Subsequent wgpu
     /// work is ordered on the same queue. MetalFX waits after its guide pass,
@@ -828,9 +832,9 @@ impl Renderer {
     /// reads retain their own completion barrier. Returns submission wall time.
     pub fn queue_live_trace(&mut self, bounces:u32, clamp:u32)->Result<f64,String> {
         if !self.live {return Err("Queued tracing requires Live mode".into());}
-        Ok(self.trace_impl(1,bounces,true,clamp,0,0,&||false,false))
+        Ok(self.trace_impl(1,bounces,true,clamp,0,0,&||false,false,None))
     }
-    fn trace_impl(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool, wait:bool)->f64 {
+    fn trace_impl(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool, wait:bool, progress:Option<&dyn Fn(u32,u32)->bool>)->f64 {
         let film_reset = std::mem::take(&mut self.film_reset);
         let reset = reset || film_reset;
         self.timings = Default::default();
@@ -847,7 +851,7 @@ impl Renderer {
         let mut left = spp;
         let mut first = true;
         while left > 0 {
-            if cancelled(){break;}
+            if cancelled() || progress.is_some_and(|p|!p(spp-left,spp)){break;}
             if !first && budget_ms > 0 && start.elapsed().as_millis() >= budget_ms as u128 { break; }
             let n = left.min(if budget_ms>0 {self.budget_batch_samples.clamp(1,4)} else {4});
             self.frame = self.frame.wrapping_add(1);
@@ -923,6 +927,7 @@ impl Renderer {
             if self.adaptive_enabled && self.samples >= min_samples && self.samples % 32 == 0
                 && self.sample_counts().iter().all(|&count|count <= (self.samples-4) as f32) { break; }
         }
+        if let Some(progress)=progress { let _=progress(spp-left,spp); }
         let elapsed=start.elapsed().as_secs_f64()*1000.;
         self.timings.trace_ms=elapsed;
         self.timings.trace_deferred=!wait;

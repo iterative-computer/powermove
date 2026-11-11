@@ -223,7 +223,7 @@ pub struct GpuMaterial {
     pub extra: [f32; 4], // ior, specular, opacity
     pub maps: [f32; 4],  // texture layers: color, emissive, orm, normal (-1: none)
     pub layers: [f32; 4], // sheen, thin-film thickness (nm), dispersion, droplets
-    pub policy: [f32; 4], // ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32), alpha test
+    pub policy: [f32; 4], // ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32,legacy-map-v-flip=128), alpha test
     pub maps2: [f32; 4], // roughness, metalness, AO texture indices, normal scale
     #[serde(default)]
     pub imported: [[f32;4];6],

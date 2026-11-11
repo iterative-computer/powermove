@@ -11,7 +11,9 @@ pub use pm_studio3d_engine::extract::{
 pub use pm_studio3d_engine::service::{
     Denoise, FastRenderer, FrameTimings, LayerTexture, RenderedScene, StudioService, Tier,
 };
-pub use pm_studio3d_engine::status::{Failure, LightKind, Progress};
+pub use pm_studio3d_engine::status::{Failure, LightKind, Progress, RefineProgress, RefineStage};
+/// Called on the engine worker; must not perform UI work or wait for the worker.
+pub type RefineObserver = std::sync::Arc<dyn Fn(&SceneRequest, RefineProgress) -> bool + Send + Sync>;
 
 mod views;
 pub use views::{Axis, Pane, ViewCamera, ViewCommand, Views};
@@ -173,11 +175,25 @@ pub fn attach_with_camera_fonts(
     camera: ViewCamera,
     fonts: Option<&pm_render::text::host::RenderFonts>,
 ) -> Result<(), String> {
+    attach_with_camera_fonts_progress(renderer,doc,media,request,preview,camera,fonts,None)
+}
+#[cfg(feature = "kernel")]
+pub(crate) fn attach_with_camera_fonts_progress(
+    renderer: &mut pm_render::Renderer,
+    doc: std::sync::Arc<pm_model::Document>,
+    media: &pm_export::render::MediaPaths,
+    request: &SceneRequest,
+    preview: Preview,
+    camera: ViewCamera,
+    fonts: Option<&pm_render::text::host::RenderFonts>,
+    observer: Option<RefineObserver>,
+) -> Result<(), String> {
     camera.validate()?;
     use pm_studio3d_engine::compositor::Source;
     let source = DocumentSource::new(doc, media.clone())
         .with_native_fonts(fonts)
-        .with_camera_for(&request.composition, camera);
+        .with_camera_for(&request.composition, camera)
+        .with_refine_observer(observer);
     let tier = match preview {
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },

@@ -11,6 +11,7 @@ pm-render = { path = "../../../../engine/crates/pm-render" }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
+serde = { version = "1", features = ["derive"] }
 
 [features]
 default = ["oidn", "metalfx"]

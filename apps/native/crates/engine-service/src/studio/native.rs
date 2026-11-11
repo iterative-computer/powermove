@@ -33,6 +33,7 @@ mod material_policy;
 mod scatter;
 
 pub struct DocumentSource {
+    refine_observer: Option<super::RefineObserver>,
     text: Mutex<pm_render::text::TextContext>,
     capture_id: u64,
     capture_fonts: Option<pm_render::text::host::RenderFonts>,
@@ -85,6 +86,7 @@ impl DocumentSource {
     pub fn new(document: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) -> Self {
         static NEXT_CAPTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            refine_observer: None,
             capture_id: NEXT_CAPTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             capture_fonts: None,
             capture_font_factory: None,
@@ -113,6 +115,9 @@ impl DocumentSource {
             failures: Mutex::default(),
             backdrop_owner: Mutex::default(),
         }
+    }
+    pub fn with_refine_observer(mut self, observer: Option<super::RefineObserver>) -> Self {
+        self.refine_observer = observer; self
     }
     pub fn with_text_fonts(self, fonts: Box<dyn pm_render::text::TextFonts>) -> Self {
         self.text
@@ -445,6 +450,9 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
     }
 }
 impl SceneSource for DocumentSource {
+    fn refine_progress(&self, request: &SceneRequest, progress: super::RefineProgress) -> bool {
+        self.refine_observer.as_ref().is_none_or(|f| f(request,progress))
+    }
     fn layer_failures(
         &self,
         request: &SceneRequest,
@@ -769,6 +777,12 @@ impl SceneSource for DocumentSource {
                                 Ok((index, texture.sampler.wrap_s, texture.sampler.wrap_t))
                             })?;
                         } else {
+                            // Three/OBJ geometry uses bottom-origin V, while
+                            // native image and live captures have top-down rows.
+                            // Keep authored UVs/tangents intact and flip only
+                            // the legacy map lookup; imported physical slots
+                            // retain their own glTF coordinates and transforms.
+                            gpu.policy[1] = (gpu.policy[1] as u32 | 128) as f32;
                             if object["material"]["doubleSided"] == false {
                                 gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
                             }
@@ -879,6 +893,7 @@ impl SceneSource for DocumentSource {
                 } else {
                     let mut material = m;
                     let mut gpu = material.gpu();
+                    gpu.policy[1] = (gpu.policy[1] as u32 | 128) as f32;
                     gpu.extra[2] = n(p, "opacity", 1.);
                     if object["material"]["doubleSided"] == false {
                         gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;

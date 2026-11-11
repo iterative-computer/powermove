@@ -167,6 +167,7 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64, String, crate::studio::Preview, u64, Option<u64>)>,
+    pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
     /// Set by the device's lost callback or an internal GPU error: the
@@ -236,6 +237,7 @@ impl Engine {
         next.mastering = self.mastering;
         next.cache_enabled = self.cache_enabled;
         next.studio_preview = self.studio_preview;
+        next.studio_progress = self.studio_progress.clone();
         next.studio_view = self.studio_view.clone();
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
@@ -364,6 +366,7 @@ impl Engine {
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
+            studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
             studio_view: crate::studio::ViewCamera::Active,
             lost,
@@ -519,7 +522,7 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
             #[cfg(feature = "kernel")]
-            crate::studio::attach_with_camera_fonts(
+            crate::studio::attach_with_camera_fonts_progress(
                 &mut self.renderer,
                 scene.doc.clone(),
                 scene.media.as_ref(),
@@ -533,6 +536,7 @@ impl Engine {
                 self.studio_preview,
                 self.studio_view.clone(),
                 self.fonts.as_ref(),
+                self.studio_progress.clone(),
             )
             .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines

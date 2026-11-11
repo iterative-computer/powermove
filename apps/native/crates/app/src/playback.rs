@@ -186,6 +186,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // out): set when it changes, cleared only while no other message
     // replaced it.
     let mut shown = None::<String>;
+    let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
     cx.spawn(async move|cx| {
         loop {
@@ -209,6 +210,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
+                let next_studio_status=(status.refine_progress,status.export_estimate.clone());
+                if studio_status.as_ref()!=Some(&next_studio_status) {
+                    studio_status=Some(next_studio_status);
+                    v.update_builtins(cx);
+                }
                 v.tell_presented(status.frame.as_ref());
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);

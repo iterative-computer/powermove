@@ -1655,3 +1655,46 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
   UVs); Fast shows speckle on extruded faces in an orthographic Front view.
 - See `design/reviews/na-studio3d-ui.md` § Round 3 for the keyboard fix
   (v4 tab stops, focus-visible) and what's left there.
+
+
+### Quiet-window engine findings (2026-11-11)
+
+The finished designer round 3 (`94b3f3c72`) is merged into this branch; no
+panels, controls or layout were designed by the engine lane.
+
+- `ViewerStatus.refine_progress` carries `samplesDone`, `samplesTarget` and
+  `stage` (`sampling`, `denoising`, `complete`). Counts advance after completed
+  four-sample GPU batches, including the first zero and last completed count.
+  A superseded viewer stamp cancels between batches and cannot publish stale
+  progress. Denoising remains a separately reported stage. The native built-in
+  facts expose `studioRefineProgress` and `studioExportEstimate`, with updates
+  on state changes. The designer can build the capsule/ring on this data.
+- Native primitive/captured-material maps now use top-down image rows through
+  an explicit legacy-map V-orientation flag. Authored UVs, tangent frames and
+  imported physical/glTF UV transforms are retained. An asymmetric four-colour
+  capture checks all six cube faces in Live, Refine and Final; all 18 views
+  pass. The reproduced problem was a vertical inversion of the artwork.
+- Dense orthographic Front text exposed noisy metallic bevels with half-size,
+  single-sample coverage. Orthographic Live now keeps full pixel coverage,
+  four stratified samples and the existing linear temporal/edge-aware filter.
+  Perspective Live keeps MetalFX and its existing resolution/sampling policy;
+  terrain's existing fallback does not gain extra samples. A 640×360 synthetic
+  text regression against a 512-sample reference measures dark outliers
+  (luminance deficit > 0.12 on bright opaque text). Baseline: **12.78%**;
+  fixed: **0%**. Acceptance: <1% dark outliers, luminance RMS <0.05. The
+  simple flat-front test also checks standard deviation <0.025.
+
+Noise acceptance already covers independently seeded 4096-sample references
+for the teapot, glass cup, chrome sphere and chrome product set. Production
+and Final must satisfy luminance RMS <0.02, smooth-region residual RMS <0.006,
+block-bias p95 <0.012 and >100 smooth pixels. Independent emitter photon IDs
+ensure the chrome reference cannot share the tested image's baked photon map.
+These are automated numeric acceptance checks, not a claim of Cycles visual
+matching for the deferred fog/subsurface/sheen/sky work.
+
+Validation: **54 native Studio integration tests passed (12.41 s)**, including
+viewer-status/stale-progress and cancellation regressions. Engine-service unit
+checks: **100 passed, 1 intentionally ignored (23.72 s)**. Their initial run
+hit eight pre-existing storage-path refusals because macOS's `/var` temporary
+path is a symlink; repeating with a canonical `/private/tmp` test directory
+passed all checks. Native app build: **19.12 s**, unchanged build profile.

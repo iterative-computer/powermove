@@ -39,6 +39,7 @@ struct PreparedScene {
     quality: Option<crate::extract::FinalQuality>,
     denoise: Denoise,
     live_guided: bool,
+    orthographic: bool,
     reset: bool,
     width: u32,
     height: u32,
@@ -190,9 +191,11 @@ impl StudioService {
         validate(&input, &extracted)?;
         // The MetalFX denoised scaler biases low-albedo, procedurally colored
         // ground dark at Live's half resolution, even with matching guides.
+        // Orthographic reference views also retain full pixel coverage and four
+        // stratified samples: half-size single rays leave metallic bevels speckled.
         // Our linear temporal/edge-aware filter preserves its exposure. Use
         // that existing GPU path for these scenes; product sets keep MetalFX.
-        let live_guided = extracted.prepared.materials.iter().any(|m| {
+        let live_guided = input.view.orthographic_span.is_some() || extracted.prepared.materials.iter().any(|m| {
             m.policy[3] == 1. && (m.policy[1] as u32 & 16) != 0
         });
         // Compare exact bytes, including resources, instead of trusting a revision
@@ -223,7 +226,7 @@ impl StudioService {
             || !matches!(self.previous_tier, Some(Tier::QualityRefine { .. }))
             || !matches!(tier, Tier::QualityRefine { .. });
         let (width, height) = match tier {
-            Tier::QualityLive => (request.width.div_ceil(2), request.height.div_ceil(2)),
+            Tier::QualityLive if input.view.orthographic_span.is_none() => (request.width.div_ceil(2), request.height.div_ceil(2)),
             _ => (request.width, request.height),
         };
         if let Some(r) = self.renderer.as_mut() {
@@ -337,6 +340,7 @@ impl StudioService {
         }
         Ok(PreparedScene {
             quality, denoise, live_guided, reset, width, height, outputs, key, resource_start,
+            orthographic: input.view.orthographic_span.is_some(),
             adaptive: input.scene.world.adaptive, layers: extracted.layers,
             failures,
         })
@@ -356,12 +360,12 @@ impl StudioService {
             let input = source.scene(&request)?;
             return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
         }
-        let PreparedScene { quality, denoise, live_guided, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
+        let PreparedScene { quality, denoise, live_guided, orthographic, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
             self.prepare_scene(source, request.clone(), tier)?;
         let r = self.renderer.as_mut().unwrap();
         r.live = tier == Tier::QualityLive;
         let (mut samples, mut bounces, salt) = match tier {
-            Tier::QualityLive => (1, 3, 0),
+            Tier::QualityLive => (if orthographic {4} else {1}, 3, 0),
             Tier::QualityRefine { samples } => (samples, 6, 0),
             Tier::Final { samples, salt, .. } => (samples, 8, salt),
             Tier::Fast => unreachable!(),
@@ -389,7 +393,24 @@ impl StudioService {
         // Stills/deliveries stop at the error target or the sample ceiling.
         // The saved time limit remains a preview hint, never an export deadline.
         timings.prepare_ms = frame_start.elapsed().as_secs_f64() * 1000.;
-        r.trace(samples, bounces, reset, if r.live { 6 } else { 64 });
+        use crate::status::{RefineProgress, RefineStage};
+        let refining = matches!(tier, Tier::QualityRefine { .. });
+        let cancelled = std::cell::Cell::new(false);
+        let completed = std::cell::Cell::new(0);
+        let progress = |done, target| {
+            completed.set(done);
+            let keep = source.refine_progress(&request, RefineProgress {
+                samples_done: done, samples_target: target, stage: RefineStage::Sampling,
+            });
+            if !keep { cancelled.set(true); }
+            keep
+        };
+        if refining { r.trace_with_progress(samples, bounces, reset, 64, &progress); }
+        else { r.trace(samples, bounces, reset, if r.live { 6 } else { 64 }); }
+        if cancelled.get() { return Err("Studio refinement superseded".into()); }
+        if refining && !source.refine_progress(&request, RefineProgress {
+            samples_done: completed.get(), samples_target: samples, stage: RefineStage::Denoising,
+        }) { return Err("Studio refinement superseded".into()); }
         r.set_output_mask(None, false);
         let passes = if r.live || denoise == Denoise::Guided {
             4
@@ -484,6 +505,9 @@ impl StudioService {
                 texture,
             });
         }
+        if refining && !source.refine_progress(&request, RefineProgress {
+            samples_done: completed.get(), samples_target: samples, stage: RefineStage::Complete,
+        }) { return Err("Studio refinement superseded".into()); }
         timings.pipeline = r.timings;
         timings.total_ms = frame_start.elapsed().as_secs_f64() * 1000.;
         self.resource_start = resource_start;

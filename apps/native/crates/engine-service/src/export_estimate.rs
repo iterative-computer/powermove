@@ -4,7 +4,7 @@ use pm_protocol::common::{Size, Ticks};
 use serde::Serialize;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ExportEstimateState {
     #[default]
@@ -21,13 +21,13 @@ pub enum ExportEstimateState {
         message: String,
     },
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Milliseconds {
     pub min: f64,
     pub max: f64,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetEstimate {
     pub preset: String,
@@ -42,7 +42,7 @@ pub struct PresetEstimate {
     pub total_ms: Milliseconds,
     pub calibration: CalibrationTiming,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationTiming {
     pub cold_samples: u32,
@@ -52,7 +52,7 @@ pub struct CalibrationTiming {
     pub oidn_ms: f64,
     pub guides_and_readback_ms: f64,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportEstimate {
     pub composition: String,

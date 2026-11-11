@@ -3495,3 +3495,369 @@ fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edi
     assert!(viewer.estimate_studio_export(stamp,Ticks::ZERO,Size::new(64,64),1).is_err());
     viewer.retire();
 }
+
+#[test]
+fn captured_art_is_upright_on_every_cube_face_in_each_tier() {
+    use studio::{Axis, ViewCamera};
+    let mut project = captured_project(json!({"layerId":"art"}));
+    let layers = project["comps"]["test"]["layers"].as_array_mut().unwrap();
+    let cube = layers.iter_mut().find(|l| l["id"] == "terrain").unwrap();
+    cube["d"]["data"]["object"]["source"] =
+        json!({"primitive":"box","parameters":{"width":2,"height":2,"depth":2}});
+    cube["d"]["data"]["object"]["material"]["maps"]["emissive"] = json!({"layerId":"art"});
+    cube["d"]["data"]["object"]["material"]["p"]["emissive"] = json!("#FFFFFF");
+    cube["d"]["data"]["object"]["material"]["p"]["emissiveIntensity"] = json!(1);
+    layers.retain(|l| l["id"] != "paint");
+    for (id, x, y, color) in [
+        ("tl", 0, 0, "#FF0000"),
+        ("tr", 16, 0, "#00FF00"),
+        ("bl", 0, 16, "#0000FF"),
+        ("br", 16, 16, "#FFFF00"),
+    ] {
+        let mut art = source_art(id, "solid", Some("art"), color);
+        art["d"]["w"] = json!(16);
+        art["d"]["h"] = json!(16);
+        art["p"]["position.x"]["v"] = json!(x);
+        art["p"]["position.y"]["v"] = json!(y);
+        layers.push(art);
+    }
+    let doc = project_document(&project);
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    let mut bad = vec![];
+    for axis in [
+        Axis::Front,
+        Axis::Right,
+        Axis::Back,
+        Axis::Left,
+        Axis::Top,
+        Axis::Bottom,
+    ] {
+        for tier in [
+            studio::Preview::Live,
+            studio::Preview::Refine,
+            studio::Preview::Final,
+        ] {
+            studio::attach_with_camera_fonts(
+                &mut renderer,
+                doc.clone(),
+                &Default::default(),
+                &req,
+                tier,
+                ViewCamera::Orthographic {
+                    axis,
+                    center: [0.; 3],
+                    span: 4.,
+                },
+                None,
+            )
+            .unwrap();
+            let mut r = request();
+            r.export = false;
+            r.output_kind = OutputKind::Preview;
+            let frame = renderer
+                .render(
+                    &doc,
+                    "test",
+                    Ticks::ZERO,
+                    &r,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let pixels = renderer.read_rgba(&frame).unwrap();
+            let colors: Vec<_> = [(24, 24), (40, 24), (24, 40), (40, 40)]
+                .map(|(x, y)| pixels[(y * 64 + x) * 4..][..3].to_vec())
+                .to_vec();
+            let ok = colors
+                .iter()
+                .zip([
+                    [true, false, false],
+                    [false, true, false],
+                    [false, false, true],
+                    [true, true, false],
+                ])
+                .all(|(c, on)| {
+                    c.iter()
+                        .zip(on)
+                        .all(|(v, on)| if on { *v > 0.6 } else { *v < 0.15 })
+                });
+            eprintln!("CUBE_UV axis={axis:?} tier={tier:?} corners={colors:?}");
+            if !ok {
+                bad.push(format!("{axis:?}/{tier:?}"));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "captured source orientation wrong on {bad:?}"
+    );
+}
+
+#[test]
+fn front_view_extrusion_live_has_no_dark_speckle_on_a_flat_face() {
+    use studio::{Axis, ViewCamera};
+    let mut project = pm_scene3d::from_model(&document(false, 100.).to_value().unwrap()).unwrap();
+    let comp = &mut project["comps"]["test"];
+    comp["studioQuality"]=pm_scene3d::quality::resolve(&pm_scene3d::quality::preset("final").unwrap(),&json!({"minSamples":512,"maxSamples":512,"noiseThreshold":0,"denoise":false,"caustics":false})).unwrap();
+    let world=pm_scene3d::service::new_layer(comp,"world","World",pm_scene3d::schema::Role::Object,json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky","p":{"visible":false,"sunIntensity":2,"elevation":45,"azimuth":0}}}}),json!({}),true,None,0.).unwrap();
+    let extrusion=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":8,"bevelStyle":"convex","bevelDepth":1},"surfaces":{"front":{"properties":{"color":"#FFD080","roughness":0.35,"metallic":0.15}},"bevel":{"properties":{"color":"#FFD080","roughness":0.2,"metallic":0.65}}}})).unwrap();
+    let layers = comp["layers"].as_array_mut().unwrap();
+    layers.retain(|l| l["id"] != "mirror");
+    layers.extend([world,json!({"id":"art","name":"Art","type":"shape","on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":32,"kf":[]},"position.y":{"v":32,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"shape":"rect","w":24,"h":24,"radius":0,"smoothing":0,"stroke":0,"color":"#FFD080","extrusion":extrusion}})]);
+    let doc = project_document(&project);
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 128,
+        height: 128,
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    let mut deviations = vec![];
+    for tier in [
+        studio::Preview::Live,
+        studio::Preview::Refine,
+        studio::Preview::Final,
+    ] {
+        studio::attach_with_camera_fonts(
+            &mut renderer,
+            doc.clone(),
+            &Default::default(),
+            &req,
+            tier,
+            ViewCamera::Orthographic {
+                axis: Axis::Front,
+                center: [0.; 3],
+                span: 4.,
+            },
+            None,
+        )
+        .unwrap();
+        let mut r = RenderRequest::sized(Size::new(128, 128), Precision::Float16);
+        r.export = false;
+        r.output_kind = OutputKind::Preview;
+        r.background = false;
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &r,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let p = renderer.read_rgba(&frame).unwrap();
+        let ids: Vec<_> = (48..80)
+            .flat_map(|y| (48..80).map(move |x| (y * 128 + x) * 4))
+            .collect();
+        assert!(ids.iter().all(|i| p[*i + 3] > 0.99));
+        let values: Vec<_> = ids
+            .iter()
+            .map(|i| p[*i] * 0.2126 + p[*i + 1] * 0.7152 + p[*i + 2] * 0.0722)
+            .collect();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let sd =
+            (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt();
+        eprintln!("FRONT_EXTRUSION tier={tier:?} mean={mean:.5} noise_sd={sd:.5}");
+        deviations.push(sd);
+    }
+    assert!(
+        deviations[0] < 0.025,
+        "Live flat-face speckle: {deviations:?}"
+    );
+}
+
+#[test]
+fn refine_reports_completed_batches_and_denoising_and_honors_supersession() {
+    use studio::RefineStage;
+    let doc = document(false, 100.);
+    let req = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let updates = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let seen = updates.clone();
+    let source = studio::DocumentSource::new(doc, Default::default()).with_refine_observer(Some(
+        std::sync::Arc::new(move |_, p| {
+            seen.lock().unwrap().push(p);
+            true
+        }),
+    ));
+    let gpu = pm_gpu::Gpu::new("Refine progress").unwrap();
+    let mut service = studio::StudioService::with_device(gpu.device, gpu.queue, 64, 64).unwrap();
+    service
+        .render(
+            &source,
+            req.clone(),
+            studio::Tier::QualityRefine { samples: 32 },
+        )
+        .unwrap();
+    let p = updates.lock().unwrap();
+    let sampling: Vec<_> = p
+        .iter()
+        .filter(|p| p.stage == RefineStage::Sampling)
+        .map(|p| p.samples_done)
+        .collect();
+    assert_eq!(sampling.first(), Some(&0));
+    assert_eq!(sampling.last(), Some(&32));
+    assert!(sampling.windows(2).all(|w| w[0] <= w[1]));
+    assert!(p.iter().all(|p| p.samples_target == 32));
+    assert!(p.iter().any(|p| p.stage == RefineStage::Denoising));
+    assert_eq!(p.last().unwrap().stage, RefineStage::Complete);
+    drop(p);
+    let source = source.with_refine_observer(Some(std::sync::Arc::new(|_, p| p.samples_done < 8)));
+    assert!(
+        service
+            .render(&source, req, studio::Tier::QualityRefine { samples: 32 })
+            .err()
+            .expect("superseded refinement returned a frame")
+            .contains("superseded")
+    );
+}
+
+#[test]
+fn viewer_refine_progress_reaches_status_and_is_hidden_after_view_changes() {
+    use pm_engine_service::{EngineService, Output, ViewerConfig};
+    let doc = document(false, 100.);
+    let snapshot = pm_kernel::DocumentStore::new_untitled(doc.to_value().unwrap()).snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("viewer Refine status").unwrap()).unwrap();
+    let v = service
+        .viewer(ViewerConfig {
+            snapshot,
+            composition: "test".into(),
+            media: Default::default(),
+            output: Output {
+                width: 64,
+                height: 64,
+                display: 1,
+                headroom: 1.,
+                crop: None,
+            },
+            layer: None,
+            rate: pm_time::Rate::FPS_30,
+            end: None,
+            audio: false,
+        })
+        .unwrap();
+    v.studio_preview(studio::Preview::Refine).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(p) = v.status().refine_progress {
+            assert_eq!(p.samples_target, 32);
+            assert!(p.samples_done <= 32);
+            if p.stage == studio::RefineStage::Complete {
+                assert_eq!(p.samples_done, 32);
+                break;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    v.studio_preview(studio::Preview::Live).unwrap();
+    assert!(v.status().refine_progress.is_none());
+    v.retire();
+}
+
+#[test]
+fn orthographic_live_text_keeps_bright_bevel_edges_free_of_dark_outliers() {
+    use studio::{Axis, ViewCamera};
+    let mut project = pm_scene3d::from_model(&document(false, 100.).to_value().unwrap()).unwrap();
+    let comp = &mut project["comps"]["test"];
+    comp["w"] = json!(1920);
+    comp["h"] = json!(1080);
+    comp["studioQuality"] = pm_scene3d::quality::resolve(
+        &pm_scene3d::quality::preset("final").unwrap(),
+        &json!({"minSamples":512,"maxSamples":512,"noiseThreshold":0,"caustics":false}),
+    )
+    .unwrap();
+    comp["layers"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|l| l["id"] == "camera");
+    let key=pm_scene3d::service::new_layer(comp,"key","Key",pm_scene3d::schema::Role::Light,json!({"light":{"type":"area","p":{"intensity":8,"width":2,"height":1.2,"targetX":0,"targetY":0,"targetZ":0}}}),json!({"position.x":-3,"position.y":5,"position.z":4}),true,None,0.).unwrap();
+    let world=pm_scene3d::service::new_layer(comp,"world","World",pm_scene3d::schema::Role::Object,json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky","p":{"intensity":1,"sunIntensity":1,"elevation":6,"azimuth":0,"haze":3,"visible":false}}}}),json!({}),true,None,0.).unwrap();
+    let bevel=pm_scene3d::extrusion::parse(&json!({"enabled":true,"p":{"depth":70,"bevelStyle":"convex","bevelDepth":8},"surfaces":{"front":{"properties":{"color":"#F2B33D","roughness":0.32,"metallic":0}},"bevel":{"properties":{"color":"#FFC142","roughness":0.16,"metallic":0.65}}}})).unwrap();
+    comp["layers"].as_array_mut().unwrap().extend([key,world,json!({"id":"title","name":"Title","type":"text","on":true,"threeD":true,"from":0,"dur":1,"p":{"position.x":{"v":960,"kf":[]},"position.y":{"v":300,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"text":"STUDIO","font":"Geist","size":220,"align":"center","weight":600,"color":"#F2B33D","extrusion":bevel}})]);
+    let doc = project_document(&project);
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(extrusion_test_fonts()));
+    let mut frames = vec![];
+    for tier in [
+        studio::Tier::QualityLive,
+        studio::Tier::Final {
+            samples: 512,
+            salt: 9,
+            denoise: studio::Denoise::Oidn,
+        },
+    ] {
+        let source = studio::DocumentSource::new(doc.clone(), Default::default())
+            .with_text_fonts(extrusion_test_fonts())
+            .with_camera_for(
+                "test",
+                ViewCamera::Orthographic {
+                    axis: Axis::Front,
+                    center: [0., 1.1, 0.],
+                    span: 5.,
+                },
+            );
+        renderer.set_studio_source(
+            Some(Arc::new(pm_studio3d_engine::compositor::Adapter(Arc::new(
+                source,
+            )))),
+            pm_render::scene3d::provider::Settings {
+                revision: doc.revision(),
+                preview: tier,
+                ..Default::default()
+            },
+        );
+        let mut r = RenderRequest::sized(Size::new(640, 360), Precision::Float16);
+        r.export = false;
+        r.output_kind = OutputKind::Preview;
+        r.background = false;
+        let f = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &r,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(f.failures.is_empty(), "{:?}", f.failures);
+        frames.push(renderer.read_rgba(&f).unwrap());
+    }
+    let luma = |p: &[f32], i: usize| p[i] * 0.2126 + p[i + 1] * 0.7152 + p[i + 2] * 0.0722;
+    let mut count = 0;
+    let mut dark = 0;
+    let mut squared = 0.;
+    for y in 1..359 {
+        for x in 1..639 {
+            let i = (y * 640 + x) * 4;
+            if frames[1][i + 3] > 0.99 && luma(&frames[1], i) > 0.6 {
+                count += 1;
+                let d = luma(&frames[1], i) - luma(&frames[0], i);
+                squared += d * d;
+                if d > 0.12 {
+                    dark += 1;
+                }
+            }
+        }
+    }
+    let fraction = dark as f32 / count as f32;
+    let rms = (squared / count as f32).sqrt();
+    eprintln!("ORTHO_TEXT pixels={count} dark_fraction={fraction:.6} rms={rms:.6}");
+    assert!(count > 500);
+    assert!(fraction < 0.01, "dark bevel outliers: {fraction:.4}");
+    assert!(rms < 0.05, "orthographic text RMS {rms}");
+}

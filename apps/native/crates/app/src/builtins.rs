@@ -403,10 +403,11 @@ impl Controller {
             })
             .unwrap_or_default();
         let effective = status
+            .as_ref()
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"layerFailures":failures,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
             "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:

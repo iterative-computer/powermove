@@ -46,7 +46,7 @@ struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, rig
 // emit: rgb, subsurface radius (0: none) · extra: ior, specular, opacity, anisotropy (-1..1)
 // maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
 // layers: sheen, thin-film thickness (nm), dispersion, water droplets
-// policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32), alpha test
+// policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32,legacy-map-v-flip=128), alpha test
 // maps2: independent roughness, metalness, AO indices, normal-map scale
 // Keep the hot BSDF payload at its original 128 bytes. After sampling, maps
 // carry specular color/sheen roughness; policy.z carries film IOR and
@@ -1322,6 +1322,10 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
   let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
   var m=materials[u32(t.uv2m.z)].base;
+  // Legacy Three/OBJ maps upload top-down rows into native textures. Sampling
+  // V with the opposite origin preserves the original tangent basis. Physical
+  // glTF slots below have their own UV transform and must not inherit this.
+  let map_uv=select(uv,vec2f(uv.x,1.-uv.y),(u32(m.policy.y)&128u)!=0u);
   var imported=imported_defaults(materials[u32(t.uv2m.z)].imported,m);
   let uv_secondary=t.uv01_secondary.xy*w+t.uv01_secondary.zw*h.b.x+t.uv2_secondary.xy*h.b.y;
   if(imported.physical3.w>0.5){
@@ -1343,19 +1347,19 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     }
   }else{
   if (m.maps.x >= 0.0) {
-    let c = map_texel(m.maps.x, uv);
+    let c = map_texel(m.maps.x, map_uv);
     m.base = vec4f(m.base.xyz * decode_srgb(c.rgb), m.base.w);
     m.extra.z *= c.a;
   }
-  if (m.maps.y >= 0.0) { m.emit = vec4f(m.emit.xyz * decode_srgb(map_texel(m.maps.y, uv).rgb), m.emit.w); }
+  if (m.maps.y >= 0.0) { m.emit = vec4f(m.emit.xyz * decode_srgb(map_texel(m.maps.y, map_uv).rgb), m.emit.w); }
   if (m.maps.z >= 0.0 && m.maps2.x < 0.0 && m.maps2.y < 0.0) {
-    let orm = map_texel(m.maps.z, uv);
+    let orm = map_texel(m.maps.z, map_uv);
     m.spec.x *= orm.g;
     m.base.w *= orm.b;
   }
-  if (m.maps2.x >= 0.0) { m.spec.x *= map_texel(m.maps2.x, uv).g; }
-  if (m.maps2.y >= 0.0) { m.base.w *= map_texel(m.maps2.y, uv).b; }
-  if (m.maps2.z >= 0.0) { m.policy.x *= map_texel(m.maps2.z, uv).r; }
+  if (m.maps2.x >= 0.0) { m.spec.x *= map_texel(m.maps2.x, map_uv).g; }
+  if (m.maps2.y >= 0.0) { m.base.w *= map_texel(m.maps2.y, map_uv).b; }
+  if (m.maps2.z >= 0.0) { m.policy.x *= map_texel(m.maps2.z, map_uv).r; }
   }
   if ((u32(m.policy.y) & 16u) != 0u) {
     let c = unpack4x8unorm(bitcast<u32>(t.n0.w)) * w + unpack4x8unorm(bitcast<u32>(t.n1.w)) * h.b.x + unpack4x8unorm(bitcast<u32>(t.n2.w)) * h.b.y;
@@ -1389,7 +1393,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
       tangent=tangent*cos(imported.physical.y)+cross(n,tangent)*handed*sin(imported.physical.y);
     }
   }else if(m.maps.w>=0. && dot(tangent,tangent)>0.){
-    let texnormal=map_texel(m.maps.w,uv).xyz*2.-1.;let tn=vec3f(texnormal.xy*m.maps2.w,texnormal.z);
+    let texnormal=map_texel(m.maps.w,map_uv).xyz*2.-1.;let tn=vec3f(texnormal.xy*m.maps2.w,texnormal.z);
     let tg=safe_normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*t.tangent.w;
     let mapped=safe_normalize(tg*tn.x+bt*tn.y+n*tn.z);if(dot(mapped,ng)>0.){n=mapped;}
   }
