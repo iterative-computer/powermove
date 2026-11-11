@@ -26,7 +26,8 @@ fn collect_allocator() {
     unsafe extern "C" {
         fn mi_collect(force: bool);
     }
-    // SAFETY: mimalloc's process-wide collection is safe from any thread.
+    // SAFETY: collects this thread's heap and abandoned segments. Owners
+    // must call on their own thread after dropping a large working set.
     unsafe { mi_collect(true) };
 }
 
@@ -267,6 +268,7 @@ fn main() -> Result<()> {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
+            idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
             ..Default::default()
         });
         let mcp_host = mcp::Host::new(actor.handle(), worker_profile.clone());

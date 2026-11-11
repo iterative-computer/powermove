@@ -1036,6 +1036,9 @@ fn worker(
                     for live in retained.values_mut() {
                         live.vm.trim();
                     }
+                    // Native host replies are allocated on this owner too.
+                    // UI/render collection cannot drain its remote frees.
+                    pm_memory::pressure_relief();
                 }
                 if wake.is_none_or(|wake| wake > Instant::now()) {
                     continue;
