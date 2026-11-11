@@ -368,6 +368,22 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         false
     });
 }
+pub(crate) const PREVIOUS_SAVE_FAILED: &str =
+    "The previous project couldn’t be saved; its recovery journal is kept.";
+
+/// Only a successfully adopted, different session displaces the old one.
+/// Home and MCP use the same kernel close, releasing its lock and history.
+pub(crate) async fn close_replaced(
+    kernel: &KernelHandle,
+    old: Option<SessionHandle>,
+    new: &SessionHandle,
+) -> Result<(), String> {
+    if let Some(old) = old.filter(|old| old != new) {
+        expect_closed(kernel.shell(ShellCall::Close(old)).await)?;
+    }
+    Ok(())
+}
+
 /// The kernel archives rejected work and releases the session atomically.
 pub async fn discard_close(kernel: &KernelHandle, session: SessionHandle) -> Result<(), String> {
     expect_closed(kernel.shell(ShellCall::DiscardClose(session)).await)
@@ -641,6 +657,14 @@ impl Controller {
                     if let Some(viewer) = v.viewer.take() {
                         viewer.retire();
                     }
+                    // The playback feed owns the viewer's placement binding,
+                    // whose drawableSize observer retains the layer and its
+                    // drawable pool. Nothing else wakes the feed now (the
+                    // display link is paused and the retired viewer sends
+                    // nothing), so tell it the viewer is gone.
+                    if let Some(wake) = &v.playback_wake {
+                        let _ = wake.try_send(());
+                    }
                     if let Some(popout) = v.popout.take() {
                         popout.shutdown();
                     }
@@ -659,6 +683,19 @@ impl Controller {
                         .set_document_metadata("Untitled", "", false, None);
                     v.mcp.bind_window(v.window_key, None);
                     v.close_operation.take();
+                    // Panel owners dispose asynchronously, and GPUI keeps
+                    // the previous frame until the next draw. Collect on the
+                    // UI thread once those references have had time to go;
+                    // the render worker cannot collect this thread's heap.
+                    cx.spawn(async move |_, cx| {
+                        for delay in [250, 1750] {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay))
+                                .await;
+                            cx.update(|_| pm_engine_service::memory::pressure_relief());
+                        }
+                    })
+                    .detach();
                     if intent == Intent::Quit {
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
@@ -669,12 +706,27 @@ impl Controller {
                         v.close_pending = false;
                         v.closing_note = None;
                         v.home = false;
+                        v.start_builtins(cx);
+                        let layer = metal::MetalLayer::new();
+                        if pm_engine_service::layers::configure_layer(
+                            objc2::MainThreadMarker::new().unwrap(),
+                            &layer,
+                            &v.engine.metal_device(),
+                        )
+                        .is_ok()
+                        {
+                            v.host.borrow_mut().replace_viewer_layer(layer);
+                            v.main_output.set(None);
+                        }
                         v.message = "No project".into();
                         if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
                             shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
                         }
                         cx.notify();
                     } else if let Some(handle) = v.close_window {
+                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+                            shell.update(cx, |s, _| s.forget_session());
+                        }
                         v.mcp.closing.store(false, Ordering::Release);
                         cx.defer(move |cx| {
                             let _ = handle.update(cx, |_, w, _| w.remove_window());
@@ -779,6 +831,101 @@ mod tests {
         answer(&k, ShellCall::Save(session.clone()));
         (dir, actor, session)
     }
+    #[test]
+    fn replacing_a_home_project_releases_it_and_allows_quit() {
+        for from_library in [false, true] {
+            let (dir, actor, old) = fixture();
+            let k = actor.handle();
+            let file = dir.path().join("previous.pmv");
+            answer(
+                &k,
+                ShellCall::SaveAs {
+                    session: old.clone(),
+                    path: file.clone(),
+                    replace: false,
+                },
+            );
+            let lock = pm_kernel::locks::project_lock_path(&file);
+            assert!(lock.exists());
+            let source = if from_library {
+                // Opening a saved project from Home follows the same handoff.
+                SessionSource::Library {
+                    profile: dir.path().to_path_buf(),
+                    project: "replacement".into(),
+                }
+            } else {
+                SessionSource::New(pm_model::json::parse(
+                    r##"{"id":"replacement","name":"Untitled","compId":"c","w":320,"h":180,"fps":30,"dur":1,"bg":"#000000","layers":[],"assets":{},"comps":{}}"##
+                ).unwrap())
+            };
+            if from_library {
+                // Seed the library using the kernel's normal save/close path.
+                let ShellReply::Opened { session, .. } = answer(&k, ShellCall::Open {
+                    id: "replacement".into(),
+                    source: SessionSource::New(pm_model::json::parse(
+                        r##"{"id":"replacement","name":"Saved","compId":"c","w":320,"h":180,"fps":30,"dur":1,"bg":"#000000","layers":[],"assets":{},"comps":{}}"##
+                    ).unwrap()), electron_profile: None,
+                }) else { panic!() };
+                answer(&k, ShellCall::Close(session));
+            }
+            let ShellReply::Opened { session: new, .. } = answer(
+                &k,
+                ShellCall::Open {
+                    id: "replacement".into(),
+                    source,
+                    electron_profile: None,
+                },
+            ) else {
+                panic!()
+            };
+            // Reproduce the hidden-session failure before the handoff closes it:
+            // quit cannot release the library while sessions remain.
+            assert!(k.shell(ShellCall::ReleaseLibrary).wait().unwrap().is_err());
+            wait(close_replaced(&k, Some(old), &new)).unwrap();
+            assert!(
+                k.published("test").is_none(),
+                "old project must leave the kernel"
+            );
+            assert!(k.published("replacement").is_some());
+            let released =
+                pm_kernel::locks::FileLock::acquire(&lock).expect("old file lock must be released");
+            drop(released);
+            // Re-adopting the same session must keep it alive.
+            wait(close_replaced(&k, Some(new.clone()), &new)).unwrap();
+            assert!(k.published("replacement").is_some());
+            answer(&k, ShellCall::Close(new));
+            answer(&k, ShellCall::PrepareQuit);
+            answer(&k, ShellCall::ReleaseLibrary);
+            actor.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_failed_replacement_close_keeps_the_previous_project_recoverable() {
+        let (dir, actor, old) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Active edit".into(),
+                },
+            ),
+        )
+        .unwrap();
+        let mut different = old.clone();
+        different.project = "next".into();
+        assert!(wait(close_replaced(&k, Some(old), &different)).is_err());
+        assert!(k.published("test").is_some());
+        assert!(dir.path().join("journals/test").exists());
+        assert_eq!(
+            PREVIOUS_SAVE_FAILED,
+            "The previous project couldn’t be saved; its recovery journal is kept."
+        );
+        actor.shutdown();
+    }
+
     fn edit(k: &KernelHandle) {
         k.call_blocking(
             "test",

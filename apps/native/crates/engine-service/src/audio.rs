@@ -124,7 +124,7 @@ impl Drop for SimDevice {
 }
 
 /// Decoded audio kept per viewer.
-const SOURCE_BUDGET: usize = 128 * 1024 * 1024;
+const SOURCE_BUDGET: usize = 24 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
 
 // The audio control thread is ordinary-priority. Keep these clock reads and
@@ -439,8 +439,31 @@ struct Control {
 
 impl Control {
     fn run(mut self) {
+        let requested = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let pending = requested.clone();
+        let memory = crate::memory::Registration::new(2, move |share, _| {
+            pending.store(share, std::sync::atomic::Ordering::Release);
+        });
+        let mut had_playback = false;
         loop {
-            let timeout = self.wait();
+            let share = requested.swap(u64::MAX, std::sync::atomic::Ordering::AcqRel);
+            if share != u64::MAX || (!had_playback && self.playback.is_some()) {
+                if let Some(playback) = &self.playback {
+                    playback.set_cache_budget((memory.grant() as usize).min(SOURCE_BUDGET));
+                }
+                self.apply(AudioCtl::MemoryPressure, None);
+                if crate::memory::pressure() == crate::memory::Pressure::Critical {
+                    crate::memory::pressure_relief();
+                }
+            }
+            had_playback = self.playback.is_some();
+            memory.report(pm_protocol::lease::LeaseCategories {
+                other: crate::memory::bytes(
+                    self.playback.as_ref().map_or(0, |p| p.cache_bytes() as u64),
+                ),
+                ..Default::default()
+            });
+            let timeout = self.wait().min(Duration::from_millis(250));
             let first = match self.rx.recv_timeout(timeout) {
                 Ok(ctl) => Some(ctl),
                 Err(RecvTimeoutError::Timeout) => None,

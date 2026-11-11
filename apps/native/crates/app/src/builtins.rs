@@ -176,6 +176,9 @@ impl Controller {
             if application && !panel.application {
                 continue;
             }
+            if panel.parks && runtime.defer_mount(&panel.id) {
+                continue;
+            }
             tickets.push((panel.id.clone(), runtime.mount(&panel.id)));
         }
         let runtime = Arc::new(runtime);

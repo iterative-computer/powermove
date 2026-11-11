@@ -367,6 +367,7 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
                 .unwrap()
                 .2
                 .stored
+                .to_value()
                 .get("outEase")
                 .cloned()
         })

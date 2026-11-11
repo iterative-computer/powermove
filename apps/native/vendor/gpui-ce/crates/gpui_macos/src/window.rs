@@ -3661,10 +3661,20 @@ extern "C" fn step(view: *mut c_void) {
             drop(lock);
             gpui_apple::feel::set_frame_start();
             callback(request);
-            window_state.lock().request_frame_callback = Some(callback);
+            let mut lock = window_state.lock();
+            lock.request_frame_callback = Some(callback);
+            // The link keeps stepping a visible window that has nothing new
+            // to draw: an unchanged window gives back its full-window
+            // intermediates until it draws again.
+            #[cfg(not(feature = "wgpu"))]
+            lock.renderer.release_idle_targets(IDLE_TARGETS);
         }
     }
 }
+
+/// How long a window draws nothing before its intermediates go.
+#[cfg(not(feature = "wgpu"))]
+const IDLE_TARGETS: std::time::Duration = std::time::Duration::from_secs(3);
 
 unsafe extern "C" fn valid_attributes_for_marked_text(_: &Objc2Object, _: Sel) -> ObjcId {
     unsafe { msg_send![class!(NSArray), array] }

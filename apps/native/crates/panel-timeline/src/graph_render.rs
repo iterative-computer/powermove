@@ -134,7 +134,7 @@ pub fn sample(
                 previous = Some(point);
             }
         }
-        let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.clone()).collect();
+        let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
         let handles = if speed {
             vec![]
         } else {

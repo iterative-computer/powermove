@@ -33,7 +33,7 @@ impl ModelPresenter for Presenter {
         Media::Ready
     }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
-        match key.stored.get("e").and_then(pm_model::Value::as_str) {
+        match key.stored_string("e") {
             Some("hold") => Interpolation::Hold,
             Some("linear") | None => Interpolation::Linear,
             _ => Interpolation::Ease,

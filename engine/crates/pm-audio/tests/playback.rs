@@ -3495,6 +3495,100 @@ fn callback_decode_wait(buffer: usize, with_ready: bool, recover_in_budget: bool
     cache.shutdown();
 }
 
+/// Speculative paused starts must settle even when their combined input
+/// exceeds the cache. Eviction does not constitute a request to decode again.
+#[test]
+fn stopped_preparation_does_not_redecode_evicted_blocks() {
+    let _device_owner = isolated_device_owner();
+    let dir = temp_dir("stopped-cache-budget");
+    let channels = [tone(SR, 12.0, 997.0, 0.1), tone(SR, 12.0, 631.0, 0.1)];
+    let mut layers = Vec::new();
+    for n in 0..6 {
+        write_wav(&dir.join(format!("{n}.wav")), SR, &channels);
+        layers.push(audio(&format!("v{n}"), &n.to_string(), 0.0, 12.0, "", ""));
+    }
+    let cache = SourceCache::new(4 << 20, 2);
+    let (playback, _side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        0,
+    )
+    .unwrap();
+    playback
+        .set_project(
+            Arc::new(project(30.0, 12.0, &layers, &[], "")),
+            "C",
+            &|id: &str| Some(dir.join(format!("{id}.wav"))),
+        )
+        .unwrap();
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(4.0),
+                end: ticks(8.0),
+            }),
+        })
+        .unwrap();
+    until(|| playback.prepared_starts().len() == 3);
+    // Let the bounded first preparation finish. Three starts and their
+    // read-ahead exceed this cache; a periodic refresh used to decode the
+    // same evicted blocks indefinitely, even with no control or callback.
+    std::thread::sleep(Duration::from_millis(500));
+    playback.memory_pressure();
+    let before = cache.stats();
+    std::thread::sleep(Duration::from_millis(1500));
+    let after = cache.stats();
+    drop(playback);
+    cache.shutdown();
+    assert_eq!(
+        after.decoded_blocks, before.decoded_blocks,
+        "stopped source churn: {before:?} -> {after:?}"
+    );
+    assert!(after.bytes <= 4 << 20);
+}
+
+#[test]
+fn closing_playback_releases_preparation_and_source_cache() {
+    let _device_owner = isolated_device_owner();
+    let dir = temp_dir("closed-playback-cache");
+    let path = dir.join("tone.wav");
+    let signal = tone(SR, 1.0, 997.0, 0.1);
+    write_wav(&path, SR, &[signal.clone(), signal]);
+    let cache = SourceCache::new(4 << 20, 2);
+    let closed = Arc::downgrade(&cache);
+    let (playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        Default::default(),
+        SR,
+        2,
+        0,
+    )
+    .unwrap();
+    playback
+        .set_project(
+            Arc::new(project(
+                30.,
+                1.,
+                &[audio("v", "s", 0., 1., r#", "speed":1.5"#, "")],
+                &[],
+                "",
+            )),
+            "C",
+            &|_: &str| Some(path.clone()),
+        )
+        .unwrap();
+    until(|| !playback.prepared_starts().is_empty());
+    assert!(cache.stats().bytes > 0);
+    drop(side);
+    drop(playback);
+    drop(cache);
+    until(|| closed.upgrade().is_none());
+}
+
 /// A6.3: both decoded (warm) and initially cold sources prepare every voice
 /// while paused, including a distinct work-area start. Play and a paused
 /// seek use those exact vocoder histories with no source wait or lost sample.

@@ -133,15 +133,54 @@ struct Key {
 }
 
 /// Reusable targets.
-#[derive(Default)]
 pub struct TargetPool {
-    free: Vec<(Key, Target)>,
+    free: Vec<(Key, Target, u64)>,
+    free_bytes: u64,
+    frame: u64,
+    free_budget: u64,
     /// Bytes held by targets in the pool and taken from it.
     live_bytes: u64,
     created: u64,
 }
 
+impl Default for TargetPool {
+    fn default() -> Self {
+        Self {
+            free: Vec::new(),
+            free_bytes: 0,
+            frame: 0,
+            free_budget: Self::FREE_BUDGET,
+            live_bytes: 0,
+            created: 0,
+        }
+    }
+}
+
 impl TargetPool {
+    pub fn set_free_budget(&mut self, bytes: u64) {
+        self.free_budget = bytes.min(Self::FREE_BUDGET);
+        self.trim(self.live_bytes.saturating_sub(self.free_bytes) + self.free_budget);
+    }
+    pub const FREE_BUDGET: u64 = 48 << 20;
+    const MAX_IDLE_FRAMES: u64 = 30;
+
+    /// Retire sizes animation has stopped using. Exact dimensions preserve
+    /// textureDimensions/UV semantics in every existing shader and export.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        let mut i = 0;
+        while i < self.free.len() {
+            if self.frame.wrapping_sub(self.free[i].2) > Self::MAX_IDLE_FRAMES {
+                let (_, target, _) = self.free.swap_remove(i);
+                self.free_bytes -= target.bytes();
+                self.live_bytes -= target.bytes();
+                // A submitted command may still hold a view. Do not destroy it.
+                drop(target);
+            } else {
+                i += 1;
+            }
+        }
+    }
     pub fn new() -> TargetPool {
         TargetPool::default()
     }
@@ -161,9 +200,11 @@ impl TargetPool {
             format,
             usage,
         };
-        if let Some(i) = self.free.iter().position(|(k, _)| *k == key) {
+        if let Some(i) = self.free.iter().position(|(k, _, _)| *k == key) {
             pm_perf::bump(pm_perf::Counter::TargetPoolHits);
-            return self.free.swap_remove(i).1;
+            let target = self.free.swap_remove(i).1;
+            self.free_bytes -= target.bytes();
+            return target;
         }
         pm_perf::bump(pm_perf::Counter::TargetPoolMisses);
         let target = Target::new(device, "pm working target", width, height, format, usage);
@@ -199,7 +240,21 @@ impl TargetPool {
             format: target.format(),
             usage: target.texture.usage(),
         };
-        self.free.push((key, target));
+        self.free_bytes += target.bytes();
+        self.free.push((key, target, self.frame));
+        while self.free_bytes > self.free_budget || self.free.len() > 128 {
+            let oldest = self
+                .free
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, _, at))| self.frame.wrapping_sub(*at))
+                .map(|(i, _)| i)
+                .unwrap();
+            let (_, target, _) = self.free.swap_remove(oldest);
+            self.free_bytes -= target.bytes();
+            self.live_bytes -= target.bytes();
+            drop(target);
+        }
     }
 
     /// Discards a target owned by this pool without calling Texture::destroy.
@@ -216,9 +271,12 @@ impl TargetPool {
     /// Frees idle targets until the pool holds at most `bytes`.
     pub fn trim(&mut self, bytes: u64) {
         while self.live_bytes > bytes {
-            let Some((_, t)) = self.free.pop() else { break };
+            let Some((_, t, _)) = self.free.pop() else {
+                break;
+            };
             self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
-            t.texture.destroy();
+            self.free_bytes -= t.bytes();
+            drop(t);
         }
     }
 
@@ -241,6 +299,25 @@ impl TargetPool {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animated_sizes_stay_bounded_and_age_out_without_changing_dimensions() {
+        let gpu = crate::device::Gpu::new("target budget test").unwrap();
+        let mut pool = TargetPool::new();
+        for width in 900..1000 {
+            pool.begin_frame();
+            let target = pool.take_working(&gpu.device, width, 1024, Precision::Float16);
+            assert_eq!(target.width(), width);
+            pool.give(target);
+            assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
+            assert!(pool.idle() < 10);
+        }
+        for _ in 0..=TargetPool::MAX_IDLE_FRAMES {
+            pool.begin_frame();
+        }
+        assert_eq!(pool.bytes(), 0);
+        assert_eq!(pool.idle(), 0);
+    }
 
     #[test]
     fn release_accounts_for_a_target_still_used_by_recorded_commands() {

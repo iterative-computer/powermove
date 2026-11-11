@@ -91,7 +91,7 @@ pub(crate) fn limits() -> Limits {
         heap_bytes: 1024 * 1024 * 1024,
         // The shipped bundle and a mirrored project start here; more comes
         // from the cage account as extensions and projects need it.
-        initial_heap_bytes: 64 * 1024 * 1024,
+        initial_heap_bytes: 32 * 1024 * 1024,
         external_bytes: 512 * 1024 * 1024,
         max_source_bytes: 256 * 1024 * 1024,
         max_host_ops: usize::MAX / 2,

@@ -284,6 +284,8 @@ pub struct MetalRenderer {
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     headless_render_target: Option<metal::Texture>,
+    /// When the last scene was encoded (`release_idle_targets`).
+    last_draw: Option<std::time::Instant>,
 }
 
 impl MetalRenderer {
@@ -544,6 +546,7 @@ impl MetalRenderer {
             intermediate_texture_size: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             headless_render_target: None,
+            last_draw: None,
         }
     }
 
@@ -590,12 +593,53 @@ impl MetalRenderer {
         self.intermediate_texture_size = (size.width.0 > 0 && size.height.0 > 0).then_some(size);
     }
 
+    /// A window that has not drawn for `idle` gives back its full-window
+    /// intermediates (path, scene colour, backdrop, blur and group targets,
+    /// about 20 MB each on a 2880×1800 window). The next draw makes the ones
+    /// its scene needs. Submitted command buffers retain their textures until
+    /// complete. True when something was released.
+    pub fn release_idle_targets(&mut self, idle: std::time::Duration) -> bool {
+        if self.last_draw.is_none_or(|at| at.elapsed() < idle) {
+            return false;
+        }
+        let held = self.path_intermediate_texture.is_some()
+            || self.scene_color_texture.is_some()
+            || self.backdrop_snapshot_texture.is_some()
+            || self.blur_ping_texture.is_some()
+            || !self.group_textures.is_empty();
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+        self.scene_color_texture = None;
+        self.backdrop_snapshot_texture = None;
+        self.blur_ping_texture = None;
+        self.blur_pong_texture = None;
+        self.group_textures.clear();
+        held
+    }
+
     fn prepare_intermediate_textures(&mut self, scene: &Scene, size: Size<DevicePixels>) {
         self.update_intermediate_texture_size(size);
         let Some(size) = self.intermediate_texture_size else {
             return;
         };
         let requirements = scene.render_plan().requirements();
+        // A simpler scene must give back the previous scene's full-window
+        // targets. Submitted command buffers retain textures until complete.
+        if !requirements.uses_path_target {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        }
+        if !requirements.uses_offscreen_target {
+            self.scene_color_texture = None;
+        }
+        if !requirements.uses_blur_target {
+            self.blur_ping_texture = None;
+            self.blur_pong_texture = None;
+        }
+        if requirements.backdrop_filter_count == 0 || requirements.isolated_target_count == 0 {
+            self.backdrop_snapshot_texture = None;
+        }
+        self.group_textures.truncate(requirements.isolated_target_count);
         let full_w = size.width.0 as u64;
         let full_h = size.height.0 as u64;
 
@@ -1003,6 +1047,7 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
+        self.last_draw = Some(std::time::Instant::now());
         self.prepare_intermediate_textures(scene, viewport_size);
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();

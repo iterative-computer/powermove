@@ -198,6 +198,7 @@ fn diamond_uses_original_key_identity_and_native_undo_retains_opaque_fields() {
             .unwrap()
             .2
             .stored
+            .to_value()
             .get("custom")
             .and_then(pm_model::Value::as_str),
         Some("retained")
@@ -577,7 +578,10 @@ fn numeric_key_time_uses_composition_time_beyond_strip_and_refuses_collision() {
     assert!(l.from + k.time > l.from + l.duration);
     assert_eq!(k.value.as_f64(), Some(42.));
     assert_eq!(
-        k.stored.get("custom").and_then(pm_model::Value::as_str),
+        k.stored
+            .to_value()
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
         Some("retained")
     );
     dispatch(
@@ -716,6 +720,7 @@ fn native_graph_drag_and_easing_keep_ids_and_opaque_metadata_through_undo() {
             .unwrap()
             .2
             .stored
+            .to_value()
             .get("custom")
             .and_then(pm_model::Value::as_str),
         Some("retained")
