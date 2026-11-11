@@ -78,6 +78,62 @@ fn draw(renderer: &mut Renderer, doc: Arc<pm_model::Document>) -> Vec<f32> {
     renderer.read_rgba(&f).unwrap()
 }
 #[test]
+fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
+    let gpu = pm_gpu::Gpu::new("studio viewer tiers").unwrap();
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    let doc = document(true, 100.);
+    let original = pm_model::json::to_canonical_string(&doc.to_value().unwrap());
+    let scene = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let mut request = request();
+    request.export = false;
+    request.output_kind = OutputKind::Preview;
+    let mut uploads = None;
+    for (tier, samples) in [
+        (studio::Preview::Live, None),
+        (studio::Preview::Refine, Some(32)),
+        (studio::Preview::Final, Some(4)),
+        (studio::Preview::Live, None),
+    ] {
+        studio::attach_with_preview(
+            &mut renderer,
+            doc.clone(),
+            &Default::default(),
+            &scene,
+            tier,
+        )
+        .unwrap();
+        let f = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(f.failures.is_empty(), "{tier:?}: {:?}", f.failures);
+        let c = renderer.studio_counters();
+        if let Some(samples) = samples {
+            assert_eq!(c.samples, samples, "{tier:?}");
+        }
+        if let Some(uploads) = uploads {
+            assert_eq!(c.geometry_uploads, uploads);
+        }
+        uploads = Some(c.geometry_uploads);
+    }
+    assert_eq!(
+        pm_model::json::to_canonical_string(&doc.to_value().unwrap()),
+        original
+    );
+    assert!(studio::Preview::parse("fast").is_err());
+}
+#[test]
 fn metal_native_document_reflection_final_repeat_and_service_export() {
     let gpu = pm_gpu::Gpu::new("studio integration").unwrap();
     assert_eq!(gpu.info.backend, wgpu::Backend::Metal);
@@ -365,6 +421,110 @@ fn imported_document() -> Arc<pm_model::Document> {
     pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap())
         .snapshot()
         .document
+}
+#[test]
+fn sparse_intrinsic_edits_override_source_identity_and_restore_original_materials() {
+    use studio::SceneSource;
+    let bytes = imported_glb();
+    let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&bytes[20..20 + length]).unwrap();
+    // Final material table slot 0 derives from file material 1, not file slot 0.
+    header["materials"] = json!([{}, {"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0.8,"roughnessFactor":0.1},"emissiveFactor":[1,0,0],"extensions":{"KHR_materials_emissive_strength":{"emissiveStrength":0}}}]);
+    header["meshes"][0]["primitives"][0]["material"] = json!(1);
+    let mut json_bytes = serde_json::to_vec(&header).unwrap();
+    while !json_bytes.len().is_multiple_of(4) {
+        json_bytes.push(b' ');
+    }
+    let bin_chunk = &bytes[20 + length..];
+    let mut edited = vec![];
+    for word in [
+        0x46546c67u32,
+        2,
+        (20 + json_bytes.len() + bin_chunk.len()) as u32,
+        json_bytes.len() as u32,
+        0x4e4f534a,
+    ] {
+        edited.extend(word.to_le_bytes());
+    }
+    edited.extend(json_bytes);
+    edited.extend(bin_chunk);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sparse.bin");
+    std::fs::write(&path, edited).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let original = imported_document();
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &original.to_value().unwrap(),
+    ))
+    .unwrap();
+    let layer = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap();
+    layer["d"]["data"]["object"]["materialProperties"] = json!({"opacity":60,"roughness":0.6,"metallic":0.3,"emissionIntensity":2,"ambientResponse":25});
+    layer["d"]["data"]["object"]["sourceMaterialProperties"] =
+        json!({"0":{"opacity":10},"1":{"roughness":0.2,"emissionColor":"#00FF00"}});
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let r = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let input = source.scene(&r).unwrap();
+    let instance = input
+        .instances
+        .iter()
+        .find(|i| i.layer == "mirror")
+        .unwrap();
+    let material = &input.materials.as_ref().unwrap()[instance.material];
+    assert_eq!(material.extra[2], 0.6);
+    assert_eq!(material.spec[0], 0.2);
+    assert_eq!(material.base[3], 0.3);
+    assert_eq!(&material.emit[..3], &[0., 2., 0.]);
+    assert_eq!(material.policy[0], 0.25);
+    let gpu = pm_gpu::Gpu::new("sparse source material").unwrap();
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(&doc, "test", Ticks::ZERO, &request(), &media)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[1] > p[0] * 2. && p[1] > 0.2 && p[3] > 0.)
+            .count()
+            > 40
+    );
+    // A new immutable source without sparse records returns the file values.
+    let source = studio::DocumentSource::new(original.clone(), media);
+    let input = source
+        .scene(&studio::SceneRequest {
+            revision: original.revision(),
+            ..r
+        })
+        .unwrap();
+    let instance = input
+        .instances
+        .iter()
+        .find(|i| i.layer == "mirror")
+        .unwrap();
+    let material = &input.materials.as_ref().unwrap()[instance.material];
+    assert_eq!(material.extra[2], 1.);
+    assert_eq!(material.spec[0], 0.1);
+    assert_eq!(material.base[3], 0.8);
+    assert_eq!(&material.emit[..3], &[0., 0., 0.]);
 }
 #[test]
 fn metal_imported_multi_object_reflection_preview_final_and_export() {
@@ -1754,6 +1914,100 @@ fn mapped_document(source: Value) -> Arc<pm_model::Document> {
     pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
         .snapshot()
         .document
+}
+#[test]
+fn indexed_image_replacements_preserve_imported_sampling_and_physical_maps() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("physical.bin");
+    let image = dir.path().join("paint.bin");
+    std::fs::write(&model, physical_map_glb()).unwrap();
+    std::fs::write(
+        &image,
+        include_bytes!("../../../../../engine/fixtures/still-red.png"),
+    )
+    .unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), model);
+    media.paths.insert("paint".into(), image);
+    let original = imported_document();
+    let request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: original.revision(),
+        ticks: 0,
+        width: 64,
+        height: 64,
+    };
+    let source = studio::DocumentSource::new(original.clone(), media.clone());
+    let before = source.scene(&request).unwrap();
+    let original_material = before.materials.as_ref().unwrap()[before.instances[0].material];
+    let mut project = pm_scene3d::from_model(&original.to_value().unwrap()).unwrap();
+    let layer = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap();
+    // A valid indexed replacement wins before an unresolved whole-model source is loaded.
+    layer["d"]["data"]["object"]["material"]["maps"] = json!({"color":"missing"});
+    layer["d"]["data"]["object"]["sourceMaterials"] = json!({"0":{"color":"paint","emissive":"paint","normal":"paint","roughness":"paint","metalness":"paint","ao":"paint"}});
+    project["assets"]["paint"] = json!({"id":"paint","kind":"image","format":"png","name":"Paint"});
+    let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+        .snapshot()
+        .document;
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            revision: doc.revision(),
+            ..request
+        })
+        .unwrap();
+    let m = &input.materials.as_ref().unwrap()[input.instances[0].material];
+    assert_eq!(input.maps.as_ref().unwrap().layers.len(), 2);
+    for slot in 0..6 {
+        assert_eq!(m.physical_maps[slot].info[0], 1.);
+        assert_eq!(
+            &m.physical_maps[slot].info[1..],
+            &original_material.physical_maps[slot].info[1..]
+        );
+        assert_eq!(
+            m.physical_maps[slot].u,
+            original_material.physical_maps[slot].u
+        );
+        assert_eq!(
+            m.physical_maps[slot].v,
+            original_material.physical_maps[slot].v
+        );
+    }
+    for slot in 6..18 {
+        assert_eq!(
+            m.physical_maps[slot].info,
+            original_material.physical_maps[slot].info
+        );
+        assert_eq!(
+            m.physical_maps[slot].u,
+            original_material.physical_maps[slot].u
+        );
+        assert_eq!(
+            m.physical_maps[slot].v,
+            original_material.physical_maps[slot].v
+        );
+    }
+    assert_eq!(&m.base[..3], &[1.; 3]);
+    assert_eq!(&m.emit[..3], &[1.; 3]);
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(&doc, "test", Ticks::ZERO, &crate::request(), &media)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[0] > 0. && p[3] > 0.)
+    );
 }
 #[test]
 fn authored_image_maps_render_from_retained_assets_and_share_one_image_layer() {

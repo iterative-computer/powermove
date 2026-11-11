@@ -249,3 +249,37 @@ fn environment_and_quality_ops_reach_the_kernel_and_readback() {
     );
     assert_eq!(fixture.read(), before);
 }
+#[test]
+fn sparse_material_commands_and_channels_are_agent_reachable() {
+    let fixture = Fixture::new();
+    let mut s = fixture.session();
+    ok(s.call(
+        "edit_3d",
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}),
+    ));
+    ok(s.call("edit_3d", json!({"operation":"update_object","target":"model","patch":{
+        "materialProperties":{"opacity":75,"roughness":0.6,"emissionIntensity":2,"ambientResponse":25},
+        "sourceMaterialProperties":{"1":{"metallic":0.3,"emissionColor":"#00FF00"}},
+        "sourceMaterials":{"1":{"color":"paint"}}
+    }})));
+    ok(s.call("apply_commands", json!({"commands":[{"type":"set_property","target":"model","path":"mi.1.metallic","value":0.8}]})));
+    let read = ok(s.call("get_3d_scene", json!({"target":"model"})));
+    assert_eq!(
+        read["scene"]["objects"][0]["sourceMaterials"]["1"]["color"],
+        "paint"
+    );
+    for (path, value) in [
+        ("mi.opacity", json!(75)),
+        ("mi.ambientResponse", json!(25)),
+        ("mi.1.metallic", json!(0.8)),
+    ] {
+        assert!(
+            read["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["path"] == path && c["value"] == value),
+            "{path}: {read}"
+        );
+    }
+}

@@ -1,5 +1,24 @@
 //! Durable image-backed material maps. Live capture is a separate resource lane.
 use super::*;
+pub(super) fn overrides(object: &Value, index: Option<usize>, basic: bool) -> Value {
+    let mut maps = object["material"]["maps"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(indexed) = index.and_then(|i| object["sourceMaterials"][i.to_string()].as_object())
+    {
+        maps.extend(indexed.clone());
+    }
+    if basic {
+        let source = maps.get("emissive").or_else(|| maps.get("color")).cloned();
+        maps.clear();
+        if let Some(source) = source {
+            maps.insert("color".into(), source.clone());
+            maps.insert("emissive".into(), source);
+        }
+    }
+    serde_json::json!({"maps": maps})
+}
 impl DocumentSource {
     fn material_image(&self, source: &Value) -> Result<Arc<Vec<u8>>, String> {
         let id = source
@@ -76,6 +95,29 @@ impl DocumentSource {
                 "metalness" => gpu.maps2[1] = index,
                 "ao" => gpu.maps2[2] = index,
                 _ => return Err("Unknown Studio material map".into()),
+            }
+            if gpu.imported[5][3] > 0.5 {
+                let slot = match slot.as_str() {
+                    "color" => 0,
+                    "emissive" => 1,
+                    "roughness" => 2,
+                    "metalness" => 3,
+                    "normal" => 4,
+                    "ao" => 5,
+                    _ => unreachable!(),
+                };
+                // Image replacement inherits the original slot's coordinates,
+                // matching textureCoordinates(original) in the source runtime.
+                let mut map = gpu.physical_maps[slot];
+                if map.info[0] < 0. {
+                    map = pm_studio3d_engine::scene::GpuTextureMap {
+                        info: [index, 0., 0., 0.],
+                        u: [1., 0., 0., 0.],
+                        v: [0., 1., 0., 0.],
+                    };
+                }
+                map.info[0] = index;
+                gpu.physical_maps[slot] = map;
             }
         }
         Ok(())
