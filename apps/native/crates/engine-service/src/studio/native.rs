@@ -310,6 +310,30 @@ impl SceneSource for DocumentSource {
             .ok_or("Studio scene has no objects")?
         {
             let id = object["id"].as_str().ok_or("Studio object has no ID")?;
+            if ["world", "fog", "terrain", "scatter"]
+                .iter()
+                .any(|key| object.get(*key).is_some())
+                || object["source"].get("nature").is_some()
+            {
+                return Err("Studio environment document adapter is not connected yet".into());
+            }
+            if [
+                "materialProperties",
+                "sourceMaterialProperties",
+                "sourceMaterials",
+                "parts",
+            ]
+            .iter()
+            .any(|key| {
+                object
+                    .get(*key)
+                    .and_then(Value::as_object)
+                    .is_some_and(|m| !m.is_empty())
+            }) {
+                return Err(
+                    "Studio sparse material/part document adapter is not connected yet".into(),
+                );
+            }
             if val(&object["p"]["visible"]) == false {
                 continue;
             }

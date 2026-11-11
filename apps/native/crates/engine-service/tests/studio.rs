@@ -714,3 +714,47 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
         );
     });
 }
+
+#[test]
+fn pending_environment_translation_fails_explicitly_instead_of_drawing_a_plane() {
+    use studio::SceneSource;
+    let old = document(false, 100.);
+    let mut project = pm_scene3d::from_model(&old.root().unwrap().to_value()).unwrap();
+    let comp = &project["comps"]["test"];
+    let world = pm_scene3d::service::new_layer(
+        comp,
+        "world",
+        "World",
+        pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"world":{"mode":"sky"}}}),
+        json!({}),
+        true,
+        None,
+        0.,
+    )
+    .unwrap();
+    project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .push(world);
+    let doc = Arc::new(
+        pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+            .snapshot()
+            .document
+            .as_ref()
+            .clone(),
+    );
+    let revision = doc.revision();
+    let source = studio::DocumentSource::new(doc, Default::default());
+    let error = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision,
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .err()
+        .unwrap();
+    assert!(error.contains("environment document adapter"), "{error}");
+}
