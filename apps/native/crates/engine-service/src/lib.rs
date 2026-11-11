@@ -2976,7 +2976,10 @@ mod worker_tests {
         while seen.len() < 12 {
             assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
             let status = v.status();
-            if let Some(f) = status.frame.filter(|f| f.gpu_ok && f.moment == Moment::Playing) {
+            if let Some(f) = status
+                .frame
+                .filter(|f| f.gpu_ok && f.moment == Moment::Playing)
+            {
                 assert_eq!(f.scale, 1., "played frame {} reduced", seen.len());
                 assert_eq!(status.effective_quality, 1.);
                 seen.insert(f.time);
