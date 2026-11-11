@@ -6,6 +6,7 @@ use wgpu::util::DeviceExt;
 mod resampling;
 mod query;
 mod edges;
+mod convergence;
 pub use query::SurfacePick;
 #[cfg(all(feature="metalfx",target_os="macos"))]
 mod metalfx;
@@ -86,6 +87,8 @@ pub struct PipelineTimings {
     pub trace_ms:f64,
     /// Queued Live: trace_ms is submission time; guides_ms includes trace completion.
     pub trace_deferred:bool,
+    /// Time spent checking global convergence, included in trace_ms.
+    pub convergence_check_ms:f64,
     pub guides_ms:f64,
     pub guide_readback_ms:f64,
     pub denoise_ms:f64,
@@ -168,6 +171,7 @@ pub struct Renderer {
     pixel_filter: crate::film::PixelFilter,
     film_reset: bool,
     edge_classifier: Option<edges::Classifier>,
+    convergence_probe: Option<convergence::Probe>,
     grid: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
@@ -442,7 +446,7 @@ impl Renderer {
             gbuf: buf("gbuf", pixels * 16, rw),
             // Emission/luminance moments, RGB moments/edge flags, inverse film CDF.
             ebuf: buf("ebuf", pixels * 32 + 4096, rw),
-            pixel_filter: Default::default(), film_reset: true, edge_classifier: None,
+            pixel_filter: Default::default(), film_reset: true, edge_classifier: None, convergence_probe: None,
             grid: buf("photon grid", GRID_CELLS * 32, rw),
             aov: buf("aov", pixels * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
@@ -927,8 +931,11 @@ impl Renderer {
             // Pixels keep their actual counts when the shared shader stops
             // them. A bounded occasional read avoids dispatching the entire
             // remaining ceiling after every pixel has converged.
-            if self.adaptive_enabled && self.samples >= min_samples && self.samples % 32 == 0
-                && self.sample_counts().iter().all(|&count|count <= (self.samples-4) as f32) { break; }
+            if self.adaptive_enabled && self.samples >= min_samples && self.samples % 32 == 0 {
+                let probe=Instant::now();let maximum=self.max_sample_count();
+                self.timings.convergence_check_ms+=probe.elapsed().as_secs_f64()*1000.;
+                if maximum <= self.samples-4 {break;}
+            }
         }
         if let Some(progress)=progress { let _=progress(spp-left,spp); }
         let elapsed=start.elapsed().as_secs_f64()*1000.;
@@ -1187,7 +1194,7 @@ impl Renderer {
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
-        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,..Default::default()};
+        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,convergence_check_ms:self.timings.convergence_check_ms,..Default::default()};
         let (w, h) = (self.width, self.height);
         if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;

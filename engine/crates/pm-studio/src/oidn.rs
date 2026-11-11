@@ -45,12 +45,13 @@ unsafe extern "C" {
 pub enum Quality { Fast, Balanced, High }
 
 #[derive(Clone,Copy,Debug,Default,serde::Serialize)]
-pub struct FilterTimings { pub albedo_ms:f64, pub normal_ms:f64, pub beauty_ms:f64, pub total_ms:f64 }
+pub struct FilterTimings { pub albedo_ms:f64, pub normal_ms:f64, pub beauty_ms:f64, pub total_ms:f64, pub beauty_pixels:u64 }
 
 pub struct Denoiser {
     device: Device,
     timings: Cell<FilterTimings>,
     half_guides: Cell<bool>,
+    crop: Cell<bool>,
     quality: Cell<i32>,
     filter: RefCell<Option<Filters>>,
 }
@@ -94,6 +95,7 @@ impl Denoiser {
             device,
             timings:Cell::new(FilterTimings::default()),
             half_guides:Cell::new(false),
+            crop:Cell::new(true),
             quality: Cell::new(QUALITY_HIGH),
             filter: RefCell::new(None),
         };
@@ -102,6 +104,9 @@ impl Denoiser {
     }
 
     pub fn timings(&self)->FilterTimings {self.timings.get()}
+    /// Restrict zero-surrounded beauty work with a 64-pixel context halo.
+    /// This changes no image resolution or sample/noise target.
+    pub fn set_crop(&self,enabled:bool){self.crop.set(enabled);}
     /// CPU fallback for bounded preview/production work. Beauty stays at full
     /// resolution; only stochastic albedo/normal prefiltering runs at half size.
     /// Final defaults to full-resolution guides unless the caller opts in.
@@ -262,9 +267,7 @@ impl Denoiser {
             let normal=expand_guide(&f.clean_normal[..guide_size.0*guide_size.1*3],guide_size,width,height,true);
             f.clean_albedo.copy_from_slice(&albedo);f.clean_normal.copy_from_slice(&normal);
         }
-        bind(f.beauty, "albedo", f.clean_albedo.as_mut_ptr(), 3,(width,height));
-        bind(f.beauty, "normal", f.clean_normal.as_mut_ptr(), 3,(width,height));
-        bind(f.beauty, "output", f.output.as_mut_ptr(), 3,(width,height));
+
         unsafe {
             oidnSetFilterBool(f.beauty, name("hdr").as_ptr(), true);
             oidnSetFilterBool(f.beauty, name("cleanAux").as_ptr(), true);
@@ -279,12 +282,21 @@ impl Denoiser {
             // shading. Preserve a constant RGB layer instead of filtering it.
             let constant=[color[0],color[1],color[2]];
             if constant.iter().all(|v|v.is_finite()) && color.chunks_exact(stride).take(pixels).all(|p|p[..3]==constant) {continue;}
-            bind(f.beauty, "color", color.as_mut_ptr(), stride,(width,height));
-            execute(f.beauty)?;
+            let region=if self.crop.get() && self.quality.get()!=QUALITY_HIGH {beauty_region(color,stride,width,height)}else{(0,0,width,height)};
+            let (x0,y0,rw,rh)=region;let offset=y0*width+x0;
+            let bind_region=|parameter:&str,ptr:*mut f32,pixel_stride:usize,row_width:usize| unsafe {
+                oidnSetSharedFilterImage(f.beauty,name(parameter).as_ptr(),ptr.cast(),FORMAT_FLOAT3,rw,rh,0,pixel_stride*4,row_width*pixel_stride*4);
+            };
+            // Guides keep their full-image row stride; output is tightly packed.
+            bind_region("albedo",unsafe{f.clean_albedo.as_mut_ptr().add(offset*3)},3,width);
+            bind_region("normal",unsafe{f.clean_normal.as_mut_ptr().add(offset*3)},3,width);
+            bind_region("color",unsafe{color.as_mut_ptr().add(offset*stride)},stride,width);
+            bind_region("output",f.output.as_mut_ptr(),3,rw);
+            execute(f.beauty)?;timings.beauty_pixels+=(rw*rh) as u64;
             let output=&f.output;
-            crate::parallel::rows(&mut color[..needed],width*stride,|y,row| {
-                for (x,pixel) in row.chunks_exact_mut(stride).enumerate() {
-                    pixel[..3].copy_from_slice(&output[(y*width+x)*3..][..3]);
+            crate::parallel::rows(&mut color[y0*width*stride..(y0+rh)*width*stride],width*stride,|y,row| {
+                for (x,pixel) in row[x0*stride..(x0+rw)*stride].chunks_exact_mut(stride).enumerate() {
+                    pixel[..3].copy_from_slice(&output[(y*rw+x)*3..][..3]);
                 }
             });
         }
@@ -293,6 +305,35 @@ impl Denoiser {
         self.timings.set(timings);
         Ok(())
     }
+}
+
+// OIDN need not evaluate a black beauty field far outside the product. Retain
+// a wide context halo and full-size stochastic guides; nonzero surroundings,
+// small images or a large product keep the original full-frame path.
+fn beauty_region(color:&[f32],stride:usize,w:usize,h:usize)->(usize,usize,usize,usize) {
+    if w*h<300_000 || color[..3]!=[0.;3] {return (0,0,w,h);}
+    let workers=std::thread::available_parallelism().map_or(1,|n|n.get().min(8));
+    let rows=h.div_ceil(workers);
+    let bounds=std::thread::scope(|scope| {
+        let jobs:Vec<_>=color[..w*h*stride].chunks(rows*w*stride).enumerate().map(|(group,chunk)|scope.spawn(move || {
+            let mut lo=(w,h);let mut hi=(0,0);
+            for (row_index,row) in chunk.chunks_exact(w*stride).enumerate() {
+                let y=group*rows+row_index;
+                let nonzero=|p:&[f32]|p[0]!=0. || p[1]!=0. || p[2]!=0.;
+                if let Some(left)=row.chunks_exact(stride).position(nonzero) {
+                    let right=row.chunks_exact(stride).rposition(nonzero).unwrap();
+                    lo=(lo.0.min(left),lo.1.min(y));hi=(hi.0.max(right+1),hi.1.max(y+1));
+                }
+            }(lo,hi)
+        })).collect();
+        jobs.into_iter().map(|j|j.join().expect("beauty bounds worker")).collect::<Vec<_>>()
+    });
+    let mut lo=(w,h);let mut hi=(0,0);
+    for (a,b) in bounds {lo=(lo.0.min(a.0),lo.1.min(a.1));hi=(hi.0.max(b.0),hi.1.max(b.1));}
+    if hi==(0,0) {return (0,0,w,h);}
+    let x0=lo.0.saturating_sub(64);let y0=lo.1.saturating_sub(64);
+    let x1=(hi.0+64).min(w);let y1=(hi.1+64).min(h);
+    if (x1-x0)*(y1-y0)>w*h*4/5 {(0,0,w,h)}else{(x0,y0,x1-x0,y1-y0)}
 }
 
 fn normalize_guide(p:&mut [f32]) {
@@ -475,5 +516,33 @@ mod parallel_buffer_tests {
         denoiser.run(&mut color,&albedo,&normal,stride,w,h).unwrap();
         assert!(color[..needed].chunks_exact(stride).all(|p|p[..3].iter().all(|v|v.is_finite()) && p[3]==0.25 && p[4]==0.875));
         assert_eq!(&color[needed..],&[0.123;17]);
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+    #[test]
+    fn occupied_beauty_crop_matches_full_frame_and_preserves_padded_channels() {
+        let (w,h,stride)=(1024,512,5);let mut input=vec![0.;w*h*stride];
+        let mut albedo=input.clone();let mut normal=input.clone();
+        for y in 0..h {for x in 0..w {
+            let i=(y*w+x)*stride;input[i+3]=0.25;input[i+4]=0.875;
+            if (400..624).contains(&x) && (200..312).contains(&y) {
+                input[i..i+3].fill(0.5+if (x+y)%2==0{0.08}else{-0.08});
+                albedo[i..i+3].fill(0.5);normal[i+2]=1.;
+            }
+        }}
+        let run=|crop| {let d=Denoiser::new().unwrap();d.set_quality(Quality::Balanced);d.set_half_resolution_guides(true);d.set_crop(crop);let mut out=input.clone();d.run(&mut out,&albedo,&normal,stride,w,h).unwrap();(out,d.timings())};
+        let (expected,full)=run(false);let (actual,cropped)=run(true);
+        assert!(cropped.beauty_pixels<full.beauty_pixels/2,"crop was not exercised");
+        let mut error=0.;let mut n=0;
+        for y in 200..312 {for x in 400..624 {let i=(y*w+x)*stride;for c in 0..3{error+=(actual[i+c]-expected[i+c]).powi(2);n+=1;}}}
+        let rms=(error/n as f32).sqrt();assert!(rms<0.005,"crop/full object RMS {rms}");
+        assert!(actual.chunks_exact(stride).all(|p|p[3]==0.25 && p[4]==0.875));
+        assert_eq!(&actual[..3],&[0.;3]);
+        let final_denoiser=Denoiser::new().unwrap();let mut final_image=input.clone();
+        final_denoiser.run(&mut final_image,&albedo,&normal,stride,w,h).unwrap();
+        assert_eq!(final_denoiser.timings().beauty_pixels,(w*h) as u64,"Final retains full-frame context");
     }
 }

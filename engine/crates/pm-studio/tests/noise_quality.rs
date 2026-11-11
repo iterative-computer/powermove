@@ -85,11 +85,13 @@ fn save(name: &str, w: u32, h: u32, pixels: &[u8]) {
         .write_image_data(pixels)
         .unwrap();
 }
-fn check_noise(names: &[&str]) {
-    let (w, h) = (192, 128);
+fn check_noise_at(names: &[&str], w:u32, h:u32) {
     let mut renderer = Renderer::new(w, h).unwrap();
     let denoiser = Denoiser::new().unwrap();
     let mut failures = vec![];
+    let policies=std::env::var("PM_STUDIO_NOISE_POLICIES").unwrap_or_else(|_|"production,final".into());
+    let policies:Vec<_>=policies.split(',').collect();
+    assert!(policies.iter().all(|p|["production","final"].contains(p)));
     for &name in names {
         let scene = if name == "chrome-set" {
             // The owner's product stress set includes glass, lacquer and the
@@ -115,14 +117,14 @@ fn check_noise(names: &[&str]) {
             ..Default::default()
         });
         renderer.set_time_seed(7);
-        renderer.trace(4096, 8, true, 0);
-        let reference = renderer.finish(0).0;
+        let reference = reference(&mut renderer, &reference_scene, name, w, h);
         save(&format!("{name}-reference4096"), w, h, &reference);
         renderer.set_scene(&scene, &scene.prepare());
         renderer.set_void(backdrop);
         for (quality, max_samples, min_samples, threshold) in
             [("production", 256, 32, 0.03), ("final", 1024, 512, 0.015)]
         {
+            if !policies.contains(&quality){continue;}
             denoiser.set_quality(if quality == "final" {
                 Quality::High
             } else {
@@ -140,6 +142,10 @@ fn check_noise(names: &[&str]) {
                 true,
             );
             let start = Instant::now();
+            // A trial ceiling is reported explicitly; acceptance limits stay
+            // fixed. The normal production policy remains 256 until validated.
+            let max_samples=if quality=="production" {std::env::var("PM_STUDIO_PRODUCTION_SPP").ok().map(|v|v.parse::<u32>().unwrap()).unwrap_or(max_samples)}else{max_samples};
+            assert!(max_samples>=min_samples && max_samples<=4096);
             renderer.trace(max_samples, 8, true, 0);
             let actual = renderer
                 .finish_with_layers(&|color, shade, a, n| {
@@ -155,18 +161,25 @@ fn check_noise(names: &[&str]) {
                 })
                 .0;
             let counts = renderer.sample_counts();
+            let object_metrics=if w>=1920 {
+                let ids=renderer.first_hit_ids();let mut masked=reference.clone();
+                for (pixel,id) in masked.chunks_exact_mut(4).zip(ids) {
+                    if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){pixel[3]=0;}
+                }
+                Some(metrics(&actual,&masked,w as usize,h as usize))
+            }else{None};
             let (rms, noise, bias, pixels) = metrics(&actual, &reference, w as usize, h as usize);
             println!(
                 "NOISE_GATE {}",
-                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":start.elapsed().as_secs_f64()*1000.})
+                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":start.elapsed().as_secs_f64()*1000.})
             );
             save(&format!("{name}-{quality}"), w, h, &actual);
             // Normalized sRGB code-value limits catch speckle and low-frequency
             // OIDN blotches in both policies. Neither has a wall-clock deadline.
-            if !(rms < 0.02 && noise < 0.006 && bias < 0.012 && pixels > 100)
+            if !(rms < 0.02 && noise < 0.006 && bias < 0.012 && pixels > 100) || object_metrics.is_some_and(|(r,n,b,p)|!(r<0.02 && n<0.006 && b<0.012 && p>100))
             {
                 failures.push(format!(
-                    "{name}/{quality}: RMS {rms:.5}, noise {noise:.5}, block bias {bias:.5}"
+                    "{name}/{quality}: RMS {rms:.5}, noise {noise:.5}, block bias {bias:.5}; object {object_metrics:?}; ceiling {max_samples}"
                 ));
             }
         }
@@ -179,11 +192,11 @@ fn check_noise(names: &[&str]) {
 }
 #[test]
 fn teapot_glass_and_chrome_production_and_final_have_bounded_noise_and_blotches() {
-    check_noise(&["teapot", "glass", "chrome"]);
+    check_noise_at(&["teapot", "glass", "chrome"],192,128);
 }
 #[test]
 fn chrome_glass_studio_caustics_match_independent_photon_references() {
-    check_noise(&["chrome-set"]);
+    check_noise_at(&["chrome-set"],192,128);
 }
 #[test]
 fn matte_enamel_uses_authored_perceptual_roughness_without_a_mirror_coat() {
@@ -192,4 +205,49 @@ fn matte_enamel_uses_authored_perceptual_roughness_without_a_mirror_coat() {
     assert_eq!(scene.materials[0].roughness, 0.7);
     assert_eq!(prepared.materials[0].spec[0], 0.7);
     assert_eq!(prepared.materials[0].spec[1], 0.);
+}
+
+// Expensive, explicit acceptance gate. Keep the exact small-fixture thresholds;
+// resolution increases coverage, rather than relaxing what counts as noise.
+#[test]
+#[ignore = "1080p/4096-spp reference acceptance; run explicitly under the build lock"]
+fn full_hd_product_noise_acceptance() {
+    let selected=std::env::var("PM_STUDIO_NOISE_SCENES").unwrap_or_else(|_|"teapot,glass,chrome,chrome-set".into());
+    let names:Vec<_>=selected.split(',').collect();
+    assert!(!names.is_empty() && names.iter().all(|n|["teapot","glass","chrome","chrome-set"].contains(n)),"unknown full-HD fixture");
+    check_noise_at(&names,1920,1080);
+}
+fn fingerprint(bytes:&[u8])->String {
+    format!("{:016x}",bytes.iter().fold(0xcbf29ce484222325u64,|h,b|(h^u64::from(*b)).wrapping_mul(0x100000001b3)))
+}
+// References may be held fixed across implementation changes: their physical
+// scene, sampling policy and bytes are checked, and provenance stays visible.
+// A camera seed plus rotated emitters gives independent paths AND photon IDs.
+fn reference(r:&mut Renderer, scene:&pm_studio::scene::Scene,name:&str,w:u32,h:u32)->Vec<u8> {
+    let key=serde_json::json!({"scene":fingerprint(&serde_json::to_vec(scene).unwrap()),"width":w,"height":h,"spp":4096,"seed":7,"rotated_lights":true,"filter":"blackman-harris-1.5","denoise":false});
+    let cache=std::env::var_os("PM_STUDIO_NOISE_REFERENCES").map(std::path::PathBuf::from);
+    let stem=format!("{name}-{w}x{h}-4096");
+    if let Some(root)=&cache {
+        let metadata=root.join(format!("{stem}.json"));let png=root.join(format!("{stem}.png"));
+        if metadata.exists() || png.exists() {
+            let metadata:serde_json::Value=serde_json::from_slice(&std::fs::read(metadata).unwrap()).unwrap();
+            assert_eq!(metadata["key"],key,"stale physical reference; use a new cache directory");
+            let pixels=image::open(png).unwrap().into_rgba8();assert_eq!(pixels.dimensions(),(w,h));
+            assert_eq!(metadata["pixels"],fingerprint(pixels.as_raw()),"corrupt reference");
+            println!("NOISE_REFERENCE {}",serde_json::json!({"scene":name,"cached":true,"provenance":metadata["provenance"]}));
+            return pixels.into_raw();
+        }
+    }
+    let start=Instant::now();
+    r.trace_with_progress(4096,8,true,0,&|done,target| {
+        if done%256==0 {eprintln!("REFERENCE_PROGRESS {name} {done}/{target} {:.1}s",start.elapsed().as_secs_f64());}true
+    });let pixels=r.finish(0).0;
+    if let Some(root)=cache {
+        std::fs::create_dir_all(&root).unwrap();
+        pm_studio::gpu::write_png(&root.join(format!("{stem}.png")),w,h,&pixels).unwrap();
+        let provenance=std::env::var("PM_STUDIO_REFERENCE_REVISION").unwrap_or_else(|_|"unrecorded; generated by this test run".into());
+        let metadata=serde_json::json!({"key":key,"pixels":fingerprint(&pixels),"provenance":provenance});
+        std::fs::write(root.join(format!("{stem}.json")),serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+    }
+    println!("NOISE_REFERENCE {}",serde_json::json!({"scene":name,"cached":false}));pixels
 }

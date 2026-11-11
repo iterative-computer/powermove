@@ -328,6 +328,7 @@ impl Calibration {
                 max_bounces: q["maxBounces"].as_u64().unwrap() as u32,
                 caustics: q["caustics"] == true,
                 denoise: true,
+                fast_denoise: name == "draft",
                 half_resolution_guides: name != "final",
             },
         );

@@ -1915,3 +1915,148 @@ The launcher checks the disk floor and supplies the development FFmpeg path
 after the system lock launcher. For a source build, use the native README's
 `cargo +1.96.1 run -p pm-native-app --bin powermove-native` from `apps/native`,
 with the documented shared target/runtime environment and the same lock.
+
+### Export-budget round: overhead checkpoint (2026-11-11)
+
+Targets remain Draft <=1 s, Refine <=2 s, Production <=3 s at 1920×1080;
+Final has no wall-clock cap. Sample floors, error thresholds and numeric noise
+limits are unchanged. Engineering measurements below are headless worker
+measurements under `nice -n 10 flock /tmp/pm-build.lock`, interleaved with the
+UI lane's builds. They are not the final on-screen/acceptance run.
+
+The diagnostic now reports scene preparation/upload separately and the actual
+per-pixel sample distribution. Baseline hero preparation/upload: 13.6/13.0 ms;
+chrome: 271.9/13.8 ms. Renderer/device/pipeline initialization is separately
+reported and excluded from steady-frame totals. Native already retains mesh
+BLASes and scene resources across frames; changing camera/instances does not
+rebuild unchanged mesh geometry. PNG costs about 40–80 ms and readback 1–2 ms,
+so moving encoding alone cannot fix the leading trace or OIDN costs.
+
+Two exact overhead reductions are implemented:
+
+- An unmapped, fully opaque shadow caster does not need a shading frame,
+  normal/coat textures or procedural BSDF evaluation. Mapped/vertex alpha,
+  noncasters and transmission retain the complete path. White-alpha-map
+  fallback parity passes with both portable and hardware traversal.
+- Global convergence reads a GPU-reduced maximum sample count (4 bytes),
+  instead of downloading the entire RGBA accumulation every 32 samples.
+  The stopping inequality and per-pixel sampling decisions are unchanged.
+  Odd dimensions, continued refinement and resize are covered.
+
+Initial worker results with these changes (single-frame diagnostics, seconds):
+
+| Product / measure | Baseline | Optimized overhead |
+|---|---:|---:|
+| Hero / Draft PNG | 1.608 | 1.540 |
+| Hero / Refine ready | 2.154 | 2.078 |
+| Hero / Production PNG | 3.677 | 3.356 |
+| Chrome / Draft PNG | 2.625 | 2.506 |
+| Chrome / Refine ready | 4.949 | 4.449 |
+| Chrome / Production PNG | 23.715 | 20.521 |
+
+Chrome Production still averages about 91 actual samples/pixel, with its
+95th percentile at the 256 ceiling; hero averages 38.7 with p95 88. The
+expensive chrome pixels still need structural sampling work. A diagnostic
+Draft GPU-guided filter (same trace samples) removes CPU OIDN: hero 0.217 s,
+chrome 1.336 s. This diagnostic choice is not yet the native Draft policy.
+
+`noise_quality::full_hd_product_noise_acceptance` is an explicit ignored test
+for teapot, glass, chrome and the mixed chrome set at 1920×1080. It retains
+4096 independent reference spp, Production/Final thresholds RMS <0.02,
+smooth noise RMS <0.006 and block bias p95 <0.012. Held reference caches check
+physical scene/sampling metadata, dimensions and decoded pixel fingerprints;
+renderer provenance is recorded outside Git. Use `PM_STUDIO_NOISE_SCENES`
+to run one fixture per lock acquisition. The first expensive reference
+attempt was stopped to prioritize engineering; it is not counted as a pass.
+
+#### Draft filter and occupied-region denoising increment
+
+Native Draft now selects the existing GPU spatial filter through the resolved
+`FinalQuality.fast_denoise` policy; the saved/export quality command and measured
+estimate calibration carry that choice. Draft retains its 4–16 spp, 0.12 error
+threshold, four bounces and full output resolution. Refine, Preview, Production
+and Final retain OIDN. The native regression checks no OIDN/guide readback work,
+full-sized output and one geometry/texture upload over two frames.
+
+OIDN beauty work may crop a zero-surrounded product with a 64-pixel context halo.
+Beauty pixels, guides and output retain their resolution; the guides are still
+prefiltered. Full-image row strides, RGB-only copying, additional channels and
+buffer tails are preserved. Cropped/full-frame object RMS must stay <0.005 in
+the large padded-buffer regression. Nonzero surroundings, small images and a
+product covering most of the frame retain full-frame filtering. The denoiser
+reports `beauty_pixels` for diagnostics. Final retains full-frame beauty context
+as well as full-resolution guides. Initial warm hero Refine is 1.871 s;
+hero Production PNG is 3.057 s before the latest classifier refinement. These
+are engineering measurements, not the final acceptance table.
+
+Near-mirror, uncoated conductors use the complete visible-normal BSDF estimator
+for offline direct light; the complementary emitter/environment MIS weight is
+removed too, preserving energy. Live and rough/layered surfaces retain their
+existing estimator. A finite-emitter energy regression covers both traversal
+paths. Opaque contact-occlusion rays may terminate on an arbitrary opaque hit;
+alpha/noncaster cases restart closest-first from the original origin.
+
+The edge classifier now distinguishes statistically significant image contrast
+from first-batch Monte Carlo variance. Geometric/coverage edges retain their
+unconditional fourfold sample floor; deterministic fine detail keeps the same
+contrast threshold. A synthetic GPU regression rejects noisy flat fields and
+retains a real detail edge. Pixel error thresholds are unchanged.
+
+An unfinished-pixel compaction prototype preserved pixel samples but produced
+no useful chrome speedup; it was removed from the branch. Full-HD acceptance
+also measures the product region separately from its floor/backdrop, using the
+same numeric limits, so a large clean background cannot hide object noise.
+Explicit sample-ceiling trials are logged as trials; the saved Production
+ceiling remains 256 pending that acceptance.
+
+#### Export round storage-stop handoff (2026-11-11)
+
+Green increments are `e958100e1` (shadow shading/global convergence readback)
+and `ace8a65b4` (GPU Draft, occupied beauty filtering, specular sampling and
+variance-aware edge classification). Targeted verification: **57 engine units,
+25 engine integration cases, one native Draft regression**, and a native app
+build pass. The Final full-context denoiser regression was rerun after its final
+guard. No sample/noise target or saved Production ceiling was lowered.
+
+Warm second-frame component measurements, seconds, before the last classifier
+refinement (engineering trials, not final acceptance):
+
+| Product | Draft PNG | Refine image ready | Production PNG |
+|---|---:|---:|---:|
+| Hero | 0.225 | 1.871 | 3.057 |
+| Mixed chrome | 1.146 | 3.894 | 18.352 |
+
+These exclude device/pipeline startup, native 2D compositing, motion-blur shutter
+samples and export-process overhead. Other UI preview processes became active
+during later experiments. No final quiet timing or on-screen gate pass is
+claimed for this round. Chrome remains trace-bound; its budgets remain unmet.
+
+Full-HD **1920×1080** Production/Final noise acceptance has completed for teapot
+and glass against independent 4096-spp references. The following table reports
+the **product region**, using the same limits as the whole-image checks; both
+regions pass. Smooth-pixel counts exceed 187,000 in every row.
+
+| Product / policy | Luma RMS (<0.02) | Smooth residual RMS (<0.006) | Block bias p95 (<0.012) |
+|---|---:|---:|---:|
+| Teapot / Production | 0.001736 | 0.001226 | 0.001569 |
+| Teapot / Final | 0.001216 | 0.001127 | 0.000525 |
+| Glass / Production | 0.010996 | 0.003900 | 0.004742 |
+| Glass / Final | 0.007439 | 0.003842 | 0.003405 |
+
+Chrome and the mixed chrome set still need their full-HD references and gates.
+Reference caches retain physical-scene/sampling metadata and decoded pixel
+fingerprints; no reference images are checked into Git. Cached reruns can
+finish the remaining gates without repeating the completed references.
+
+The tile experiment preserved HDR film and stopping decisions but added
+submission/probe overhead, so it was removed. Plain visibility resampling
+increased sample variance. Cached visibility and secondary light-tree sampling
+remain uncommitted experiments, archived outside Git for the next engineering
+round; their final combined source is uncompiled and unverified.
+
+Work stopped when available storage fell below the required 4 GB floor. No
+further builds, renders or timing runs were started. Remaining work is the
+unverified trace experiments, full-HD chrome acceptance, the complete regression
+suite/Cycles yardstick after the final engine choice, and quiet final native
+performance measurements. All test app windows launched by this lane are closed
+(this round used headless workers only).

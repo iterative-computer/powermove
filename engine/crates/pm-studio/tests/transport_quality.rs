@@ -693,3 +693,18 @@ fn sheen_reserves_the_same_energy_for_reflection_and_emission() {
         "sheen reflection and underlying emission must sum to one: {actual}"
     );
 }
+
+#[test]
+fn near_mirror_bsdf_sampling_preserves_finite_emitter_energy() {
+    let mut scene=receiver();scene.extra_lights.clear();scene.environment=(Vec3::ZERO,Vec3::ZERO);
+    scene.camera=Camera::lens(v3(0.,0.,5.),Vec3::ZERO,70.,0.);
+    scene.objects[0].mesh=Mesh {positions:vec![v3(-4.,-4.,0.),v3(4.,-4.,0.),v3(4.,4.,0.),v3(-4.,4.,0.)],normals:vec![v3(0.,0.,1.);4],uvs:vec![[0.,0.];4],indices:vec![[0,1,2],[0,2,3]],..Default::default()};
+    scene.materials[0]=Material::metal(Vec3::splat(0.95),0.02);
+    scene.lights=vec![pm_studio::scene::Softbox::aimed(Vec3::ZERO,0.,0.,3.,8.,8.,Vec3::splat(2.))];
+    let mut r=Renderer::new(24,24).unwrap();
+    for hardware in [false,true] {
+        r.hardware_rt=hardware;r.set_scene(&scene,&scene.prepare());r.trace(64,2,true,0);
+        let pixels=r.linear_beauty();let center=(12*24+12)*4;
+        assert!((pixels[center]-1.9).abs()<0.025,"finite emitter energy hardware={hardware}: {:?}",&pixels[center..center+3]);
+    }
+}
