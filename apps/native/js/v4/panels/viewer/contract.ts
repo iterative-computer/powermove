@@ -50,6 +50,8 @@ export interface ViewerModel {
       samplesTarget: number;
       stage: "sampling" | "denoising" | "complete";
     };
+    /** Quality, paused, before the first progress report. */
+    pending?: boolean;
   } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */

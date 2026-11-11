@@ -181,6 +181,11 @@ export function ViewerPanel({
     refine && refine.samplesTarget > 0
       ? Math.min(99, Math.floor((refine.samplesDone / refine.samplesTarget) * 100))
       : 0;
+  // Before the first sample lands (a heavy scene can take a while) the
+  // capsule says so, rather than leave a dark stage that looks broken.
+  const pending =
+    m.studio?.tier === "refine" &&
+    (m.studio?.pending === true || (stage === "sampling" && refine?.samplesDone === 0));
   const capsuleText =
     stage === "sampling" && refine && refine.samplesDone > 0
       ? `Refining · ${percentDone} %`
@@ -188,7 +193,9 @@ export function ViewerPanel({
         ? "Refining · Denoising"
         : stage === "complete" && clean
           ? "Clean"
-          : null;
+          : pending
+            ? "Rendering…"
+            : null;
   const capsule = capsuleText ? (
     <div
       id="viewer.studio.status"

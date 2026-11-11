@@ -455,6 +455,10 @@ impl Backend {
             let refine = &self.native.facts["studioRefineProgress"];
             if refine.is_object() {
                 model["studio"]["refine"] = refine.clone();
+            } else if model["studio"]["tier"] == "refine" && self.native.facts["playing"] != true {
+                // Quality before its first progress report: the picture is
+                // on its way (a heavy scene can take a while), not missing.
+                model["studio"]["pending"] = json!(true);
             }
         }
         if model["studio"]["tool"] == "light" {

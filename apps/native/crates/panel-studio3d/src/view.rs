@@ -978,7 +978,7 @@ pub fn add_layer(
         if let Some(camera) = overview_camera(&layers, id) {
             commands.push(scene(p, time, camera));
         }
-        if let Some(sky) = landscape_sky(&layers, id) {
+        if let Some(sky) = landscape_sky(&layers, id).or_else(|| landscape_fog(&layers)) {
             commands.push(scene(p, time, sky));
         }
         return Ok((format!("Add {label}"), commands, id.into()));
@@ -1013,7 +1013,7 @@ pub fn add_layer(
         if let Some(camera) = overview_camera(&layers, id) {
             commands.push(scene(p, time, camera));
         }
-        if let Some(sky) = landscape_sky(&layers, id) {
+        if let Some(sky) = landscape_sky(&layers, id).or_else(|| landscape_fog(&layers)) {
             commands.push(scene(p, time, sky));
         }
     }
@@ -1086,8 +1086,39 @@ fn landscape_sky(layers: &[Value], id: &str) -> Option<Value> {
     }
     Some(
         json!({"operation":"set_world","id":format!("{id}w"),"world":{"mode":"sky","preset":"clear-noon",
-        "p":{"elevation":38,"haze":3,"intensity":1,"sunIntensity":0.9,"groundColor":"#5F6B45"}}}),
+        "p":{"elevation":38,"haze":3,"intensity":1,"sunIntensity":0.9,"groundColor":"#5F6B45",
+        "fogHeightFalloff":LANDSCAPE_FOG.0,"fogDistance":LANDSCAPE_FOG.1}}}),
     )
+}
+/// A landscape's atmosphere shape: fog that thins with height and ends past
+/// the terrain's far edge (400 units from the camera), shaped like the
+/// engine's landscape reference. Density stays 0 (no fog) until the user
+/// raises it. The schema's
+/// defaults (even fog filling 10,000 units) black out the sun and sky in
+/// Quality at any density a user would try.
+const LANDSCAPE_FOG: (f64, f64) = (0.06, 400.);
+/// An existing World gets the landscape fog shape when its own is still the
+/// default (neither channel stored).
+fn landscape_fog(layers: &[Value]) -> Option<Value> {
+    let world = layers
+        .iter()
+        .find(|l| fields::environment(&l["d"]["data"]) == Some("world"))?;
+    let p = &world["d"]["data"]["object"]["world"]["p"];
+    // A World stores every channel; untouched means its default value, with
+    // no keyframes or expression.
+    let untouched = |key: &str, default: f64| {
+        let c = &p[key];
+        c.is_null()
+            || c.as_f64() == Some(default)
+            || (c["v"].as_f64() == Some(default)
+                && c["kf"].as_array().is_none_or(Vec::is_empty)
+                && c["expr"].is_null())
+    };
+    if !untouched("fogHeightFalloff", 0.) || !untouched("fogDistance", 10000.) {
+        return None;
+    }
+    Some(json!({"operation":"set_world","id":world["id"],"world":{"p":{
+        "fogHeightFalloff":LANDSCAPE_FOG.0,"fogDistance":LANDSCAPE_FOG.1}}}))
 }
 /// The first object in an empty scene arrives lit (3d-studio.md's product
 /// film): a clear sky, a key softbox placed for a highlight, and a floor so
@@ -1208,4 +1239,32 @@ pub fn scatter_options(p: &Published, scatter: &str, key: &str) -> Result<Vec<Va
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod landscape_fog_tests {
+    use super::*;
+    fn world(p: Value) -> Value {
+        json!({"id":"w1","d":{"data":{"object":{"world":{"mode":"sky","preset":"clear-noon","p":p}}}}})
+    }
+    #[test]
+    fn a_default_world_gets_the_landscape_fog_shape_once() {
+        let op = landscape_fog(&[world(json!({"elevation":45}))]).unwrap();
+        assert_eq!(op["operation"], "set_world");
+        assert_eq!(op["id"], "w1");
+        assert_eq!(op["world"]["p"]["fogHeightFalloff"], 0.06);
+        assert_eq!(op["world"]["p"]["fogDistance"], 400.);
+        assert!(op["world"].get("preset").is_none(), "the sky the user chose stays");
+        // A shape the user (or an earlier terrain) set is left alone.
+        assert!(landscape_fog(&[world(json!({"fogDistance":50}))]).is_none());
+        // Stored defaults (every channel is materialised) still count as untouched.
+        let stored = json!({"fogDistance":{"expr":null,"kf":[],"v":10000},"fogHeightFalloff":{"expr":null,"kf":[],"v":0}});
+        assert!(landscape_fog(&[world(stored)]).is_some());
+        let keyed = json!({"fogDistance":{"expr":null,"kf":[[0,10000]],"v":10000}});
+        assert!(landscape_fog(&[world(keyed)]).is_none());
+        assert!(landscape_fog(&[]).is_none());
+        // A new landscape sky carries the shape from the start.
+        let sky = landscape_sky(&[], "t1").unwrap();
+        assert_eq!(sky["world"]["p"]["fogHeightFalloff"], 0.06);
+    }
 }
