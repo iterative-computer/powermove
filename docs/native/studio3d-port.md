@@ -326,7 +326,7 @@ of OIDN/TBB/licenses remains a separate gate; dev builds use installed libraries
 The WIP branch adds the pinned World/fog/terrain/scatter/material-option schemas,
 material/part sparse data, iris channels, ordinary actor/property paths, quality
 presets, MCP operation metadata/readback and source validation. Its targeted
-checks pass: **23 kernel**, **17 document**, **2 source-contract**, **8 MCP**.
+checks pass: **24 kernel**, **17 document**, **2 source-contract**, **8 MCP**.
 They prove exact Undo/Redo, protected edits, atomic failure, saved quality and
 PMV reopening. The old source oracle is retained; its 16-light case is explicitly
 superseded by Studio's 4096-light budget. No scene rendering claim follows from
@@ -346,3 +346,11 @@ quality overrides into actual rendering; FBX native import; render passes;
 noise convergence/filter/edge checks and native presentation/input measurements.
 The standalone engine supports more than the native document adapter currently
 translates. Treat the capability matrix as partial until each row has evidence.
+
+
+WIP source checkpoints: `f62ec5781` (composition quality persistence),
+`1dcfc3270` (document/MCP authoring), `492226f10` (explicit failure while new
+render translations are pending). The last checkpoint adds a separate passing
+native regression that prevents environment placeholders from being drawn as
+ordinary planes. The five existing native scene/export regressions still pass.
+The data checkpoint is deliberately not merged into `feat/na-studio3d`.
