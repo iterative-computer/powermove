@@ -1,35 +1,11 @@
-/// Rust allocations go through mimalloc: it returns freed pages to macOS
-/// within milliseconds, where the system allocator kept hundreds of MB of
-/// load-time buffers (file text, media copies, history compaction) resident
-/// for minutes after a large project opened.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// Purge freed mimalloc pages at once (default 10 ms, arenas ×10).
-///
-/// Note for memory reviews: mimalloc tags its OS memory 100, which
-/// footprint/vmmap label "IOAccelerator" (not the "(graphics)" rows); that
-/// category is the Rust heap. Its tag is read before `main`, so it can only
-/// be changed with `MIMALLOC_OS_TAG` in the launch environment.
-fn tune_allocator() {
-    unsafe extern "C" {
-        fn mi_option_set(option: i32, value: std::ffi::c_long);
-    }
-    // mimalloc's stable `mi_option_purge_delay` (include/mimalloc.h).
-    const PURGE_DELAY: i32 = 15;
-    // SAFETY: a plain option store; mimalloc reads it on each later purge.
-    unsafe { mi_option_set(PURGE_DELAY, 0) };
-    pm_engine_service::memory::set_allocator_relief(collect_allocator);
-}
-
-fn collect_allocator() {
-    unsafe extern "C" {
-        fn mi_collect(force: bool);
-    }
-    // SAFETY: collects this thread's heap and abandoned segments. Owners
-    // must call on their own thread after dropping a large working set.
-    unsafe { mi_collect(true) };
-}
+// Rust allocations use the system allocator. The bundle launches with
+// `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
+// freed large blocks go back to macOS at once; small blocks return per 16 KiB
+// page (`pm_memory::pressure_relief`). mimalloc kept whole 64 KiB pages of
+// the project load's long-lived nodes, about 140 MB more with Paper open
+// (installed app: idle 563 → 416 MB, stopped 700 → 522 MB). Memory reviews:
+// the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
+// "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
 
 mod after_open;
 mod agent_clients;
@@ -157,7 +133,6 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
 }
 
 fn main() -> Result<()> {
-    tune_allocator();
     diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let headless = args
