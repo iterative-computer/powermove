@@ -18,8 +18,12 @@ node tools/visual-parity/sheet.mjs --dir "$S/paper" --title Paper [--notes notes
 
 - v1 frames are the exporter's frames (`renderToPixels` with the export
   options, Full quality) after `prepareFrame` and three identical renders.
-- V2 frames are the app's `render_frames`: the export job on the open
-  project, with the migrated profile's extensions.
+- V2 frames (`--via export`, default) come from the app's `export_video`:
+  full-size ProRes from the export job on the open project, with the migrated
+  profile's extensions, decoded by frame index. An export refuses an effect
+  whose extension isn't installed; for such a profile use `--via stills`
+  (`render_frames`, at most 1280 wide, missing effects bypassed as the viewer
+  does) and capture v1 with `--width 1280`.
 - Times: every `--step` seconds, the last frame, and `--times` (seconds, or
   `s:ff` timecode at the project rate). V2 reuses v1's list.
 - `notes.json` maps a sample label (`t13_458`) to its cause or the reason a

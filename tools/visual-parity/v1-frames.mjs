@@ -2,7 +2,7 @@
 // cannot host Playwright's Electron driver (engine/corpus/src/electron-bridge.mts).
 //
 //   node tools/visual-parity/v1-frames.mjs --profile <v1 profile clone> --project <file.pmv>
-//        --out <dir> [--times 0,12.333] [--step 2]
+//        --out <dir> [--times 0,12.333] [--step 2] [--width 1280]
 //
 // v1.2.0 runs hidden (POWERMOVE_BACKGROUND_TEST=1) on the given profile CLONE
 // with a mock Keychain, opens a copy of the project and writes each sample as
@@ -59,16 +59,18 @@ try {
   });
   log(`opened ${info.name} ${info.w}x${info.h} ${info.fps} fps ${info.dur}s`);
   const times = sampleTimes(info, args);
+  // --width renders smaller, as v1's viewer below Full and its agent stills do.
+  const width = Number(args.width) || info.w, height = Math.round(width * info.h / info.w);
   const samples = [];
   for (const time of times) {
     const started = Date.now();
-    const r = await page.evaluate(captureFrame, { time, width: info.w, height: info.h });
+    const r = await page.evaluate(captureFrame, { time, width, height });
     const file = `${timeName(time)}.png`;
-    writeFileSync(path.join(out, file), encodePng(info.w, info.h, Buffer.from(r.base64, 'base64')));
+    writeFileSync(path.join(out, file), encodePng(width, height, Buffer.from(r.base64, 'base64')));
     samples.push({ time, file, stable: r.stable, renders: r.renders, prepareError: r.prepareError, ms: Date.now() - started });
     log(`${time.toFixed(3)}s ${r.stable ? 'stable' : 'UNSTABLE'} after ${r.renders} renders${r.prepareError ? ` prepareError ${r.prepareError}` : ''}`);
   }
-  writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: 'v1.2.0 export path', project: info, pending, samples }, null, 1));
+  writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: `v1.2.0 export path, ${width}x${height}`, project: info, pending, samples }, null, 1));
 } finally {
   // v1's quit barrier can wait on the renderer forever; the clone needs no clean quit.
   const pid = app.process().pid;

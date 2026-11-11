@@ -1,15 +1,15 @@
 // V2 frames for the visual parity sheet (README.md), through the running
-// lane app's own MCP server: render_frames is the app's export job on the
-// open project, with the profile's extensions and raster overrides.
+// lane app's own MCP server: export_video is the app's export job on the open
+// project, with the profile's extensions and raster overrides.
 //
 //   node tools/visual-parity/v2-frames.mjs --app <Powermove.app> --profile <V2 profile>
-//        --out <dir> --project <file.pmv> [--times 13:11] [--step 2]
+//        --out <dir> --project <file.pmv> [--via export|stills]
 //
 // The app must already show the project (pm-gui launch). Sample times and the
 // project size come from <out>/v1/manifest.json when it exists, so both
 // columns hold the same instants.
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { parseArgs, sampleTimes, timeName } from './lib.mjs';
@@ -44,7 +44,7 @@ const log = (line) => console.log(`[v2 ${new Date().toISOString().slice(11, 19)}
 try {
   await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'visual-parity', version: '1' } });
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-  await tool('start_session', { context: 'project', access: 'project' });
+  await tool('start_session', { prompt: 'Visual parity frames', context: 'project', access: 'project' });
   const v1Manifest = path.resolve(args.out, 'v1/manifest.json');
   let info, times;
   if (existsSync(v1Manifest)) {
@@ -58,21 +58,56 @@ try {
     times = sampleTimes(info, args);
   }
   log(`${info.name} ${info.w}x${info.h}, ${times.length} samples`);
-  const samples = [];
-  for (let i = 0; i < times.length; i += 5) {
-    const batch = times.slice(i, i + 5);
+  if (args.via === 'stills') {
+    // An agent's stills: the export pipeline at most 1280 wide (the tool's
+    // limit), with missing effects bypassed as the viewer does. v1 must be
+    // captured at the same --width.
+    const width = Math.min(info.w, 1280);
+    const samples = [];
+    for (let i = 0; i < times.length; i += 5) {
+      const batch = times.slice(i, i + 5);
+      const r = await tool('render_frames', { times: batch, width });
+      const images = r.content.filter((c) => c.type === 'image');
+      if (images.length !== batch.length) throw new Error(`render_frames returned ${images.length} images for ${batch.length} times`);
+      batch.forEach((time, k) => {
+        const file = `${timeName(time)}.png`;
+        writeFileSync(path.join(out, file), Buffer.from(images[k].data, 'base64'));
+        samples.push({ time, file });
+      });
+      log(`stills ${batch.map((t) => t.toFixed(3)).join(', ')}`);
+    }
+    writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: `V2 render_frames (${width} wide, missing effects bypassed)`, project: info, samples }, null, 1));
+  } else {
+    // The real export: full size ProRes through the app's export job, then the
+    // sample frames by index (render_frames is capped at 1280 wide).
+    let r = await tool('export_video', { name: 'visual-parity', format: 'prores', range: 'all', audio: false, motionBlur: true });
     const started = Date.now();
-    const r = await tool('render_frames', { times: batch, width: info.w });
-    const images = r.content.filter((c) => c.type === 'image');
-    if (images.length !== batch.length) throw new Error(`render_frames returned ${images.length} images for ${batch.length} times`);
-    batch.forEach((time, k) => {
+    for (;;) {
+      const value = JSON.parse(r.content.find((c) => c.type === 'text').text);
+      const file = JSON.stringify(value).match(/"([^"]+\.mov)"/)?.[1];
+      if (value.status !== 'running' && file) { var movie = file; break; }
+      if (value.status !== 'running') throw new Error(`export_video: ${JSON.stringify(value)}`);
+      log(`exporting ${value.frames ?? '?'}/${value.totalFrames ?? '?'}`);
+      r = await tool('export_video', { jobId: value.jobId });
+    }
+    log(`exported ${movie} in ${Math.round((Date.now() - started) / 1000)} s`);
+    const frames = times.map((t) => Math.min(Math.round(t * info.fps), Math.round(info.dur * info.fps) - 1));
+    const tmp = path.join(out, 'extract');
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(tmp);
+    execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', movie,
+      '-vf', `select='${frames.map((n) => `eq(n,${n})`).join('+')}',scale=in_color_matrix=bt709:in_range=tv:out_range=pc:flags=accurate_rnd+full_chroma_int+full_chroma_inp,format=rgba`,
+      '-fps_mode', 'passthrough', path.join(tmp, '%04d.png')]);
+    const samples = [];
+    const unique = [...new Set(frames)];
+    times.forEach((time, k) => {
       const file = `${timeName(time)}.png`;
-      writeFileSync(path.join(out, file), Buffer.from(images[k].data, 'base64'));
-      samples.push({ time, file });
+      copyFileSync(path.join(tmp, `${String(unique.indexOf(frames[k]) + 1).padStart(4, '0')}.png`), path.join(out, file));
+      samples.push({ time, frame: frames[k], file });
     });
-    log(`${batch.map((t) => t.toFixed(3)).join(', ')} in ${Date.now() - started} ms`);
-  }
-  writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: 'V2 render_frames (export job)', project: info, samples }, null, 1));
+    rmSync(tmp, { recursive: true, force: true });
+    writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ source: 'V2 export_video (ProRes, full size, motion blur on), frames by index', movie, project: info, samples }, null, 1));
+}
   await tool('finish_session', { commit: false }).catch(() => {});
 } finally {
   child.stdin.end();
