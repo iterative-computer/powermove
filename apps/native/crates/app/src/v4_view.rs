@@ -538,7 +538,6 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     glass: false,
-                    symbol_only: false,
                 },
                 &tokens,
                 window,

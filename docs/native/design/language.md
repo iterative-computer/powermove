@@ -253,11 +253,6 @@ controls are for forms: Settings, sheets, panel option rows).
   ⌘F puts the keyboard in the search; typing filters; Escape clears the
   search and leaves the field in one step
   (`TextField::set_escape_cancels`).
-- An open choice, kept in code until it is made (`PM_NATIVE_HOME_GLASS`):
-  `glyph` shows New Project as its plus alone; `all` also stands the search
-  field and the view switch in glass capsules (`ControlSpec.glass` on a
-  search field or a segmented control). The default is the label, with the
-  rest of the header drawn.
 - Second row, 28 high: the count in the muted ink; the sort as a text action
   (an icon and the current order) that opens our menu; then the grid/list
   switch, the header's one raised element (a small pill, two 30 × 24 cells,
