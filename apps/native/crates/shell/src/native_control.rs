@@ -60,7 +60,7 @@ define_class!(
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let value:f64=unsafe{msg_send![sender,doubleValue]};json!(value)},
                 Kind::Push=>Value::Null,
-                Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};json!(text.to_string())},
+                Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
             let _=self.ivars().sender.try_send(value);
         }
@@ -143,8 +143,17 @@ impl Control {
                 if v.currentEditor().is_none() && v.stringValue().to_string() != text {
                     v.setStringValue(&NSString::from_str(text));
                 }
+                search_hint(v, v.stringValue().is_empty());
             }
         }
+    }
+}
+/// A prominent search field's shortcut hint stands at its trailing end while
+/// the field is empty (the clear button takes that place once it is not).
+const SEARCH_HINT: isize = 0x4846;
+fn search_hint(field: &NSView, empty: bool) {
+    if let Some(hint) = field.viewWithTag(SEARCH_HINT) {
+        hint.setHidden(!empty);
     }
 }
 pub struct NativeControl {
@@ -188,7 +197,9 @@ pub struct ControlSpec<'a> {
     pub inline: bool,
     /// The view's one accent action: a push button tinted with this colour.
     pub tint: Option<u32>,
-    /// A push button's leading SF Symbol.
+    /// A push button's leading SF Symbol. On a search field, its shortcut
+    /// (`⌘F`): the field is then the view's one prominent search, drawn large
+    /// with the shortcut at its trailing end while it is empty.
     pub symbol: Option<&'a str>,
 }
 
@@ -375,6 +386,30 @@ impl NativeControl {
                     let _: () = msg_send![&*v, setDelegate: &*target];
                 }
                 v.sizeToFit();
+                // A view's one prominent search (Home): the large field, with
+                // its shortcut at the trailing end while it is empty.
+                if let Some(shortcut) = symbol {
+                    v.setControlSize(NSControlSize::Large);
+                    v.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+                    v.sizeToFit();
+                    let hint = NSTextField::labelWithString(&NSString::from_str(shortcut), mtm);
+                    hint.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+                    hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+                    hint.setTag(SEARCH_HINT);
+                    hint.setAccessibilityElement(false);
+                    hint.sizeToFit();
+                    let (field, own) = (v.frame().size, hint.frame().size);
+                    hint.setFrameOrigin(NSPoint::new(
+                        field.width - own.width - 12.,
+                        ((field.height - own.height) / 2.).round(),
+                    ));
+                    hint.setAutoresizingMask(
+                        NSAutoresizingMaskOptions::ViewMinXMargin
+                            | NSAutoresizingMaskOptions::ViewMinYMargin
+                            | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                    );
+                    v.addSubview(&hint);
+                }
                 Control::Search(v)
             }
             Kind::Switch => {
@@ -449,6 +484,7 @@ impl NativeControl {
             && self.host_revision.replace(revision) != Some(revision)
         {
             v.setStringValue(&NSString::from_str(text));
+            search_hint(v, text.is_empty());
         }
     }
     /// A search field's placeholder, when it is not its accessibility label.

@@ -18,7 +18,7 @@ pub use color::mix;
 use color::oklch;
 pub use recipe::{Elevation, Shadow, Text, TextStyle};
 use serde::{Deserialize, Serialize};
-pub use strip::{GLOW_FROM, Playhead, Strip, StripState, TrimGrip};
+pub use strip::{GLOW_FROM, GRID_FADE, Playhead, Strip, StripState, TrimGrip};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
     Light,
@@ -771,7 +771,7 @@ impl Tokens {
                 match scheme {
                     Scheme::Dark => Translucency {
                         ground,
-                        window: if solid { 1. } else { 0.82 },
+                        window: if solid { 1. } else { 0.9 },
                         panel: if solid { 1. } else { 0.72 },
                         edge: 0.07,
                         line: 0.07,
@@ -783,7 +783,7 @@ impl Tokens {
                         selected: 0.1,
                         pressed: 0.14,
                         faint: 0.36,
-                        glass_tint: 0.5,
+                        glass_tint: 0.9,
                     },
                     Scheme::Light => Translucency {
                         ground,
@@ -799,7 +799,7 @@ impl Tokens {
                         selected: 0.07,
                         pressed: 0.1,
                         faint: 0.42,
-                        glass_tint: 0.3,
+                        glass_tint: 0.6,
                     },
                 }
             },

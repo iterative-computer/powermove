@@ -94,9 +94,26 @@ Real system material through AppKit, for what the system itself makes glass:
   the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
   own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
   and hidden from the menus and by their tabs, not from the toolbar.
+- The project strip (Home and the open projects, in the toolbar's leading
+  glass) is one control drawn in cells. Every cell stands 4 pt inside the
+  glass on all four sides, so a pill's corner is the glass's corner less the
+  inset. Tabs share one width: the widest while there is room, then narrower
+  together down to a readable least; past that the strip shows the run that
+  holds the selected tab and a pull-down lists every project. A title stands
+  in the middle of its tab and is cut in the middle, keeping the start and
+  the end of a name. The leading slot holds the close button (under the
+  pointer) or the edited dot and is always kept, so the title never moves.
+  The selected cell is a raised neutral pill; the one under the pointer a
+  wash of the same shape; hairlines part resting tabs and vanish beside
+  either. The pull-down and New Project are round targets after the last
+  rule. A tab is carried along the strip to reorder it.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
-  light tint of the window colour) in a column under the GPUI view, which
-  leaves that column unpainted.
+  heavy tint of the window colour) in a column under the GPUI view, which
+  leaves that column unpainted. The glass runs on under the content sheet's
+  leading corners, so its rim is hidden. In both appearances the sidebar
+  recedes into the window (a shade under the window ground) and the content
+  sheet stands out from it: the change of value is the only line between
+  them.
 - Popovers with their own window: `popover_frame`. The palette and field menu
   are pooled child windows (`native::Popup`).
 - The window ground is a tint over a behind-window blur.
@@ -167,6 +184,21 @@ the text font, so it sits on its row label's baseline. A section heading in a
 panel is the Label role, a step under the panel's Title.
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
+## Home
+
+A sidebar for navigation only (Recents, Trash, Store, the account) on the
+window's glass, and one inset sheet. The sheet's header is two rows on the
+sheet's margins: the section title, the one wide search field in the middle
+(the large system field, its shortcut at the trailing end while it is empty)
+and Open… with the one accent action; then the count and the quiet sort and
+layout controls. A project is its poster: the frame in the composition's own
+shape with a continuous corner, a hairline and a soft shadow, the name and
+one line of facts under it, and a small dot when it is open (the accent for
+this window's project). A project with no poster yet is a quiet ground of the
+same shape that says its size. Under the pointer a card rises on the hover
+springs; pressed, it sits back down; a sort or a search slides cards to their
+new places. The list is the dense alternative under the same header.
+
 ## Timeline strips
 
 `Tokens::strip(layer colour, StripState)`: a slab of tinted glass on the solid
@@ -178,8 +210,11 @@ the hue that holds 4.5:1 on the body under them (`under_label`). A 1 px rim of
 light in the strip's hue runs inside the edge, brightest along the top and
 round its corners, faint down the sides, with no outline; corners are
 continuous and about a quarter of the strip's height (`strip_radius`); an even
-`strip_gap` parts neighbours; the ruler's grid reads through the body
-(`grid`). A waveform is a soft filled shape in a paler tone standing on the
+`strip_gap` parts neighbours; the ruler's grid reads through the body as a
+top-lit highlight: brightest at the strip's top edge and gone by the middle
+of its height (`grid`, `GRID_FADE`), with the faint full-height line showing
+only between rows. The foot gathers as much light as the hue allows while a
+label still holds 4.5:1 under a name (a pale layer colour takes less). A waveform is a soft filled shape in a paler tone standing on the
 foot; silence draws nothing. A collapsed layer's keys are small marks in the
 foot, under the name. Hover brightens and whitens the rim and shows the trim
 grip (`trim_grip`) inside the nearer edge, with the name starting clear of it.
