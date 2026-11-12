@@ -124,9 +124,16 @@ pub fn expand(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-/// `assetIdentity`: what the Project panel and layers read from an asset.
-fn metadata(path: &Path, kind: &str, size: u64) -> Result<Value, String> {
-    let facts = pm_media::facts::media_facts(path, None).map_err(|e| e.to_string())?;
+/// `assetIdentity`: what the Project panel and layers read from an asset,
+/// and the file's audio streams. Lengths are measured as an asset with
+/// `timing` reads the file.
+fn metadata(
+    path: &Path,
+    kind: &str,
+    size: u64,
+    timing: pm_media::clip::ClipTiming,
+) -> Result<(Value, Vec<pm_protocol::media::AudioStreamFacts>), String> {
+    let facts = pm_media::facts::media_facts_as(path, None, timing).map_err(|e| e.to_string())?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -152,16 +159,43 @@ fn metadata(path: &Path, kind: &str, size: u64) -> Result<Value, String> {
     });
     if kind == "video" {
         asset["hasAudio"] = json!(facts.audio.is_some());
-        asset["audioDur"] = json!(if facts.audio.is_some() {
-            facts.duration.unwrap_or(0.)
-        } else {
-            0.
-        });
+        asset["audioDur"] = json!(facts.audio_duration.unwrap_or(0.));
+    }
+    // A file with several audio streams (camera and recorder tracks) lists
+    // them all, each on: every one is heard until it is switched off.
+    if let Some(streams) = pm_media::facts::asset_audio_streams(&facts.audio_streams) {
+        asset["audioStreams"] = streams;
     }
     if kind == "image" {
         asset["format"] = json!(extension(path));
     }
-    crate::data::model(&asset)
+    Ok((crate::data::model(&asset)?, facts.audio_streams))
+}
+
+/// How an asset record reads its file's times (its `timing` member).
+pub fn asset_timing(record: Option<&serde_json::Value>) -> pm_media::clip::ClipTiming {
+    pm_media::clip::ClipTiming::of_asset(record.and_then(|r| r["timing"].as_f64()))
+}
+
+/// A relinked asset's `audioStreams`: the old member reconciled with the new
+/// file (`pm_media::facts::relinked_audio_streams`). The new bytes are the
+/// old ones when their hashes agree; without retained old bytes that cannot
+/// be told.
+pub fn relink_streams(
+    asset: &mut serde_json::Value,
+    old: Option<&serde_json::Value>,
+    streams: &[pm_protocol::media::AudioStreamFacts],
+    previous: Option<&pm_kernel::media_archive::Original>,
+    original: &pm_kernel::media_archive::Original,
+) {
+    let same = previous.map(|previous| previous.hash() == original.hash());
+    let Some(asset) = asset.as_object_mut() else {
+        return;
+    };
+    match pm_media::facts::relinked_audio_streams(old, streams, same) {
+        Some(list) => asset.insert("audioStreams".into(), list),
+        None => asset.remove("audioStreams"),
+    };
 }
 
 /// What the probe proves before any byte is retained.
@@ -362,16 +396,27 @@ impl Builtins {
             Some(encoded) => vec![encoded.path.clone()],
             None => expand(request.paths),
         };
-        let previous = match &request.replace {
+        // A relink retains the old bytes and reads which of the old file's
+        // audio streams were heard and how the asset reads its file's times.
+        let mut timing = pm_media::clip::ClipTiming::Presentation;
+        let (previous, old_streams) = match &request.replace {
             Some(id) => {
                 let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
                 let entry = published.media.get(id).cloned();
-                entry
+                let previous = entry
                     .map(|entry| archive.retain_entry(&entry))
                     .transpose()
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                let record = published
+                    .snapshot
+                    .root()
+                    .and_then(|root| root.get("assets")?.get(id))
+                    .map(|record| crate::data::wire(&record.to_value()));
+                timing = asset_timing(record.as_ref());
+                let streams = record.and_then(|record| record.get("audioStreams").cloned());
+                (previous, streams)
             }
-            None => None,
+            None => (None, None),
         };
         for path in paths {
             if cancel.load(Ordering::Acquire) {
@@ -394,12 +439,24 @@ impl Builtins {
             })
             .and_then(|()| {
                 let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                let mut asset = match model {
+                let (mut asset, streams) = match model {
                     // A model has no media facts; the scene system reads its bytes.
-                    Some(_) => json!({"name":name,"kind":"model","size":size,"persisted":true,
+                    Some(_) => (
+                        json!({"name":name,"kind":"model","size":size,"persisted":true,
                             "sourcePath":path.to_string_lossy()}),
-                    None => crate::data::wire(&metadata(&path, kind, size)?),
+                        vec![],
+                    ),
+                    None => {
+                        let (asset, streams) = metadata(&path, kind, size, timing)?;
+                        (crate::data::wire(&asset), streams)
+                    }
                 };
+                // A new clip's times address the file's presentation. A
+                // relinked asset keeps the reading its edits were made with:
+                // the merge leaves its `timing` member (or its absence) alone.
+                if request.replace.is_none() && matches!(kind, "video" | "audio") {
+                    asset["timing"] = json!(pm_media::clip::ClipTiming::imported());
+                }
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
                 }
@@ -411,15 +468,24 @@ impl Builtins {
                     asset["fps"] = json!(encoded.fps);
                     asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
-                crate::data::model(&asset)
+                Ok((asset, streams))
             })
-            .and_then(|metadata| {
+            .and_then(|(mut asset, streams)| {
                 let original = archive
                     .retain_path(&path, &type_, cancel)
                     .map_err(|e| e.to_string())?;
+                if request.replace.is_some() {
+                    relink_streams(
+                        &mut asset,
+                        old_streams.as_ref(),
+                        &streams,
+                        previous.as_ref(),
+                        &original,
+                    );
+                }
                 Ok(RetainedAsset {
                     id: pm_kernel::new_id("a"),
-                    metadata,
+                    metadata: crate::data::model(&asset)?,
                     original,
                     previous: previous.clone(),
                 })
@@ -629,6 +695,13 @@ mod tests {
         runtime: Builtins,
     }
     fn fixture() -> Fixture {
+        opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+        )
+        .0
+    }
+    /// A session on `project` and its handle.
+    fn opened(project: &str) -> (Fixture, SessionHandle) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let actor = KernelActor::spawn(KernelConfig {
@@ -645,11 +718,8 @@ mod tests {
             .wait()
             .unwrap()
             .unwrap();
-        let project = pm_model::json::parse(
-            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
-        )
-        .unwrap();
-        kernel
+        let project = pm_model::json::parse(project).unwrap();
+        let reply = kernel
             .shell(ShellCall::Open {
                 id: "p".into(),
                 source: SessionSource::New(project),
@@ -658,13 +728,17 @@ mod tests {
             .wait()
             .unwrap()
             .unwrap();
+        let ShellReply::Opened { session, .. } = reply else {
+            panic!("the project did not open");
+        };
         let runtime = Builtins::new(kernel, "p", || {}).unwrap();
-        Fixture {
+        let fixture = Fixture {
             _dir: dir,
             root,
             actor,
             runtime,
-        }
+        };
+        (fixture, session)
     }
     fn write(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = root.join(name);
@@ -830,6 +904,369 @@ mod tests {
             sequence_name(Path::new("/a/0001.png")),
             "Image sequence.webm"
         );
+    }
+
+    /// One second of silence, 8 kHz mono.
+    fn wav() -> Vec<u8> {
+        let data = vec![0u8; 16_000];
+        let mut out = b"RIFF".to_vec();
+        out.extend((36 + data.len() as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes());
+        out.extend([1, 0, 1, 0]);
+        out.extend(8_000u32.to_le_bytes());
+        out.extend(16_000u32.to_le_bytes());
+        out.extend([2, 0, 16, 0]);
+        out.extend(b"data");
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+
+    /// A new clip's times address its file's presentation (`timing`); a
+    /// relinked asset keeps the reading its edits were made with, present or
+    /// absent; and the member survives the project file.
+    #[test]
+    fn a_new_clip_is_stamped_with_its_timing_and_a_relink_never_changes_it() {
+        let (f, session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"old":{"id":"old","name":"Old.wav","kind":"audio","dur":1}},"comps":{},"layers":[]}"##,
+        );
+        let import = |name: &str, replace: Option<&str>| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![write(&f.root, name, &wav())],
+                        replace: replace.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        let timings = |project: &str| -> Vec<(String, Option<f64>)> {
+            let published = f.actor.handle().published(project).unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            pm_kernel::asset_order::keys(&root)
+                .into_iter()
+                .map(|id| {
+                    let asset = root.get("assets").unwrap().get(&id).unwrap();
+                    let name = asset.get("name").unwrap().as_str().unwrap().to_owned();
+                    (name, asset.get("timing").and_then(Value::as_f64))
+                })
+                .collect()
+        };
+        import("New.wav", None);
+        let expected = vec![
+            ("Old.wav".to_owned(), None),
+            ("New.wav".to_owned(), Some(2.)),
+        ];
+        assert_eq!(timings("p"), expected);
+        // Relink both: the older asset stays without the member, the new
+        // one keeps it.
+        let root = f.actor.handle().published("p").unwrap();
+        let new = pm_kernel::asset_order::keys(&root.snapshot.root().unwrap().to_value())
+            .into_iter()
+            .find(|id| id != "old")
+            .unwrap();
+        import("Old again.wav", Some("old"));
+        import("New again.wav", Some(&new));
+        let relinked = vec![
+            ("Old again.wav".to_owned(), None),
+            ("New again.wav".to_owned(), Some(2.)),
+        ];
+        assert_eq!(timings("p"), relinked);
+        // Saved and opened again, both records read the same.
+        let file = f.root.join("Film.pmv");
+        let kernel = f.actor.handle();
+        let save = ShellCall::SaveAs {
+            session: session.clone(),
+            path: file.clone(),
+            replace: false,
+        };
+        kernel.shell(save).wait().unwrap().unwrap();
+        kernel
+            .shell(ShellCall::Close(session))
+            .wait()
+            .unwrap()
+            .unwrap();
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::File(file),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert_eq!(timings("p"), relinked);
+    }
+
+    const RATE: usize = 48_000;
+    /// Where each fixture stream's one click sits: two streams of a
+    /// recorder file, a mono and a stereo replacement.
+    const CLICKS: [usize; 4] = [4_800, 24_000, 14_400, 33_600];
+
+    fn ffmpeg() -> PathBuf {
+        std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg")
+    }
+
+    /// A one-second clip with a picture and one PCM stream per click
+    /// (`(click, channels)`), each stream holding its one click.
+    fn clip_with_streams(root: &Path, name: &str, streams: &[(usize, u32)]) -> PathBuf {
+        let path = root.join(name);
+        let mut command = std::process::Command::new(ffmpeg());
+        command.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"]);
+        command.args(["-i", "testsrc2=size=64x64:rate=25:duration=1"]);
+        for &(at, channels) in streams {
+            let layout = if channels == 1 { "mono" } else { "stereo" };
+            command.args(["-f", "lavfi", "-i"]).arg(format!(
+                "aevalsrc='0.9*eq(n\\,{at})':s={RATE}:d=1:c={layout}"
+            ));
+        }
+        command.args(["-map", "0:v"]);
+        for k in 0..streams.len() {
+            command.args(["-map", &format!("{}:a", k + 1)]);
+        }
+        command.args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        assert!(command.arg(&path).status().unwrap().success());
+        path
+    }
+
+    /// The clicks a person hears from `asset` as its only clip: the
+    /// published record through the mix graph and offline PCM.
+    fn heard(f: &Fixture, asset: &str) -> Vec<usize> {
+        let published = f.actor.handle().published("p").unwrap();
+        let mut root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+        root["layers"] = json!([{"id":"V","type":"video","name":"V","from":0,"dur":1,"on":true,
+            "solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],
+            "d":{"asset":asset,"trim":0,"speed":1,"embeddedAudio":true}}]);
+        let source = PathBuf::from(root["assets"][asset]["sourcePath"].as_str().unwrap());
+        let doc = pm_model::Document::new(Some(crate::data::model(&root).unwrap()), 1);
+        let cache = pm_audio::SourceCache::new(64 << 20, 0);
+        let resolver = move |_: &str| Some(source.clone());
+        let comp = root["compId"].as_str().unwrap().to_owned();
+        let graph = pm_audio::MixGraph::build(
+            &doc,
+            &comp,
+            &mut pm_eval::Evaluator::new(),
+            &cache,
+            &resolver,
+        )
+        .unwrap();
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(RATE as u32),
+            std::sync::Arc::new(doc),
+            std::sync::Arc::new(graph),
+            pm_eval::Evaluator::new(),
+            cache.clone(),
+        );
+        let mut left = vec![];
+        let summary = pm_audio::offline::render(&mut mixer, 0, RATE as i64, 4096, |_, inter| {
+            left.extend(inter.iter().step_by(2).copied());
+            Ok(())
+        })
+        .unwrap();
+        cache.shutdown();
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        let mut found = vec![];
+        for (k, &at) in CLICKS.iter().enumerate() {
+            if left[at.saturating_sub(2)..(at + 3).min(left.len())]
+                .iter()
+                .any(|v| v.abs() > 0.2)
+            {
+                found.push(k);
+            }
+        }
+        let loud = left.iter().filter(|v| v.abs() > 0.2).count();
+        assert!(loud <= found.len() * 2, "sound away from any click: {loud}");
+        found
+    }
+
+    fn streams_of(f: &Fixture, asset: &str) -> Option<serde_json::Value> {
+        let published = f.actor.handle().published("p").unwrap();
+        let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+        root["assets"][asset].get("audioStreams").cloned()
+    }
+
+    /// Relinking an asset to its own file changes nothing a person hears:
+    /// an older clip without a stream list keeps playing its one stream, and
+    /// a stream the person switched off stays off. Replacing it with other
+    /// footage reconciles the list to the new file: a stream with the same
+    /// index and layout keeps its state, anything else plays as a fresh
+    /// import would, and nothing listed names a stream the file lacks.
+    #[test]
+    fn a_relink_keeps_which_audio_streams_are_heard() {
+        let entry = |index: u32, on: bool| {
+            format!(r#"{{"index":{index},"channels":1,"sampleRate":48000,"on":{on}}}"#)
+        };
+        let project = format!(
+            r##"{{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,"bg":"#000000","comps":{{}},"layers":[],"assets":{{
+                "older":{{"id":"older","name":"Older.mov","kind":"video","dur":1}},
+                "muted":{{"id":"muted","name":"Muted.mov","kind":"video","dur":1,"audioStreams":[{},{}]}},
+                "first_off":{{"id":"first_off","name":"First off.mov","kind":"video","dur":1,"audioStreams":[{},{}]}},
+                "both":{{"id":"both","name":"Both.mov","kind":"video","dur":1,"audioStreams":[{},{}]}}}}}}"##,
+            entry(1, true),
+            entry(2, false),
+            entry(1, false),
+            entry(2, true),
+            entry(1, true),
+            entry(2, true),
+        );
+        let (f, _session) = opened(&project);
+        let recorder =
+            clip_with_streams(&f.root, "recorder.mov", &[(CLICKS[0], 1), (CLICKS[1], 1)]);
+        let mono = clip_with_streams(&f.root, "mono.mov", &[(CLICKS[2], 1)]);
+        let stereo = clip_with_streams(&f.root, "stereo.mov", &[(CLICKS[3], 2)]);
+        let relink = |asset: &str, path: &Path| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path.to_owned()],
+                        replace: Some(asset.into()),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        // An older clip without a list: still the file's one best stream.
+        relink("older", &recorder);
+        assert_eq!(heard(&f, "older"), [0]);
+        assert_eq!(streams_of(&f, "older"), None);
+        // The stream the person switched off stays off.
+        relink("muted", &recorder);
+        assert_eq!(heard(&f, "muted"), [0]);
+        // A one-stream replacement: stream 1 keeps its state (off); stream
+        // 2 no longer exists and is no longer listed.
+        relink("first_off", &mono);
+        assert_eq!(heard(&f, "first_off"), Vec::<usize>::new());
+        assert_eq!(
+            streams_of(&f, "first_off"),
+            Some(json!([{"index":1,"channels":1,"sampleRate":48000,"on":false}]))
+        );
+        // A stereo stream is not the mono one it replaces: it plays as the
+        // file's one stream, without a list.
+        relink("both", &stereo);
+        assert_eq!(heard(&f, "both"), [3]);
+        assert_eq!(streams_of(&f, "both"), None);
+        // New footage known to differ (the old bytes were retained): a clip
+        // that played one stream lists and plays all of the new file's.
+        relink("both", &recorder);
+        assert_eq!(heard(&f, "both"), [0, 1]);
+        // The same bytes again: nothing changes.
+        let copy = f.root.join("recorder copy.mov");
+        std::fs::copy(&recorder, &copy).unwrap();
+        relink("muted", &copy);
+        assert_eq!(heard(&f, "muted"), [0]);
+    }
+
+    /// A relink records the clip's lengths as the asset reads its file: an
+    /// older asset's frames sit at their own timestamps and its sound starts
+    /// at the program's first sample; a new one reads the presentation.
+    #[test]
+    fn a_relink_measures_the_clip_as_its_asset_reads_it() {
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,"bg":"#000000","comps":{},"layers":[],"assets":{
+                "older":{"id":"older","name":"Older.mp4","kind":"video","dur":1},
+                "new":{"id":"new","name":"New.mp4","kind":"video","dur":1,"timing":2}}}"##,
+        );
+        let run = |args: &[&str], name: &str| {
+            let path = f.root.join(name);
+            let status = std::process::Command::new(ffmpeg())
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(args)
+                .args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            path
+        };
+        let picture = [
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=25:duration=0.8",
+        ];
+        // Twenty frames, the first 0.4 s into the file.
+        let late_picture = run(
+            &[&picture[..], &["-output_ts_offset", "0.4"]].concat(),
+            "late picture.mp4",
+        );
+        // A second of picture from zero and a second of sound from 0.25 s.
+        let late_sound = run(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=25:duration=1",
+                "-itsoffset",
+                "0.25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=r=48000:d=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+            ],
+            "late sound.mov",
+        );
+        let lengths = |asset: &str| {
+            let published = f.actor.handle().published("p").unwrap();
+            let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+            let record = &root["assets"][asset];
+            (
+                record["dur"].as_f64().unwrap(),
+                record["audioDur"].as_f64().unwrap(),
+            )
+        };
+        let relink = |asset: &str, path: &Path| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path.to_owned()],
+                        replace: Some(asset.into()),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        let close =
+            |(a, b): (f64, f64), (c, d): (f64, f64)| (a - c).abs() < 1e-3 && (b - d).abs() < 1e-3;
+        for (path, older, new) in [
+            (&late_picture, (1.2, 0.), (0.8, 0.)),
+            (&late_sound, (1.0, 1.0), (1.25, 1.25)),
+        ] {
+            relink("older", path);
+            relink("new", path);
+            assert!(
+                close(lengths("older"), older),
+                "{path:?}: {:?}",
+                lengths("older")
+            );
+            assert!(close(lengths("new"), new), "{path:?}: {:?}", lengths("new"));
+        }
     }
 
     #[test]

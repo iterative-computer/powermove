@@ -47,6 +47,8 @@ pm-export = { path = "../pm-export", features = ["test-sinks"] }
 pm-reference = { path = "../pm-reference" }
 # Anchor edits on level 2 text (the semantic gate runs the edit kernels).
 pm-edit = { path = "../pm-edit" }
+# Proxies of an older project's clips select the frames their originals do.
+pm-proxy = { path = "../pm-proxy" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 read-fonts = "0.45"
 png = "0.18"

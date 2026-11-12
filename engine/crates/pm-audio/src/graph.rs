@@ -39,11 +39,41 @@ use std::sync::Arc;
 
 use pm_eval::retime::RetimeCache;
 use pm_eval::{Comp, Evaluator, JsValue, Scope, node};
+use pm_media::clip::ClipTiming;
 use pm_model::{Document, JsString, Node, NodeKind};
 
 use crate::conform::{self, Pitch};
 use crate::error::{AudioError, Result};
 use crate::source::{Source, SourceCache};
+
+/// The audio streams of its file an asset plays, as FFmpeg stream indexes.
+///
+/// An asset imported with every stream listed (`audioStreams`: one entry
+/// per audio stream of the file, in file order, each with its `index`)
+/// plays every entry whose `on` is not false, each folded by its own
+/// channel layout and summed: what an editor does with a camera or recorder
+/// file's separate tracks. An asset without the member (every project made
+/// before streams were listed) plays the file's best stream alone, as it
+/// always has, so it sounds the same. `None` is that best stream.
+/// The audio streams an asset record plays (`audioStreams` entries that are
+/// on; the file's best stream without the member).
+pub fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
+    let Some(list) = node::array(node::member(record, "audioStreams")) else {
+        return vec![None];
+    };
+    list.iter()
+        .filter(|entry| !is_false(node::member(Some(entry), "on")))
+        .filter_map(|entry| node::number(node::member(Some(entry), "index")))
+        .filter(|index| index.is_finite() && *index >= 0.0 && index.fract() == 0.0)
+        .map(|index| Some(index as usize))
+        .collect()
+}
+
+/// Which reading of its file's timestamps an asset's stored times address:
+/// the record's `timing` member (`pm_media::clip`).
+pub fn clip_timing(record: Option<&Node>) -> ClipTiming {
+    ClipTiming::of_asset(node::number(node::member(record, "timing")))
+}
 
 /// Nesting limit (`MAX_PRECOMP_DEPTH`).
 pub const MAX_PRECOMP_DEPTH: usize = 8;
@@ -116,6 +146,11 @@ pub struct VoicePlan {
     pub static_at: f64,
     /// How the pitch follows a speed change (`d.pitch`).
     pub pitch: Pitch,
+    /// A stream its asset lists by index: it folds to the mix by its own
+    /// layout and never widens the bus other clips are summed on, so the
+    /// streams of one file cannot change each other's level. A clip without
+    /// a list joins the bus as today's graph does.
+    pub folded: bool,
     /// Source seconds per clip second from a conformed frame rate
     /// (Interpret Footage on a video asset); 1 otherwise. Applied in
     /// [`Point::source_time`].
@@ -514,7 +549,57 @@ impl<'d> Walk<'_, 'd> {
                 .push((name, asset, "the media is missing".into()));
             return Ok(());
         };
-        let source = match cache.open(&file, None) {
+        // One voice per audio stream the asset plays: the first keeps the
+        // layer's voice id, the others add their stream index.
+        let record = node::member(node::member(Some(self.root), "assets"), asset.as_str());
+        let timing = clip_timing(record);
+        for (nth, stream) in selected_streams(record).into_iter().enumerate() {
+            let id = match (nth, stream) {
+                (1.., Some(index)) => format!("{id}:stream-{index}"),
+                _ => id.clone(),
+            };
+            self.stream_voice(
+                comp,
+                layer,
+                kind,
+                id,
+                strip.clone(),
+                asset.clone(),
+                path,
+                level.clone(),
+                window,
+                from,
+                linear,
+                dynamic,
+                name.clone(),
+                (cache, &file, stream, timing),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The voice of one audio stream of a clip's file (`stream` is the
+    /// FFmpeg stream index; `None` is the file's best stream).
+    #[allow(clippy::too_many_arguments)]
+    fn stream_voice(
+        &mut self,
+        comp: &Comp<'d>,
+        layer: &'d Node,
+        kind: VoiceKind,
+        id: String,
+        strip: String,
+        asset: String,
+        path: &PathState,
+        level: Level,
+        window: (f64, f64),
+        from: f64,
+        linear: bool,
+        dynamic: bool,
+        name: String,
+        (cache, file, stream, timing): (&SourceCache, &std::path::Path, Option<usize>, ClipTiming),
+    ) -> Result<()> {
+        let file = file.to_path_buf();
+        let source = match cache.open_as(&file, stream, timing) {
             Ok(s) => s,
             // A video without a soundtrack has nothing to play.
             Err(AudioError::Media(pm_media::MediaError::Invalid(m)))
@@ -596,6 +681,7 @@ impl<'d> Walk<'_, 'd> {
             static_point: None,
             static_at: 0.0,
             pitch,
+            folded: stream.is_some(),
             conform,
             constant_rate,
             map_key,
@@ -858,7 +944,7 @@ impl StaticMap {
         out.source_time = source_time;
         out.local = local;
         out.audible = duration;
-        if let Some(len) = plan.source.info.duration() {
+        if let Some(len) = plan.source.end_seconds() {
             let speed = self.levels.last().unwrap().2;
             if speed.is_finite() && speed > 0.0 {
                 let speed = speed * self.conform;
@@ -974,7 +1060,7 @@ impl VoicePlan {
             };
             // Where the source runs out, for linear maps: the clip stops there
             // and the fade out ends there (`audibleDuration`).
-            if let Some(len) = self.source.info.duration() {
+            if let Some(len) = self.source.end_seconds() {
                 let speed = match self.offset {
                     Some(_) => Some(1.0),
                     None => static_number(node::member(node::member(Some(layer), "d"), "speed"))

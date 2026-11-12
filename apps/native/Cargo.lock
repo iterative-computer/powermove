@@ -4700,6 +4700,7 @@ dependencies = [
  "pm-audio",
  "pm-captions",
  "pm-design",
+ "pm-eval",
  "pm-export",
  "pm-fx-defs",
  "pm-kernel",
