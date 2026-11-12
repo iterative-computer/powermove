@@ -1692,6 +1692,77 @@ mod lifetime_tests {
         assert!(worst < 1e-3, "banded differs by {worst}");
     }
 
+    /// The frame cache holds viewer pictures only. A paused viewer frame at
+    /// a scale is kept and served again at that scale; an exact read of the
+    /// same time and scale (a capture, an export frame) is drawn from the
+    /// originals every time, is never kept, and never takes or displaces
+    /// the viewer picture that is.
+    #[test]
+    fn an_exact_frame_at_a_scale_is_drawn_each_time_beside_the_cached_viewer_frame() {
+        let mut engine = Engine::new(Gpu::new("exact-scale-cache-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
+        };
+        let viewer = FrameSpec {
+            exact: false,
+            ..exact
+        };
+        // Draws `spec` and says whether the frame cache served it.
+        let draw = |engine: &mut Engine, spec: FrameSpec| {
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            while engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    false,
+                    trace.clone(),
+                )
+                .unwrap()
+                .is_none()
+            {}
+            trace.lock().unwrap().cache_hit
+        };
+        assert!(
+            !draw(&mut engine, viewer),
+            "the first viewer frame is drawn"
+        );
+        assert_eq!(engine.cache.len(), 1, "and kept at its scale");
+        assert!(draw(&mut engine, viewer), "the same viewer frame is served");
+        for read in 1..=2 {
+            assert!(
+                !draw(&mut engine, exact),
+                "exact read {read} took a cached picture"
+            );
+            assert_eq!(engine.cache.len(), 1, "exact read {read} was kept");
+        }
+        assert!(
+            draw(&mut engine, viewer),
+            "the viewer frame is still served after the exact reads"
+        );
+    }
+
     #[test]
     fn only_a_traced_frame_counts_its_work() {
         let mut engine = Engine::new(Gpu::new("work-count-test").unwrap()).unwrap();
