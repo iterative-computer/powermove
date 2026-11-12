@@ -357,6 +357,9 @@ pub struct Translucency {
     pub pressed: f32,
     /// Third text step (`colors.faint`), as `text` ink.
     pub faint: f32,
+    /// Tint of the window colour on system glass that carries labels (a
+    /// sidebar), so text keeps its contrast over any desktop.
+    pub glass_tint: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -675,7 +678,7 @@ impl Tokens {
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
-                symbol_toolbar: 15.,
+                symbol_toolbar: 14.,
                 symbol_panel: 14.,
                 symbol_inline: 12.,
                 hit: 24.,
@@ -735,8 +738,8 @@ impl Tokens {
                 reading_leading: 1.45,
                 text_optical_size: 12.,
                 display_optical_size: 24.,
-                heading_tracking: -0.2,
-                display_tracking: -0.45,
+                heading_tracking: -0.1,
+                display_tracking: -0.2,
             },
             motion: Motion {
                 enter: 0.32,
@@ -770,6 +773,7 @@ impl Tokens {
                         selected: 0.1,
                         pressed: 0.14,
                         faint: 0.36,
+                        glass_tint: 0.5,
                     },
                     Scheme::Light => Translucency {
                         ground,
@@ -785,6 +789,7 @@ impl Tokens {
                         selected: 0.07,
                         pressed: 0.1,
                         faint: 0.42,
+                        glass_tint: 0.3,
                     },
                 }
             },
@@ -871,6 +876,10 @@ impl Tokens {
         let mut next = self.clone();
         for (name, value) in patch {
             next.set_field(name, value)?;
+            // v1 themes have one gap (`--gap`): it spaces the docks too.
+            if name == "metrics.gap" {
+                next.metrics.dock_gap = next.metrics.gap;
+            }
         }
         next.enforce_accessibility();
         next.derive_fills();

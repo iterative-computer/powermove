@@ -774,6 +774,16 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
     )
     .expect("SF Symbol")
 }
+/// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
+/// in one weight, whichever control hosts it.
+fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
+    let image = symbol(s, label);
+    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
+        t.metrics.symbol_toolbar as f64,
+        unsafe { objc2_app_kit::NSFontWeightRegular },
+    );
+    image.imageWithSymbolConfiguration(&config).unwrap_or(image)
+}
 impl ToolbarDelegate {
     fn new(mtm: MainThreadMarker, target: Retained<Target>, tokens: Tokens) -> Retained<Self> {
         unsafe {
@@ -795,7 +805,10 @@ impl ToolbarDelegate {
         let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), id);
         let name = id.to_string();
         if name == "tools" {
-            let images: Vec<_> = TOOLS.iter().map(|(_, s, l)| symbol(s, l)).collect();
+            let images: Vec<_> = TOOLS
+                .iter()
+                .map(|(_, s, l)| toolbar_symbol(s, l, t))
+                .collect();
             let control = unsafe {
                 NSSegmentedControl::segmentedControlWithImages_trackingMode_target_action(
                     &NSArray::from_retained_slice(&images),
@@ -889,14 +902,14 @@ impl ToolbarDelegate {
             if name == "export" {
                 NSButton::buttonWithTitle_image_target_action(
                     &NSString::from_str(label),
-                    &symbol(sym, label),
+                    &toolbar_symbol(sym, label, t),
                     Some(target),
                     Some(sel!(act:)),
                     mtm,
                 )
             } else {
                 NSButton::buttonWithImage_target_action(
-                    &symbol(sym, label),
+                    &toolbar_symbol(sym, label, t),
                     Some(target),
                     Some(sel!(act:)),
                     mtm,
@@ -907,7 +920,7 @@ impl ToolbarDelegate {
         b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
         if name == "home" {
             // v1's home tab at the leading edge of the titlebar (`.project-home`).
-            item.setImage(Some(&symbol(sym, label)));
+            item.setImage(Some(&toolbar_symbol(sym, label, t)));
             unsafe {
                 item.setTarget(Some(target));
                 item.setAction(Some(sel!(act:)));
@@ -920,7 +933,7 @@ impl ToolbarDelegate {
         }
         if name == "toggleSidebar" || name == "toggleInspector" {
             // Apple's sidebar toggles: a plain toolbar item, never a filled tint.
-            item.setImage(Some(&symbol(sym, label)));
+            item.setImage(Some(&toolbar_symbol(sym, label, t)));
             unsafe {
                 item.setTarget(Some(target));
                 item.setAction(Some(sel!(act:)));
@@ -1105,6 +1118,8 @@ pub struct Host {
     subtitle: Retained<NSTextField>,
     /// Home shows over the docks (`set_home`).
     home: Cell<bool>,
+    /// Home's sidebar material, under the GPUI view while Home shows.
+    sidebar: RefCell<Option<Retained<NSView>>>,
 }
 /// Static palette rows: every menu command (including display-only menus and
 /// tools) plus workspace presets. Dynamic rows are added when it opens.
@@ -1281,6 +1296,7 @@ impl Host {
             title,
             subtitle,
             home: Cell::new(false),
+            sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
         let native_rects = host.borrow().native_panels.clone();
@@ -1680,6 +1696,7 @@ impl Host {
             return;
         }
         self.home.set(home);
+        self.sync_sidebar();
         let id = NSString::from_str("home");
         self._toolbar
             .setSelectedItemIdentifier(home.then_some(&*id));
@@ -1692,6 +1709,52 @@ impl Host {
                 item.setHidden(home);
             }
         }
+    }
+    /// Home's sidebar is real system material in a column under the GPUI
+    /// view, which leaves that column unpainted: liquid glass on macOS 26 and
+    /// later, the sidebar visual effect before, the solid window colour under
+    /// Reduce Transparency. The glass carries a light tint of the window
+    /// colour (`translucency.glass_tint`), so labels drawn on it keep their
+    /// contrast whatever is behind the window.
+    fn sync_sidebar(&self) {
+        let mut slot = self.sidebar.borrow_mut();
+        if !self.home.get() {
+            if let Some(view) = slot.take() {
+                view.removeFromSuperview();
+            }
+            return;
+        }
+        if slot.is_some() {
+            return;
+        }
+        let t = &self.tokens;
+        let frame = NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(t.metrics.sidebar as f64, self.content.bounds().size.height),
+        );
+        let view = material(self.window.mtm(), frame, t, Surface::Sidebar);
+        if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
+            glass.setCornerRadius(0.);
+            glass.setStyle(NSGlassEffectViewStyle::Clear);
+            glass.setTintColor(Some(
+                &native_color(t.colors.window)
+                    .colorWithAlphaComponent(t.translucency.glass_tint as f64),
+            ));
+        } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
+            effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+            effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
+            solid.setCornerRadius(0.);
+            solid.setBorderWidth(0.);
+            solid.setFillColor(&native_color(t.colors.window));
+        }
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+        self.content.addSubview_positioned_relativeTo(
+            &view,
+            NSWindowOrderingMode::Below,
+            Some(&self.gpui),
+        );
+        *slot = Some(view);
     }
     /// Current toolbar title and subtitle (tests, accessibility checks).
     pub fn document_title(&self) -> (String, String) {
@@ -1717,6 +1780,11 @@ impl Host {
             .setTextColor(Some(&native_color(t.colors.muted)));
         layout_title(&self.title, &self.subtitle, &t);
         self.tokens = t;
+        // The sidebar material follows the appearance and transparency setting.
+        if let Some(view) = self.sidebar.borrow_mut().take() {
+            view.removeFromSuperview();
+        }
+        self.sync_sidebar();
     }
     pub fn replayed(&mut self, token: u64) {
         let effects = self.resolver.replayed(token);

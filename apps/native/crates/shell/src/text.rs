@@ -24,6 +24,9 @@ pub struct TextField {
     /// A multiline editor that takes its container's whole height (Shader Lab,
     /// Notes) instead of four rows.
     fill: bool,
+    /// No well of its own: the field sits inside a control that draws one
+    /// (the search field).
+    bare: bool,
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -92,6 +95,7 @@ impl TextField {
             submitted: None,
             host_value: 0,
             fill: false,
+            bare: false,
         }
     }
     /// A multiline editor in `family` (code editors use the mono face) that
@@ -134,6 +138,10 @@ impl TextField {
         self.fill = fill;
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    /// Draw no well: the enclosing control owns the fill, edge and padding.
+    pub fn set_bare(&mut self, bare: bool) {
+        self.bare = bare;
+    }
     pub fn set_unit(&mut self, unit: Option<SharedString>) {
         self.unit = unit;
     }
@@ -206,13 +214,27 @@ impl Render for TextField {
         let slot = self.slot.clone();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing();
+        let (t, bare) = (&self.tokens, self.bare);
+        let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
+        // A well is a soft ink fill with no outline; while it is edited a
+        // neutral ring marks it (never the accent).
+        let ring = BoxShadow {
+            color: crate::kit::ink(t.colors.focus, 1.).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(t.metrics.border),
+            inset: false,
+        };
         div()
             .id("native-text")
             .relative()
             .w_full()
             .when(self.fill, |d| d.h_full())
             .when(!self.fill, |d| {
-                d.h(px(if self.kind == TextKind::Composer {
+                d.h(px(if bare {
+                    // One line, so the control around it can centre the text.
+                    (self.tokens.typography.body * 1.35).ceil()
+                } else if self.kind == TextKind::Composer {
                     // Grows with its lines, up to the composer's limit.
                     let lines = (self.value.lines().count().max(1) as f32)
                         .min(self.tokens.metrics.composer_max_lines);
@@ -224,15 +246,22 @@ impl Render for TextField {
                 }))
             })
             // A well with a unit trades side padding for the value's room.
-            .px(px(if self.unit.is_some() {
+            .px(px(if bare {
+                0.
+            } else if self.unit.is_some() {
                 self.tokens.metrics.inner_radius
             } else {
                 self.tokens.metrics.gap
             }))
-            .border_1()
-            .border_color(rgb(self.tokens.colors.separator))
-            .rounded(px(self.tokens.metrics.control_radius))
-            .bg(rgb(self.tokens.colors.field))
+            .when(!bare, |d| {
+                d.rounded(px(if single {
+                    t.metrics.inner_radius
+                } else {
+                    t.metrics.control_radius
+                }))
+                .bg(crate::kit::ink(t.colors.text, t.translucency.hover))
+                .when(editing, |d| d.shadow(vec![ring]))
+            })
             .text_color(rgb(self.tokens.colors.text))
             .text_size(px(self.tokens.typography.body))
             .font_family(".AppleSystemUIFont")

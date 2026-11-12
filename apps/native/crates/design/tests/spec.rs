@@ -380,6 +380,10 @@ const ROLES: &[(&str, &str)] = &[
     ("translucency.pressed", "Pressed wash, as `text` ink"),
     ("translucency.faint", "Third text step, as `text` ink"),
     (
+        "translucency.glass_tint",
+        "Window-colour tint on system glass that carries labels",
+    ),
+    (
         "colors.faint",
         "Placeholders, shortcut hints, disabled labels (derived)",
     ),

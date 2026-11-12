@@ -66,6 +66,18 @@ impl Shadow {
             inset: false,
         }
     }
+    /// A ring drawn inside the edge: for translucent surfaces, where an
+    /// outer shadow would show through the material.
+    const fn inner(color: u32, alpha: f32, spread: f32) -> Self {
+        Self {
+            color,
+            alpha,
+            y: 0.,
+            blur: 0.,
+            spread,
+            inset: true,
+        }
+    }
     /// A hairline of light just inside the top edge.
     const fn highlight(alpha: f32) -> Self {
         Self {
@@ -134,21 +146,33 @@ impl Tokens {
         } else if dark {
             // Dark surfaces part from their ground with a dark seam; the light
             // comes from the highlight inside the top edge.
-            Shadow::ring(0x000000, 0.42, 0.5)
+            Shadow::ring(0x000000, 0.36, 0.5)
         } else {
             Shadow::ring(ink, edge, 0.5)
         };
         let shade = if dark { 0x000000 } else { ink };
         match elevation {
-            Elevation::Well => vec![Shadow::ring(ink, edge, 0.5)],
+            Elevation::Well => vec![Shadow::inner(ink, edge, 0.5)],
             Elevation::Raised if dark => vec![
                 Shadow::highlight(0.09),
                 ring,
                 Shadow::drop(shade, 0.28, 1., 2.),
             ],
             Elevation::Raised => vec![ring, Shadow::drop(shade, 0.07, 1., 2.)],
-            Elevation::Panel if dark => vec![Shadow::highlight(0.045), ring],
-            Elevation::Panel => vec![ring, Shadow::drop(shade, 0.04, 1., 3.)],
+            // Panels are translucent material: their edge is inside, so
+            // nothing dark sits under the material.
+            Elevation::Panel => {
+                let edge = if self.accessibility.increase_contrast {
+                    Shadow::inner(self.colors.separator, 1., self.metrics.border / 2.)
+                } else {
+                    Shadow::inner(ink, edge, 0.5)
+                };
+                if dark {
+                    vec![Shadow::highlight(0.03), edge]
+                } else {
+                    vec![edge]
+                }
+            }
             Elevation::Menu => vec![
                 Shadow::ring(ink, if dark { 0.12 } else { 0.1 }, 0.5),
                 Shadow::drop(shade, if dark { 0.45 } else { 0.14 }, 8., 24.),

@@ -194,7 +194,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
 | `metrics.symbol_inline` | SF Symbol size inside rows | 12 | 12 | 12 | 12 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 14 | 14 | 14 | 14 |
-| `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 15 | 15 | 15 | 15 |
+| `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 14 | 14 | 14 | 14 |
 | `metrics.sync_badge` | Linked-clip sync badge height | 16 | 16 | 16 | 16 |
 | `metrics.tab` | Text tab and full-height segmented control | 28 | 28 | 28 | 28 |
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
@@ -233,9 +233,9 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `typography.dense_leading` | Line height multiplier for dense UI | 1.3 | 1.3 | 1.3 | 1.3 |
 | `typography.display` | Empty-state and onboarding display | 24 | 24 | 24 | 24 |
 | `typography.display_optical_size` | Optical size for display | 24 | 24 | 24 | 24 |
-| `typography.display_tracking` | Tracking of screen titles (pt) | -0.45 | -0.45 | -0.45 | -0.45 |
+| `typography.display_tracking` | Tracking of screen titles (pt) | -0.2 | -0.2 | -0.2 | -0.2 |
 | `typography.heading` | Sheet and Settings pane headings (semibold) | 15 | 15 | 15 | 15 |
-| `typography.heading_tracking` | Tracking of headings (pt) | -0.2 | -0.2 | -0.2 | -0.2 |
+| `typography.heading_tracking` | Tracking of headings (pt) | -0.1 | -0.1 | -0.1 | -0.1 |
 | `typography.label` | Inspector row labels | 12 | 12 | 12 | 12 |
 | `typography.medium_weight` | Medium weight: tabs, timecode, values being edited | 500 | 500 | 500 | 500 |
 | `typography.minimum` | Smallest text anywhere: captions, ruler, status bar | 11 | 11 | 11 | 11 |
@@ -259,6 +259,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.faint` | Third text step, as `text` ink | 0.42 | 0.36 | 0.42 | 0.36 |
+| `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.3 | 0.5 | 0.3 | 0.5 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |

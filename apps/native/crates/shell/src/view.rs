@@ -1,3 +1,4 @@
+use crate::kit::Recipes as _;
 use crate::{
     layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, Rect},
     native::{Command, Host, MenuEntry, MenuState},
@@ -1183,9 +1184,7 @@ fn title_width(text: &str, size: f32, window: &Window) -> f32 {
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
-pub fn tint(rgb: u32, alpha: f32) -> gpui::Rgba {
-    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
-}
+pub use crate::kit::ink as tint;
 fn positioned(r: Rect) -> Div {
     div()
         .absolute()
@@ -1221,41 +1220,7 @@ pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
                 .child(line.to_string()),
         )
 }
-struct Tip {
-    text: SharedString,
-    tokens: Tokens,
-}
-impl Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let (c, m) = (&self.tokens.colors, self.tokens.metrics);
-        div()
-            .px(px(m.gap))
-            .py(px(m.border * 2.))
-            .rounded(px(m.control_radius))
-            .bg(rgb(c.floating))
-            .border(px(m.border))
-            .border_color(rgb(c.separator))
-            .text_size(px(self.tokens.typography.minimum))
-            .text_color(rgb(c.text))
-            .font_family(pm_design::TEXT_FONT)
-            .child(self.text.clone())
-    }
-}
-/// A tooltip builder naming a control's action.
-pub fn tooltip(
-    t: &Tokens,
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let tokens = t.clone();
-    let text = text.into();
-    move |_, cx| {
-        cx.new(|_| Tip {
-            text: text.clone(),
-            tokens: tokens.clone(),
-        })
-        .into()
-    }
-}
+pub use crate::kit::tooltip;
 impl Editor {
     /// Home fills the window below the toolbar: no docks, no viewer slot,
     /// no native panel bodies and no status bar (v1's Projects screen).
@@ -1273,6 +1238,13 @@ impl Editor {
         }
         let t = &self.tokens;
         let (ground, ground_alpha) = t.ground();
+        // The sidebar column is the system's material (`Host::sync_sidebar`):
+        // the ground is painted everywhere else.
+        let clear = if self.host.is_some() {
+            t.metrics.sidebar
+        } else {
+            0.
+        };
         div()
             .id("editor")
             .role(Role::Group)
@@ -1280,7 +1252,25 @@ impl Editor {
             .aria_label("Powermove editor")
             .size_full()
             .relative()
-            .bg(tint(ground, ground_alpha))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.paint_quad(
+                            PaintQuad::new(Bounds::new(
+                                point(bounds.origin.x + px(clear), bounds.origin.y),
+                                gpui::size(
+                                    (bounds.size.width - px(clear)).max(px(0.)),
+                                    bounds.size.height,
+                                ),
+                            ))
+                            .background(tint(ground, ground_alpha)),
+                        );
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 if let Some(i) = &this.integration {
                     i.drop_paths(paths.paths().to_vec(), cx);
@@ -1317,11 +1307,13 @@ impl Render for Editor {
         if let Some(home) = self.integration.clone().and_then(|i| i.home(w, cx)) {
             return self.render_home(home, top, cx).into_any_element();
         }
+        // The toolbar band already separates the docks from the window's top
+        // edge; the other three sides keep the dock gap.
         self.dock_bounds = Rect {
-            x: m.gap,
-            y: top + m.gap,
-            w: (f32::from(viewport.width) - m.gap * 2.).max(0.),
-            h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
+            x: m.dock_gap,
+            y: top,
+            w: (f32::from(viewport.width) - m.dock_gap * 2.).max(0.),
+            h: (f32::from(viewport.height) - top - m.status - m.dock_gap).max(0.),
         };
         self.geometry = self.layout.geometry_with_maximized(
             self.dock_bounds,
@@ -1378,7 +1370,6 @@ impl Render for Editor {
         let native = self.host.is_some();
         let canvas_viewer = viewer;
         let (ground, ground_alpha) = t.ground();
-        let (edge, edge_alpha) = t.edge();
         let (line, line_alpha) = t.line();
         // Extension pages sit below GPUI too; their bodies are read at paint
         // time, after this frame's layout has recorded them.
@@ -1591,9 +1582,10 @@ impl Render for Editor {
                 })
                 .accessibility_id(format!("shell.panel.{id}"))
                 .aria_label(panels.title(&id).to_string())
-                .rounded(px(m.panel_radius))
-                .border(px(m.border))
-                .border_color(tint(edge, edge_alpha))
+                // A panel is a borderless surface: its edge is the elevation's
+                // hairline, its corner continuous.
+                .corner(&t, m.panel_radius)
+                .elevated(&t, pm_design::Elevation::Panel)
                 .overflow_hidden();
             if body_native {
                 native_bodies.push((
@@ -2055,8 +2047,7 @@ impl Render for Editor {
                     .py(px(4.))
                     .rounded(px(m.control_radius))
                     .bg(rgb(c.floating))
-                    .border(px(m.border))
-                    .border_color(rgb(c.separator))
+                    .elevated(&t, pm_design::Elevation::Menu)
                     .shadow_md()
                     .font_weight(FontWeight::MEDIUM)
                     .child(panels.title(&drag.id).to_string()),

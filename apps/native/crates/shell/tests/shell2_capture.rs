@@ -42,7 +42,7 @@ fn drag_to_dock_preview_and_result_render() {
         let rgb = |v: u32| [(v >> 16) as u8, (v >> 8) as u8, v as u8];
 
         // Drag Effects to the window's bottom edge, over the timeline.
-        let (x, y) = (700., m.window_height - m.status - m.gap - 2.);
+        let (x, y) = (700., m.window_height - m.status - m.dock_gap - 2.);
         window
             .update(&mut cx, |v, _, cx| {
                 v.simulate_drag("fxbrowser", x, y);

@@ -57,6 +57,12 @@ fn placement_accessibility_and_motion_contract() {
     assert_eq!(t.metrics.gap, 6.);
     assert_eq!(t.metrics.panel_radius, 12.);
     assert_eq!((t.metrics.header, t.metrics.status), (38., 24.));
+    let mut themed = t.clone();
+    themed.apply_patch([("metrics.gap", 10.)]).unwrap();
+    assert_eq!(
+        themed.metrics.dock_gap, 10.,
+        "a theme's gap spaces the docks"
+    );
     assert!(Tokens::new(Scheme::Dark, Accessibility::default()).translucent());
     let solid = Tokens::new(
         Scheme::Dark,
