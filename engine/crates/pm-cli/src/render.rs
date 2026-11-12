@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pm_export::Overwrite;
-use pm_export::render::{
-    ExportJob, JobError, MediaPaths, Progress, Unrestricted, composition_size,
-};
+use pm_export::render::{ExportJob, JobError, MediaPaths, Progress, composition_size};
 use pm_model::{Document, Value};
 use pm_protocol::color::{OutputColor, QuickTimeTag};
 use pm_protocol::common::{FrameRate, Size, TickRange, Ticks};
@@ -94,6 +92,9 @@ pub struct Options {
     pub contributed: Option<PathBuf>,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
+    /// Render each frame in bands of this many 16-row units, as an export
+    /// running beside a busy viewer does (default: whole frames).
+    pub bands: Option<u32>,
     /// Parameter values supplied by the CLI user, parsed as JSON.
     pub parameters: Vec<(String, Value)>,
 }
@@ -674,7 +675,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
                 &job,
                 plan,
                 sink,
-                &Unrestricted,
+                &Bands(options.bands),
                 &INTERRUPTED,
                 &mut progress,
             )
@@ -714,6 +715,27 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "fps": r.frames as f64 / seconds.max(1e-9),
         "definitions": source,
     }))
+}
+
+/// Admits whole frames, or `Some(n)` bands of `n` units.
+struct Bands(Option<u32>);
+
+impl pm_export::render::GpuGate for Bands {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        (!cancel.load(Ordering::Relaxed)).then(|| self.0.map_or(units, |n| n.clamp(1, units)))
+    }
+
+    fn finished(&self, _: u64, _: u32, _: f64) {}
+
+    fn abandoned(&self, _: u64) {}
+
+    fn measures(&self) -> bool {
+        false
+    }
+
+    fn overlaps(&self) -> bool {
+        true
+    }
 }
 
 /// What [`headless_renderer`] sets a renderer up for.
