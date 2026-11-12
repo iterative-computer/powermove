@@ -2848,6 +2848,101 @@ impl Host {
     /// and `dragright` carry the tab one place along the strip with pointer
     /// events posted to this app's own queue; `holdleft` and `holdright`
     /// keep it lifted for a few seconds first, for a capture.
+    /// Development builds: resizes the window by (`dw`, `dh`) in twelve
+    /// steps, two frames apart, its top-left corner kept, and writes
+    /// `resize.txt` to `--save-dir`: for every hosted AppKit control, how far
+    /// it stood right after a step from where the following frames put it.
+    /// All zeros means the controls stay attached while the window resizes.
+    #[cfg(debug_assertions)]
+    pub fn review_resize(&self, dw: f64, dh: f64) {
+        use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
+        const STEPS: usize = 12;
+        fn controls(view: &NSView, skip: &NSView, out: &mut Vec<(String, NSRect)>) {
+            if std::ptr::eq(view, skip) || view.isHidden() {
+                return;
+            }
+            if unsafe { msg_send![view, isKindOfClass: NSControl::class()] } {
+                let name = format!(
+                    "{} {:?}",
+                    view.class().name().to_string_lossy(),
+                    view.accessibilityLabel()
+                        .map(|l| l.to_string())
+                        .unwrap_or_default()
+                );
+                // From the window's top-left, which the resize keeps.
+                let r = view.convertRect_toView(view.bounds(), None);
+                let top = view.window().map_or(0., |w| w.frame().size.height);
+                out.push((
+                    name,
+                    NSRect::new(
+                        NSPoint::new(r.origin.x, top - r.origin.y - r.size.height),
+                        r.size,
+                    ),
+                ));
+                return;
+            }
+            for child in view.subviews().to_vec() {
+                controls(&child, skip, out);
+            }
+        }
+        let (window, gpui) = (self.window.clone(), self.gpui.clone());
+        let read = move || {
+            let mut out = vec![];
+            if let Some(content) = window.contentView() {
+                controls(&content, &gpui, &mut out);
+            }
+            out
+        };
+        let window = self.window.clone();
+        let state = Rc::new(RefCell::new((0usize, read(), String::new(), 0f64)));
+        let step = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
+            let mut s = state.borrow_mut();
+            let settled = read();
+            if s.0 > 0 {
+                // The same control in both readings (a list that changed
+                // between them is not compared).
+                for ((name, at), (same, now)) in s.1.clone().iter().zip(&settled) {
+                    if name != same {
+                        continue;
+                    }
+                    let off = (at.origin.x - now.origin.x)
+                        .abs()
+                        .max((at.origin.y - now.origin.y).abs())
+                        .max((at.size.width - now.size.width).abs());
+                    s.3 = s.3.max(off);
+                    if off > 0.01 {
+                        let line = format!("step {} {name}: {off:.1} pt behind\n", s.0);
+                        s.2.push_str(&line);
+                    }
+                }
+            }
+            if s.0 == STEPS {
+                unsafe { timer.as_ref().invalidate() };
+                let report = format!(
+                    "{} controls, {STEPS} steps of ({:.1}, {:.1}) pt, worst {:.1} pt\n{}",
+                    settled.len(),
+                    dw / STEPS as f64,
+                    dh / STEPS as f64,
+                    s.3,
+                    s.2
+                );
+                if let Ok(dir) = std::env::var("PM_NATIVE_REVIEW_SAVE_DIR") {
+                    let _ = std::fs::write(std::path::Path::new(&dir).join("resize.txt"), report);
+                }
+                return;
+            }
+            s.0 += 1;
+            let mut frame = window.frame();
+            frame.size.width += dw / STEPS as f64;
+            frame.size.height += dh / STEPS as f64;
+            frame.origin.y -= dh / STEPS as f64;
+            drop(s);
+            window.setFrame_display(frame, true);
+            state.borrow_mut().1 = read();
+        });
+        let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(1. / 30., true, &step) };
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+    }
     #[cfg(debug_assertions)]
     pub fn review_popup(&self, action: &str, value: &str) {
         for popup in [&self.palette, &self.fields] {

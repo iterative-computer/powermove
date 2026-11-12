@@ -645,6 +645,19 @@ impl Editor {
             }
             return;
         }
+        // `reviewResize:-240:-140`: a stepped resize that measures whether
+        // hosted controls stay attached (`resize.txt` in `--save-dir`).
+        #[cfg(debug_assertions)]
+        if let Some((dw, dh)) = cmd
+            .name
+            .strip_prefix("reviewResize:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let (Some(host), Ok(dw), Ok(dh)) = (&self.host, dw.parse(), dh.parse()) {
+                host.borrow().review_resize(dw, dh);
+            }
+            return;
+        }
         // `reviewPopup:hover:3`, `leave:`, `type:exp`, `key:down`: the open
         // palette or menu, as the pointer and the keyboard drive it.
         #[cfg(debug_assertions)]
