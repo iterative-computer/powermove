@@ -56,7 +56,7 @@ pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     local_time, temporary_sibling,
 };
-pub(crate) use durable::{Host, remove_abandoned_temps};
+pub(crate) use durable::{Host, folder_sync_now, remove_abandoned_temps};
 pub use durable::{
     PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, TrashHook, WriteCoordinator,
 };

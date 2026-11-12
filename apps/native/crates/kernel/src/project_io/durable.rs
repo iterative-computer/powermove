@@ -643,6 +643,11 @@ pub(crate) fn folder_sync(dir: &Path, hooks: &PublishHooks) -> Result<Folder, Pr
     }
 }
 
+/// Syncs `dir` as [`folder_sync`] does; an error only for a real failure.
+pub(crate) fn folder_sync_now(dir: &Path, hooks: &PublishHooks) -> Result<(), ProjectIoError> {
+    folder_sync(dir, hooks).map(drop)
+}
+
 /// [`folder_sync`] after a save installed its file, held to what the folder
 /// answered when the save began (`probed`): "does not exist" is believed
 /// only from a folder that said so then, with the same error. A folder
@@ -1379,8 +1384,12 @@ fn confirm_installed(
     let installed =
         installed_at(destination, incoming, new_hash).ok_or(ProjectIoError::ChangedOnDisk)?;
     let dir = destination.parent().unwrap_or(Path::new("."));
-    folder_sync_as(dir, tx.folder(), hooks).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
-    tx.step("installed")?;
+    match folder_sync_as(dir, tx.folder(), hooks) {
+        Ok(()) => tx.step("installed")?,
+        // Installed but not proven durable: nothing more is done with the
+        // replaced version, and the save reports it ([`Published::unfinalized`]).
+        Err(e) => tx.unsynced = Some(e.to_string()),
+    }
     Ok(installed)
 }
 
@@ -1560,6 +1569,14 @@ fn replace_aside(
     // Not confirmed: the file moved aside stays where the record names it.
     let installed = confirm_installed(tx, destination, incoming, new_hash, hooks)
         .inspect_err(|_| tx.strand())?;
+    // Not synced: the same, and the save says so.
+    if tx.unsynced.is_some() {
+        tx.strand();
+        return Ok(Published {
+            installed: Some(installed),
+            ..Default::default()
+        });
+    }
     // What was moved aside is read only now: the name was empty for no
     // longer than the two renames, and the new file is confirmed in place.
     let mut published = Published {
@@ -1620,6 +1637,11 @@ pub(crate) struct Published {
     /// Earlier versions this save no longer needs that could not be moved
     /// to the Trash: they stay where they are, for the person.
     pub untrashed: Vec<PathBuf>,
+    /// The file is installed but the folder did not sync after it: why.
+    /// Nothing else was done (the replaced version stays named by the
+    /// record); the save is reported failed, and adopted by the next save
+    /// once the folder syncs ([`ProjectIoError::Finalize`]'s receipt).
+    pub unfinalized: Option<String>,
 }
 
 /// The system's way for programs to take turns at a file (on macOS,
@@ -2004,11 +2026,15 @@ fn publish_now(
             let confirmed = confirm_installed(&mut tx, destination, &incoming, new_hash, hooks);
             // The folder did not sync: the displaced file stays where the
             // record names it, for the next open or save to settle.
-            if let Err(e @ ProjectIoError::Finalize(_)) = confirmed {
+            if let (Ok(_), Some(message)) = (&confirmed, tx.unsynced.clone()) {
                 let _ = temp.keep();
                 tx.strand();
                 tx.finish();
-                return Err(e);
+                published.installed = confirmed.ok();
+                published.unfinalized = Some(message);
+                published.unproven = unproven;
+                published.local_copy = local_copy;
+                return Ok(published);
             }
             // `temp.path` names the displaced file: the version we were
             // allowed to replace (retained), or one to keep beside.
@@ -2082,6 +2108,15 @@ fn publish_now(
                 }
             }
         }
+    }
+    // Installed, but the folder did not sync: the save is not adopted yet
+    // (the session keeps it as a ticket and the next save syncs again).
+    if let Some(message) = tx.unsynced.clone() {
+        tx.finish();
+        published.unfinalized = Some(message);
+        published.unproven = unproven;
+        published.local_copy = local_copy;
+        return Ok(published);
     }
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.

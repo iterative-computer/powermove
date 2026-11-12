@@ -341,6 +341,11 @@ pub(crate) struct Session {
     pub meta: Value,
     pub rejected_history: Option<Value>,
     pub pending_save: Option<PendingSave>,
+    /// A save whose file was installed but whose folder did not sync after
+    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save in
+    /// place once the folder syncs, so that save expects the file that is
+    /// there.
+    pub unfinalized: Option<Box<crate::SaveReceipt>>,
 }
 /// The session metadata member that lists files kept beside the project
 /// file which the person has not been told about.
@@ -941,6 +946,7 @@ impl Kernel {
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
         if path.is_none() {
+            self.adopt_unfinalized(&session.project)?;
             self.follow_file(&session.project);
         }
         let mut lock = None;
@@ -1017,11 +1023,24 @@ impl Kernel {
             .unwrap();
         let receipt = match result {
             Ok(receipt) => receipt,
+            Err(crate::ProjectIoError::Finalize {
+                message,
+                receipt: Some(mut receipt),
+            }) => {
+                // Kept as a ticket, not as a save still running.
+                receipt.ticket = std::sync::Arc::new(());
+                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(receipt);
+                return Err(failure(crate::ProjectIoError::Finalize {
+                    message,
+                    receipt: None,
+                }));
+            }
             Err(e) => {
                 self.adopt_put_back(&session.project, &e);
                 return Err(failure(e));
             }
         };
+        self.sessions.get_mut(&session.project).unwrap().unfinalized = None;
         let displaced = self.note_changed(&session.project, &receipt);
         self.note_unproven(&session.project, receipt.unproven);
         // Written from the snapshot frozen before the error; the slot and the
@@ -2016,6 +2035,7 @@ impl Kernel {
                 meta,
                 rejected_history,
                 pending_save: None,
+                unfinalized: None,
             },
         );
         // A new/copy project gets a rollback-readable slot immediately.
@@ -2703,6 +2723,41 @@ impl Kernel {
             .displaced
             .clone()
             .or_else(|| receipt.changed.first().cloned())
+    }
+    /// The last save in place installed its file but its folder did not
+    /// sync. Before the next save in place: the folder is synced again (a
+    /// failure fails this save too, and the ticket stays), and if the name
+    /// still holds exactly that save's file it is adopted, as the save it
+    /// is; edits made since stay unsaved and are what this save writes. A
+    /// file changed since is not adopted: this save then finds it changed.
+    fn adopt_unfinalized(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let Some(receipt) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
+            return Ok(());
+        };
+        let dir = receipt
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_owned();
+        if let Err(e) = project_io::folder_sync_now(&dir, &self.publish_hooks) {
+            self.sessions.get_mut(id).unwrap().unfinalized = Some(receipt);
+            return Err(failure(crate::ProjectIoError::Finalize {
+                message: e.to_string(),
+                receipt: None,
+            }));
+        }
+        if !receipt.version.is_unchanged().unwrap_or(false) {
+            return Ok(());
+        }
+        self.note_changed(id, &receipt);
+        self.note_unproven(id, receipt.unproven);
+        self.project_mut(id)
+            .unwrap()
+            .store_mut()
+            .finish_save(*receipt)
+            .map_err(failure)?;
+        self.save_published(id);
+        Ok(())
     }
     /// Earlier versions a save no longer needed stay where they are when
     /// they cannot go to the Trash: the Error Log lists them for the person.

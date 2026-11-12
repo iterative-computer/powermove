@@ -1626,6 +1626,60 @@ fn a_save_the_volume_cannot_prove_durable_keeps_a_local_copy_until_it_is_read_ba
         }
     }
 }
+/// The folder fails to sync once, right after a save installed its file:
+/// that save is reported failed (its file is in place, not proven durable).
+/// Once the folder syncs again, the next Save in place goes through: it
+/// syncs the folder, adopts the save that was installed (its file is still
+/// the one under the name), and writes the edits made since. No close and
+/// reopen, no Save As.
+#[test]
+fn a_save_whose_folder_failed_to_sync_once_does_not_block_the_next_save() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        let dir = common::TempDir::new("finalize-once");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        let mut k = kernel(&native);
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    1 => (Some(5), None),
+                    _ => (None, None),
+                }
+            })),
+            ..hooks.clone()
+        });
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .expect_err(&format!("{disk}: the folder did not sync"));
+        k.set_publish_hooks(hooks.clone());
+        rename_comp(&mut k, "P", "Two");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap_or_else(|e| panic!("{disk}: {e}"));
+        k.finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{disk}: Save in place goes through: {e}"));
+        assert_eq!(saved_name(&file).as_deref(), Some("Two"), "{disk}");
+        assert!(
+            !k.project("P").unwrap().store().is_dirty(),
+            "{disk}: everything is saved"
+        );
+        rename_comp(&mut k, "P", "Three");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run()).unwrap();
+        assert_eq!(saved_name(&file).as_deref(), Some("Three"), "{disk}");
+    }
+}
 /// On a network share no save can be proven durable from this Mac: the
 /// server alone decides when a rename survives. So the local copy of the
 /// last save there is its checkpoint. A save whose local copy cannot be

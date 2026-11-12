@@ -940,6 +940,7 @@ impl SavePlan {
             }
         }
         let mut published = published?;
+        let unfinalized = published.unfinalized.take();
         let backup = published.backup.take().or(backup);
 
         // The file the save installed and found under the name after its
@@ -970,7 +971,7 @@ impl SavePlan {
                 },
             });
         }
-        Ok(SaveReceipt {
+        let receipt = SaveReceipt {
             portable: self.options.portable,
             unavailable_links,
             path: dest.clone(),
@@ -992,7 +993,16 @@ impl SavePlan {
             local_copy: published.local_copy,
             untrashed: published.untrashed,
             ticket: self.ticket.clone(),
-        })
+        };
+        // Installed, but its folder did not sync: reported failed, with the
+        // receipt for the session to adopt once the folder syncs.
+        match unfinalized {
+            Some(message) => Err(ProjectIoError::Finalize {
+                message,
+                receipt: Some(Box::new(receipt)),
+            }),
+            None => Ok(receipt),
+        }
     }
 
     fn verify(

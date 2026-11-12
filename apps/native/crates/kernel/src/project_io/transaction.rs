@@ -464,6 +464,8 @@ pub(super) struct Transaction {
     /// What the project's folder answered when it was synced as the save
     /// began ([`Self::folder`]).
     folder: Folder,
+    /// The folder failed to sync after the install: why.
+    pub unsynced: Option<String>,
 }
 
 impl Transaction {
@@ -537,6 +539,7 @@ impl Transaction {
             tells: false,
             live: true,
             folder,
+            unsynced: None,
         };
         tx.reached("begin");
         Ok(tx)
@@ -552,6 +555,7 @@ impl Transaction {
             retains: !record.retained.is_empty(),
             tells: !record.notices().is_empty(),
             live: false,
+            unsynced: None,
             folder: folder_sync(destination.parent().unwrap_or(Path::new(".")), hooks)
                 .map_err(|_| io::Error::other("the folder cannot be synced"))?,
         })

@@ -176,8 +176,13 @@ pub enum ProjectIoError {
     /// held, the same bytes in another file.
     PutBack(Box<ProjectIoError>),
     /// Our file was published but the final directory sync failed. Your
-    /// edits stay open (and dirty); save again to confirm.
-    Finalize(String),
+    /// edits stay open (and dirty); save again to confirm. `receipt` is that
+    /// save, for the session to adopt once the folder syncs (the next save
+    /// in place does that first).
+    Finalize {
+        message: String,
+        receipt: Option<Box<crate::SaveReceipt>>,
+    },
     /// A save of this document is already running.
     SaveInProgress,
     /// No destination: use Save As.
@@ -228,7 +233,7 @@ impl fmt::Display for ProjectIoError {
                 kept.display()
             ),
             ProjectIoError::PutBack(e) => e.fmt(f),
-            ProjectIoError::Finalize(m) => write!(
+            ProjectIoError::Finalize { message: m, .. } => write!(
                 f,
                 "The project file was written, but save finalization failed. Your edits are \
                  still open. Try Save again to confirm, or Save As to keep a separate copy. {m}"
