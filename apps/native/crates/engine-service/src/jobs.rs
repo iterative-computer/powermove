@@ -1407,8 +1407,12 @@ fn fill_cache(
         let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
         Ok(
             render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
-                // Every bit of the export's values (finer than half floats).
-                let bytes: Vec<u8> = read.rgba.iter().flat_map(|v| v.to_le_bytes()).collect();
+                // The export's values as the viewer's surface holds them.
+                let bytes: Vec<u8> = read
+                    .rgba
+                    .iter()
+                    .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                    .collect();
                 crate::frame_codec::encode(&bytes, fill.width, fill.height)
             }),
         )

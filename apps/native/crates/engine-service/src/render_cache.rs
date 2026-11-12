@@ -46,9 +46,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::render::Scene;
 
-/// Frames on disk: RGBA32F rows, top-down, the export's premultiplied
-/// working values, coded losslessly (`crate::frame_codec`).
-pub const FORMAT: &str = "rgba32f-export-lzfse-v3";
+/// Frames on disk: RGBA16F rows, top-down, the export's premultiplied
+/// working values rounded to the half floats the viewer's surface holds,
+/// coded losslessly (`crate::frame_codec`).
+pub const FORMAT: &str = "rgba16f-export-lzfse-v4";
 /// Media stamps are looked at again at most this often.
 const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
@@ -1578,24 +1579,10 @@ impl Reader {
                     if stale {
                         continue;
                     }
-                    // Stored at full precision, shown on a half-float surface.
-                    let data = ask
-                        .cache
-                        .get(&ask.key)
-                        .ok()
-                        .flatten()
-                        .and_then(|d| {
-                            crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
-                        })
-                        .map(|values| {
-                            values
-                                .chunks_exact(4)
-                                .flat_map(|b| {
-                                    half::f16::from_f32(f32::from_le_bytes(b.try_into().unwrap()))
-                                        .to_le_bytes()
-                                })
-                                .collect::<Vec<u8>>()
-                        });
+                    // Stored as the viewer's surface holds it.
+                    let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
+                        crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
+                    });
                     if data.is_some() {
                         // Played frames are the last the limit removes.
                         let _ = ask.cache.touch(&ask.key);
@@ -1951,9 +1938,10 @@ mod tests {
                 state.cache.clone().unwrap(),
             )
         };
-        let bytes: Vec<u8> = std::iter::repeat_n(0.25f32.to_le_bytes(), 640 * 360 * 4)
-            .flatten()
-            .collect();
+        let bytes: Vec<u8> =
+            std::iter::repeat_n(half::f16::from_f32(0.25).to_le_bytes(), 640 * 360 * 4)
+                .flatten()
+                .collect();
         cache
             .put(&key, &crate::frame_codec::encode(&bytes, 640, 360))
             .unwrap();
@@ -2229,7 +2217,7 @@ mod tests {
         assert!(disk.read(&scene, time).is_none(), "nothing stored");
     }
 
-    /// Frame 30 filled through the real child, as stored (RGBA32F values).
+    /// Frame 30 filled through the real child, as stored.
     fn filled_values(scene: &Scene) -> Vec<f32> {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskFrames::default();
@@ -2271,12 +2259,12 @@ mod tests {
         );
     }
 
-    /// A cached frame is the exported frame: the cache's values through the
-    /// export's own 16-bit conversion (its dither too) are the samples of a
-    /// 16-bit PNG export of the same time, both through the real children.
-    /// An animated layer with motion blur (the paused viewer's samples and
-    /// the export's differ) and a 32-bit working depth (values finer than
-    /// half floats).
+    /// A cached frame is the exported frame at the viewer's precision: the
+    /// cache's half floats through the export's own 16-bit conversion (its
+    /// dither too) are the samples of a 16-bit PNG export of the same time,
+    /// both through the real children, to within a half float's rounding
+    /// ([`HALF_ROUNDING`]). An animated layer with motion blur (the paused
+    /// viewer's samples and the export's differ) and a 32-bit working depth.
     #[test]
     fn a_cached_frame_is_the_exported_frame() {
         let mut project: serde_json::Value =
@@ -2378,13 +2366,22 @@ mod tests {
         )
         .unwrap();
         let expected = expected.planes[0].u16().unwrap();
-        let differing = expected
+        let worst = expected
             .iter()
             .zip(exported)
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(differing, 0, "of {} samples", expected.len());
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= HALF_ROUNDING, "{worst} of 65535");
+        // The comparison would see a missing layer or sample.
+        assert!(exported.iter().any(|v| *v > 4096) && exported.iter().any(|v| *v < 60000));
     }
+
+    /// The most a 16-bit export sample moves when its working value is
+    /// rounded to a half float first: half a unit in the last of a half
+    /// float's 11 significant bits is 2⁻¹² of a value below 1.0, 16 of
+    /// 65535, and the transfer and the dither's rounding add at most one.
+    const HALF_ROUNDING: u16 = 17;
 
     /// Frame 30 rendered by background rendering (its chunk known not to
     /// play), as stored.
@@ -2423,8 +2420,8 @@ mod tests {
         let coded = cache.get(&key).unwrap().expect("the stored frame");
         crate::frame_codec::decode(&coded, 640, 360)
             .unwrap()
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes(b.try_into().unwrap()).to_f32())
             .collect()
     }
 
