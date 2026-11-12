@@ -102,6 +102,24 @@ impl OverlayGeometry {
         );
         Ok(Self { lines })
     }
+    /// The lines that can be drawn, at most [`Self::MAX_LINES`] of them: a
+    /// line with a non-finite end or color (geometry divided by a zero-size
+    /// composition, a transform beyond what a float holds) is left out, and
+    /// lines past the limit are dropped. Never fails: overlay geometry is
+    /// derived from the person's document on the main thread, where an
+    /// error has nowhere to go but a crash.
+    pub fn lossy(lines: impl IntoIterator<Item = OverlayLine>) -> Self {
+        Self {
+            lines: lines
+                .into_iter()
+                .filter(|l| {
+                    l.ends.iter().chain(&l.color).all(|v| v.is_finite())
+                        && (0. ..=1.).contains(&l.color[3])
+                })
+                .take(Self::MAX_LINES)
+                .collect(),
+        }
+    }
     fn params(&self) -> OverlayParams {
         let mut p = OverlayParams {
             count: self.lines.len() as u32,
@@ -3902,6 +3920,27 @@ mod worker_tests {
             captured()
         );
         v.retire();
+    }
+
+    /// Overlay geometry from a zero-size composition (a division by zero)
+    /// or a transform too large for a float is left out line by line; what
+    /// can be drawn is kept, and nothing fails.
+    #[test]
+    fn overlay_lines_that_cannot_be_drawn_are_left_out() {
+        let line = |x: f32| OverlayLine {
+            ends: [x, 0., 1., 1.],
+            color: [1., 1., 1., 1.],
+        };
+        let zero_width = (1.0f64 / 0.0) as f32;
+        let beyond_float = (1e42f64 / 1920.) as f32;
+        assert!(zero_width.is_infinite() && beyond_float.is_infinite());
+        let bad = [line(zero_width), line(f32::NAN), line(beyond_float)];
+        assert!(OverlayGeometry::new(bad.to_vec()).is_err());
+        let kept = OverlayGeometry::lossy(bad.into_iter().chain([line(0.25), line(0.5)]));
+        let firsts: Vec<f32> = kept.lines.iter().map(|l| l.ends[0]).collect();
+        assert_eq!(firsts, [0.25, 0.5]);
+        let many = OverlayGeometry::lossy((0..500).map(|_| line(0.5)));
+        assert_eq!(many.lines.len(), OverlayGeometry::MAX_LINES);
     }
 
     /// A viewer whose document has a raster override answering through the

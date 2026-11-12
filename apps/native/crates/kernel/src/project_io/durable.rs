@@ -22,8 +22,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -98,12 +99,67 @@ pub(crate) fn stat_of(meta: &fs::Metadata) -> FileStat {
 
 /// A file exactly as we last read or wrote it: its identity and the SHA-256
 /// of its whole content (`FileVersion` in the old app).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct FileVersion {
     pub path: PathBuf,
     pub stat: FileStat,
     /// Lowercase hex SHA-256 of the whole file.
     pub hash: String,
+    /// The descriptor the file was read (or written) through. It stays the
+    /// same file when the path stops naming it (renamed, moved, deleted
+    /// while open), so the session can follow it and its embedded media can
+    /// still be copied out. Not part of the version's identity.
+    pub held: Option<Arc<HeldFile>>,
+}
+impl PartialEq for FileVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.stat == other.stat && self.hash == other.hash
+    }
+}
+impl Eq for FileVersion {}
+
+/// An open descriptor of a file version and the last state its bytes were
+/// proven at.
+#[derive(Debug)]
+pub struct HeldFile {
+    file: File,
+    proven: std::sync::Mutex<Option<FileStat>>,
+}
+impl HeldFile {
+    pub(crate) fn new(file: File) -> Arc<Self> {
+        Arc::new(Self {
+            file,
+            proven: std::sync::Mutex::new(None),
+        })
+    }
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
+    fn stat(&self) -> io::Result<FileStat> {
+        Ok(stat_of(&self.file.metadata()?))
+    }
+    /// Where the system says this file is now (it follows a rename or a
+    /// move on its volume). `None` when it has no name any more.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn current_path(&self) -> Option<PathBuf> {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStringExt};
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: a live descriptor and a PATH_MAX buffer, as F_GETPATH asks.
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let len = buf.iter().position(|b| *b == 0)?;
+        buf.truncate(len);
+        let linked = self.file.metadata().ok().is_some_and(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.nlink() > 0
+        });
+        linked.then(|| PathBuf::from(std::ffi::OsString::from_vec(buf)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn current_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Whether `path` names a file the editor may treat as a project file:
@@ -142,6 +198,71 @@ impl FileVersion {
             path: path.to_owned(),
             stat: info,
             hash,
+            held: Some(HeldFile::new(file)),
+        }))
+    }
+
+    /// The descriptor held since this version was read, if the file behind
+    /// it still has exactly this version's bytes: the same inode and size,
+    /// and either untouched timestamps or (a rename or move touches them) a
+    /// whole-file hash equal to the version's, proven once per state.
+    pub(crate) fn held_unchanged(&self) -> Result<Option<&File>, ProjectIoError> {
+        let Some(held) = &self.held else {
+            return Ok(None);
+        };
+        let Ok(now) = held.stat() else {
+            return Ok(None);
+        };
+        if !now.same_identity(&self.stat) || now.size != self.stat.size {
+            return Ok(None);
+        }
+        let mut proven = held.proven.lock().unwrap();
+        if now.same_file(&self.stat) || proven.as_ref() == Some(&now) {
+            return Ok(Some(held.file()));
+        }
+        // Proven for the state it was read in: the descriptor's stat must be
+        // the same after the read as before it.
+        if hex(&hash_reader(held.file(), &self.path)?.finalize()) != self.hash
+            || held.stat().ok().as_ref() != Some(&now)
+        {
+            return Ok(None);
+        }
+        *proven = Some(now);
+        Ok(Some(held.file()))
+    }
+
+    /// This version at the path the file has now (it was renamed or moved
+    /// while open): the same inode and bytes, found through the descriptor
+    /// held since it was read. `None` if the path still names it, it has no
+    /// name any more, its bytes changed, or it now sits somewhere nobody
+    /// keeps documents ([`is_document_place`]: a Trash, a bundle, a hidden or
+    /// system folder), where a save must be the person's choice (Save As),
+    /// never something that follows the file there on its own.
+    pub fn moved(&self) -> Result<Option<FileVersion>, ProjectIoError> {
+        if lstat_file(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|at| at.same_identity(&self.stat))
+        {
+            return Ok(None);
+        }
+        let Some(path) = self.held.as_ref().and_then(|held| held.current_path()) else {
+            return Ok(None);
+        };
+        let Some(at) = lstat_file(&path).ok().flatten() else {
+            return Ok(None);
+        };
+        if !is_document_place(&path)
+            || !at.same_identity(&self.stat)
+            || self.held_unchanged()?.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(FileVersion {
+            path,
+            stat: at,
+            hash: self.hash.clone(),
+            held: self.held.clone(),
         }))
     }
 
@@ -161,6 +282,84 @@ impl FileVersion {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Whether `path` is somewhere a person keeps documents: not inside a
+/// hidden folder (a Trash is one), not inside a bundle or another package
+/// (known by the folder's extension), not in a system folder, and not in the
+/// user's Library other than the folders sync clients keep documents in.
+pub(crate) fn is_document_place(path: &Path) -> bool {
+    const PACKAGES: &[&str] = &[
+        "app",
+        "appex",
+        "bundle",
+        "framework",
+        "plugin",
+        "kext",
+        "xpc",
+        "pkg",
+        "mpkg",
+        "prefpane",
+        "saver",
+        "qlgenerator",
+        "mdimporter",
+        "component",
+        "wdgt",
+        "dsym",
+        "lproj",
+        "xcodeproj",
+        "xcworkspace",
+        "xcassets",
+        "playground",
+        "photoslibrary",
+        "aplibrary",
+        "imovielibrary",
+        "tvlibrary",
+        "musiclibrary",
+        "fcpbundle",
+        "logicx",
+        "band",
+        "rtfd",
+        "key",
+        "pages",
+        "numbers",
+        "sparsebundle",
+    ];
+    const SYSTEM: &[&str] = &[
+        "/System",
+        "/Library",
+        "/Applications",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/opt",
+        "/etc",
+        "/private/etc",
+    ];
+    if SYSTEM.iter().any(|folder| path.starts_with(folder)) {
+        return false;
+    }
+    if let Some(library) = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library"))
+        && path.starts_with(&library)
+        && !path.starts_with(library.join("Mobile Documents"))
+        && !path.starts_with(library.join("CloudStorage"))
+    {
+        return false;
+    }
+    let Some(folder) = path.parent() else {
+        return true;
+    };
+    !folder.components().any(|c| {
+        let std::path::Component::Normal(name) = c else {
+            return false;
+        };
+        let name = name.to_string_lossy();
+        name.starts_with('.')
+            || Path::new(&*name)
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|e| PACKAGES.iter().any(|p| p.eq_ignore_ascii_case(e)))
+    })
 }
 
 /// `checkVersion(destination, expected, verifyContent)`. With no expected
@@ -202,16 +401,34 @@ pub fn check_version(
     Ok(())
 }
 
+/// SHA-256 of everything behind `file`, read by position from its start. A
+/// descriptor's cursor belongs to whatever read through it last (a held
+/// descriptor is hashed more than once, and its duplicates share the
+/// cursor), so it says nothing about where the file begins.
 pub(crate) fn hash_reader(file: &File, path: &Path) -> Result<Sha256, ProjectIoError> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
-    let mut reader = file;
+    let mut offset = 0u64;
     loop {
-        let n = read_retry(|| reader.read(&mut buf)).map_err(|e| io_err(path, e))?;
+        #[cfg(unix)]
+        let n = {
+            use std::os::unix::fs::FileExt;
+            read_retry(|| file.read_at(&mut buf, offset))
+        };
+        #[cfg(not(unix))]
+        let n = {
+            use std::io::{Seek, SeekFrom};
+            let mut reader = file;
+            reader
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| read_retry(|| reader.read(&mut buf)))
+        };
+        let n = n.map_err(|e| io_err(path, e))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        offset += n as u64;
     }
     Ok(hasher)
 }
@@ -384,9 +601,50 @@ mod sys {
     }
 }
 
+/// Something a test does to the destination at a point of a publication,
+/// as a sync client or another machine would.
+#[doc(hidden)]
+pub type PublishHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+/// Test hooks on publication.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct PublishHooks {
+    /// The volume has no atomic exchange (exFAT, HFS+, most network shares).
+    pub no_exchange: bool,
+    /// The volume answers the exchange with success but only renames the
+    /// first name over the second (a FAT32 volume on macOS 27).
+    pub exchange_renames: bool,
+    /// The volume has neither an exclusive rename nor hard links (exFAT).
+    pub no_exclusive: bool,
+    /// Called with the destination after its last check, right before the
+    /// staged file is exchanged with it.
+    pub before_exchange: Option<PublishHook>,
+    /// Called with the destination right after the exchange.
+    pub after_exchange: Option<PublishHook>,
+}
+impl std::fmt::Debug for PublishHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishHooks")
+            .field("no_exchange", &self.no_exchange)
+            .field("exchange_renames", &self.exchange_renames)
+            .field("no_exclusive", &self.no_exclusive)
+            .field("before_exchange", &self.before_exchange.is_some())
+            .field("after_exchange", &self.after_exchange.is_some())
+            .finish()
+    }
+}
+
 /// `swapFiles`: `Ok(true)` when exchanged, `Ok(false)` when the volume or
-/// platform does not support exchange (the caller falls back).
-fn swap_files(a: &Path, b: &Path) -> Result<bool, ProjectIoError> {
+/// platform has no atomic exchange (nothing was moved).
+fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    if hooks.no_exchange {
+        return Ok(false);
+    }
+    if hooks.exchange_renames {
+        fs::rename(a, b).map_err(|e| io_err(b, e))?;
+        return Ok(true);
+    }
     #[cfg(target_os = "macos")]
     {
         match sys::renamex(a, b, sys::RENAME_SWAP) {
@@ -409,8 +667,88 @@ fn swap_files(a: &Path, b: &Path) -> Result<bool, ProjectIoError> {
     }
 }
 
+/// The volume a folder is on, as far as one mount of it can be told from
+/// another: its device, filesystem type and mount point.
+fn volume_of(dir: &Path) -> Option<(u64, String)> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let dev = fs::metadata(dir).ok()?.dev();
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: a valid C path and output storage, read only on success.
+    let stat = unsafe {
+        if libc::statfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stat.assume_init()
+    };
+    // SAFETY: both are NUL-terminated arrays the system filled.
+    let text = |chars: &[libc::c_char]| unsafe {
+        std::ffi::CStr::from_ptr(chars.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    };
+    #[cfg(target_os = "macos")]
+    let mounted = format!("{} {}", text(&stat.f_fstypename), text(&stat.f_mntonname));
+    #[cfg(not(target_os = "macos"))]
+    let mounted = {
+        let _ = (&stat, &text);
+        String::new()
+    };
+    Some((dev, mounted))
+}
+
+/// Whether the volume `destination` is on really exchanges two names
+/// atomically, proven by doing it: two one-byte staging files are exchanged
+/// and each must come back under the other's name. The call's own answer is not
+/// proof. One filesystem driver answers it with success and renames instead,
+/// which destroys whatever was at the destination (measured on a FAT32
+/// volume). A volume proven once is not probed again while it stays mounted.
+/// An error is the staging files' own (a folder that cannot be written).
+pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    static PROVEN: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+    let simulated = hooks.no_exchange || hooks.exchange_renames;
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let volume = volume_of(if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    });
+    if !simulated
+        && let Some(volume) = &volume
+        && PROVEN.lock().unwrap().contains(volume)
+    {
+        return Ok(true);
+    }
+    // Told apart by a byte of content each: an empty file has no stable
+    // inode number on FAT-family volumes.
+    let stage = |text: &[u8]| -> Result<TempFile, ProjectIoError> {
+        use std::io::Write;
+        let (temp, mut file) = TempFile::create(destination)?;
+        file.write_all(text).map_err(|e| io_err(&temp.path, e))?;
+        Ok(temp)
+    };
+    let (a, b) = (stage(b"a")?, stage(b"b")?);
+    let holds = |path: &Path, text: &[u8]| fs::read(path).is_ok_and(|read| read == text);
+    let works =
+        swap_files(&a.path, &b.path, hooks)? && holds(&a.path, b"b") && holds(&b.path, b"a");
+    if works
+        && !simulated
+        && let Some(volume) = volume
+    {
+        PROVEN.lock().unwrap().push(volume);
+    }
+    Ok(works)
+}
+
 /// `installFile`: exclusive rename where supported. `Ok(false)` to fall back.
-fn install_exclusive(temp: &Path, destination: &Path) -> Result<bool, ProjectIoError> {
+fn install_exclusive(
+    temp: &Path,
+    destination: &Path,
+    hooks: &PublishHooks,
+) -> Result<bool, ProjectIoError> {
+    if hooks.no_exclusive {
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
         match sys::renamex(temp, destination, sys::RENAME_EXCL) {
@@ -429,6 +767,78 @@ fn install_exclusive(temp: &Path, destination: &Path) -> Result<bool, ProjectIoE
     }
 }
 
+/// The last way to create a new file, for a volume with neither an exclusive
+/// rename nor hard links (exFAT), which has no atomic way to give a finished
+/// file a name nothing holds yet: the name is created exclusively (never
+/// over a file that is there), the staged bytes are copied into it and
+/// synced, and what the name then holds is read back and must be that
+/// content. A crash mid-copy leaves an incomplete file under a name that
+/// held nothing before; the work is still open or in its journal.
+fn create_exclusive(
+    staged: &Path,
+    destination: &Path,
+    new_hash: &str,
+) -> Result<(), ProjectIoError> {
+    let mut source = File::open(staged).map_err(|e| io_err(staged, e))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = source
+            .metadata()
+            .map_err(|e| io_err(staged, e))?
+            .permissions()
+            .mode();
+        options.mode(mode & 0o777);
+    }
+    let mut out = match options.open(destination) {
+        Ok(out) => out,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ProjectIoError::DestinationExists(
+                destination.display().to_string(),
+            ));
+        }
+        Err(e) => return Err(io_err(destination, e)),
+    };
+    // Its identity is read once it has bytes: on FAT-family volumes an empty
+    // file has no stable inode number yet.
+    let written = io::copy(&mut source, &mut out)
+        .and_then(|_| sync_file(&out))
+        .and_then(|()| out.metadata())
+        .map(|m| stat_of(&m))
+        .map_err(|e| io_err(destination, e));
+    let verified = written.as_ref().map_err(|_| ()).and_then(|ours| {
+        let file = File::open(destination).map_err(|_| ())?;
+        let same = file
+            .metadata()
+            .is_ok_and(|now| stat_of(&now).same_identity(ours));
+        let hash = hash_reader(&file, destination).map_err(|_| ())?;
+        (same && hex(&hash.finalize()) == new_hash)
+            .then_some(())
+            .ok_or(())
+    });
+    if verified.is_ok() {
+        return Ok(());
+    }
+    // Our own incomplete file, under a name that held nothing before: gone
+    // again unless the name already holds something else.
+    let ours = out.metadata().map(|m| stat_of(&m));
+    if let Ok(ours) = ours
+        && lstat_file(destination)
+            .ok()
+            .flatten()
+            .is_some_and(|now| now.same_identity(&ours))
+    {
+        let _ = fs::remove_file(destination);
+    }
+    Err(written.err().unwrap_or_else(|| {
+        ProjectIoError::Invalid(
+            "The new project file could not be verified after writing it.".into(),
+        )
+    }))
+}
+
 /// How the destination may be written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Publish {
@@ -440,39 +850,108 @@ pub enum Publish {
     Replace(FileVersion),
 }
 
-/// Renames the staged file to `<temp>.conflict.pmv` so neither version is
-/// lost, and returns the error naming it (`preserveConflict`).
-fn preserve_conflict(temp: TempFile, destination: &Path, message: &str) -> ProjectIoError {
-    let mut recovery = temp.path.clone().into_os_string();
-    recovery.push(".conflict.pmv");
-    let recovery = PathBuf::from(recovery);
-    let kept = temp.keep();
-    match fs::rename(&kept, &recovery) {
-        Ok(()) => {
-            let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
-            ProjectIoError::Conflict {
-                message: message.to_owned(),
-                recovery_path: recovery,
-            }
-        }
-        Err(_) => ProjectIoError::Conflict {
-            message: format!("{message} Recovery finalization failed."),
-            recovery_path: kept,
-        },
+/// `2026-11-12 14.03.22`, local time (a file name the person reads).
+fn local_stamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[cfg(unix)]
+    {
+        let seconds = now as libc::time_t;
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+        // SAFETY: a valid time and output storage; zeroed is a valid `tm`
+        // should the call fail.
+        let tm = unsafe {
+            libc::localtime_r(&seconds, tm.as_mut_ptr());
+            tm.assume_init()
+        };
+        format!(
+            "{:04}-{:02}-{:02} {:02}.{:02}.{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
     }
+    #[cfg(not(unix))]
+    backup_stamp(now as i64 * 1000)
+}
+
+/// Keeps the file an exchange displaced when it is not the version the save
+/// was allowed to replace: renamed, never over anything, to
+/// `<name> (other version <date time>).<ext>` beside the project, where the
+/// person finds it. Where that cannot be done it keeps a hidden name no
+/// sweep removes (`<staging name>.conflict.pmv`). Returns where it is.
+fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> PathBuf {
+    let held = temp.keep();
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let stem = destination
+        .file_stem()
+        .unwrap_or("project".as_ref())
+        .to_string_lossy();
+    let stamp = local_stamp();
+    for n in 1..=50 {
+        let mut name = format!("{stem} (other version {stamp}");
+        if n > 1 {
+            name.push_str(&format!(" {n}"));
+        }
+        name.push(')');
+        if let Some(extension) = destination.extension() {
+            name.push('.');
+            name.push_str(&extension.to_string_lossy());
+        }
+        let to = dir.join(name);
+        match install_exclusive(&held, &to, hooks) {
+            Ok(true) => return to,
+            Err(ProjectIoError::DestinationExists(_)) => continue,
+            _ => break,
+        }
+    }
+    let mut hidden = held.clone().into_os_string();
+    hidden.push(".conflict.pmv");
+    let hidden = PathBuf::from(hidden);
+    match fs::rename(&held, &hidden) {
+        Ok(()) => hidden,
+        Err(_) => held,
+    }
+}
+
+/// What a publication left on disk besides the published file.
+#[derive(Debug, Default)]
+pub(crate) struct Published {
+    /// The exchange found another version at the destination (it arrived
+    /// after the last check, or cannot be read). Ours is published; that
+    /// version is kept here, beside it.
+    pub displaced: Option<PathBuf>,
 }
 
 /// `publishFile`: atomically publishes `temp` (already flushed) at
 /// `destination`, whose content hash will be `new_hash`. On `Err` the
 /// destination holds what it held before, except for
 /// [`ProjectIoError::Finalize`] (our file is in place but the directory sync
-/// failed) and [`ProjectIoError::Conflict`] (both versions kept).
+/// failed) and [`ProjectIoError::Conflict`] (something else replaced our
+/// file right after it was published; both other versions are kept).
+///
+/// An existing file is replaced only by the atomic exchange, which takes
+/// whatever is at the path at that instant and hands it back to be judged.
+/// Where the volume has none (see [`exchanges`]), nothing is replaced
+/// ([`ProjectIoError::NoSafeReplace`]): checking the file and then renaming
+/// over it would destroy a version that arrived in between, unread.
+///
+/// The exchange is never undone. When the file it hands back is not the
+/// version this save could replace, that file is kept beside the project
+/// ([`Published::displaced`]) and ours stays published: no call puts a file
+/// back only if the path still holds ours, so a put-back that lost that race
+/// would displace a third version, unread, from the place it arrived at.
 pub(crate) fn publish(
     temp: TempFile,
     destination: &Path,
     mode: &Publish,
     new_hash: &str,
-) -> Result<(), ProjectIoError> {
+    hooks: &PublishHooks,
+) -> Result<Published, ProjectIoError> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let expected = match mode {
         Publish::CreateNew => None,
@@ -480,79 +959,83 @@ pub(crate) fn publish(
     };
     check_version(destination, expected, false)?;
     let incoming = lstat_file(&temp.path)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+    let mut published = Published::default();
     match expected {
         Some(expected) => {
-            if swap_files(&temp.path, destination)? {
-                // `temp.path` now names the displaced file. Verify it is the
-                // version we were allowed to replace.
-                let displaced = FileVersion::read(&temp.path).ok().flatten();
-                let ok = displaced.as_ref().is_some_and(|d| {
+            if !exchanges(destination, hooks)? {
+                return Err(ProjectIoError::NoSafeReplace);
+            }
+            if let Some(hook) = &hooks.before_exchange {
+                hook(destination);
+            }
+            if !swap_files(&temp.path, destination, hooks)? {
+                return Err(ProjectIoError::NoSafeReplace);
+            }
+            if let Some(hook) = &hooks.after_exchange {
+                hook(destination);
+            }
+            // `temp.path` now names the displaced file: the version we were
+            // allowed to replace (removed when `temp` drops), or one to keep.
+            let replaced = FileVersion::read(&temp.path)
+                .ok()
+                .flatten()
+                .is_some_and(|d| {
                     d.hash == expected.hash
                         && d.stat.same_identity(&expected.stat)
                         && d.stat.same_permissions(&expected.stat)
                 });
-                if !ok {
-                    if displaced.is_none() {
-                        return Err(preserve_conflict(
-                            temp,
-                            destination,
-                            "Could not verify the displaced project.",
-                        ));
-                    }
-                    // Only roll back our own published bytes.
-                    let current = FileVersion::read(destination).ok().flatten();
-                    let ours = current
-                        .as_ref()
-                        .is_some_and(|c| c.hash == new_hash && c.stat.same_identity(&incoming));
-                    if ours && swap_files(&temp.path, destination).unwrap_or(false) {
-                        let rolled = FileVersion::read(&temp.path).ok().flatten();
-                        if rolled
-                            .as_ref()
-                            .is_none_or(|r| r.hash != new_hash || !r.stat.same_identity(&incoming))
-                        {
-                            return Err(preserve_conflict(
-                                temp,
-                                destination,
-                                "The project changed during saving. The original was restored.",
-                            ));
-                        }
-                        let _ = sync_directory(dir);
-                        return Err(ProjectIoError::ChangedOnDisk);
-                    }
-                    return Err(preserve_conflict(
-                        temp,
-                        destination,
-                        "The project changed during saving.",
-                    ));
-                }
-                // Published. `temp` (the displaced old version) is removed on
-                // drop.
+            if replaced {
                 drop(temp);
             } else {
-                check_version(destination, Some(expected), true)?;
-                fs::rename(&temp.path, destination).map_err(|e| io_err(destination, e))?;
-                let _ = temp.keep();
+                published.displaced = Some(keep_displaced(temp, destination, hooks));
+            }
+            // The path must still hold the file just published.
+            if !lstat_file(destination)
+                .ok()
+                .flatten()
+                .is_some_and(|now| now.same_identity(&incoming))
+            {
+                let _ = sync_directory(dir);
+                return Err(match published.displaced {
+                    Some(recovery_path) => ProjectIoError::Conflict {
+                        message: "The project file was replaced by something else while it was \
+                                  being saved."
+                            .into(),
+                        recovery_path,
+                    },
+                    None => ProjectIoError::ChangedOnDisk,
+                });
             }
         }
         None => {
-            if install_exclusive(&temp.path, destination)? {
+            if install_exclusive(&temp.path, destination, hooks)? {
                 let _ = temp.keep();
             } else {
-                match fs::hard_link(&temp.path, destination) {
+                let linked = if hooks.no_exclusive {
+                    Err(io::Error::from_raw_os_error(45))
+                } else {
+                    fs::hard_link(&temp.path, destination)
+                };
+                match linked {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Err(ProjectIoError::DestinationExists(
                             destination.display().to_string(),
                         ));
                     }
-                    Err(e) => return Err(io_err(destination, e)),
+                    // No links either (or none allowed): exclusive creation
+                    // replaces nothing whatever the reason was, and reports
+                    // its own error if the folder cannot be written at all.
+                    Err(_) => create_exclusive(&temp.path, destination, new_hash)?,
                 }
-                // The link keeps the data; `temp` unlinks its name on drop.
+                // The link or the copy keeps the data; `temp` unlinks its
+                // name on drop.
                 drop(temp);
             }
         }
     }
-    sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))
+    sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
+    Ok(published)
 }
 
 // ── version backups (`ProjectFiles.backup` / `retain`) ─────────────────────
@@ -1284,6 +1767,39 @@ mod tests {
         assert_eq!(key("notes.pmv"), None);
         // Collisions sort numerically: `-10` is newer than `-9`.
         assert!(key(&format!("{stamp}.pmv-10")) > key(&format!("{stamp}.pmv-9")));
+    }
+
+    #[test]
+    fn a_document_place_is_not_a_bundle_a_hidden_folder_or_a_system_folder() {
+        for place in [
+            "/Volumes/Work/job/cut.pmv",
+            "/Users/someone/Movies/2026.11 final v1.2/cut.pmv",
+            "/Users/someone/Dropbox/job/cut.pmv",
+            "/private/tmp/job/cut.pmv",
+        ] {
+            assert!(is_document_place(Path::new(place)), "{place}");
+        }
+        for place in [
+            "/Users/someone/.Trash/cut.pmv",
+            "/Volumes/Work/.Trashes/501/cut.pmv",
+            "/Users/someone/Tools/Thing.app/Contents/Resources/cut.pmv",
+            "/Users/someone/Pictures/Photos Library.photoslibrary/originals/cut.pmv",
+            "/Users/someone/work/.git/cut.pmv",
+            "/Applications/cut.pmv",
+            "/System/Library/cut.pmv",
+        ] {
+            assert!(!is_document_place(Path::new(place)), "{place}");
+        }
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let library = home.join("Library");
+            assert!(!is_document_place(&library.join("Caches/x/cut.pmv")));
+            assert!(is_document_place(
+                &library.join("Mobile Documents/com~apple~CloudDocs/job/cut.pmv")
+            ));
+            assert!(is_document_place(
+                &library.join("CloudStorage/Provider-Name/job/cut.pmv")
+            ));
+        }
     }
 
     #[test]

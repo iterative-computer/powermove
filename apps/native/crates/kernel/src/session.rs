@@ -43,6 +43,10 @@ pub enum ShellCall {
         ticket: String,
         decision: RecoveryDecision,
     },
+    /// Library copies holding work for the file this session has open in
+    /// place that the person has not been told about yet (see
+    /// `Kernel::unoffered_copies`). Replies `Copies`.
+    CopiesOf(SessionHandle),
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
@@ -134,6 +138,9 @@ pub(crate) struct Prepared {
     base: String,
     recovered: Recovery,
     recovery_file: Option<project_io::ProjectFile>,
+    /// `recovered` is another file entry's work (its id), offered to this
+    /// file: see [`RecoveryResult::FromOtherFile`].
+    from_other: Option<String>,
 }
 /// Sizes and modification times of the files an open read.
 type Freshness = Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>;
@@ -218,9 +225,25 @@ impl SessionSave {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryResult {
     None,
-    Recovered { truncated: bool },
-    OfferCopy { project: String, truncated: bool },
-    Unrecoverable { reason: String },
+    Recovered {
+        truncated: bool,
+    },
+    OfferCopy {
+        project: String,
+        truncated: bool,
+    },
+    Unrecoverable {
+        reason: String,
+    },
+    /// Unsaved work left for another file (`name`, no longer where it was)
+    /// whose saved content is exactly this file's. It may be this file
+    /// (moved across volumes, restored from a backup) or a duplicate of it:
+    /// the person decides. Until they choose Recover nothing of that work
+    /// is touched, and `Discard` leaves it where it is.
+    FromOtherFile {
+        name: String,
+        truncated: bool,
+    },
 }
 #[derive(Clone, Debug)]
 pub enum ShellReply {
@@ -242,12 +265,17 @@ pub enum ShellReply {
     Saved {
         session: SessionHandle,
         recovery_copy: Option<String>,
+        /// Another version of the file arrived while it was being saved:
+        /// the save is published and that version is kept beside it here.
+        displaced: Option<PathBuf>,
     },
     Closed {
         recovery_copy: Option<String>,
     },
     Durable,
     Recent(Vec<Value>),
+    /// Library rows (`id`, `name`, `at`) of copies of a file.
+    Copies(Vec<Value>),
     Changed(bool),
 }
 pub(crate) enum Destination {
@@ -393,16 +421,22 @@ impl Kernel {
                 source,
                 electron_profile,
             } => self.open_session_mode(id, source, electron_profile, RecoveryMode::Ask),
+            ShellCall::CopiesOf(handle) => {
+                self.check_session(&handle)?;
+                Ok(ShellReply::Copies(self.unoffered_copies(&handle.project)))
+            }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
                     .pending_recovery
                     .remove(&ticket)
                     .ok_or_else(|| failure("Recovery choice expired; prepare the open again"))?;
                 if let Some(prepared) = pending.prepared.take() {
-                    let journals = self.project_dir(match &prepared.destination {
-                        Destination::Library(slot) => slot,
-                        _ => &prepared.id,
-                    });
+                    let journals =
+                        self.project_dir(match (&prepared.from_other, &prepared.destination) {
+                            (Some(other), _) => other,
+                            (None, Destination::Library(slot)) => slot,
+                            _ => &prepared.id,
+                        });
                     let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
                     if freshness(prepared.inputs(journals, library.as_deref())) == pending.fresh {
                         return self.settle_open(*prepared, Some(decision));
@@ -713,12 +747,15 @@ impl Kernel {
         replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
+        if path.is_none() {
+            self.follow_file(&session.project);
+        }
         let mut lock = None;
         if let Some(path) = &path {
             if locks::open_decision(path, None) != OpenDecision::Writable {
                 return Err(failure("Choose a writable local destination"));
             }
-            lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
+            lock = Some(self.lock_project(path).map_err(failure)?);
         } else if !matches!(
             self.sessions[&session.project].destination,
             Destination::File(_)
@@ -786,6 +823,7 @@ impl Kernel {
             .take()
             .unwrap();
         let receipt = result.map_err(failure)?;
+        let displaced = receipt.displaced.clone();
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
         self.refuse_faulted(&session.project)?;
@@ -816,6 +854,7 @@ impl Kernel {
         Ok(ShellReply::Saved {
             session,
             recovery_copy: None,
+            displaced,
         })
     }
     fn duplicate_slot(
@@ -926,13 +965,22 @@ impl Kernel {
             }
             // A file's entry has no body: the file is the project.
             let file = file.filter(|path| path.is_file());
-            let p = self
+            // From here on the project is one no window has open: its
+            // journal is folded into its slot if that works. Anything that
+            // does not (an unreadable slot or journal, a recovery that needs
+            // the person's decision, a close that fails) leaves the journal
+            // where it is for the next open to offer. It never fails the
+            // quit: a quit refused for a project that is not even open could
+            // be refused forever.
+            let Ok(p) = self
                 .library
                 .as_ref()
                 .ok_or_else(|| failure("Attach a native library before compaction"))?
                 .store()
                 .load(&id)
-                .map_err(failure)?;
+            else {
+                continue;
+            };
             let source = match (p, file) {
                 (_, Some(path)) => SessionSource::File(path),
                 (Some(p), None) => match p
@@ -953,20 +1001,45 @@ impl Kernel {
                     // Untitled/crashed work without a slot: materialize a recovery copy.
                     match self.recover(&id, None, None) {
                         Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
-                            recovery_copies.push(self.recovery_copy(r, None)?);
-                            projects += 1;
+                            if let Ok(copy) = self.recovery_copy(r, None) {
+                                recovery_copies.push(copy);
+                                projects += 1;
+                            }
                         }
-                        Recovery::Nothing => {}
-                        Recovery::Unrecoverable { reason, .. } => return Err(failure(reason)),
+                        Recovery::Nothing | Recovery::Unrecoverable { .. } => {}
                     }
                     continue;
                 }
             };
-            let ShellReply::Opened {
+            // Asked first, with nobody here to answer. Only a journal that
+            // replays whole is folded in. One this build cannot replay, or
+            // whose end is missing, is the person's to decide at the next
+            // open: the project is not opened at all, so nothing saves its
+            // older slot and nothing removes the journal as saved.
+            let opened =
+                match self.open_session_mode(id.clone(), source.clone(), None, RecoveryMode::Ask) {
+                    Ok(ShellReply::RecoveryRequired { ticket, recovery }) => {
+                        self.pending_recovery.remove(&ticket);
+                        if !matches!(
+                            recovery,
+                            RecoveryResult::Recovered { truncated: false }
+                                | RecoveryResult::OfferCopy {
+                                    truncated: false,
+                                    ..
+                                }
+                        ) {
+                            continue;
+                        }
+                        self.open_session(id, source, None)
+                    }
+                    // Nothing to recover: it is open.
+                    opened => opened,
+                };
+            let Ok(ShellReply::Opened {
                 session, recovery, ..
-            } = self.open_session(id, source, None)?
+            }) = opened
             else {
-                unreachable!()
+                continue;
             };
             if let RecoveryResult::OfferCopy { project, .. } = recovery {
                 recovery_copies.push(project);
@@ -976,11 +1049,13 @@ impl Kernel {
             {
                 recovery_copies.push(slot.clone());
             }
-            let saved = self.shell(ShellCall::Close(session))?;
-            if let ShellReply::Closed { recovery_copy } = saved {
+            // A close that fails leaves the session to the library's
+            // release, which defers it (journal kept).
+            if let Ok(ShellReply::Closed { recovery_copy }) = self.shell(ShellCall::Close(session))
+            {
                 recovery_copies.extend(recovery_copy);
+                projects += 1;
             }
-            projects += 1;
         }
         Ok(ShellReply::Compacted {
             projects,
@@ -1045,6 +1120,8 @@ impl Kernel {
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
         let mut rejected_history = None;
+        // A file entry whose unsaved work may be this file's (id, file name).
+        let mut maybe_left: Option<(String, String)> = None;
         let (source, destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
@@ -1169,7 +1246,7 @@ impl Kernel {
                         } else {
                             decision = locks::open_decision(path, electron_profile.as_deref());
                             if decision == OpenDecision::Writable {
-                                match FileLock::acquire(&locks::project_lock_path(path)) {
+                                match self.lock_project(path) {
                                     Ok(l) => {
                                         lock = Some(l);
                                         crate::project_io::remove_abandoned_temps(path);
@@ -1214,7 +1291,7 @@ impl Kernel {
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
                 if decision == OpenDecision::Writable {
-                    match FileLock::acquire(&locks::project_lock_path(&path)) {
+                    match self.lock_project(&path) {
                         Ok(l) => {
                             lock = Some(l);
                             // Staging files a save cut short by Quit Now left.
@@ -1231,8 +1308,40 @@ impl Kernel {
                         }
                     }
                 }
+                // The copy made the last time this file could not open in
+                // place holds the person's work since: the same file opens
+                // that copy again, never a second one. A different file at
+                // that name (replaced, or a link pointed elsewhere) is not
+                // that copy's file: it gets a copy of its own below.
+                if decision != OpenDecision::Writable
+                    && let Some(copy) = self.copy_of(&path)
+                {
+                    return self.reopen_copy(id, copy, decision, mode);
+                }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+                // The copy's entry names the file it stands in for (where it
+                // was and which file it was), and why, so that file finds it
+                // again and its window can say what it is.
+                if let (OpenDecision::AsCopy(reason), Value::Object(m)) = (&decision, &mut meta) {
+                    m.insert(
+                        "copyOf",
+                        copy_record(&path, reason, opened.file.version.as_deref()),
+                    );
+                }
+                // Recovery follows the file, not its path: unsaved work left
+                // in the journal of the name or place it had before comes
+                // along, with where the person left off in it. Work that
+                // only may be this file's is not taken: it is offered.
+                if decision == OpenDecision::Writable
+                    && let Some(version) = &opened.file.version
+                {
+                    match self.left_behind(&id, &path, version) {
+                        Some(Left::Mine(left)) => meta = left,
+                        Some(Left::Maybe { entry, name }) => maybe_left = Some((entry, name)),
+                        None => {}
+                    }
+                }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
                 // is still the one they left; a file changed elsewhere brings its own.
@@ -1299,6 +1408,29 @@ impl Kernel {
                 recovered = Recovery::Nothing;
             }
         }
+        // Work that may be this file's is offered only where someone can be
+        // asked, and only if it replays cleanly onto exactly this file.
+        let mut from_other = None;
+        if !journaled
+            && !matches!(mode, RecoveryMode::Legacy)
+            && let Some((entry, name)) = maybe_left
+        {
+            let document = source_document(&source);
+            let saved = saved_state(&source);
+            let found = self.recover_from(
+                &entry,
+                Some(&base),
+                Some(crate::journal::Base {
+                    document: &document,
+                    history: saved.as_ref().map(|(h, _)| h),
+                    workspace: saved.as_ref().map(|(_, w)| w),
+                }),
+            );
+            if matches!(found, Recovery::Recovered(_)) {
+                recovered = found;
+                from_other = Some((entry, name));
+            }
+        }
         let file_stamp = recovery_file
             .as_ref()
             .and_then(|f| f.version.as_ref())
@@ -1320,22 +1452,29 @@ impl Kernel {
             }
         );
         if matches!(mode, RecoveryMode::Ask) && !matches!(recovered, Recovery::Nothing) {
-            let recovery = match &recovered {
-                Recovery::Recovered(r) => RecoveryResult::Recovered {
+            let recovery = match (&recovered, &from_other) {
+                (Recovery::Recovered(r), Some((_, name))) => RecoveryResult::FromOtherFile {
+                    name: name.clone(),
                     truncated: r.truncated,
                 },
-                Recovery::Copy { recovered: r, .. } => RecoveryResult::OfferCopy {
-                    project: id.clone(),
-                    truncated: r.truncated,
+                _ => match &recovered {
+                    Recovery::Recovered(r) => RecoveryResult::Recovered {
+                        truncated: r.truncated,
+                    },
+                    Recovery::Copy { recovered: r, .. } => RecoveryResult::OfferCopy {
+                        project: id.clone(),
+                        truncated: r.truncated,
+                    },
+                    Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
+                        reason: reason.clone(),
+                    },
+                    _ => unreachable!(),
                 },
-                Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
-                    reason: reason.clone(),
-                },
-                _ => unreachable!(),
             };
             self.pending_recovery.retain(|_, p| p.id != id);
             let ticket = crate::new_id("recovery-choice");
-            let journals = self.project_dir(recovery_id);
+            let journals =
+                self.project_dir(from_other.as_ref().map_or(recovery_id, |(entry, _)| entry));
             let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
             let prepared = Prepared {
                 id: id.clone(),
@@ -1348,6 +1487,7 @@ impl Kernel {
                 base,
                 recovered,
                 recovery_file,
+                from_other: from_other.map(|(entry, _)| entry),
             };
             let fresh = freshness(prepared.inputs(journals, library.as_deref()));
             self.pending_recovery.insert(
@@ -1384,6 +1524,7 @@ impl Kernel {
                 base,
                 recovered,
                 recovery_file,
+                from_other: from_other.map(|(entry, _)| entry),
             },
             choice,
         )
@@ -1405,6 +1546,7 @@ impl Kernel {
             base,
             recovered,
             recovery_file,
+            from_other,
         } = prepared;
         let setting_aside = matches!(
             choice,
@@ -1418,7 +1560,9 @@ impl Kernel {
                 "Recovery could not be replayed; files are retained",
             ));
         }
-        if setting_aside {
+        // Work offered from another file and declined is left exactly where
+        // it is: it may not be this file's to set aside.
+        if setting_aside && from_other.is_none() {
             // Explicitly rejected sessions remain archived. No save of recovered
             // content, and no unrelated journal session is retired.
             let paths = match &recovered {
@@ -1540,6 +1684,13 @@ impl Kernel {
                 _ => false,
             };
         let mut info = self.open_known(&id, source, known)?;
+        // What the first save would work out about a long undo history on
+        // this thread is worked out beside it instead, from now.
+        if let Some(p) = self.project(&id) {
+            let _ = std::thread::Builder::new()
+                .name("pm-save-warmup".into())
+                .spawn(p.store().save_warmup());
+        }
         let slot_current = slot_current
             && !info.history_rejected
             && !self.project(&id).unwrap().store().upgraded_on_open();
@@ -1673,6 +1824,9 @@ impl Kernel {
     ) -> Result<ShellReply, KernelFailure> {
         self.ensure_idle(handle)?;
         let id = &handle.project;
+        if save_as.is_none() {
+            self.follow_file(id);
+        }
         let mut new_lock = None;
         if let Some((path, _)) = &save_as {
             let decision = locks::open_decision(path, None);
@@ -1681,9 +1835,10 @@ impl Kernel {
                     "Choose a writable local destination: {decision:?}"
                 )));
             }
-            new_lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
+            new_lock = Some(self.lock_project(path).map_err(failure)?);
         }
         let mut recovery_copy = None;
+        let mut displaced = None;
         let file_path = save_as.as_ref().map(|(path, _)| path.clone()).or_else(|| {
             match &self.sessions[id].destination {
                 Destination::File(path) => Some(path.clone()),
@@ -1708,9 +1863,10 @@ impl Kernel {
                 self.mark_save_point(id, &plan.document, plan.revision)?;
             }
             let p = self.project_mut(id).unwrap();
-            let result = plan
-                .and_then(|plan| plan.run())
-                .and_then(|receipt| p.store_mut().finish_save(receipt));
+            let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
+                displaced = receipt.displaced.clone();
+                p.store_mut().finish_save(receipt)
+            });
             if result.is_ok() {
                 self.save_published(id);
             }
@@ -1742,6 +1898,7 @@ impl Kernel {
         Ok(ShellReply::Saved {
             session: handle.clone(),
             recovery_copy,
+            displaced,
         })
     }
     fn save_library_slot(
@@ -1879,7 +2036,338 @@ impl Kernel {
     }
 }
 
+/// Unsaved work a file entry left behind, as it relates to a file being
+/// opened ([`Kernel::left_behind`]).
+enum Left {
+    /// The entry is this file: its journal was moved to it; its metadata.
+    Mine(Value),
+    /// The entry may be this file (its id, and the file name it had).
+    Maybe { entry: String, name: String },
+}
+/// What a copy's entry records about the file it stands in for (`copyOf`):
+/// where it was, why it opened as a copy, and which file it was (`source`:
+/// its content hash, and the stat that says without reading it that it is
+/// still that file).
+fn copy_record(
+    path: &std::path::Path,
+    reason: &CopyReason,
+    source: Option<&crate::project_io::FileVersion>,
+) -> Value {
+    let mut m = Map::new();
+    m.insert("path", Value::from(path.to_string_lossy().into_owned()));
+    m.insert("reason", Value::from(format!("{reason:?}")));
+    if let Some(version) = source {
+        let mut s = Map::new();
+        // Text: these do not fit a JSON number.
+        s.insert("dev", Value::from(version.stat.dev.to_string()));
+        s.insert("ino", Value::from(version.stat.ino.to_string()));
+        s.insert("size", Value::from(version.stat.size.to_string()));
+        s.insert("mtime", Value::from(version.stat.mtime_ns.to_string()));
+        s.insert("hash", Value::from(version.hash.clone()));
+        m.insert("source", Value::Object(s));
+    }
+    Value::Object(m)
+}
+/// Whether the file at `path` now is the one a copy was made from: the same
+/// file untouched (device, inode, size and modification time), or a file
+/// with exactly its content (a sync client rewrites a file under a new
+/// inode). A copy that did not record its source is never assumed to match.
+fn is_copy_source(record: &Value, path: &std::path::Path) -> bool {
+    let Some(source) = record.get("source") else {
+        return false;
+    };
+    let text = |key: &str| source.get(key).and_then(Value::as_str);
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let now = crate::project_io::durable_stat_of(&meta);
+    let untouched = text("dev") == Some(&now.dev.to_string())
+        && text("ino") == Some(&now.ino.to_string())
+        && text("size") == Some(&now.size.to_string())
+        && text("mtime") == Some(&now.mtime_ns.to_string());
+    untouched
+        || text("hash")
+            .is_some_and(|hash| crate::project_io::hash_file(path).is_ok_and(|now| now == hash))
+}
+
 impl Kernel {
+    /// The library copy made of the file now at `path` when it could not be
+    /// opened in place, if the library still has it (the newest, were there
+    /// several). A copy made of another file that had this name is not it.
+    fn copy_of(&self, path: &std::path::Path) -> Option<String> {
+        let store = self.library.as_ref()?.store();
+        let same = |recorded: &str| {
+            let recorded = std::path::Path::new(recorded);
+            recorded == path
+                || recorded
+                    .canonicalize()
+                    .is_ok_and(|r| path.canonicalize().is_ok_and(|p| p == r))
+        };
+        let mut rows = store.projects().ok()?;
+        rows.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
+        rows.into_iter().map(|row| row.id).find(|id| {
+            store
+                .read(&format!("projectMeta.{id}"))
+                .ok()
+                .flatten()
+                .and_then(|meta| {
+                    let record = meta.get("copyOf")?;
+                    Some(same(record.get("path")?.as_str()?) && is_copy_source(record, path))
+                })
+                .unwrap_or(false)
+        })
+    }
+    /// Copies in the library that hold work for the file session `id` has
+    /// open in place: copies recorded for the file (`copyOf`), and copies an
+    /// earlier build made of every file in a syncing folder without
+    /// recording it, known by their name ("<project name> — Native"). The
+    /// copies are never touched. Each is reported once per file: the file's
+    /// entry remembers the ones reported (`copiesOffered`).
+    ///
+    /// For a session that is itself a copy of a file, the other copies
+    /// recorded for that file's name: they were made of another file that
+    /// had the name (it was replaced, or a link was pointed elsewhere), so
+    /// this open did not take them for its own. They are reported the same
+    /// way, marked `different`.
+    fn unoffered_copies(&mut self, id: &str) -> Vec<Value> {
+        let Some(session) = self.sessions.get(id) else {
+            return Vec::new();
+        };
+        let (path, own_copy) = match &session.destination {
+            Destination::File(path) => (path.clone(), None),
+            Destination::Library(slot) => {
+                let Some(of) = session
+                    .meta
+                    .get("copyOf")
+                    .and_then(|c| c.get("path"))
+                    .and_then(Value::as_str)
+                else {
+                    return Vec::new();
+                };
+                (PathBuf::from(of), Some(slot.clone()))
+            }
+        };
+        let Some(store) = self.library.as_ref().map(|w| w.store()) else {
+            return Vec::new();
+        };
+        let name = self
+            .project(id)
+            .and_then(|p| p.store().root())
+            .and_then(|root| root.get("name"))
+            .map(|name| name.to_value())
+            .and_then(|name| name.as_str().map(|n| format!("{n} — Native")));
+        let offered: Vec<String> = self
+            .state
+            .ui
+            .get(id)
+            .and_then(|ui| ui.session.get("copiesOffered"))
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut found = Vec::new();
+        for row in store.projects().unwrap_or_default() {
+            if row.id == id || own_copy.as_ref() == Some(&row.id) || offered.contains(&row.id) {
+                continue;
+            }
+            let meta = store
+                .read(&format!("projectMeta.{}", row.id))
+                .ok()
+                .flatten();
+            let recorded = meta
+                .as_ref()
+                .and_then(|m| m.get("copyOf")?.get("path")?.as_str())
+                .map(std::path::Path::new);
+            let stands_for_it = match recorded {
+                Some(recorded) => {
+                    recorded == path
+                        || recorded
+                            .canonicalize()
+                            .is_ok_and(|r| path.canonicalize().is_ok_and(|p| p == r))
+                }
+                // An earlier build's copy: a `copy` slot with no file of
+                // its own, under the name copies are given.
+                None => {
+                    own_copy.is_none()
+                        && row.id.starts_with("copy")
+                        && meta.as_ref().is_none_or(|m| m.get("file").is_none())
+                        && name.as_deref() == Some(row.name.as_str())
+                }
+            };
+            if stands_for_it {
+                let mut m = Map::new();
+                m.insert("id", Value::from(row.id.clone()));
+                m.insert("name", Value::from(row.name.clone()));
+                if let Some(at) = row.at {
+                    m.insert("at", Value::from(at));
+                }
+                if let Some(file) = path.file_name() {
+                    m.insert("file", Value::from(file.to_string_lossy().into_owned()));
+                }
+                if own_copy.is_some() {
+                    m.insert("different", Value::from(true));
+                }
+                found.push(Value::Object(m));
+            }
+        }
+        if !found.is_empty() {
+            let ids = offered
+                .into_iter()
+                .map(Value::from)
+                .chain(found.iter().filter_map(|row| row.get("id").cloned()))
+                .collect();
+            if let Some(ui) = std::sync::Arc::make_mut(&mut self.state.ui).get_mut(id)
+                && let Value::Object(m) = &mut ui.session
+            {
+                m.insert("copiesOffered", Value::Array(ids));
+            }
+        }
+        found
+    }
+    /// `path` (the file `version`) is being opened under `id` and has no
+    /// journal of its own. A file entry of the library that left a journal
+    /// may be this file under the name or place it had before.
+    ///
+    /// It *is* this file when it names this path already (a save followed
+    /// the file here), or when it recorded this very file: the device and
+    /// inode it had when last opened or saved, which a rename or a move
+    /// within the volume keep and a copy never has, with exactly these
+    /// bytes. Then its journal becomes this file's and its metadata is
+    /// returned ([`Left::Mine`]).
+    ///
+    /// It only *may* be this file when it was saved with exactly these bytes
+    /// and its old path holds no file any more, but the identity does not
+    /// match or was never recorded (a duplicate, a copy restored from a
+    /// backup, a file moved to another volume). Equal bytes do not make two
+    /// files one: nothing is moved, and the entry is returned for the person
+    /// to decide ([`Left::Maybe`]).
+    fn left_behind(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        version: &project_io::FileVersion,
+    ) -> Option<Left> {
+        let store = self.library.as_ref()?.store();
+        let root = self.config_journal_root()?;
+        let to = root.join(id);
+        if !crate::journal::sessions(&to).is_empty() {
+            return None;
+        }
+        let mut maybe = None;
+        for row in store.projects().ok()? {
+            if row.id == id || self.sessions.contains_key(&row.id) {
+                continue;
+            }
+            let Some(meta) = store
+                .read(&format!("projectMeta.{}", row.id))
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let Some(file) = meta.get("file") else {
+                continue;
+            };
+            let from = root.join(&row.id);
+            if crate::journal::sessions(&from).is_empty() {
+                continue;
+            }
+            let text = |key: &str| file.get(key).and_then(Value::as_str);
+            let was = text("path").map(std::path::Path::new);
+            let same_bytes = text("savedHash") == Some(version.hash.as_str());
+            let same_file = same_bytes
+                && text("dev") == Some(&version.stat.dev.to_string())
+                && text("ino") == Some(&version.stat.ino.to_string());
+            if was == Some(path) || same_file {
+                // An empty folder left by an earlier open of this id is no journal.
+                let _ = std::fs::remove_dir(&to);
+                if std::fs::rename(&from, &to).is_ok() {
+                    return Some(Left::Mine(meta));
+                }
+            } else if maybe.is_none()
+                && same_bytes
+                && let Some(was) = was.filter(|was| !was.is_file())
+            {
+                let name = was
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| row.name.clone());
+                maybe = Some(Left::Maybe {
+                    entry: row.id.clone(),
+                    name,
+                });
+            }
+        }
+        maybe
+    }
+    /// The file session `id` saves to was renamed or moved while open: carry
+    /// on at the place the system says it is now (the same inode, its bytes
+    /// proven unchanged, never a Trash), under a lock taken there. A file
+    /// with no name any more is left to the save to report (Save As still
+    /// works from the descriptor the session holds).
+    fn follow_file(&mut self, id: &str) {
+        let Some(Destination::File(_)) = self.sessions.get(id).map(|s| &s.destination) else {
+            return;
+        };
+        let Some(version) = self
+            .project(id)
+            .and_then(|p| p.store().file().version.clone())
+        else {
+            return;
+        };
+        let Ok(Some(moved)) = version.moved() else {
+            return;
+        };
+        let Ok(lock) = self.lock_project(&moved.path) else {
+            return;
+        };
+        let path = moved.path.clone();
+        self.project_mut(id).unwrap().store_mut().file_moved(moved);
+        let session = self.sessions.get_mut(id).unwrap();
+        session.destination = Destination::File(path);
+        session.lock = Some(lock);
+    }
+    /// Opens the copy `copy` in place of the file it stands in for; the
+    /// reply still says the file opened as a copy, and why. The copy is this
+    /// library's own project: what kept the file from opening in place (the
+    /// original app running, a read-only folder) does not apply to it, or
+    /// every open would make a copy of the copy.
+    fn reopen_copy(
+        &mut self,
+        id: String,
+        copy: String,
+        decision: OpenDecision,
+        mode: RecoveryMode,
+    ) -> Result<ShellReply, KernelFailure> {
+        let profile = self
+            .library
+            .as_ref()
+            .ok_or_else(|| failure("Attach a native library first"))?
+            .store()
+            .dir()
+            .to_path_buf();
+        let source = SessionSource::Library {
+            profile,
+            project: copy,
+        };
+        Ok(match self.open_session_mode(id, source, None, mode)? {
+            ShellReply::Opened {
+                session,
+                recovery,
+                info,
+                ..
+            } => ShellReply::Opened {
+                session,
+                recovery,
+                decision,
+                info,
+            },
+            other => other,
+        })
+    }
     fn owns_library(&self, profile: &std::path::Path) -> bool {
         self.library.as_ref().is_some_and(|w| {
             w.store().dir().canonicalize().ok()
@@ -2062,6 +2550,10 @@ fn file_metadata(meta: Value, store: &crate::DocumentStore) -> Value {
     if let Some(version) = &store.file().version {
         file.insert("savedHash", Value::from(version.hash.clone()));
         file.insert("baselineHash", Value::from(version.hash.clone()));
+        // Which file this was (text: neither fits a JSON number). A rename
+        // keeps both; a copy of the file has neither.
+        file.insert("dev", Value::from(version.stat.dev.to_string()));
+        file.insert("ino", Value::from(version.stat.ino.to_string()));
     }
     m.insert("file", Value::Object(file));
     Value::Object(m)

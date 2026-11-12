@@ -155,6 +155,8 @@ pub struct CheckpointState {
 // ── background durability ──────────────────────────────────────────────────
 
 struct SyncTarget {
+    /// The project whose journal segment this is.
+    project: String,
     file: File,
     dirty: AtomicBool,
     syncing: Mutex<()>,
@@ -216,7 +218,23 @@ struct Shared {
     stop: AtomicBool,
     wake: Condvar,
     lock: Mutex<()>,
-    errors: Mutex<VecDeque<String>>,
+    /// Failures of the background threads: the project whose edits are not
+    /// durable, and why.
+    errors: Mutex<VecDeque<(String, String)>>,
+    /// Called after an error is queued, so its owner collects it now and
+    /// not at its next request.
+    on_error: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+impl Shared {
+    fn report(&self, project: &str, message: String) {
+        self.errors
+            .lock()
+            .expect("errors")
+            .push_back((project.to_owned(), message));
+        if let Some(notify) = &*self.on_error.lock().expect("on_error") {
+            notify();
+        }
+    }
 }
 
 /// The kernel's durability threads: one fsync loop, one checkpoint writer.
@@ -235,6 +253,7 @@ impl Durability {
             wake: Condvar::new(),
             lock: Mutex::new(()),
             errors: Mutex::new(VecDeque::new()),
+            on_error: Mutex::new(None),
         });
         let flusher = {
             let shared = shared.clone();
@@ -251,11 +270,7 @@ impl Durability {
                             shared.targets.lock().expect("targets").clone();
                         for t in &targets {
                             if let Err(e) = t.sync() {
-                                shared
-                                    .errors
-                                    .lock()
-                                    .expect("errors")
-                                    .push_back(e.to_string());
+                                shared.report(&t.project, e.to_string());
                             }
                         }
                         // Forget rotated-away files once synced.
@@ -308,10 +323,7 @@ impl Durability {
                                     Ok(bytes) => bytes,
                                     Err(e) => {
                                         shared
-                                            .errors
-                                            .lock()
-                                            .expect("errors")
-                                            .push_back(format!("checkpoint {segment}: {e}"));
+                                            .report(&project, format!("checkpoint {segment}: {e}"));
                                         continue;
                                     }
                                 };
@@ -346,8 +358,9 @@ impl Durability {
         &self.config
     }
 
-    fn register(&self, file: &File) -> io::Result<Arc<SyncTarget>> {
+    fn register(&self, file: &File, project: &str) -> io::Result<Arc<SyncTarget>> {
         let target = Arc::new(SyncTarget {
+            project: project.to_owned(),
             file: file.try_clone()?,
             dirty: AtomicBool::new(false),
             syncing: Mutex::new(()),
@@ -387,7 +400,8 @@ impl Durability {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(io::Error::other(errors.join("; ")))
+            let messages: Vec<String> = errors.into_iter().map(|(_, message)| message).collect();
+            Err(io::Error::other(messages.join("; ")))
         }
     }
 
@@ -396,9 +410,15 @@ impl Durability {
         JournalSync(self.shared.clone())
     }
 
-    /// Background errors since the last call (shown as a notice, never
-    /// silently dropped).
-    pub fn take_errors(&self) -> Vec<String> {
+    /// `notify` runs (on a background thread) whenever an error is queued
+    /// for [`Self::take_errors`].
+    pub fn on_error(&self, notify: impl Fn() + Send + Sync + 'static) {
+        *self.shared.on_error.lock().expect("on_error") = Some(Box::new(notify));
+    }
+
+    /// Background errors since the last call, each with the project whose
+    /// journal it concerns (shown as a notice, never silently dropped).
+    pub fn take_errors(&self) -> Vec<(String, String)> {
         self.shared
             .errors
             .lock()
@@ -894,7 +914,7 @@ fn open_segment(
     (&file).write_all(buf.as_bytes())?;
     full_sync(&file)?;
     sync_dir(dir)?;
-    let target = durability.register(&file)?;
+    let target = durability.register(&file, &project)?;
     Ok((file, target))
 }
 
@@ -1719,7 +1739,7 @@ mod durability_tests {
             flush_interval: Duration::from_secs(60),
             ..Default::default()
         });
-        let target = d.register(&file).unwrap();
+        let target = d.register(&file, "P").unwrap();
         for _ in 0..4 {
             (&file).write_all(b"synthetic\n").unwrap();
             let start = Instant::now();
@@ -1746,7 +1766,7 @@ mod durability_tests {
     #[test]
     fn barrier_waits_for_a_flush_that_already_claimed_dirty() {
         let d = Arc::new(Durability::new(JournalConfig::default()));
-        let target = d.register(&File::open("/dev/null").unwrap()).unwrap();
+        let target = d.register(&File::open("/dev/null").unwrap(), "P").unwrap();
         // Model the flusher between dirty.swap(false) and fsync completion.
         let flushing = target.syncing.lock().unwrap();
         assert!(!target.dirty.load(Ordering::Acquire));
@@ -1777,6 +1797,7 @@ mod durability_tests {
         use std::os::{fd::OwnedFd, unix::net::UnixStream};
         let (socket, _peer) = UnixStream::pair().unwrap();
         let target = SyncTarget {
+            project: "P".into(),
             file: File::from(OwnedFd::from(socket)),
             dirty: AtomicBool::new(true),
             syncing: Mutex::new(()),

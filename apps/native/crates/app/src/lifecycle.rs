@@ -59,6 +59,8 @@ struct QuitCoordinator {
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
+    /// The running-export question is on screen.
+    asking_exports: bool,
     /// A second Quit's prompt is showing: the window and its sheet, ended
     /// before the app terminates (AppKit refuses to while a sheet is up).
     asking_now: Option<(
@@ -102,11 +104,109 @@ fn cancel_quit(cx: &mut App) {
         }
     });
 }
+/// The exports a quit would stop: every export that has not ended.
+fn running_exports(
+    tasks: &[pm_promedia::tasks::Task],
+) -> Vec<(pm_promedia::tasks::TaskId, String)> {
+    tasks
+        .iter()
+        .filter(|t| t.kind == pm_promedia::tasks::TaskKind::Export && !t.state.terminal())
+        .map(|t| (t.id, t.title.clone()))
+        .collect()
+}
+/// How long a quit waits for the exports it stopped to say they have ended.
+/// An export's worker removes its unfinished file before it reports that;
+/// quitting sooner killed the worker with that file still on disk.
+const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Whether every export in `stopping` has ended (cancelled, failed or done).
+fn exports_ended(
+    tasks: &[pm_promedia::tasks::Task],
+    stopping: &[pm_promedia::tasks::TaskId],
+) -> bool {
+    !running_exports(tasks)
+        .iter()
+        .any(|(id, _)| stopping.contains(id))
+}
+/// The question a quit asks while an export runs: quitting would stop it.
+fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, button) = match titles {
+        [one] if !one.is_empty() => (
+            format!("“{one}” is still exporting."),
+            "Stop Export and Quit",
+        ),
+        [_] => ("An export is still running.".into(), "Stop Export and Quit"),
+        many => (
+            format!("{} exports are still running.", many.len()),
+            "Stop Exports and Quit",
+        ),
+    };
+    Alert::new(
+        message,
+        "If you quit now, the export stops and its unfinished file is removed. Your projects are not affected.",
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new(button, true),
+        ],
+    )
+}
 pub fn begin_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
     if q.quitting {
         return ask_quit_now(cx);
     }
+    if q.asking_exports {
+        return;
+    }
+    // An export that is running is asked about before anything closes.
+    let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
+    let window = q
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    if let (false, Some(window)) = (exporting.is_empty(), window) {
+        cx.global_mut::<QuitCoordinator>().asking_exports = true;
+        let titles: Vec<String> = exporting.iter().map(|(_, title)| title.clone()).collect();
+        let answer = export_quit_alert(&titles).sheet(&window);
+        cx.spawn(async move |cx| {
+            let stop = answer.recv().await.ok().flatten() == Some(true);
+            if stop {
+                let stopping: Vec<_> = exporting.iter().map(|(id, _)| *id).collect();
+                for id in &stopping {
+                    crate::export_coordinator::cancel_export(*id);
+                }
+                // The quit goes on once each stopped export has ended (its
+                // unfinished file is removed by then), or after a short
+                // wait if one never answers: a quit is never held for good.
+                let asked = std::time::Instant::now();
+                while asked.elapsed() < EXPORT_STOP_WAIT
+                    && !exports_ended(
+                        &crate::export_coordinator::tasks().lock().unwrap().all(),
+                        &stopping,
+                    )
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                }
+            }
+            cx.update(|cx| {
+                cx.global_mut::<QuitCoordinator>().asking_exports = false;
+                if stop {
+                    start_quit(cx);
+                } else {
+                    cancel_quit(cx);
+                }
+            });
+        })
+        .detach();
+        return;
+    }
+    start_quit(cx);
+}
+fn start_quit(cx: &mut App) {
+    let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
@@ -270,10 +370,12 @@ async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp)
 /// answered), so the person is never left with a quit that only refuses.
 fn quit_failed_alert(reason: &str) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button, Key};
+    // The kernel's account chooses the sentence and goes to the Error Log.
+    let why = crate::surfaces::documents::WriteFailure::of(reason).sentence();
     Alert::new(
         "Powermove couldn’t finish saving before quitting.",
         format!(
-            "{reason}. If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them."
+            "{why} If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them. Window ▸ Error Log has the details."
         ),
         vec![
             Button::new("Cancel", false).default().key(Key::Escape),
@@ -352,6 +454,10 @@ fn finish_quit(cx: &mut App) {
             other => {
                 let reason = reason(other);
                 eprintln!("Couldn’t quit: {reason}. Your work is kept.");
+                crate::error_log::shared(cx).borrow_mut().push(
+                    "Quit",
+                    &format!("The project library couldn’t be written before quitting: {reason}"),
+                );
                 let q = cx.global::<QuitCoordinator>();
                 let kernel = q.host.kernel.clone();
                 let window = q
@@ -386,6 +492,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             queue: Vec::new(),
             quitting: false,
             discard: false,
+            asking_exports: false,
             asking_now: None,
             host,
         });
@@ -450,7 +557,7 @@ fn expect_closed(
     }
 }
 /// A person-readable reason for a kernel reply that wasn't the expected one.
-fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
+pub(crate) fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
     match reply {
         Some(Err(e)) => e.to_string(),
         Some(Ok(ShellReply::Closed {
@@ -902,6 +1009,63 @@ mod tests {
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
         assert_eq!(quit_waits_for(Dirty, false, false, false), None);
     }
+    /// A quit while an export runs asks first: Cancel is the default, and
+    /// only exports that have not ended count.
+    #[test]
+    fn a_quit_during_an_export_asks_before_stopping_it() {
+        use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec};
+        let mut tasks = BackgroundTasks::default();
+        let mut add = |kind, title: &str| {
+            tasks
+                .enqueue(
+                    "w".into(),
+                    "p".into(),
+                    TaskSpec {
+                        title: title.into(),
+                        kind,
+                        unit: ProgressUnit::Frames,
+                        priority: 0,
+                        total: 10,
+                    },
+                )
+                .unwrap()
+        };
+        let export = add(TaskKind::Export, "Launch Film");
+        add(TaskKind::Proxy, "clip");
+        let done = add(TaskKind::Export, "Old");
+        tasks.cancel(done).unwrap();
+        let running = running_exports(&tasks.all());
+        assert_eq!(running, [(export, "Launch Film".to_owned())]);
+        let alert = export_quit_alert(&["Launch Film".to_owned()]);
+        assert_eq!(alert.message, "“Launch Film” is still exporting.");
+        assert_eq!(alert.labels(), ["Cancel", "Stop Export and Quit"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        let two = export_quit_alert(&["a".to_owned(), "b".to_owned()]);
+        assert_eq!(two.labels(), ["Cancel", "Stop Exports and Quit"]);
+    }
+    /// "Stop Export and Quit" stops the export and then waits for it to have
+    /// ended: the request to stop is not the end (the worker still has its
+    /// unfinished file to remove), the settled task is.
+    #[test]
+    fn a_quit_goes_on_only_after_the_export_it_stopped_has_ended() {
+        use crate::export_coordinator::{AgentExport, cancel_export, tasks};
+        let export = AgentExport::start("Promo", "quit-stops-export", 120).unwrap();
+        let id = running_exports(&tasks().lock().unwrap().all())
+            .into_iter()
+            .find(|(_, title)| title == "Promo (Agent)")
+            .expect("it is running")
+            .0;
+        let ended = || exports_ended(&tasks().lock().unwrap().all(), &[id]);
+        assert!(!ended());
+        assert!(cancel_export(id));
+        assert!(!ended(), "asked to stop is not stopped");
+        // Its worker cleaned up and says so.
+        export.finish(Err("cancelled".into()));
+        assert!(ended());
+        // An export nobody stopped is not waited for.
+        assert!(exports_ended(&tasks().lock().unwrap().all(), &[]));
+    }
     /// A quit asks every window with unsaved changes before it closes a
     /// clean one (windows are taken from the end).
     #[test]
@@ -918,15 +1082,16 @@ mod tests {
     /// what happens to unsaved work.
     #[test]
     fn a_quit_the_library_refuses_offers_to_quit_anyway() {
-        let alert = quit_failed_alert("The disk is full");
+        let alert = quit_failed_alert("Permission denied (os error 13)");
         assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(
             alert
                 .informative
-                .starts_with("The disk is full. If you quit anyway")
+                .starts_with("Powermove isn’t allowed to write there. If you quit anyway")
         );
+        assert!(!alert.informative.contains("os error"));
         assert!(alert.informative.contains("offers to recover"));
     }
     use std::{
@@ -995,8 +1160,10 @@ mod tests {
         answer(&k, ShellCall::ReleaseLibrary);
         assert!(k.published("test").is_none(), "the session is released");
         assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
-        let lock = pm_kernel::locks::project_lock_path(&file);
-        drop(pm_kernel::locks::FileLock::acquire(&lock).expect("its file lock is released"));
+        drop(
+            pm_kernel::locks::lock_project(&dir.path().join("locks"), &file)
+                .expect("its file lock is released"),
+        );
         assert!(
             !pm_kernel::journal::sessions(&dir.path().join("journals/test")).is_empty(),
             "the unsaved edit is kept for recovery"

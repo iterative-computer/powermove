@@ -166,6 +166,10 @@ pub enum ProjectIoError {
         message: String,
         recovery_path: std::path::PathBuf,
     },
+    /// The destination's volume cannot replace a file conditionally, so the
+    /// file was left exactly as it is. The open document is untouched; use
+    /// Save As.
+    NoSafeReplace,
     /// Our file was published but the final directory sync failed. Your
     /// edits stay open (and dirty); save again to confirm.
     Finalize(String),
@@ -201,6 +205,10 @@ impl fmt::Display for ProjectIoError {
                 f,
                 "{message} The other version was preserved at {}",
                 recovery_path.display()
+            ),
+            ProjectIoError::NoSafeReplace => f.write_str(
+                "This disk cannot replace a file safely, so the project file was left as it \
+                 is. Your edits are still open. Use Save As to save them as a new file.",
             ),
             ProjectIoError::Finalize(m) => write!(
                 f,
