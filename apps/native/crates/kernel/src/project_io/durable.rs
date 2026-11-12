@@ -1118,16 +1118,18 @@ pub(crate) fn settle_asides(destination: &Path, hooks: &PublishHooks) -> Vec<Lef
 ///
 /// 1. The file at the path is moved aside under a private name in the same
 ///    folder. That takes whatever is there at that instant and destroys
-///    nothing. What was taken is then read: if it is not `expected` (another
-///    version landed after the last check) it is kept beside the project
-///    under a plain name and reported ([`Published::displaced`]).
+///    nothing.
 /// 2. The staged file is installed at the now empty path by a rename that
 ///    refuses a taken name ([`rename_new`]). A file that landed there
 ///    between the two renames stays; this save's file is kept beside it and
 ///    the save fails naming it ([`ProjectIoError::KeptBeside`]).
 ///
-/// The file moved aside is removed only once it was read and found to be
-/// `expected`, and the new file is at the path. Any other failure puts it
+/// Then what was moved aside is read: if it does not have `expected`'s bytes
+/// (another version landed after the last check) it is kept beside the
+/// project under a plain name and reported ([`Published::displaced`]).
+///
+/// The file moved aside is removed only once it was read and found to hold
+/// `expected`'s bytes, and the new file is at the path. Any other failure puts it
 /// back. A process killed between the renames leaves it under its private
 /// name for the next open ([`settle_asides`]).
 fn replace_aside(
@@ -1135,6 +1137,7 @@ fn replace_aside(
     destination: &Path,
     expected: &FileVersion,
     incoming: &FileStat,
+    new_hash: &str,
     hooks: &PublishHooks,
 ) -> Result<Published, ProjectIoError> {
     let dir = destination.parent().unwrap_or(Path::new("."));
@@ -1149,7 +1152,6 @@ fn replace_aside(
         }
         other => other,
     })?;
-    let replaced = check_version(&aside, Some(expected), true).is_ok();
     if let Some(hook) = &hooks.between_renames {
         hook(destination);
     }
@@ -1174,6 +1176,15 @@ fn replace_aside(
     if let Some(hook) = &hooks.after_exchange {
         hook(destination);
     }
+    // What was moved aside is read only now, so the name is empty for no
+    // longer than the two renames. It is judged by its bytes, not its file
+    // number: a network share numbers files by name, so a renamed file has
+    // a new one. A file with exactly the bytes the session read holds
+    // nothing the session did not read.
+    let replaced = FileVersion::read(&aside)
+        .ok()
+        .flatten()
+        .is_some_and(|moved| moved.hash == expected.hash);
     let mut published = Published::default();
     if replaced {
         let _ = fs::remove_file(&aside);
@@ -1186,12 +1197,12 @@ fn replace_aside(
         let _ = sync_directory(dir);
         return Err(ProjectIoError::KeptBeside { kept });
     }
-    // The path must still hold the file just installed.
-    if !lstat_file(destination)
-        .ok()
-        .flatten()
-        .is_some_and(|now| now.same_identity(incoming))
-    {
+    // The path must still hold the file just installed: the same file, or
+    // (where a rename gives a file a new number) the same content.
+    if !lstat_file(destination).ok().flatten().is_some_and(|now| {
+        now.same_identity(incoming)
+            || (now.size == incoming.size && hash_file(destination).is_ok_and(|h| h == new_hash))
+    }) {
         let _ = sync_directory(dir);
         return Err(ProjectIoError::ChangedOnDisk);
     }
@@ -1252,7 +1263,7 @@ pub(crate) fn publish(
                 swap_files(&temp.path, destination, hooks)?
             };
             if !exchanged {
-                published = replace_aside(temp, destination, expected, &incoming, hooks)?;
+                published = replace_aside(temp, destination, expected, &incoming, new_hash, hooks)?;
                 sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
                 return Ok(published);
             }

@@ -1045,6 +1045,65 @@ fn a_save_replaces_the_file_on_a_disk_without_an_atomic_exchange() {
         assert_eq!(visible_siblings(&file), [""; 0].map(Path::new), "{disk}");
     }
 }
+/// Gives the file at `path` a new file number with the same bytes, as a
+/// network share does to a file that is renamed (its numbers follow names).
+fn renumber(path: &Path) {
+    let copy = path.with_extension("renumbered");
+    fs::copy(path, &copy).unwrap();
+    fs::rename(&copy, path).unwrap();
+}
+/// A network share (measured: an SMB share mounted on macOS 27) has no
+/// exchange and no exclusive rename, and numbers files by name: the file
+/// moved aside has another number than it had at the path, and the installed
+/// file another than it had while staged. Save works there all the same. The
+/// file moved aside is known by its bytes (it is not kept as "another
+/// version" on every save), and the installed file by its content.
+#[test]
+fn a_save_stands_on_a_share_that_renumbers_a_file_when_it_is_renamed() {
+    let dir = common::TempDir::new("renumbering-share");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        no_exclusive: true,
+        between_renames: Some(std::sync::Arc::new(|path| {
+            let aside = fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|e| e == "aside"))
+                .expect("the file moved aside");
+            renumber(&aside);
+        })),
+        after_exchange: Some(std::sync::Arc::new(|path| renumber(path))),
+        ..Default::default()
+    });
+    let (session, _) = open_file(&mut k, &file);
+    for name in ["One", "Two"] {
+        rename_comp(&mut k, "P", name);
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let saved = k
+            .finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("Save writes the file in place: {e}"));
+        assert!(
+            matches!(
+                saved,
+                ShellReply::Saved {
+                    displaced: None,
+                    recovery_copy: None,
+                    ..
+                }
+            ),
+            "{saved:?}"
+        );
+        assert_eq!(saved_name(&file).as_deref(), Some(name));
+        assert_eq!(visible_siblings(&file), [""; 0].map(Path::new));
+        assert_eq!(private_leftovers(&file), [""; 0]);
+    }
+}
 /// On such a disk the file is moved aside and the new one installed at the
 /// empty path. A version that lands at the path after the save's last check
 /// is what gets moved aside: it is read, found not to be the version the
