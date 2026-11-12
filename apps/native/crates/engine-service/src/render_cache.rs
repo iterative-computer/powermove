@@ -430,6 +430,9 @@ struct State {
     /// Rises with every new observation, storage or deletion: fences
     /// fingerprints and indexes that started before it.
     generation: u64,
+    /// `generation` as of the last published change, for the indexer to
+    /// read without the lock ([`Indexer`]).
+    live: Arc<AtomicU64>,
     /// Rises with every storage change or deletion: fences fills' frames.
     storage: u64,
     frames: Option<Frames>,
@@ -462,6 +465,7 @@ struct Inner {
     published: Mutex<Arc<RenderBars>>,
     running: Mutex<Option<Running>>,
     reader: Reader,
+    indexer: Indexer,
     /// The background delay in milliseconds, read live by fill children.
     delay_ms: Arc<AtomicU64>,
     scheduling: std::sync::Once,
@@ -484,12 +488,15 @@ pub struct DiskFrames {
 }
 impl Default for DiskFrames {
     fn default() -> Self {
+        let state = State::default();
+        let indexer = Indexer::start(state.live.clone());
         Self {
             inner: Arc::new(Inner {
-                state: Mutex::default(),
+                state: Mutex::new(state),
                 published: Mutex::default(),
                 running: Mutex::default(),
                 reader: Reader::start(),
+                indexer,
                 delay_ms: Arc::new(AtomicU64::new(
                     Background::default().delay.as_millis() as u64
                 )),
@@ -502,6 +509,7 @@ impl Default for DiskFrames {
 /// Something the render bar shows changed: publish a snapshot and tell
 /// whoever listens (never blocking).
 fn bump(state: &mut State, published: &Mutex<Arc<RenderBars>>) {
+    state.live.store(state.generation, Ordering::Release);
     state.revision += 1;
     *published.lock().unwrap() = Arc::new(snapshot(state));
     if let Some(notify) = &state.notify {
@@ -847,61 +855,18 @@ impl DiskFrames {
         bump(&mut state, &self.inner.published);
         let cache = state.cache.clone().expect("checked above");
         drop(state);
-        let weak = Arc::downgrade(&self.inner);
-        std::thread::Builder::new()
-            .name("pm-render-cache".into())
-            .spawn(move || {
-                let fingerprint = fingerprint(&source, &identity);
-                let inputs = crate::frame_inputs::frame_digests(
-                    &source.scene.doc,
-                    &identity.comp,
-                    rate,
-                    count,
-                    // Override code can read anything in the document.
-                    identity.overrides.is_some(),
-                )
-                .unwrap_or_default();
-                // A frame is its inputs at its time.
-                let ids: Vec<FrameId> = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(n, d)| {
-                        let mut id = blake3::Hasher::new();
-                        id.update(&fingerprint);
-                        id.update(d);
-                        id.update(&rate.frame_start(n as i64).unwrap_or(-1).to_le_bytes());
-                        *id.finalize().as_bytes()
-                    })
-                    .collect();
-                let template = Frames {
-                    identity,
-                    source,
-                    fingerprint: Some(fingerprint),
-                    ids: Arc::new(ids),
-                    size,
-                    rate,
-                    count,
-                    present: HashSet::new(),
-                    kept: HashSet::new(),
-                };
-                let keys: Vec<(i64, RenderKey)> = (0..count)
-                    .filter_map(|n| Some((n, template.key(n)?)))
-                    .collect();
-                let (present, kept) = index(&cache, &keys);
-                let Some(inner) = weak.upgrade() else { return };
-                let mut state = inner.state.lock().unwrap();
-                // Only the observation it was taken for: anything since
-                // (another observation, storage, a deletion) wins.
-                if state.generation == generation {
-                    state.frames = Some(Frames {
-                        present,
-                        kept,
-                        ..template
-                    });
-                    bump(&mut state, &inner.published);
-                }
-            })
-            .ok();
+        // One worker takes it: a newer observation replaces one still
+        // waiting, and the one being worked on stops at its next stage.
+        self.inner.indexer.submit(Indexing {
+            inner: Arc::downgrade(&self.inner),
+            generation,
+            source,
+            identity,
+            cache,
+            size,
+            rate,
+            count,
+        });
         true
     }
 
@@ -2210,16 +2175,184 @@ impl Reader {
 
 /// Which of `keys`' frames are on disk, and which of those are kept.
 fn index(cache: &RenderCache, keys: &[(i64, RenderKey)]) -> (HashSet<i64>, HashSet<i64>) {
+    index_until(cache, keys, &|| false).expect("never stopped")
+}
+/// [`index`], given up (`None`) as soon as `stop` says so, asked every 64
+/// frames: a long composition on a slow volume is not looked through for an
+/// observation nobody waits for any more.
+fn index_until(
+    cache: &RenderCache,
+    keys: &[(i64, RenderKey)],
+    stop: &dyn Fn() -> bool,
+) -> Option<(HashSet<i64>, HashSet<i64>)> {
     let (mut present, mut kept) = (HashSet::new(), HashSet::new());
-    for (n, key) in keys {
-        if let Ok(Some(keep)) = cache.presence(key) {
-            present.insert(*n);
-            if keep {
-                kept.insert(*n);
+    for chunk in keys.chunks(64) {
+        if stop() {
+            return None;
+        }
+        for (n, key) in chunk {
+            if let Ok(Some(keep)) = cache.presence(key) {
+                present.insert(*n);
+                if keep {
+                    kept.insert(*n);
+                }
             }
         }
     }
-    (present, kept)
+    Some((present, kept))
+}
+
+/// One observation to fingerprint and find on disk.
+struct Indexing {
+    inner: Weak<Inner>,
+    generation: u64,
+    source: Source,
+    identity: Identity,
+    cache: Arc<RenderCache>,
+    size: Size,
+    rate: Rate,
+    count: i64,
+}
+/// Takes fingerprints and finds frames on disk on one thread, one
+/// observation at a time. A newer observation replaces the one waiting (and
+/// frees its document snapshot); the one being worked on gives up at its
+/// next stage once the cache's generation has moved on (another
+/// observation, a storage change, a deletion, a closed project). Rapid
+/// edits or alternating viewers on a slow volume therefore cost one job in
+/// flight and one waiting, never a thread and a snapshot each.
+struct Indexer {
+    shared: Arc<IndexerShared>,
+}
+#[derive(Default)]
+struct IndexerShared {
+    slot: Mutex<(Option<Indexing>, bool)>,
+    wake: std::sync::Condvar,
+    live: Arc<AtomicU64>,
+    /// Jobs begun (tests).
+    begun: AtomicU64,
+    /// Held by a test to keep the worker at the start of a job.
+    #[cfg(test)]
+    gate: Mutex<()>,
+}
+impl Indexer {
+    fn start(live: Arc<AtomicU64>) -> Self {
+        let shared = Arc::new(IndexerShared {
+            live,
+            ..Default::default()
+        });
+        let worker = shared.clone();
+        std::thread::Builder::new()
+            .name("pm-render-cache".into())
+            .spawn(move || {
+                loop {
+                    let job = {
+                        let mut slot = worker.slot.lock().unwrap();
+                        loop {
+                            if slot.1 {
+                                return;
+                            }
+                            if let Some(job) = slot.0.take() {
+                                break job;
+                            }
+                            slot = worker.wake.wait(slot).unwrap();
+                        }
+                    };
+                    worker.run(job);
+                }
+            })
+            .expect("render cache indexer thread");
+        Self { shared }
+    }
+    fn submit(&self, job: Indexing) {
+        // The job it replaces is dropped outside the lock.
+        let replaced = self.shared.slot.lock().unwrap().0.replace(job);
+        drop(replaced);
+        self.shared.wake.notify_one();
+    }
+}
+impl Drop for Indexer {
+    fn drop(&mut self) {
+        self.shared.slot.lock().unwrap().1 = true;
+        self.shared.wake.notify_one();
+    }
+}
+impl IndexerShared {
+    fn run(&self, job: Indexing) {
+        self.begun.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        drop(self.gate.lock().unwrap());
+        let Indexing {
+            inner,
+            generation,
+            source,
+            identity,
+            cache,
+            size,
+            rate,
+            count,
+        } = job;
+        // Anything since (another observation, storage, a deletion) wins.
+        let stale = || self.live.load(Ordering::Acquire) != generation;
+        if stale() {
+            return;
+        }
+        let fingerprint = fingerprint(&source, &identity);
+        if stale() {
+            return;
+        }
+        let inputs = crate::frame_inputs::frame_digests(
+            &source.scene.doc,
+            &identity.comp,
+            rate,
+            count,
+            // Override code can read anything in the document.
+            identity.overrides.is_some(),
+        )
+        .unwrap_or_default();
+        if stale() {
+            return;
+        }
+        // A frame is its inputs at its time.
+        let ids: Vec<FrameId> = inputs
+            .iter()
+            .enumerate()
+            .map(|(n, d)| {
+                let mut id = blake3::Hasher::new();
+                id.update(&fingerprint);
+                id.update(d);
+                id.update(&rate.frame_start(n as i64).unwrap_or(-1).to_le_bytes());
+                *id.finalize().as_bytes()
+            })
+            .collect();
+        let template = Frames {
+            identity,
+            source,
+            fingerprint: Some(fingerprint),
+            ids: Arc::new(ids),
+            size,
+            rate,
+            count,
+            present: HashSet::new(),
+            kept: HashSet::new(),
+        };
+        let keys: Vec<(i64, RenderKey)> = (0..count)
+            .filter_map(|n| Some((n, template.key(n)?)))
+            .collect();
+        let Some((present, kept)) = index_until(&cache, &keys, &stale) else {
+            return;
+        };
+        let Some(inner) = inner.upgrade() else { return };
+        let mut state = inner.state.lock().unwrap();
+        // Only the observation it was taken for.
+        if state.generation == generation {
+            state.frames = Some(Frames {
+                present,
+                kept,
+                ..template
+            });
+            bump(&mut state, &inner.published);
+        }
+    }
 }
 
 /// Frame indices of `[from, to)` seconds, clamped to the composition.
@@ -3597,6 +3730,47 @@ mod tests {
             disk.inner.state.lock().unwrap().fill.serial,
             fills,
             "nothing left"
+        );
+    }
+
+    /// A hundred edits while the worker is busy (a slow volume being
+    /// looked through) cost one job in flight and one waiting: each newer
+    /// observation replaces the one waiting and frees its document
+    /// snapshot, the job in flight gives up at its next stage, and only the
+    /// latest observation is fingerprinted and lands.
+    #[test]
+    fn observations_coalesce_into_one_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let indexer = disk.inner.indexer.shared.clone();
+        // The worker stays at the start of whatever job it takes.
+        let gate = indexer.gate.lock().unwrap();
+        let mut snapshots = Vec::new();
+        let mut latest = None;
+        for revision in 1..=100 {
+            let mut scene = scene();
+            scene.content = revision;
+            snapshots.push(Arc::downgrade(&scene.doc));
+            assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+            latest = Some(scene);
+        }
+        let latest = latest.unwrap();
+        // The job in flight and the latest one: nothing in between is kept.
+        let alive = snapshots.iter().filter(|d| d.upgrade().is_some()).count();
+        assert!(alive <= 2, "{alive} document snapshots are held");
+        assert!(indexer.begun.load(Ordering::Relaxed) <= 1);
+        drop(gate);
+        ready(&disk);
+        {
+            let state = disk.inner.state.lock().unwrap();
+            let frames = state.frames.as_ref().unwrap();
+            assert!(frames.identity.scene_matches(&latest), "the latest landed");
+        }
+        assert!(
+            indexer.begun.load(Ordering::Relaxed) <= 2,
+            "the job in flight, then the latest: nothing in between ran"
         );
     }
 
