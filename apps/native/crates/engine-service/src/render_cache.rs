@@ -624,7 +624,7 @@ impl DiskFrames {
     /// any fingerprint or disk read that was already running.
     pub(crate) fn forget_document(&self, doc_id: u64) {
         let generation = self.with(|s| {
-            if !s.frames.as_ref().is_some_and(|f| f.source.doc_id == doc_id) {
+            if s.frames.as_ref().is_none_or(|f| f.source.doc_id != doc_id) {
                 return (None, false);
             }
             s.generation += 1;

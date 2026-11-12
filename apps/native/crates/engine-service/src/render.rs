@@ -352,7 +352,7 @@ impl Engine {
             geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
                 + self.renderer.scene3d_resident().map_bytes,
             binding_bytes: self.renderer.binding_cache_bytes(),
-            gpu_allocated_bytes: self.metal.current_allocated_size() as u64,
+            gpu_allocated_bytes: self.metal.current_allocated_size(),
             // Counted by the service across engine rebuilds.
             project_releases: 0,
         }

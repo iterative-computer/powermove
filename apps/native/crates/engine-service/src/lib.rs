@@ -3018,7 +3018,17 @@ mod worker_tests {
             assert!(status.error.is_none(), "{:?}", status.error);
             if let Some(frame) = status.frame {
                 assert_ne!(frame.stamp, old);
-                assert_eq!(frame.stamp, v.stamp().unwrap());
+                // The new revision's picture: the current one, or the fast
+                // picture whose refinement (the next stamp) is being drawn.
+                let now = v.stamp().unwrap();
+                assert_eq!(
+                    (frame.stamp.generation, frame.stamp.revision),
+                    (now.generation, now.revision)
+                );
+                assert!(
+                    now.sequence - frame.stamp.sequence <= 1,
+                    "{frame:?} {now:?}"
+                );
                 assert!(status.stale_rejections >= 1);
                 break;
             }
