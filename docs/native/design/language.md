@@ -18,7 +18,9 @@ the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
 text field's `metadata.search`; `metrics.symbol_action`;
 `pm_shell::native::selected_color`; `ControlSpec::quiet` and the panel
 variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
-`TreeItem`) are rounded. Nothing was renamed or removed.
+`TreeItem`) are rounded; `pm_shell::resize_from_top`;
+`NativeControl::stretch` (a `SegmentedControl` with `flexGrow`); a sheet's
+`data-pm-slot="body"`; a `Switch` in a sheet. Nothing was renamed or removed.
 
 ## Colour
 
@@ -221,6 +223,38 @@ and every row title start on one x: a card bleeds past that column by the
 row inset. Lists that are not settings (speech models, installed extensions,
 the Store, memory notes) are rows of the same cards, never loose text. A
 search lists every section with a match and dims the others in the sidebar.
+
+## Sheets
+
+A form in a sheet is a Settings page in a sheet: the title, then cards of
+rows under quiet headings, then Cancel and the default action at the trailing
+edge of the bottom (no rule above them). A row is its title over its notes
+(a description, or what is wrong with the value), with a real control of its
+natural width at the trailing edge: the pop-up, the system switch (never a
+checkbox or Off | On segments for a yes-or-no row), a text or number field, a
+colour well. Numbers end before one unit column, so their right edges line
+up whatever the unit. Radios keep their own titles, one to a row.
+
+One text column: the sheet's title, a destination's description, section
+headings, row titles, notes and the summary all start on
+`sheet_inset + inset` (32 pt); cards start on `sheet_inset`. Measure it in a
+capture before showing a sheet.
+
+Two builders, one anatomy: a panel sheet is `SheetAnchor` with `FormGroup`
+and `FormRow` (Export), and an AppKit sheet is `surfaces::sheet_layout`
+(`Sheet`: `text`, `number`, `pair`, `control`, `toggle`, `swatch`, `option`,
+`note`, `heading`, `line`, laid out by `footer`), which every `Surface` form
+goes through (composition settings, new composition and project, pre-compose,
+keyframe value, velocity and scale, captions, sequence import, sign-in and
+Store forms). Confirmations are the system's alert sheets.
+
+A sheet whose content changes height marks the part between its title and
+its actions `data-pm-slot="body"`. Its window follows the body's height on
+the layout spring from a fixed top edge (`pm_shell::resize_from_top`; AppKit
+would centre the sheet again on every frame, so the window class hangs it
+from the top it was first given), the actions ride the bottom edge, and
+nothing else moves. Hosted controls keep their distance from the window's
+top between a resize and the next paint.
 
 ## Timeline strips
 
