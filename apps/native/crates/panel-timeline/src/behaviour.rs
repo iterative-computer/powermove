@@ -353,7 +353,7 @@ impl TimelineModel {
                             k.value.clone(),
                         );
                         spec.id = Some(k.id.clone());
-                        spec.temporal = Some(k.stored.clone());
+                        spec.temporal = Some(k.stored.to_value());
                         spec
                     })
                     .collect();

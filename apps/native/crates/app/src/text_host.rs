@@ -26,6 +26,10 @@ static FONTS: OnceLock<RenderFonts> = OnceLock::new();
 /// One query mirror per project: it follows publications incrementally and
 /// keeps the fonts it was given.
 static MIRRORS: Mutex<BTreeMap<String, QueryMirror>> = Mutex::new(BTreeMap::new());
+#[cfg(debug_assertions)]
+pub fn mirror_count() -> Option<usize> {
+    MIRRORS.try_lock().ok().map(|mirrors| mirrors.len())
+}
 /// How long one ask may wait on the registry (it answers from main).
 const ASK: Duration = Duration::from_secs(2);
 

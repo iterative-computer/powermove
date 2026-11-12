@@ -9,6 +9,7 @@ mod frame_inputs;
 pub mod jobs;
 pub mod layers;
 pub mod media;
+pub mod memory;
 pub mod policy;
 mod present;
 pub mod qos;
@@ -130,6 +131,9 @@ pub struct MediaCatalog {
     /// in Automatic in place of their originals (Final Cut's optimized
     /// media). Exports never read them.
     pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// High-resolution originals whose preview should use a ready HD proxy.
+    /// Runtime-only policy; never serialized into the project.
+    pub automatic_proxies: std::collections::BTreeSet<String>,
     /// Always Play Original: these assets never play a proxy or optimized
     /// media, in any mode.
     pub play_original: std::collections::BTreeSet<String>,
@@ -141,7 +145,7 @@ pub struct MediaCatalog {
 /// originals whatever this says; only an explicit draft export uses proxies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaMode {
-    /// Originals, and a proxy for a clip whose original is missing.
+    /// HD proxies for large sources, otherwise originals/optimized media.
     #[default]
     Automatic,
     /// Originals only: a clip whose original is missing is offline.
@@ -175,6 +179,13 @@ impl MediaCatalog {
         let mut paths = BTreeMap::new();
         for map in order {
             paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if mode == MediaMode::Automatic {
+            for id in &self.automatic_proxies {
+                if let Some(proxy) = self.proxies.get(id) {
+                    paths.insert(id.clone(), proxy.clone());
+                }
+            }
         }
         for id in &self.play_original {
             match self.originals.get(id) {
@@ -396,6 +407,7 @@ impl View {
 #[derive(Default)]
 struct State {
     views: BTreeMap<u64, View>,
+    retired_documents: BTreeSet<u64>,
     next: u64,
     content: u64,
     stop: bool,
@@ -409,6 +421,7 @@ type ScopeTap = (
 );
 struct Shared {
     state: Mutex<State>,
+    memory: Mutex<memory::CacheUsage>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
@@ -829,8 +842,18 @@ impl Viewer {
     }
     pub fn retire(&self) {
         let mut state = self.shared.state.lock().unwrap();
-        state.views.remove(&self.id);
+        if let Some(view) = state.views.remove(&self.id) {
+            let doc = view.stamp.doc_id;
+            if !state.views.values().any(|v| v.stamp.doc_id == doc) {
+                state.retired_documents.insert(doc);
+            }
+        }
         state.notify();
+        drop(state);
+        let mut scopes = self.shared.scopes.lock().unwrap();
+        if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *scopes = None;
+        }
         self.shared.wake.try_send(()).ok();
     }
 }
@@ -855,11 +878,7 @@ impl EngineService {
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
-        let layer_rasters = compat::LayerRasters::start(
-            gpu.device.clone(),
-            gpu.queue.clone(),
-            Some(fonts.clone()),
-        )?;
+        let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
         // Built-in definitions load first thing on the service thread
         // (`run`): the app's window doesn't wait for a cold shader cache.
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
@@ -881,10 +900,15 @@ impl EngineService {
     pub fn forget_compat(&self, doc_id: u64) {
         self.compat.forget(doc_id);
     }
+    /// The renderer's latest cache counters (not OS or allocator footprint).
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.shared.memory.lock().unwrap().clone()
+    }
     fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
+            memory: Mutex::default(),
             wake,
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
@@ -1409,6 +1433,29 @@ fn resume(v: &mut View, now: f64) {
     }
 }
 
+/// An autorelease pool for one pass of a long-lived thread's loop, popped when
+/// the pass ends however it ends (`continue`, `break`).
+struct LoopPool(*mut std::ffi::c_void);
+impl LoopPool {
+    fn push() -> Self {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+        }
+        // SAFETY: paired with the pop in Drop, on this thread, in LIFO order
+        // (pools pushed during the pass are popped within it).
+        Self(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for LoopPool {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+        }
+        // SAFETY: the token from `push` on this thread.
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -1443,8 +1490,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let mut played_since_idle = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
+        // Objects Metal and Core Animation autorelease on this thread outside
+        // a frame's own pool (a finished flight returning its drawable to the
+        // layer, device lookups after a rebuild) are drained every pass. This
+        // thread's implicit pool is never drained: it kept every closed
+        // project's viewer layer, and with it the layer's drawable pool.
+        let _pool = LoopPool::push();
         #[cfg(test)]
         if shared
             .lose_device
@@ -1467,7 +1521,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
+        engine.govern_memory();
         engine.poll();
+        *shared.memory.lock().unwrap() = engine.memory_usage();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
             // and draw every viewer again on the new device. A device lost
@@ -1702,10 +1758,48 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             .filter(|id| !state.views.contains_key(id))
             .copied()
             .collect();
-        if !retired.is_empty() {
+        let closed: Vec<_> = std::mem::take(&mut state.retired_documents)
+            .into_iter()
+            .filter(|doc| !state.views.values().any(|v| v.stamp.doc_id == *doc))
+            .collect();
+        if !retired.is_empty() || !closed.is_empty() {
+            let last_view_closed = state.views.is_empty();
+            if !closed.is_empty() {
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+            }
             drop(state);
             for id in retired {
                 runtime.remove(&id);
+            }
+            if !closed.is_empty() {
+                for doc in closed {
+                    if let Some(compat) = &engine.compat {
+                        compat.forget(doc);
+                    }
+                    shared.disk.forget_document(doc);
+                }
+                engine.release_project_memory();
+                if last_view_closed {
+                    played_since_idle = false;
+                    // Metal command queues and wgpu encoder pools retain
+                    // their playback high-water storage after caches empty.
+                    // No viewer uses this device now; retire those owners as
+                    // well. The ordinary rebuild path preserves fonts/cache
+                    // configuration and recreates programs on next use.
+                    match engine.rebuild() {
+                        Ok(next) => {
+                            engine = next;
+                            *shared.device.lock().unwrap() = engine.metal().to_owned();
+                        }
+                        Err(error) => {
+                            eprintln!("Viewer cleanup could not renew the idle device: {error:#}")
+                        }
+                    }
+                    crate::memory::pressure_relief();
+                }
+                *shared.memory.lock().unwrap() = engine.memory_usage();
             }
             continue;
         }
@@ -2000,7 +2094,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
                 comp: v.config.composition.clone(),
-                media: v.paths.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else {
+                    v.paths.clone()
+                },
                 content: v.content,
             };
             cursor = id;
@@ -2238,6 +2336,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
             {
+                played_since_idle = true;
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
                     r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
@@ -2532,7 +2631,32 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
-            let _ = wakes.recv_timeout(timeout);
+            if engine.maintain_memory() {
+                shared.disk.release_idle_reads();
+                for r in runtime.values() {
+                    if let Some(audio) = &r.transport.audio {
+                        audio.send(audio::AudioCtl::MemoryPressure);
+                    }
+                }
+            }
+            if played_since_idle
+                && engine.idle_memory_released()
+                && flights.is_empty()
+                && runtime.values().all(|r| !r.transport.running())
+            {
+                match engine.renew_idle() {
+                    Ok(next) => {
+                        engine = next;
+                        *shared.device.lock().unwrap() = engine.metal().to_owned();
+                    }
+                    Err(error) => eprintln!(
+                        "Viewer cleanup could not renew stopped recording pools: {error:#}"
+                    ),
+                }
+                played_since_idle = false;
+                crate::memory::pressure_relief();
+            }
+            let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }
     drop(flights); // Command completion handlers hold their source leases.
@@ -2544,9 +2668,99 @@ pub struct Headless {
     engine: render::Engine,
 }
 impl Headless {
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.engine.memory_usage()
+    }
+
+    /// Submit a preview frame without allocating a CPU pixel readback.
+    pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        self.preview_inner(scene, spec)
+    }
+
+    /// Pump the main-thread font broker while the render thread waits for
+    /// replies, including during a frame's first text layout.
+    pub fn preview_with_pump(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        pump: impl FnMut(),
+    ) -> Result<()> {
+        with_pump(|| self.preview_inner(scene, spec), pump)
+    }
+
+    /// Keep one render thread for a sequence while the caller pumps its
+    /// main-thread services. Recreating it per frame changes allocator
+    /// ownership and does not model the app's persistent render worker.
+    pub fn run_with_pump<T: Send>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> T + Send,
+        pump: impl FnMut(),
+    ) -> T {
+        with_pump(|| run(self), pump)
+    }
+
+    fn preview_inner(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let rendered = objc2::rc::autoreleasepool(|_| -> Result<()> {
+                let Some(s) = self.engine.frame(
+                    scene,
+                    spec,
+                    None,
+                    &OverlayGeometry::default(),
+                    false,
+                    Arc::default(),
+                )?
+                else {
+                    anyhow::bail!("no headless surface");
+                };
+                s.commit();
+                s.complete()?;
+                anyhow::ensure!(
+                    s.failures.is_empty(),
+                    "memory benchmark frame omitted {} layers: {}",
+                    s.failures.len(),
+                    s.failures
+                        .iter()
+                        .map(|f| f.message.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                Ok(())
+            });
+            match rendered {
+                Ok(_) => {
+                    self.engine.poll();
+                    return Ok(());
+                }
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.engine.release_idle_memory();
+    }
+    /// Releases every cache owned by the previous project. The renderer and
+    /// device stay available for the next project in the same window.
+    pub fn release_project_memory(&mut self) {
+        self.engine.release_project_memory();
+    }
+    pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
+        memory::simulate_pressure(pressure);
+        self.engine.govern_memory();
+        self.engine.poll();
+    }
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+        objc2::rc::autoreleasepool(|_| {
+            Ok(Self {
+                engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+            })
         })
     }
     pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {
@@ -2621,10 +2835,42 @@ impl Headless {
     }
 }
 
+/// Font registries belong to the main thread; a render can synchronously
+/// request more fonts at any point. Pumping only between renders deadlocks.
+fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -> T {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| objc2::rc::autoreleasepool(|_| work()));
+        while !worker.is_finished() {
+            pump();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 #[cfg(test)]
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn headless_pump_answers_fonts_during_a_blocking_render() {
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_wake(Arc::new(|| {}));
+        let worker = broker.clone();
+        with_pump(
+            move || worker.ask(Vec::new(), Vec::new(), Duration::from_millis(500)),
+            || {
+                for ask in broker.take_asks() {
+                    ask.answer(Ok(pm_text::host::FontReply::default()));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(broker.counts(), (1, 1, 0));
+    }
     #[test]
     fn revision_and_output_change_while_encoding_reject_the_submission() {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
@@ -2773,6 +3019,50 @@ mod worker_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(completed(), settled, "a paused viewer stays idle");
         assert_eq!(v.status().no_drawable, 0);
+    }
+
+    /// A closed project's viewer layer is freed with its drawables: nothing
+    /// the engine thread autoreleased while returning drawables keeps it.
+    #[test]
+    fn a_retired_viewers_layer_is_released() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-release-test").unwrap()).unwrap();
+        let weak = objc2::rc::autoreleasepool(|_| {
+            let layer = metal::MetalLayer::new();
+            layer.set_device(&service.metal_device());
+            layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            layer.set_framebuffer_only(false);
+            layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+            // This thread has no run loop to commit the implicit transaction
+            // those property changes opened (it retains the layer).
+            // SAFETY: a class method with no arguments.
+            unsafe {
+                let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+            }
+            // SAFETY: a live CAMetalLayer; the Retained takes its own reference.
+            let object = unsafe {
+                objc2::rc::Retained::retain(
+                    foreign_types::ForeignType::as_ptr(&layer).cast::<objc2::runtime::AnyObject>(),
+                )
+            }
+            .unwrap();
+            let weak = objc2::rc::Weak::from_retained(&object);
+            let v = shapes_viewer(&service, Some(layer));
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.retire();
+            weak
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while objc2::rc::autoreleasepool(|_| weak.load().is_some()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retired viewer's layer is still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

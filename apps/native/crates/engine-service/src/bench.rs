@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 #[cfg(not(feature = "kernel"))]
 use {pm_engine_service::Snapshot, std::sync::Arc};
 
-fn arg(name: &str, default: &str) -> String {
+pub(crate) fn arg(name: &str, default: &str) -> String {
     std::env::args()
         .find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_owned))
         .unwrap_or(default.into())
@@ -47,17 +47,40 @@ static OPEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 
 /// The fixture or the project copy named by `--project`, with its media.
 #[cfg(feature = "kernel")]
-fn scene() -> anyhow::Result<(
+pub(crate) fn scene() -> anyhow::Result<(
     pm_engine_service::Snapshot,
     MediaCatalog,
     f64,
     pm_time::Rate,
+    Option<pm_kernel::DocumentStore>,
 )> {
+    let fixture = arg("fixture", "");
+    if !fixture.is_empty() {
+        let dir = std::path::Path::new(&fixture);
+        let store = pm_kernel::DocumentStore::open(pm_kernel::open_project(
+            &dir.join("project.pmv"),
+            Default::default(),
+        )?);
+        let snapshot = store.snapshot();
+        let paths: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(dir.join("media.json"))?)?;
+        let mut media = MediaCatalog::default();
+        for (id, path) in paths {
+            media.originals.insert(id, dir.join(path));
+        }
+        return Ok((snapshot, media, 20., pm_time::Rate::FPS_30, Some(store)));
+    }
     let project = arg("project", "");
     if project.is_empty() {
         let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json"))?;
         let snapshot = pm_kernel::document::DocumentStore::new_untitled(value).snapshot();
-        return Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30));
+        return Ok((
+            snapshot,
+            MediaCatalog::default(),
+            2.,
+            pm_time::Rate::FPS_30,
+            None,
+        ));
     }
     let opening = Instant::now();
     let opened = pm_kernel::open_project(std::path::Path::new(&project), Default::default())?;
@@ -78,22 +101,24 @@ fn scene() -> anyhow::Result<(
     let comp = snapshot
         .open_comp()
         .ok_or_else(|| anyhow::anyhow!("the project has no open composition"))?;
-    let root = snapshot
-        .document
-        .to_value()
-        .ok_or_else(|| anyhow::anyhow!("empty project"))?;
-    let canonical: serde_json::Value =
-        serde_json::from_str(&pm_model::json::to_canonical_string(&root))?;
-    let c = &canonical["comps"][&comp];
-    let duration = c["dur"].as_f64().filter(|d| *d > 0.).unwrap_or(1.);
-    let fps = c["fps"].as_f64().filter(|f| *f > 0.).unwrap_or(30.);
-    let rate =
-        pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
-    Ok((snapshot, media, duration, rate))
+    // Kernel snapshots can keep the open composition at the root. Resolve
+    // it exactly as the renderer does; indexing only comps[compId] silently
+    // reduced such projects to a one-second benchmark loop.
+    let c = pm_eval::Comp::resolve(&snapshot.document, &comp)
+        .map_err(|_| anyhow::anyhow!("composition unavailable"))?;
+    let duration = pm_eval::node::number(c.member("dur"))
+        .filter(|d| *d > 0.)
+        .unwrap_or(1.);
+    let rate = c.rate().map(|r| r.rate).unwrap_or(pm_time::Rate::FPS_30);
+    Ok((snapshot, media, duration, rate, Some(store)))
 }
 
 #[cfg(not(feature = "kernel"))]
-fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate)> {
+pub(crate) fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate, Option<()>)> {
+    anyhow::ensure!(
+        arg("project", "").is_empty() && arg("fixture", "").is_empty(),
+        "project and corpus benchmarks require the kernel feature"
+    );
     let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json"))?;
     let snapshot = Snapshot {
         doc_id: 1,
@@ -103,7 +128,13 @@ fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate)> {
             1,
         )),
     };
-    Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30))
+    Ok((
+        snapshot,
+        MediaCatalog::default(),
+        2.,
+        pm_time::Rate::FPS_30,
+        None,
+    ))
 }
 
 /// Where the bench extracts a project's embedded media for one run.
@@ -112,7 +143,7 @@ fn scratch_dir() -> std::path::PathBuf {
 }
 
 /// Removes the run's extracted media however the run ends.
-struct Scratch;
+pub(crate) struct Scratch;
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(scratch_dir());
@@ -129,7 +160,7 @@ pub fn run() -> anyhow::Result<()> {
         (1. ..=240.).contains(&hz) && (1. ..=300.).contains(&seconds),
         "invalid duration/rate"
     );
-    let (snapshot, media, duration, rate) = scene()?;
+    let (snapshot, media, duration, rate, _store) = scene()?;
     // The font registry answers on this thread, as the app's main thread does.
     let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
     let fonts = pm_text::host::FontBroker::new();

@@ -50,6 +50,11 @@ unsafe extern "C" {
         index: usize,
         options: CFDictionaryRef,
     ) -> CGImageRef;
+    fn CGImageSourceCreateThumbnailAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        options: CFDictionaryRef,
+    ) -> CGImageRef;
     fn CGImageSourceGetType(src: CGImageSourceRef) -> CFStringRef;
 }
 
@@ -433,6 +438,22 @@ pub fn read_frame(
     pool: &FramePool,
     format: ImageFormat,
 ) -> Result<StillImage> {
+    read_frame_inner(path, index, pool, format, None)
+}
+
+/// Decode a viewer-sized image without allocating the native-resolution
+/// bitmap. Exact frames continue to use the original native-depth reader.
+pub fn read_preview(path: &Path, pool: &FramePool, max_edge: u32) -> Result<StillImage> {
+    read_frame_inner(path, 0, pool, ImageFormat::Other, Some(max_edge.max(1)))
+}
+
+fn read_frame_inner(
+    path: &Path,
+    index: usize,
+    pool: &FramePool,
+    format: ImageFormat,
+    max_edge: Option<u32>,
+) -> Result<StillImage> {
     let src = source(path)?;
     let count = unsafe { CGImageSourceGetCount(src.as_mut_ptr()) };
     if index >= count {
@@ -450,12 +471,31 @@ pub fn read_frame(
         .and_then(|p| unsafe { cf_i64(cf_dict_get(p.as_ptr(), "Orientation")) })
         .filter(|o| (1..=8).contains(o))
         .unwrap_or(1) as u8;
-    let img = unsafe {
-        Cf::from_create(CGImageSourceCreateImageAtIndex(
-            src.as_mut_ptr(),
-            index,
-            std::ptr::null(),
-        ))
+    let img = if let Some(edge) = max_edge {
+        let always = cf_str("kCGImageSourceCreateThumbnailFromImageAlways");
+        let max = cf_str("kCGImageSourceThumbnailMaxPixelSize");
+        let cache = cf_str("kCGImageSourceShouldCache");
+        let size = cf_i32(edge.min(i32::MAX as u32) as i32);
+        let options = cf_dict(&[
+            (always.as_ptr(), cf_bool(true)),
+            (max.as_ptr(), size.as_ptr()),
+            (cache.as_ptr(), cf_bool(false)),
+        ]);
+        unsafe {
+            Cf::from_create(CGImageSourceCreateThumbnailAtIndex(
+                src.as_mut_ptr(),
+                index,
+                options.as_ptr(),
+            ))
+        }
+    } else {
+        unsafe {
+            Cf::from_create(CGImageSourceCreateImageAtIndex(
+                src.as_mut_ptr(),
+                index,
+                std::ptr::null(),
+            ))
+        }
     }
     .ok_or_else(|| MediaError::Image(format!("ImageIO could not decode frame {index}")))?;
     let uti =

@@ -1463,7 +1463,8 @@ impl DocumentStore {
             .filter(|m| self.file.media.is_linked(&m.id))
             .map(|m| m.id.clone())
             .collect();
-        let history = match (&self.file.envelope.history, self.history_owned) {
+        let raw_history = self.file.envelope.history.as_ref().map(|h| h.value());
+        let history = match (&raw_history, self.history_owned) {
             (Some(raw), false) => HistoryToWrite::Raw(raw.clone()),
             _ => HistoryToWrite::Session(self.history.snapshot()),
         };
@@ -1479,7 +1480,7 @@ impl DocumentStore {
             );
         }
         if self.history_owned
-            && let Some(raw) = &self.file.envelope.history
+            && let Some(raw) = &raw_history
             && project_io::history_needs_archive(
                 raw,
                 model::open_comp_id(self.root().expect("project root")).as_deref(),
@@ -1586,7 +1587,7 @@ impl DocumentStore {
             } else {
                 for op in record.forward.iter().chain(record.inverse.iter()) {
                     if let Op::Leaf(p) = op {
-                        project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
+                        project_io::collect_patch_assets(&p, &mut ids, &mut add_keys);
                     }
                 }
             }
@@ -1602,7 +1603,7 @@ impl DocumentStore {
         for record in self.history.records() {
             for op in record.forward.iter().chain(record.inverse.iter()) {
                 // A deleted layer's value is what Undo would reinsert.
-                let value = match op {
+                let value = match &op {
                     Op::Leaf(p) => p.value.as_ref(),
                     Op::Insert { value, .. } => Some(value),
                     _ => None,
@@ -2027,8 +2028,8 @@ impl DocumentStore {
             });
         }
         let (ops, reverse) = self.history_step(
-            &record.inverse,
-            &record.forward,
+            &record.inverse.to_vec().into(),
+            &record.forward.to_vec().into(),
             ChangeCause::Undo {
                 label: record.label.clone(),
             },
@@ -2071,8 +2072,8 @@ impl DocumentStore {
             });
         }
         let (ops, reverse) = self.history_step(
-            &record.forward,
-            &record.inverse,
+            &record.forward.to_vec().into(),
+            &record.inverse.to_vec().into(),
             ChangeCause::Redo {
                 label: record.label.clone(),
             },

@@ -850,7 +850,7 @@ impl Builtins {
             Config {
                 limits: Limits {
                     // A mounted built-in holds about 10 MiB.
-                    initial_heap_bytes: 32 * 1024 * 1024,
+                    initial_heap_bytes: 16 * 1024 * 1024,
                     ..Limits::default()
                 },
                 watchdog: WatchdogPolicy::default(),
@@ -861,7 +861,7 @@ impl Builtins {
                 cache: CodeCache::new(4 * 1024 * 1024),
                 // The process's one cage account: each isolate (the nine
                 // built-ins and the user's v4 extensions, §3.4/§3.7) starts
-                // at a 32 MiB slice and grows toward its 64 MiB ceiling only
+                // at a 16 MiB slice and grows toward its 64 MiB ceiling only
                 // while every window's isolates together leave room. Closed
                 // panels park to give theirs back.
                 admission: Admission::cage(),
@@ -879,6 +879,22 @@ impl Builtins {
     /// after Rust accepts the complete atomic surface commit.
     pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.mount_builtin(panel)
+    }
+
+    /// A closed, parkable panel has no isolate until its first layout show.
+    pub fn defer_mount(&self, panel: &str) -> bool {
+        if !builtin_panel(panel).is_some_and(|p| p.parks) {
+            return false;
+        }
+        self.broker.parked.shared().insert(panel.into());
+        true
+    }
+
+    pub fn memory_pressure(&self) {
+        let extensions = self.extension_realms.shared();
+        for realm in self.realms.shared().values().chain(extensions.values()) {
+            let _ = realm.memory_pressure();
+        }
     }
     /// Parks a closed built-in panel: its isolate goes and its reservation
     /// returns to the cage account; `unpark` starts it again from its first

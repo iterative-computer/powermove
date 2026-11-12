@@ -1769,6 +1769,24 @@ impl Host {
     pub fn viewer_layer(&self) -> metal::MetalLayer {
         self.layer.clone()
     }
+    /// A closed document must not leave its drawable pool in the Home
+    /// window. The presenter and placement binding release their old layer
+    /// separately; the next layout sizes this fresh, configured layer.
+    pub fn replace_viewer_layer(&mut self, layer: metal::MetalLayer) {
+        unsafe {
+            let old = self.layer.as_ptr() as *mut AnyObject;
+            let _: () = msg_send![old, removeFromSuperlayer];
+            if self.viewer_transform.is_some() {
+                if let Some(root) = self.viewer.layer() {
+                    let _: () = msg_send![&*root, addSublayer:layer.as_ptr() as *mut AnyObject];
+                }
+            } else {
+                let _: () = msg_send![&*self.viewer, setLayer:layer.as_ptr() as *mut AnyObject];
+            }
+        }
+        self.layer = layer;
+        self.last_geometry = None;
+    }
     pub fn set_viewer_label(&self, label: &str) {
         self.viewer
             .setAccessibilityLabel(Some(&NSString::from_str(label)));

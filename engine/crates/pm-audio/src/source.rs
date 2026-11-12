@@ -23,9 +23,9 @@ pub const BLOCK: usize = 1 << 16;
 /// How long a block a playback read, checked, or asked for again survives
 /// a memory-pressure grant ([`SourceCache::playback_memory_pressure`]).
 /// A playing transport asks for its whole look-ahead again each quarter
-/// second of media (at least every 250 ms: J/K/L rates are 1x or faster),
-/// and a paused, prepared start asks again every second (the producer's
-/// `PAUSED_REFRESH`); this covers both with margin. Today's
+/// second of media (at least every 250 ms: J/K/L rates are 1x or faster).
+/// Paused starts are prepared once; this grace also
+/// protects their newly decoded input. Today's
 /// `trimDecodedCache` likewise never evicts the assets of active voices.
 const PLAYBACK_PRESSURE_HOT: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -252,13 +252,18 @@ fn log_decode(
 }
 
 /// Counters for diagnostics and tests.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CacheStats {
     pub decoded_blocks: u64,
     pub hits: u64,
     pub misses: u64,
     pub evicted_blocks: u64,
     pub bytes: usize,
+    pub budget_bytes: usize,
+    pub resident_blocks: usize,
+    pub queued_blocks: usize,
+    pub in_flight_blocks: usize,
 }
 
 /// Shared by every mixer and render in one process.
@@ -273,7 +278,7 @@ pub struct SourceCache {
     blocks: Arc<Mutex<Blocks>>,
     ready: Condvar,
     work: Arc<Condvar>,
-    budget: usize,
+    budget: AtomicU64,
     next_id: AtomicU64,
     decoded: AtomicU64,
     hits: AtomicU64,
@@ -330,9 +335,11 @@ impl SourceCache {
             blocks: Arc::default(),
             ready: Condvar::new(),
             work: Arc::new(Condvar::new()),
-            budget: budget_bytes
-                .min(crate::chromium::TODAYS_BUDGET as usize)
-                .max(BLOCK * 8 * 4),
+            budget: AtomicU64::new(
+                budget_bytes
+                    .min(crate::chromium::TODAYS_BUDGET as usize)
+                    .max(BLOCK * 8 * 4) as u64,
+            ),
             next_id: AtomicU64::new(1),
             decoded: AtomicU64::new(0),
             hits: AtomicU64::new(0),
@@ -441,12 +448,17 @@ impl SourceCache {
     }
 
     pub fn stats(&self) -> CacheStats {
+        let blocks = lock(&self.blocks);
         CacheStats {
             decoded_blocks: self.decoded.load(Ordering::Relaxed),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             evicted_blocks: self.evicted.load(Ordering::Relaxed),
-            bytes: lock(&self.blocks).bytes,
+            bytes: blocks.bytes,
+            budget_bytes: self.budget.load(Ordering::Relaxed) as usize,
+            resident_blocks: blocks.map.len(),
+            queued_blocks: blocks.queue.len(),
+            in_flight_blocks: blocks.in_flight.len(),
         }
     }
 
@@ -569,6 +581,14 @@ impl SourceCache {
         self.trim_pressure(std::time::Duration::ZERO);
     }
 
+    pub fn set_budget(&self, bytes: usize) {
+        self.budget.store(
+            bytes.min(crate::chromium::TODAYS_BUDGET as usize) as u64,
+            Ordering::Relaxed,
+        );
+        self.memory_pressure();
+    }
+
     /// A live playback also protects the input it is reading and the input
     /// its look-ahead and prepared starts still want: blocks read, checked
     /// or asked for again within [`PLAYBACK_PRESSURE_HOT`]. A prefetched
@@ -647,7 +667,7 @@ impl SourceCache {
         ) {
             blocks.bytes -= old.block.bytes();
         }
-        while blocks.bytes > self.budget && blocks.map.len() > 1 {
+        while blocks.bytes as u64 > self.budget.load(Ordering::Relaxed) && blocks.map.len() > 1 {
             let Some((&oldest, _)) = blocks
                 .map
                 .iter()

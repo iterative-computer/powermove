@@ -64,31 +64,67 @@ pub struct BaseRaster {
 
 type Job = (BaseRequest, Sender<Result<Option<BaseRaster>, String>>);
 
-/// The base raster worker: a second renderer on the app's GPU, with the
-/// app's fonts, owned by one thread.
+/// The base raster worker: a second renderer with the app's fonts, owned by
+/// one thread. Its device is its own (rasters return as CPU pixels), made on
+/// the first request and released after [`RASTER_IDLE`] without one: most
+/// projects never ask, and a clone of the viewer's first wgpu device kept
+/// that device, its queue and programs alive through every renewal.
 pub struct LayerRasters {
     jobs: Mutex<Sender<Job>>,
 }
 
+/// How long the base raster renderer outlives its last request.
+const RASTER_IDLE: Duration = Duration::from_secs(30);
+
 impl LayerRasters {
-    pub fn start(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        fonts: Option<pm_render::text::host::RenderFonts>,
-    ) -> anyhow::Result<Arc<Self>> {
+    pub fn start(fonts: Option<pm_render::text::host::RenderFonts>) -> anyhow::Result<Arc<Self>> {
         let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()
             .name("pm-layer-rasters".into())
             .spawn(move || {
-                let mut renderer = Renderer::new(device, queue);
-                let _ = renderer.set_definitions(&pm_render::all_builtin_definitions());
-                renderer.set_captions_hidden(false);
-                let mut generation = None;
-                for (request, reply) in rx {
-                    if let Some(fonts) = &fonts {
-                        fonts.sync(&mut renderer, &mut generation);
-                    }
-                    let _ = reply.send(paint(&mut renderer, request));
+                let mut worker: Option<(Renderer, Option<u64>)> = None;
+                loop {
+                    let job = if worker.is_some() {
+                        match rx.recv_timeout(RASTER_IDLE) {
+                            Ok(job) => job,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                objc2::rc::autoreleasepool(|_| worker = None);
+                                pm_memory::pressure_relief();
+                                continue;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match rx.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        }
+                    };
+                    let (request, reply) = job;
+                    // This thread's implicit pool is never drained.
+                    objc2::rc::autoreleasepool(|_| {
+                        if worker.is_none() {
+                            match pm_gpu::Gpu::new("pm-layer-rasters") {
+                                Ok(gpu) => {
+                                    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+                                    let _ = renderer
+                                        .set_definitions(&pm_render::all_builtin_definitions());
+                                    renderer.set_captions_hidden(false);
+                                    worker = Some((renderer, None));
+                                }
+                                Err(error) => {
+                                    let _ = reply
+                                        .send(Err(format!("No GPU for layer rasters: {error}")));
+                                    return;
+                                }
+                            }
+                        }
+                        let (renderer, generation) = worker.as_mut().expect("raster renderer");
+                        if let Some(fonts) = &fonts {
+                            fonts.sync(renderer, generation);
+                        }
+                        let _ = reply.send(paint(renderer, request));
+                    });
                 }
             })?;
         Ok(Arc::new(Self {
@@ -910,8 +946,8 @@ mod tests {
             Some(pm_model::canonical::canonical_project(project)),
             1,
         ));
-        let gpu = pm_gpu::Gpu::new("base window test").unwrap();
-        let rasters = LayerRasters::start(gpu.device.clone(), gpu.queue.clone(), None).unwrap();
+        // The raster worker makes its own device on the first request.
+        let rasters = LayerRasters::start(None).unwrap();
         let ask = |window: Option<PixelRect>| {
             rasters
                 .raster(BaseRequest {

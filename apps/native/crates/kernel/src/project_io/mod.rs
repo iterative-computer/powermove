@@ -296,7 +296,7 @@ pub struct Envelope {
     pub version: Option<Value>,
     /// `history` exactly as read. Written back unchanged when it could not be
     /// imported and this session recorded no undo step.
-    pub history: Option<Value>,
+    pub history: Option<crate::history::CompactJson>,
     /// `ws` (the workspace snapshot), kept verbatim.
     pub workspace: Option<Value>,
     /// Every other member, kept verbatim (a newer app's fields survive).
@@ -624,10 +624,21 @@ pub(crate) fn from_container(
     normalize_compositions(&mut project);
     let canonical = canonical_project(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
-    let history = raw_history
-        .as_ref()
-        .and_then(|h| History::from_saved(h, open_comp.as_deref()));
-    Ok(OpenedProject {
+    let (retained_history, history) = pm_model::parallel::join(
+        || {
+            raw_history
+                .as_ref()
+                .map(crate::history::CompactJson::history)
+        },
+        || {
+            raw_history
+                .as_ref()
+                .and_then(|h| History::from_saved(h, open_comp.as_deref()))
+        },
+    );
+    // Free the parsed history tree before asking malloc to return pages.
+    drop(raw_history);
+    let opened = OpenedProject {
         file: ProjectFile {
             path,
             format,
@@ -635,7 +646,7 @@ pub(crate) fn from_container(
             envelope: Envelope {
                 container_index: container.index,
                 version: version_member,
-                history: raw_history,
+                history: retained_history,
                 workspace,
                 extra: fields,
                 wrapped,
@@ -646,7 +657,9 @@ pub(crate) fn from_container(
         document: pm_model::Document::new(Some(canonical), 1),
         open_comp,
         history,
-    })
+    };
+    crate::memory::pressure_relief();
+    Ok(opened)
 }
 
 /// `normalizeCompositions` (main `core/validate/project.ts`): a project from

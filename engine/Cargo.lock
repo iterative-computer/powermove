@@ -2176,6 +2176,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-memory"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pm-protocol",
+]
+
+[[package]]
 name = "pm-model"
 version = "0.1.0"
 dependencies = [

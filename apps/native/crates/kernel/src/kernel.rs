@@ -37,6 +37,10 @@ pub struct KernelConfig {
     /// Previous versions (`<root>/<project id>/`). Every production host sets
     /// this: a save without it deletes the file it replaces.
     pub backup_root: Option<PathBuf>,
+    /// Optional allocator collection on the actor after two seconds idle.
+    /// Snapshots allocated here may be freed later by UI/render owners;
+    /// thread-local allocators need their allocating thread to collect.
+    pub idle_memory_relief: Option<fn()>,
 }
 
 /// Where an opened project comes from.

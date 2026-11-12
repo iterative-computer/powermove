@@ -97,7 +97,7 @@ pub(crate) fn history_assets(history: &crate::History, mut f: impl FnMut(&str, &
                         walk(value, id, &mut f);
                     }
                 }
-                Op::Insert { value, .. } => walk(value, None, &mut f),
+                Op::Insert { value, .. } => walk(&value, None, &mut f),
                 _ => {}
             }
         }

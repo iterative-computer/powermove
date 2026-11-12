@@ -430,9 +430,10 @@ impl KernelActor {
             thread::Builder::new()
                 .name("pm-kernel".into())
                 .spawn(move || {
+                    let idle_memory_relief = config.idle_memory_relief;
                     let kernel = Kernel::new(config);
                     *shared.journal_sync.lock().expect("journal sync") = kernel.journal_sync();
-                    run(kernel, rx, shared)
+                    run(kernel, rx, shared, idle_memory_relief)
                 })
                 .expect("spawn kernel thread")
         };
@@ -918,10 +919,29 @@ fn scope(msg: &Msg) -> Scope {
     }
 }
 
-fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
+fn run(
+    mut kernel: Kernel,
+    rx: mpsc::Receiver<Msg>,
+    shared: Arc<Shared>,
+    idle_memory_relief: Option<fn()>,
+) {
     let mut turns = Turns::default();
     UNANSWERED.with(|u| *u.borrow_mut() = Some(Vec::new()));
-    for msg in rx {
+    loop {
+        let received = if let Some(collect) = idle_memory_relief {
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(msg) => Ok(msg),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    collect();
+                    // Collect once per idle period, then sleep without polling.
+                    rx.recv()
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            rx.recv()
+        };
+        let Ok(msg) = received else { break };
         let shutdown = matches!(msg, Msg::Shutdown);
         let scope = scope(&msg);
         crate::fault_injection::enter(match &scope {
@@ -945,6 +965,40 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
         }
     }
     kernel.sync_all();
+}
+
+#[cfg(test)]
+mod idle_memory_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ON_OWNER: AtomicBool = AtomicBool::new(false);
+    fn collect() {
+        ON_OWNER.store(
+            std::thread::current().name() == Some("pm-kernel"),
+            Ordering::Release,
+        );
+        CALLS.fetch_add(1, Ordering::Release);
+    }
+
+    #[test]
+    fn collects_on_the_allocating_actor_once_then_sleeps() {
+        let actor = KernelActor::spawn(KernelConfig {
+            idle_memory_relief: Some(collect),
+            ..Default::default()
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while CALLS.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "idle owner did not collect");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ON_OWNER.load(Ordering::Acquire));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(CALLS.load(Ordering::Acquire), 1);
+        actor.shutdown();
+    }
 }
 
 fn panic_detail(panic: &(dyn std::any::Any + Send)) -> String {
@@ -1408,6 +1462,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply(closed);
             if closed {
                 emit(shared, KernelEvent::Closed { project });
+                crate::memory::pressure_relief();
             }
         }
         Msg::Recover {

@@ -437,6 +437,12 @@ impl FontService {
     pub fn generation(&self) -> u64 {
         self.layout.resolver().generation()
     }
+
+    /// Numeric payload accounting; full font files can be memory mapped,
+    /// so these byte lengths are not a resident-memory measurement.
+    pub fn memory_usage(&self) -> crate::registry::FontMemoryUsage {
+        self.layout.resolver().memory_usage()
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "system"))]

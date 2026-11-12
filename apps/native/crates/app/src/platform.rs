@@ -395,7 +395,10 @@ define_class!(
     unsafe impl NSObjectProtocol for QuitDelegate {
         #[unsafe(method(respondsToSelector:))]
         fn responds_to_selector(&self, selector: Sel) -> bool {
+            // Advertise our Apple Event handler as well as GPUI’s methods;
+            // otherwise Objective-C capability checks hide the quit route.
             selector == objc2::sel!(applicationShouldTerminate:)
+                || selector == objc2::sel!(handleQuitEvent:withReplyEvent:)
                 || unsafe { msg_send![&*self.ivars().previous, respondsToSelector: selector] }
         }
     }
