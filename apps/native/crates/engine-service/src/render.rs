@@ -374,6 +374,19 @@ impl Engine {
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
         if request != u64::MAX || surfaces != self.budgeted_surfaces {
+            // A traced viewer logs why its caches are trimmed (diagnostics).
+            if crate::trace::enabled() {
+                eprintln!(
+                    "PM_MEMORY_TRIM at={:.6} request={} surfaces={} previous_surfaces={} share={} pool_bytes={} vector_bytes={}",
+                    crate::trace::now(),
+                    request != u64::MAX,
+                    surfaces,
+                    self.budgeted_surfaces,
+                    share,
+                    self.renderer.target_pool_bytes(),
+                    self.renderer.vector_cache_bytes(),
+                );
+            }
             self.budgeted_surfaces = surfaces;
             // In-flight surfaces are pinned. Divide only the remainder,
             // so every independently reusable cache shares the same allowance.
@@ -562,6 +575,11 @@ impl Engine {
             decoders: 32 << 20,
         });
         renderer.set_draw_reuse(true);
+        // A/B diagnostics: `PM_VECTOR_BATCHING=0` resolves every vector scene
+        // on its own (`Renderer::set_vector_batching`).
+        if std::env::var_os("PM_VECTOR_BATCHING").is_some_and(|v| v == "0") {
+            renderer.set_vector_batching(false);
+        }
         renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
             mastering: Default::default(),

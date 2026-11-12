@@ -451,6 +451,8 @@ pub struct Renderer {
     /// comes with each request).
     options3d: crate::scene3d::Options3d,
     vector: crate::vector::cache::VectorCache,
+    /// [`Renderer::set_vector_batching`], kept across cache resets.
+    vector_batching: bool,
     pyramids: crate::sampling::gpu::PyramidCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
@@ -526,6 +528,7 @@ impl Renderer {
             scene3d: Scene3dRenderer::default(),
             options3d: crate::scene3d::Options3d::default(),
             vector: crate::vector::cache::VectorCache::new(),
+            vector_batching: true,
             pyramids: crate::sampling::gpu::PyramidCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
@@ -566,6 +569,21 @@ impl Renderer {
     /// (they are validated by revision when it is on again).
     pub fn set_draw_reuse(&mut self, enabled: bool) {
         self.reuse_enabled = enabled;
+    }
+
+    /// Whether a draw list's missing coverage scenes render together
+    /// (`VectorCache::prepare_scenes_in`; on by default). Every texture is
+    /// the one each scene renders alone; tests turn it off to compare.
+    pub fn set_vector_batching(&mut self, enabled: bool) {
+        self.vector_batching = enabled;
+        self.vector.set_batching(enabled);
+    }
+
+    /// Lowers the vector cache's per-frame scratch bound (tests force split
+    /// and refused batches). It never raises the standing bound and resets
+    /// with the cache.
+    pub fn limit_vector_frame_scratch(&mut self, bytes: u64) {
+        self.vector.limit_frame_scratch(bytes);
     }
 
     /// Whether frames plan with the channels found in the same unchanged
@@ -1570,6 +1588,7 @@ impl Renderer {
         self.trim(0);
         self.media = MediaCache::new(&self.device);
         self.vector = crate::vector::cache::VectorCache::new();
+        self.vector.set_batching(self.vector_batching);
         self.scene3d = Scene3dRenderer::default();
         self.options3d.studio = None;
         self.evaluator.reset();

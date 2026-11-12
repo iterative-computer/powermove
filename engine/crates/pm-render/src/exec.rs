@@ -359,6 +359,21 @@ impl Exec<'_> {
         draws: &[Draw],
         region: Option<Region>,
     ) -> Vec<Resolved> {
+        // The draw list's coverage scenes the cache misses render together
+        // first (`VectorCache::prepare_scenes_in`); each resolves as before.
+        let mut scenes = Vec::new();
+        for draw in draws {
+            vector_scenes(&draw.content, &mut scenes);
+        }
+        if scenes.len() > 1 {
+            self.vector.prepare_scenes_in(
+                self.device,
+                self.queue,
+                encoder,
+                &scenes,
+                self.precision,
+            );
+        }
         let mut out = Vec::with_capacity(draws.len());
         for draw in draws {
             // Drawn by `composite::exec`, never resolved as a quad.
@@ -1323,6 +1338,18 @@ impl Exec<'_> {
         pass.set_bind_group(0, &quad, &[base as u32]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);
+    }
+}
+
+/// The coverage scenes `content` resolves through the vector cache.
+fn vector_scenes<'c>(content: &'c Content, out: &mut Vec<&'c crate::vector::VectorSource>) {
+    match content {
+        Content::Texture {
+            source: Source::Vector(v),
+            ..
+        } if matches!(**v, crate::vector::VectorSource::Scene { .. }) => out.push(v.as_ref()),
+        Content::Placed(p) => vector_scenes(&p.content, out),
+        _ => {}
     }
 }
 
