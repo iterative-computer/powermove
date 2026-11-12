@@ -48,10 +48,23 @@ pub enum ShellCall {
     /// `Kernel::unoffered_copies`). Replies `Copies`.
     CopiesOf(SessionHandle),
     /// Files kept beside this session's project file that the person has
-    /// not been told about yet: a version that arrived during a save nobody
-    /// was shown (at quit, on close), and what a save that was cut short
-    /// left (see `Kernel::note_kept`). Replies `Kept` and forgets them.
+    /// not seen a notice about yet: a version that arrived during a save,
+    /// what a save that was cut short left, a retained version found
+    /// changed. They are read from the saves' own records beside the file
+    /// (written before each file was kept, so a crash loses none), and only
+    /// from records that know the file now open. Replies `Kept`; nothing is
+    /// forgotten until `KeptSeen`.
     KeptBeside(SessionHandle),
+    /// The person was shown the notices about the kept files `paths` (and,
+    /// with `restored`, that the last saved version was put back; with
+    /// `other`, the notices that are not about a kept file): they are not
+    /// reported again.
+    KeptSeen {
+        session: SessionHandle,
+        paths: Vec<PathBuf>,
+        restored: bool,
+        other: bool,
+    },
     /// The files a save of the project file at this path left when it was
     /// cut short and recovery would not choose between (their bytes are
     /// not what the save's record says, or more than one save was cut
@@ -522,13 +535,61 @@ impl Kernel {
             }
             ShellCall::KeptBeside(handle) => {
                 self.check_session(&handle)?;
-                let told = std::sync::Arc::make_mut(&mut self.state.ui)
-                    .get_mut(&handle.project)
-                    .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE));
-                Ok(ShellReply::Kept(match told {
-                    Some(Value::Array(rows)) => rows,
-                    _ => Vec::new(),
-                }))
+                let mut rows = Vec::new();
+                if let Some(Destination::File(path)) =
+                    self.sessions.get(&handle.project).map(|s| &s.destination)
+                {
+                    let path = path.clone();
+                    let hash = self
+                        .project(&handle.project)
+                        .and_then(|p| p.store().file().version.clone())
+                        .map(|v| v.hash.clone());
+                    let (told, strangers) = project_io::kept_notices(&path, hash.as_deref());
+                    rows.extend(
+                        told.iter()
+                            .map(|(why, kept)| kept_row(why, kept.as_deref())),
+                    );
+                    // A notice about another project that was under this
+                    // name is not this project's: left, and logged.
+                    for record in strangers {
+                        self.log(format!(
+                            "A save's record beside {} tells of files kept for a project that                              is no longer under that name; it was left as it is: {}",
+                            path.display(),
+                            record.display()
+                        ));
+                    }
+                }
+                if let Some(Value::Array(more)) = self
+                    .state
+                    .ui
+                    .get(&handle.project)
+                    .and_then(|ui| ui.session.get(KEPT_BESIDE))
+                {
+                    rows.extend(more.iter().cloned());
+                }
+                Ok(ShellReply::Kept(rows))
+            }
+            ShellCall::KeptSeen {
+                session,
+                paths,
+                restored,
+                other,
+            } => {
+                self.check_session(&session)?;
+                if let Some(Destination::File(path)) =
+                    self.sessions.get(&session.project).map(|s| &s.destination)
+                {
+                    project_io::kept_seen(path, &paths, restored);
+                }
+                if other
+                    && std::sync::Arc::make_mut(&mut self.state.ui)
+                        .get_mut(&session.project)
+                        .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE))
+                        .is_some()
+                {
+                    self.save_session_meta(&session.project)?;
+                }
+                Ok(ShellReply::Kept(Vec::new()))
             }
             ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
                 project_io::leftovers(&path, &self.host())
@@ -679,11 +740,9 @@ impl Kernel {
                     else {
                         unreachable!()
                     };
-                    // Nobody sees this save's reply: the next open says it.
-                    if let Some(kept) = displaced {
-                        self.note_kept(&handle.project, [kept_row("arrived", Some(&kept))]);
-                        self.save_session_meta(&handle.project)?;
-                    }
+                    // Nobody sees this save's reply: the save's record keeps
+                    // what it kept, and the next open says it.
+                    let _ = displaced;
                     recovery_copy
                 };
                 crate::fault_injection::hit(crate::fault_injection::Stage::InClose);
@@ -1071,11 +1130,9 @@ impl Kernel {
             {
                 projects += 1;
                 recovery_copies.extend(recovery_copy);
-                // A quit has no window to say it in: the next open does.
-                if let Some(kept) = displaced {
-                    self.note_kept(&handle.project, [kept_row("arrived", Some(&kept))]);
-                    self.save_session_meta(&handle.project)?;
-                }
+                // A quit has no window to say it in: the save's record keeps
+                // what it kept, and the next open says it.
+                let _ = displaced;
             }
         }
         let Some(root) = &self.config_journal_root() else {
@@ -1567,10 +1624,10 @@ impl Kernel {
                 {
                     push_kept(m, [kept_row("unconfirmed", Some(&copy))]);
                 }
-                // What a save that was cut short left is said once the
-                // project is open (`ShellCall::KeptBeside`).
+                // What a save that was cut short left and recovery did not
+                // move is said once the project is open, with what its
+                // records tell (`ShellCall::KeptBeside`).
                 if let Value::Object(m) = &mut meta {
-                    push_kept(m, left_aside.left.iter().map(left_row));
                     push_kept(
                         m,
                         left_aside
@@ -2113,12 +2170,8 @@ impl Kernel {
                 self.note_unproven(id, unproven);
             }
             // A retained version found changed is another version to tell
-            // about: at once where nothing else is, at the next open else.
-            let mut changed = changed.into_iter();
-            if displaced.is_none() {
-                displaced = changed.next();
-            }
-            self.note_kept(id, changed.map(|kept| kept_row("other", Some(&kept))));
+            // about: named by the reply where nothing else is.
+            displaced = displaced.or_else(|| changed.into_iter().next());
             if result.is_ok() {
                 self.save_published(id);
             }
@@ -2627,26 +2680,14 @@ impl Kernel {
     }
     /// The other version a save kept beside the project that its reply
     /// names: the one found at the path, else the first of the versions an
-    /// earlier save had retained and this one found changed. The rest are
-    /// told at the next open.
-    fn note_changed(&mut self, id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
-        let mut changed = receipt.changed.iter();
-        let displaced = receipt
+    /// earlier save had retained and this one found changed. Every one of
+    /// them is in a save's record until the person has seen it
+    /// (`ShellCall::KeptBeside`).
+    fn note_changed(&mut self, _id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
+        receipt
             .displaced
             .clone()
-            .or_else(|| changed.next().cloned());
-        self.note_kept(id, changed.map(|kept| kept_row("other", Some(kept))));
-        displaced
-    }
-    /// Remembers files kept beside session `id`'s project file until the
-    /// person is told (`ShellCall::KeptBeside`); the file's entry keeps them
-    /// across a quit.
-    fn note_kept(&mut self, id: &str, rows: impl IntoIterator<Item = Value>) {
-        if let Some(ui) = std::sync::Arc::make_mut(&mut self.state.ui).get_mut(id)
-            && let Value::Object(m) = &mut ui.session
-        {
-            push_kept(m, rows);
-        }
+            .or_else(|| receipt.changed.first().cloned())
     }
     /// The file session `id` saves to was renamed or moved while open: carry
     /// on at the place the system says it is now (the same inode, its bytes
@@ -2662,7 +2703,6 @@ impl Kernel {
         let path = path.clone();
         let left = project_io::settle(&path, &self.host());
         self.log_unrecorded(&left);
-        self.note_kept(id, left.left.iter().map(left_row));
         let Some(version) = self
             .project(id)
             .and_then(|p| p.store().file().version.clone())

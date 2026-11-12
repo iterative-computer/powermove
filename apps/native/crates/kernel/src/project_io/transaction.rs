@@ -307,10 +307,78 @@ impl Record {
     /// Whether everything this record still names is a retained file:
     /// nothing to settle, only to prune later.
     fn only_retains(&self) -> bool {
-        !self.retained.is_empty()
+        (!self.retained.is_empty() || !self.notices().is_empty())
             && [&self.staged, &self.aside]
                 .into_iter()
                 .all(|p| self.retains(p) || matches!(lstat_file(p), Ok(None)))
+    }
+    /// What this record has to tell the person and has not been seen yet:
+    /// each file a save or a recovery kept beside the project (why, and
+    /// where), and `restored` (no path) when the last saved version was put
+    /// back under the project's name. A file counts as kept from the line
+    /// written once it had its name; or, if the process died right then,
+    /// from the line written before, when the file is under that name and
+    /// gone from its private one.
+    fn notices(&self) -> Vec<(String, Option<PathBuf>)> {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        let text =
+            |step: &Value, key: &str| step.get(key).and_then(Value::as_str).map(str::to_owned);
+        let is = |step: &Value, name: &str| step.get("step").and_then(Value::as_str) == Some(name);
+        let mut told: Vec<(String, Option<PathBuf>)> = Vec::new();
+        let mut push = |why: String, path: Option<PathBuf>| {
+            if !told.iter().any(|(_, known)| *known == path) {
+                told.push((why, path));
+            }
+        };
+        for (at, step) in self.steps.iter().enumerate() {
+            if is(step, "kept") {
+                if let (Some(why), Some(to)) = (text(step, "why"), text(step, "to")) {
+                    push(why, Some(dir.join(to)));
+                }
+            } else if is(step, "restored") {
+                push("restored".into(), None);
+            } else if is(step, "keep") {
+                let (Some(from), Some(to), Some(why)) =
+                    (text(step, "from"), text(step, "to"), text(step, "why"))
+                else {
+                    continue;
+                };
+                let last = !self.steps[at + 1..]
+                    .iter()
+                    .any(|later| is(later, "keep") && text(later, "from").as_ref() == Some(&from));
+                if last
+                    && matches!(lstat_file(&dir.join(&from)), Ok(None))
+                    && matches!(lstat_file(&dir.join(&to)), Ok(Some(_)))
+                {
+                    push(why, Some(dir.join(to)));
+                }
+            }
+        }
+        told.retain(|(_, path)| {
+            !self.steps.iter().any(|step| {
+                is(step, "seen")
+                    && match path {
+                        Some(path) => {
+                            text(step, "to").map(|to| dir.join(to)).as_ref() == Some(path)
+                        }
+                        None => text(step, "to").is_none(),
+                    }
+            })
+        });
+        told
+    }
+    /// Whether the file now under the project's name (`hash`) is one this
+    /// record knows: the version its save replaced, the one it wrote, or
+    /// what the name held when the record was last settled. Its notices are
+    /// about that project, not about whatever else may be put under the
+    /// name later.
+    fn knows(&self, hash: &str) -> bool {
+        self.old.as_deref() == Some(hash)
+            || self.new == hash
+            || self.steps.iter().rev().any(|step| {
+                step.get("step").and_then(Value::as_str) == Some("settled")
+                    && step.get("holds").and_then(Value::as_str) == Some(hash)
+            })
     }
     fn has(&self, step: &str) -> bool {
         self.steps
@@ -328,6 +396,13 @@ pub(super) struct Transaction {
     /// A file this record names is retained under its private name, or
     /// could not be given the name it should have: the record stays with it.
     retains: bool,
+    /// The record holds something the person has not been told (a file
+    /// kept beside the project, the last saved version put back): it stays
+    /// until that was seen ([`kept_seen`]).
+    tells: bool,
+    /// Whether this is the save itself (not a later recovery from its
+    /// record): another version it finds at the path arrived during it.
+    live: bool,
     /// What the project's folder answered when it was synced as the save
     /// began ([`Self::folder`]).
     folder: Folder,
@@ -401,6 +476,8 @@ impl Transaction {
             destination: destination.to_owned(),
             hooks: host.hooks.clone(),
             retains: false,
+            tells: false,
+            live: true,
             folder,
         };
         tx.reached("begin");
@@ -415,6 +492,8 @@ impl Transaction {
             destination: destination.to_owned(),
             hooks: hooks.clone(),
             retains: !record.retained.is_empty(),
+            tells: !record.notices().is_empty(),
+            live: false,
             folder: folder_sync(destination.parent().unwrap_or(Path::new(".")), hooks)
                 .map_err(|_| io::Error::other("the folder cannot be synced"))?,
         })
@@ -531,21 +610,59 @@ impl Transaction {
     /// [`Self::keep`] without deciding what becomes of the file under its
     /// old name when the new one holds a copy: says how it was placed.
     pub fn keep_file(&mut self, held: PathBuf, label: &str) -> Result<(PathBuf, Placed), PathBuf> {
-        let why = if label == "recovered" {
-            "unfinished"
-        } else {
-            "other"
+        let why = match label {
+            "recovered" => "unfinished",
+            // Found at the path by the save itself: it arrived during it.
+            _ if self.live => "arrived",
+            _ => "other",
         };
         let (destination, hooks) = (self.destination.clone(), self.hooks.clone());
-        keep_beside(held, &destination, label, &hooks, &mut |from, to| {
+        let kept = keep_beside(held, &destination, label, &hooks, &mut |from, to| {
             self.keeping(from, to, why)
-        })
+        })?;
+        // It has its name: the person is to be told, and the record keeps
+        // that until they were.
+        let mut members = Map::new();
+        members.insert(
+            "to",
+            Value::from(
+                kept.0
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        );
+        members.insert("why", Value::from(why));
+        let _ = self.step_with("kept", members);
+        self.tells = true;
+        Ok(kept)
+    }
+
+    /// The last saved version is back under the project's name: the person
+    /// is to be told.
+    pub fn restored(&mut self) {
+        let _ = self.step("restored");
+        self.tells = true;
+    }
+
+    /// Everything this record names is where it will stay. `holds` is what
+    /// the project's name holds now, which is the project the record's
+    /// notices are about ([`Record::knows`]).
+    pub fn settled(&mut self, holds: Option<&str>) {
+        if self.tells {
+            let mut members = Map::new();
+            if let Some(holds) = holds {
+                members.insert("holds", Value::from(holds));
+            }
+            let _ = self.step_with("settled", members);
+        }
     }
 
     /// The save has nothing left to do: its record goes, unless a file it
     /// names is retained under its private name.
     pub fn finish(self) {
-        if !self.retains {
+        if !self.retains && !self.tells {
             let _ = fs::remove_file(&self.record);
         }
         self.reached("closed");
@@ -833,7 +950,7 @@ fn settle_one(
                 if placed == Placed::Copied {
                     tx.retain(&record.aside, old);
                 }
-                let _ = tx.step("restored");
+                tx.restored();
                 left.push(LeftAside::Restored);
                 (at_path, aside_settled) = (Holds::Old, true);
             }
@@ -847,7 +964,7 @@ fn settle_one(
         && aside != Holds::Other
     {
         // Put back right before the crash that interrupted that recovery.
-        let _ = tx.step("restored");
+        tx.restored();
         left.push(LeftAside::Restored);
     }
     if !aside_settled {
@@ -908,9 +1025,81 @@ fn settle_one(
         unresolved = Some(Undecided::Unknown);
     }
     if unresolved.is_none() {
+        let holds = match at_path {
+            Holds::Old => record.old.clone(),
+            Holds::New => Some(record.new.clone()),
+            Holds::Other => super::durable::hash_file(destination).ok(),
+            Holds::Nothing => None,
+        };
+        tx.settled(holds.as_deref());
         tx.finish();
     }
     unresolved
+}
+
+/// What the records beside `destination` have to tell the person and have
+/// not been seen: (why, where) of each file a save or a recovery kept
+/// beside the project (`arrived`, `other`, `unfinished`), and `restored`.
+/// Only from records that know the file now under the project's name
+/// (`hash`; see [`Record::knows`]): a notice is about the project it
+/// happened to, not about another one later put under that name. The
+/// records that have something to tell but do not know this file are
+/// returned too, untouched.
+pub(crate) fn kept_notices(
+    destination: &Path,
+    hash: Option<&str>,
+) -> (Vec<(String, Option<PathBuf>)>, Vec<PathBuf>) {
+    let (mut notices, mut strangers) = (Vec::new(), Vec::new());
+    for record in records_of(destination).0 {
+        let told = record.notices();
+        if told.is_empty() {
+            continue;
+        }
+        if hash.is_none_or(|hash| record.knows(hash)) {
+            notices.extend(told);
+        } else {
+            strangers.push(record.path.clone());
+        }
+    }
+    (notices, strangers)
+}
+
+/// The person has seen the notices about the kept files `paths` (and, with
+/// `restored`, that the last saved version was put back). Each is marked
+/// seen in its record; a record with nothing left to tell and nothing
+/// retained goes.
+pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
+    for record in records_of(destination).0 {
+        let told = record.notices();
+        let seen: Vec<_> = told
+            .iter()
+            .filter(|(_, path)| match path {
+                Some(path) => paths.contains(path),
+                None => restored,
+            })
+            .collect();
+        if seen.is_empty() {
+            continue;
+        }
+        let Ok(mut file) = OpenOptions::new().append(true).open(&record.path) else {
+            continue;
+        };
+        for (_, path) in &seen {
+            let mut members = Map::new();
+            members.insert("step", Value::from("seen"));
+            if let Some(name) = path.as_ref().and_then(|p| p.file_name()) {
+                members.insert("to", Value::from(name.to_string_lossy().into_owned()));
+            }
+            let _ = file.write_all(line(&Value::Object(members)).as_bytes());
+        }
+        let _ = sync_file(&file);
+        let left = [&record.staged, &record.aside]
+            .into_iter()
+            .any(|p| !matches!(lstat_file(p), Ok(None)));
+        if seen.len() == told.len() && !left {
+            let _ = fs::remove_file(&record.path);
+        }
+    }
 }
 
 /// The retention pass a save runs once it stands: every version an earlier
@@ -929,7 +1118,7 @@ pub(super) fn prune_retained(
     let mut changed = Vec::new();
     let (records, _) = records_of(destination);
     for record in records {
-        if record.path == current.record || !record.only_retains() {
+        if record.path == current.record || !record.only_retains() || record.retained.is_empty() {
             continue;
         }
         let Ok(mut tx) = Transaction::resume(&record, destination, hooks) else {
@@ -962,7 +1151,11 @@ pub(super) fn prune_retained(
                 }
             }
         }
-        if gone {
+        // The record goes with its last file, unless it has something to
+        // tell that was not seen yet (a file just kept is one).
+        let tells =
+            Record::read(&record.path, destination).is_some_and(|r| !r.notices().is_empty());
+        if gone && !tells {
             let _ = fs::remove_file(&record.path);
         }
     }

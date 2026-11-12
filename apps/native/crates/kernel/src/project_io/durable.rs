@@ -1789,6 +1789,7 @@ fn publish_now(
             // The path no longer holds the file just published.
             if confirmed.is_err() {
                 let _ = sync_directory(dir);
+                tx.settled(None);
                 tx.finish();
                 return Err(match published.displaced {
                     Some(recovery_path) => ProjectIoError::Conflict {
@@ -1813,6 +1814,7 @@ fn publish_now(
             ) {
                 Ok(aside) => published = aside,
                 Err(e) => {
+                    tx.settled(None);
                     tx.finish();
                     return Err(e);
                 }
@@ -1861,6 +1863,7 @@ fn publish_now(
             }
         }
     }
+    tx.settled(Some(new_hash));
     tx.finish();
     published.unproven = unproven;
     published.local_copy = local_copy;

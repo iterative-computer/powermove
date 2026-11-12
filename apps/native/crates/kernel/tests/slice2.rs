@@ -1000,7 +1000,9 @@ fn retained(file: &Path) -> Vec<std::path::PathBuf> {
             .filter_map(|step| Some(dir.join(step.get("name")?.as_str()?)))
             .filter(|path| path.exists())
             .collect();
-        if !kept.is_empty() {
+        // A record also stays while it has something to tell the person.
+        let tells = text.contains(r#""step":"kept""#) || text.contains(r#""step":"restored""#);
+        if !kept.is_empty() || tells {
             found.extend(kept);
             found.push(record);
         }
@@ -2244,6 +2246,201 @@ fn kept_beside(
         })
         .collect()
 }
+/// The person saw the notices `rows` ([`kept_beside`]).
+fn seen(k: &mut Kernel, session: &SessionHandle, rows: &[(String, Option<std::path::PathBuf>)]) {
+    k.shell(ShellCall::KeptSeen {
+        session: session.clone(),
+        paths: rows.iter().filter_map(|(_, path)| path.clone()).collect(),
+        restored: rows.iter().any(|(why, _)| why == "restored"),
+        other: true,
+    })
+    .unwrap();
+}
+/// A notice about a kept file is written into the save's record before the
+/// file is kept, stays there until the person has seen it, and is about the
+/// project it happened to. So: asking does not forget it; a crash right
+/// after the save does not lose it; every kept file is told, also when the
+/// save itself failed; and it is not told to another project later put
+/// under the same name.
+#[test]
+fn a_kept_version_is_told_until_it_was_seen_whatever_happens_in_between() {
+    let dir = common::TempDir::new("notices");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let ShellReply::Saved {
+        displaced: Some(kept),
+        ..
+    } = k.finish_session_save(plan.run()).unwrap()
+    else {
+        panic!()
+    };
+    let told = kept_beside(&mut k, &session);
+    assert_eq!(told, [("arrived".to_owned(), Some(kept.clone()))]);
+    assert_eq!(
+        kept_beside(&mut k, &session),
+        told,
+        "asking forgets nothing"
+    );
+    // Not seen yet, and the app goes away: the next open still says it.
+    k.set_publish_hooks(Default::default());
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    assert_eq!(kept_beside(&mut k, &session), told);
+    // Another project put under that name is not told about it.
+    let mine = fs::read(&file).unwrap();
+    let elsewhere = dir.path("elsewhere/cut.pmv");
+    fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    fs::copy(common::ts_fixture("fresh.pmv"), &elsewhere).unwrap();
+    {
+        let mut other = kernel(&dir.path("other"));
+        let (session, _) = open_file(&mut other, &elsewhere);
+        rename_comp(&mut other, "P", "Elsewhere");
+        other.shell(ShellCall::Save(session)).unwrap();
+    }
+    k.shell(ShellCall::Close(session)).unwrap();
+    fs::copy(&elsewhere, &file).unwrap();
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::Open {
+            id: "Q".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        kept_beside(&mut k, &session),
+        [],
+        "not this project's notice"
+    );
+    assert!(
+        k.take_log()
+            .iter()
+            .any(|l| l.contains("no longer under that name")),
+        "the Error Log says a notice was left"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    // The project it is about, again: told, seen, and then not told again.
+    fs::write(&file, &mine).unwrap();
+    let (session, _) = open_file(&mut k, &file);
+    assert_eq!(kept_beside(&mut k, &session), told);
+    seen(&mut k, &session, &told);
+    assert_eq!(kept_beside(&mut k, &session), []);
+    assert_eq!(private_leftovers(&file), [""; 0]);
+    assert_eq!(
+        fs::read(&kept).unwrap(),
+        b"version B",
+        "the file itself stays"
+    );
+}
+/// A save that dies right after it kept another version (before anything
+/// could reply or write a notice elsewhere) has already recorded it: the
+/// next open tells.
+#[test]
+fn a_crash_right_after_a_version_was_kept_does_not_lose_the_notice() {
+    for disk in ["real", "no-exchange", "no-exclusive"] {
+        let dir = common::TempDir::new("notice-crash");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        let crashed = Process::new(std::env::current_exe().unwrap())
+            .args(["--exact", "save_child_process"])
+            .env("PM_KERNEL_TEST_SAVE_PROFILE", &native)
+            .env("PM_KERNEL_TEST_SAVE_FILE", &file)
+            .env("PM_KERNEL_TEST_SAVE_DISK", disk)
+            .env("PM_KERNEL_TEST_SAVE_KILL", "closed")
+            .env("PM_KERNEL_TEST_SAVE_LAND", "1")
+            .stdout(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(crashed.status.code(), Some(0), "{disk}");
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "{disk}");
+        let kept = visible_siblings(&file);
+        assert_eq!(kept.len(), 1, "{disk}: {kept:?}");
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk(disk));
+        let session = match k
+            .shell(ShellCall::PrepareOpen {
+                id: "P".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap()
+        {
+            ShellReply::Opened { session, .. } => session,
+            ShellReply::RecoveryRequired { ticket, .. } => {
+                decide(&mut k, ticket, RecoveryDecision::Discard)
+            }
+            other => panic!("{disk}: {other:?}"),
+        };
+        assert_eq!(
+            kept_beside(&mut k, &session),
+            [("arrived".to_owned(), Some(kept[0].clone()))],
+            "{disk}"
+        );
+    }
+}
+/// Two versions arrive during one save: one before the file is moved aside
+/// (it is what gets moved, and is kept), one between the two renames (it
+/// takes the name; this save's file is kept beside it and the save fails).
+/// The failure names this save's file. The other kept file is told as well:
+/// both are in the save's record.
+#[test]
+fn every_file_a_failed_save_kept_is_told_not_only_the_one_its_error_names() {
+    for (disk, hooks) in disks_without_an_exchange() {
+        let dir = common::TempDir::new("notices-both");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version X"))),
+            between_renames: Some(std::sync::Arc::new(|path| land(path, b"version Y"))),
+            ..hooks
+        });
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let failed = k
+            .finish_session_save(plan.run())
+            .expect_err("Y took the name");
+        let ours = pm_kernel::project_io::kept_beside(&failed.to_string()).expect("named");
+        assert_eq!(fs::read(&file).unwrap(), b"version Y", "{disk}");
+        let told = kept_beside(&mut k, &session);
+        assert_eq!(told.len(), 2, "{disk}: {told:?}");
+        assert!(
+            told.contains(&("unfinished".to_owned(), Some(ours))),
+            "{disk}: {told:?}"
+        );
+        let (_, other) = told
+            .iter()
+            .find(|(why, _)| why == "arrived")
+            .expect("X is told");
+        assert_eq!(
+            fs::read(other.as_ref().unwrap()).unwrap(),
+            b"version X",
+            "{disk}"
+        );
+    }
+}
 /// A save nobody is shown the result of (the one a close does on its own
 /// when a window goes at quit, or a compaction of every open project) finds
 /// another version at the project's path. That version is
@@ -2289,12 +2486,14 @@ fn a_version_kept_by_a_save_at_quit_or_close_is_told_at_the_next_open() {
         else {
             panic!("a saved project opens without a question")
         };
+        let told = kept_beside(&mut k, &session);
         assert_eq!(
-            kept_beside(&mut k, &session),
+            told,
             [("arrived".to_owned(), Some(kept[0].clone()))],
             "at_quit {at_quit}"
         );
-        assert_eq!(kept_beside(&mut k, &session), [], "told once");
+        seen(&mut k, &session, &told);
+        assert_eq!(kept_beside(&mut k, &session), [], "told until seen");
         // Told, and closed: the next open has nothing to say.
         k.shell(ShellCall::Close(session)).unwrap();
         let (session, _) = open_file(&mut k, &file);
@@ -2366,6 +2565,11 @@ fn save_child_process() {
             }
         })),
         owner_host: var("PM_KERNEL_TEST_SAVE_HOST"),
+        before_exchange: var("PM_KERNEL_TEST_SAVE_LAND").map(
+            |_| -> pm_kernel::project_io::PublishHook {
+                std::sync::Arc::new(|path| land(path, b"version B"))
+            },
+        ),
         ..child_disk(&var("PM_KERNEL_TEST_SAVE_DISK").unwrap_or_else(|| "no-exchange".into()))
     };
     // A build that does not share the user's lock folder has its own.
@@ -2492,6 +2696,7 @@ fn a_save_killed_between_its_two_renames_leaves_the_last_saved_version_for_the_n
                 ("unfinished".to_owned(), Some(unfinished[0].clone()))
             ]
         );
+        seen(&mut k, &session, &told);
         assert_eq!(kept_beside(&mut k, &session), []);
         // And it saves: the session is an ordinary one again.
         k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
