@@ -41,6 +41,28 @@ fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
         .copied()
 }
 
+/// Gate: what the frames that completed a phase's samples were made of.
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    frames: u64,
+    stand_ins: u64,
+    reduced: u64,
+    cache_hits: u64,
+    gpu_bad: u64,
+}
+impl Tally {
+    fn add(&mut self, f: &pm_engine_service::FrameReport, requested: f64) {
+        self.frames += 1;
+        self.stand_ins += u64::from(f.stand_ins);
+        self.reduced += u64::from(f.scale + 1e-9 < requested);
+        self.cache_hits += u64::from(f.cache_hit);
+        self.gpu_bad += u64::from(!f.gpu_ok);
+    }
+    fn json(&self) -> serde_json::Value {
+        json!({"frames":self.frames,"stand_ins":self.stand_ins,"reduced_resolution":self.reduced,"cache_hits":self.cache_hits,"gpu_failures":self.gpu_bad})
+    }
+}
+
 /// How long the kernel took to open `--project` (µs): what a window waits
 /// for before its first frame, without media extraction.
 static OPEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -253,8 +275,11 @@ pub fn run() -> anyhow::Result<()> {
         rate: PlaybackRate::NORMAL,
     })?;
     let skipped_before = viewer.status().skipped_targets;
+    println!("PHASE playback");
     let started = Instant::now();
     let mut next = started;
+    let mut late_ticks = 0u64;
+    let mut missed_ticks = 0u64;
     let mut last = 0.;
     let mut costs = Vec::new();
     let (mut failures, mut stand_ins, mut lowest_quality) = (0, 0, 1f64);
@@ -262,6 +287,9 @@ pub fn run() -> anyhow::Result<()> {
         pm_text::host::serve(&mut font_service, fonts.take_asks());
         let now = Instant::now();
         if now >= next {
+            let behind = now.duration_since(next).as_secs_f64();
+            late_ticks += u64::from(behind > 1. / hz);
+            missed_ticks += (behind * hz).floor() as u64;
             viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
             next = now + Duration::from_secs_f64(1. / hz);
         }
@@ -287,8 +315,18 @@ pub fn run() -> anyhow::Result<()> {
     viewer.command(TransportCommand::Pause)?;
     costs.sort_by(f64::total_cmp);
     // Seeks: input to a completed frame at the new time, as the viewer scrubs.
+    // Gate: the resolution the quality setting asks for when stopped.
+    let requested = match arg("quality", "auto").as_str() {
+        "half" => 0.5,
+        "quarter" => 0.25,
+        _ => 1.,
+    };
+    let mut seek_tally = Tally::default();
+    let mut seek_ats = Vec::new();
+    println!("PHASE seek");
     let mut seeks = Vec::new();
     let mut stuck = Vec::new();
+    let mut seek_stand_ins = 0u64;
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
     let frame = rate
         .exact_frame_ticks()
@@ -310,6 +348,9 @@ pub fn run() -> anyhow::Result<()> {
                 .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
             {
                 seeks.push(input.elapsed().as_secs_f64() * 1000.);
+                seek_stand_ins += u64::from(status.frame.as_ref().unwrap().stand_ins);
+                seek_tally.add(status.frame.as_ref().unwrap(), requested);
+                seek_ats.push(at);
                 break;
             }
             if input.elapsed() > Duration::from_secs(10) {
@@ -323,8 +364,16 @@ pub fn run() -> anyhow::Result<()> {
     // A playhead drag: every frame of two seconds forward, then back over
     // them (media and glyphs warm), then among the last few (the service's
     // frame cache): input to a completed frame at the new time each.
+    // Benchmark-only: per sweep, how many answering frames were stand-ins
+    // or frame-cache hits (`sweep_counts`, in sweep order).
+    let mut sweep_counts = Vec::new();
+    // Gate: per sweep, the tally with reduced-resolution / GPU failures, and stuck scrubs.
+    let mut gate_sweeps: Vec<(Tally, u64)> = Vec::new();
     let mut sweep = |times: &mut dyn Iterator<Item = i64>| -> anyhow::Result<Vec<f64>> {
         let mut out = Vec::new();
+        let (mut stand_ins, mut hits) = (0u64, 0u64);
+        let mut tally = Tally::default();
+        let mut stuck_sweep = 0u64;
         for t in times {
             let at = Ticks::new(t)?;
             let input = Instant::now();
@@ -339,30 +388,35 @@ pub fn run() -> anyhow::Result<()> {
                     .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
                 {
                     out.push(input.elapsed().as_secs_f64() * 1000.);
+                    let f = status.frame.as_ref().unwrap();
+                    stand_ins += u64::from(f.stand_ins);
+                    hits += u64::from(f.cache_hit);
+                    tally.add(f, requested);
                     break;
                 }
-                anyhow::ensure!(
-                    input.elapsed() < Duration::from_secs(10),
-                    "scrub stuck at {t}"
-                );
+                // Gate: a stuck scrub is counted, not fatal.
+                if input.elapsed() >= Duration::from_secs(10) {
+                    stuck_sweep += 1;
+                    break;
+                }
                 std::thread::sleep(Duration::from_micros(100));
             }
         }
+        sweep_counts.push(json!({"n":out.len(),"stand_ins":stand_ins,"cache_hits":hits}));
+        gate_sweeps.push((tally, stuck_sweep));
         out.sort_by(f64::total_cmp);
         Ok(out)
     };
     let scrub_from = (from * pm_protocol::common::TICKS_PER_SECOND as f64) as i64 / frame * frame;
     let frames = (2. * rate.to_f64()).round() as i64;
+    println!("PHASE scrub_forward");
     let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
+    println!("PHASE scrub_back");
     let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
+    println!("PHASE scrub_cached");
     let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
     // The playhead stops: its frame is drawn exact, at the requested
     // resolution (Auto drags a slow project at reduced resolution).
-    let requested = match arg("quality", "auto").as_str() {
-        "half" => 0.5,
-        "quarter" => 0.25,
-        _ => 1.,
-    };
     let last = Ticks::new(scrub_from + 3 * frame)?;
     let stopped = Instant::now();
     let settle_ms = loop {
@@ -383,18 +437,52 @@ pub fn run() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_micros(100));
     };
+    // Gate: the settled frame must also be a real one: no stand-in, the
+    // requested resolution, GPU work completed, no layer left out.
+    let settle_report = {
+        let waited = Instant::now();
+        loop {
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            let status = viewer.status();
+            let f = status.frame.clone();
+            let exact = f.as_ref().is_some_and(|f| {
+                f.time == last
+                    && f.completion_host_seconds.is_some()
+                    && !f.stand_ins
+                    && f.gpu_ok
+                    && f.scale + 1e-9 >= requested
+            }) && status.layer_failures.is_empty();
+            if exact || waited.elapsed() > Duration::from_secs(10) {
+                break json!({
+                    "exact": exact,
+                    "extra_wait_ms": waited.elapsed().as_secs_f64() * 1000.,
+                    "stand_ins": f.as_ref().map(|f| f.stand_ins),
+                    "scale": f.as_ref().map(|f| f.scale),
+                    "requested_scale": requested,
+                    "gpu_ok": f.as_ref().map(|f| f.gpu_ok),
+                    "layer_failures": status.layer_failures.len(),
+                });
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    };
     // Skimming: pointer events at 60 Hz move the skimmer at `--skim` media
     // seconds per wall second over two media seconds forward, then back over
     // them; each frame shown counts from the event that asked for its time.
     let skim_speed: f64 = arg("skim", "1").parse()?;
+    let mut skim_counts = Vec::new();
     let mut skim_pass = |forward: bool| -> anyhow::Result<Vec<f64>> {
         let events = skim_events(skim_speed, SKIM_SPAN_SECONDS);
         let span = (SKIM_SPAN_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
         let mut asked: std::collections::HashMap<i64, f64> = Default::default();
         let mut out = Vec::new();
+        let mut delivered = std::collections::HashSet::new();
+        let mut delivered_tally = Tally::default();
+        let mut skim_stand_ins = 0u64;
         let mut seen = None;
         let started = Instant::now();
-        let collect = |out: &mut Vec<f64>,
+        let mut collect = |out: &mut Vec<f64>,
                        asked: &std::collections::HashMap<i64, f64>,
                        seen: &mut Option<(i64, u64)>| {
             if let Some(f) = viewer.status().frame
@@ -404,6 +492,10 @@ pub fn run() -> anyhow::Result<()> {
                 *seen = Some((f.time.get(), f.stamp.sequence));
                 if let Some(input) = asked.get(&f.time.get()) {
                     out.push((done - input) * 1000.);
+                    if delivered.insert(f.time.get()) {
+                        delivered_tally.add(&f, requested);
+                    }
+                    skim_stand_ins += u64::from(f.stand_ins);
                 }
             }
         };
@@ -434,25 +526,103 @@ pub fn run() -> anyhow::Result<()> {
             collect(&mut out, &asked, &mut seen);
             std::thread::sleep(Duration::from_micros(200));
         }
+        drop(collect);
+        skim_counts.push(json!({"requested_unique":asked.len(),"delivered_unique":delivered.len(),"missed_unique":asked.len().saturating_sub(delivered.len()),"stand_ins":skim_stand_ins,"delivered_frames":delivered_tally.json()}));
         out.sort_by(f64::total_cmp);
         Ok(out)
     };
+    println!("PHASE skim_forward");
     let skim_forward = skim_pass(true)?;
+    println!("PHASE skim_back");
     let skim_back = skim_pass(false)?;
     viewer.skim(None, pm_engine_service::trace::now())?;
-    let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
+    // Gate: pixel-exact check. At the settle frame and the first random-seek
+    // positions the viewer is asked for a capture, which the engine delivers
+    // only from an exact frame (paused, full resolution, no stand-in). The
+    // pixels are fingerprinted so two builds can be compared frame by frame.
+    println!("PHASE exact");
+    let mut exact_frames = Vec::new();
+    let mut positions = vec![last];
+    positions.extend(seek_ats.iter().take(5).copied());
+    for at in positions {
+        let started = Instant::now();
+        viewer.scrub(at)?;
+        let mut asked = false;
+        let item = loop {
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            let status = viewer.status();
+            if let Some(f) = status.frame.as_ref().filter(|f| f.time == at) {
+                if let Some(px) = &f.pixels {
+                    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+                    let (cols, rows) = (16usize, 9usize);
+                    let mut sum = vec![[0f64; 3]; cols * rows];
+                    let mut count = vec![0u64; cols * rows];
+                    let w = width as usize;
+                    for (i, p) in px.iter().enumerate() {
+                        for c in p {
+                            hash = (hash ^ c.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
+                        }
+                        let cell = (i / w * rows / height as usize) * cols + (i % w) * cols / w;
+                        for k in 0..3 {
+                            sum[cell][k] += p[k];
+                        }
+                        count[cell] += 1;
+                    }
+                    let grid: Vec<f64> = sum
+                        .iter()
+                        .zip(&count)
+                        .flat_map(|(s, n)| s.map(|v| (v / (*n).max(1) as f64 * 1e4).round() / 1e4))
+                        .collect();
+                    break json!({"time":at.get(),"delivered":true,"hash":format!("{hash:016x}"),"pixels":px.len(),"grid16x9_rgb":grid,"ms":started.elapsed().as_secs_f64()*1000.});
+                }
+                if !asked
+                    && f.completion_host_seconds.is_some()
+                    && !f.stand_ins
+                    && status.effective_quality == requested
+                {
+                    viewer.capture_next()?;
+                    asked = true;
+                }
+            }
+            if let Some(why) = status.capture_failed {
+                break json!({"time":at.get(),"delivered":false,"why":why});
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                break json!({"time":at.get(),"delivered":false,"why":"timeout","asked":asked});
+            }
+            std::thread::sleep(Duration::from_micros(250));
+        };
+        exact_frames.push(item);
+    }
+    // Gate: nothing asked for four seconds (past the engine's two-second idle
+    // release): the footprint it settles to.
+    println!("PHASE idle");
+    let idling = Instant::now();
+    while idling.elapsed() < Duration::from_secs(4) {
+        pm_text::host::serve(&mut font_service, fonts.take_asks());
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    println!("PHASE end");
+    let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"p99":percentile(v,0.99),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
         "output":[width,height],"open_s":OPEN_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,"first_frame_s":first_frame_s,
-        "samples":costs.len(),
-        "worker_to_completion_ms":{"p50":percentile(&costs,0.5),"p95":percentile(&costs,0.95),"max":costs.last()},
+        "samples":costs.len(),"late_ticks_over_interval":late_ticks,"missed_tick_intervals":missed_ticks,
+        "worker_to_completion_ms":{"p50":percentile(&costs,0.5),"p95":percentile(&costs,0.95),"p99":percentile(&costs,0.99),"max":costs.last()},
         "headroom_budget_ms":500./hz,"gpu_failures":failures,
         "skipped_targets":status.skipped_targets - skipped_before,"held_frames":status.held_frames,
         "stand_in_frames":stand_ins,"lowest_effective_quality":lowest_quality,
         "layer_failures":status.layer_failures.len(),
-        "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
-        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"settle_exact":settle_ms,"budget_120hz":9.333},
-        "skim_ms":{"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
+        "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"p99":percentile(&seeks,0.99),"max":seeks.last(),"stuck":stuck,"stand_ins":seek_stand_ins},
+        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"settle_exact":settle_ms,"counts":sweep_counts,"budget_120hz":9.333},
+        "gate":{"requested_scale":requested,"playback_stand_ins":stand_ins,
+            "seek":seek_tally.json(),
+            "scrub_forward":gate_sweeps[0].0.json(),"scrub_back":gate_sweeps[1].0.json(),"scrub_cached":gate_sweeps[2].0.json(),
+            "stuck":{"seek":stuck.len(),"scrub_forward":gate_sweeps[0].1,"scrub_back":gate_sweeps[1].1,"scrub_cached":gate_sweeps[2].1},
+            "settle":settle_report,"exact_capture":exact_frames},
+        "skim_ms":{"counts":skim_counts,"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
