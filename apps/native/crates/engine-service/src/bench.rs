@@ -185,9 +185,17 @@ fn diag_mark(phase: &str, service: &EngineService) {
         .map(|(k, v)| (k.to_owned(), json!(v)))
         .collect();
     let usage = serde_json::to_value(service.memory_usage()).unwrap_or_default();
+    let lease = json!({
+        "budget": pm_memory::budget(),
+        "clients": pm_memory::clients()
+            .into_iter()
+            .map(|(weight, grant, reported)| json!({"weight":weight,"grant":grant,"reported":reported}))
+            .collect::<Vec<_>>(),
+        "reported": serde_json::to_value(pm_memory::usage()).unwrap_or_default(),
+    });
     DIAG.lock()
         .unwrap()
-        .push(json!({"phase":phase,"decode":counters,"usage":usage}));
+        .push(json!({"phase":phase,"decode":counters,"usage":usage,"lease":lease}));
 }
 
 pub fn run() -> anyhow::Result<()> {
