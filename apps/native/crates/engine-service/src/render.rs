@@ -894,7 +894,13 @@ impl Engine {
                 self.disk_late += 1;
                 return Err(DiskFramePending.into());
             }
-            _ => None,
+            other => {
+                // Drawn after all: the frames after it give way again.
+                if matches!(other, Some(crate::render_cache::Read::Late(_))) {
+                    self.disk_late = 0;
+                }
+                None
+            }
         };
         // A paused playhead keeps the frames a play starts from read.
         if spec.moment == Moment::Paused

@@ -146,6 +146,8 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
             .chunks_mut(per)
             .map(|group| {
                 s.spawn(move || {
+                    // A frame on screen waits for this read.
+                    crate::qos::set_interactive_qos();
                     let mut planes = Vec::new();
                     group.iter_mut().all(|(dst, (coded, packed, raw))| {
                         let planes: &[u8] = if *packed {

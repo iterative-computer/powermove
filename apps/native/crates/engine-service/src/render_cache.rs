@@ -57,6 +57,8 @@ const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
 const AHEAD: i64 = 6;
 const READY_FRAMES: usize = 8;
+/// Reader threads.
+const READERS: usize = 3;
 /// Frames kept read at a paused playhead, so a play starts from them.
 const WARM: i64 = 3;
 /// How long a playing frame waits for its frame on disk to be read. A
@@ -1603,7 +1605,6 @@ fn run_fill(
     }
 }
 
-/// Reads frames on a thread of its own, ahead of the playhead.
 /// What [`DiskFrames::read_within`] found.
 pub(crate) enum Read {
     /// The frame, at its stored size.
@@ -1616,6 +1617,7 @@ pub(crate) enum Read {
 }
 /// A frame still being read when the wait for it ended.
 struct Late;
+/// Reads frames on threads of its own, ahead of the playhead.
 struct Reader {
     asks: std::sync::mpsc::SyncSender<Ask>,
     ready: Arc<Mutex<Ready>>,
@@ -1647,10 +1649,32 @@ impl Reader {
         let shared = ready.clone();
         let ended = Arc::new(std::sync::Condvar::new());
         let end = ended.clone();
-        std::thread::Builder::new()
-            .name("pm-render-cache-read".into())
-            .spawn(move || {
-                for ask in rx {
+        // Frames are read side by side: a frame takes several times longer
+        // to read on a busy machine, and one reader then falls behind the
+        // playhead for good while three still deliver a frame an interval.
+        let rx = Arc::new(Mutex::new(rx));
+        for _ in 0..READERS {
+            let (rx, shared, end) = (rx.clone(), shared.clone(), end.clone());
+            std::thread::Builder::new()
+                .name("pm-render-cache-read".into())
+                .spawn(move || Self::read_asks(&rx, &shared, &end))
+                .expect("render cache reader thread");
+        }
+        Self { asks, ready, ended }
+    }
+    /// One reader: takes asks until the cache's last owner is gone.
+    fn read_asks(
+        rx: &Mutex<std::sync::mpsc::Receiver<Ask>>,
+        shared: &Mutex<Ready>,
+        end: &std::sync::Condvar,
+    ) {
+        // A frame on screen waits for these reads.
+        crate::qos::set_interactive_qos();
+        loop {
+            let ask = rx.lock().unwrap().recv();
+            let Ok(ask) = ask else { return };
+            {
+                {
                     let stale = {
                         let mut ready = shared.lock().unwrap();
                         let (generation, n) = ask.id;
@@ -1689,9 +1713,8 @@ impl Reader {
                         }
                     }
                 }
-            })
-            .expect("render cache reader thread");
-        Self { asks, ready, ended }
+            }
+        }
     }
     /// Frame `n` asked at `generation`, waiting up to `patience` while it
     /// is being read: [`Late`] when it is still being read after that,
