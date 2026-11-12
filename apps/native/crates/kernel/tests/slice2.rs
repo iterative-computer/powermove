@@ -668,6 +668,148 @@ fn a_file_opened_in_place_is_told_once_about_its_stranded_copies() {
         "the copy is untouched"
     );
 }
+fn rename_comp(k: &mut Kernel, id: &str, name: &str) {
+    use pm_kernel::commands::comps::{CompCommand, CompPatch};
+    k.handle(
+        id,
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("Rename".into()),
+                body: WriteBody::Commands(vec![
+                    CompCommand::Set {
+                        patch: Box::new(CompPatch {
+                            name: Some(name.into()),
+                            ..Default::default()
+                        }),
+                    }
+                    .into(),
+                ]),
+                expected_revision: None,
+            },
+        ),
+    )
+    .unwrap();
+}
+fn saved_name(file: &Path) -> Option<String> {
+    let opened = open_project(file, OpenOptions::default()).unwrap();
+    opened
+        .document
+        .root()
+        .and_then(|r| r.get("name"))
+        .map(|n| n.to_value())
+        .and_then(|n| n.as_str().map(str::to_owned))
+}
+/// The open project's file (with embedded media) is renamed, then moved to
+/// another folder, in Finder: Save keeps writing that file where it is now,
+/// by the app's own save route. Then it is deleted: Save cannot write it,
+/// but the work and every embedded item are kept (a recovery copy), and Save
+/// As writes a complete file from what the session holds.
+#[test]
+fn a_file_renamed_moved_or_deleted_while_open_can_still_be_saved() {
+    let dir = common::TempDir::new("follow");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    fs::create_dir_all(dir.path("archive")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    let media = k.project("P").unwrap().store().media().len();
+    assert!(media > 0);
+    let save = |k: &mut Kernel| {
+        let plan = k.prepare_session_save(session.clone(), None, false)?;
+        k.finish_session_save(plan.run())
+    };
+    let destination = |k: &Kernel| match k.session_metadata("P").unwrap().destination {
+        SessionDestination::File(path) => path,
+        other => panic!("{other:?}"),
+    };
+    // Renamed in place.
+    let renamed = dir.path("job/cut v2.pmv");
+    fs::rename(&file, &renamed).unwrap();
+    rename_comp(&mut k, "P", "One");
+    save(&mut k).expect("a renamed file is still saved");
+    assert_eq!(saved_name(&renamed).as_deref(), Some("One"));
+    assert!(!file.exists(), "nothing is written back at the old name");
+    assert_eq!(
+        destination(&k).canonicalize().unwrap(),
+        renamed.canonicalize().unwrap()
+    );
+    // Moved to another folder.
+    let moved = dir.path("archive/cut v2.pmv");
+    fs::rename(&renamed, &moved).unwrap();
+    rename_comp(&mut k, "P", "Two");
+    save(&mut k).expect("a moved file is still saved");
+    assert_eq!(saved_name(&moved).as_deref(), Some("Two"));
+    let saved = open_project(&moved, OpenOptions::default()).unwrap();
+    assert_eq!(
+        saved.file.media.len(),
+        media,
+        "its embedded media went with it"
+    );
+    // Deleted: no file to write, nothing lost, and Save As works.
+    fs::remove_file(&moved).unwrap();
+    rename_comp(&mut k, "P", "Three");
+    assert!(
+        save(&mut k).is_err(),
+        "a file that is gone cannot be saved in place"
+    );
+    let rescued = dir.path("rescued.pmv");
+    let plan = k
+        .prepare_session_save(session.clone(), Some(rescued.clone()), false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("Save As works from what the session holds");
+    assert_eq!(saved_name(&rescued).as_deref(), Some("Three"));
+    assert_eq!(
+        open_project(&rescued, OpenOptions::default())
+            .unwrap()
+            .file
+            .media
+            .len(),
+        media,
+        "every embedded item was written from the held file"
+    );
+}
+/// Unsaved work is found by the file, not by its path: the file is renamed
+/// while it has unsaved changes and the app ends without a save; opening the
+/// renamed file (a different session id, as its path gives) recovers them.
+#[test]
+fn a_renamed_file_is_offered_its_unsaved_work() {
+    let dir = common::TempDir::new("recover-renamed");
+    let file = dir.path("cut.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let native = dir.path("native");
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    // Saved once, so the file is the app's own container and has an entry.
+    k.shell(ShellCall::Save(session)).unwrap();
+    edit(&mut k, "P", 10.0);
+    // The app ends with the edit only in the journal.
+    drop(k);
+    let renamed = dir.path("cut final.pmv");
+    fs::rename(&file, &renamed).unwrap();
+    let mut k = kernel(&native);
+    let ShellReply::Opened { recovery, .. } = k
+        .shell(ShellCall::Open {
+            id: "Q".into(),
+            source: SessionSource::File(renamed.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { .. }),
+        "{recovery:?}"
+    );
+    assert_eq!(
+        common::opacity_of(k.project("Q").unwrap().store(), "layer0"),
+        Some(10.0)
+    );
+}
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");

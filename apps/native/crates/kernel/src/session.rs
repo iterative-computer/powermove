@@ -723,6 +723,9 @@ impl Kernel {
         replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
+        if path.is_none() {
+            self.follow_file(&session.project);
+        }
         let mut lock = None;
         if let Some(path) = &path {
             if locks::open_decision(path, None) != OpenDecision::Writable {
@@ -1258,6 +1261,15 @@ impl Kernel {
                 }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+                // Recovery follows the file, not its path: unsaved work left
+                // in the journal of the name or place it had before comes
+                // along, with where the person left off in it.
+                if decision == OpenDecision::Writable
+                    && let Some(version) = &opened.file.version
+                    && let Some(left) = self.adopt_moved_entry(&id, &path, &version.hash)
+                {
+                    meta = left;
+                }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
                 // is still the one they left; a file changed elsewhere brings its own.
@@ -1698,6 +1710,9 @@ impl Kernel {
     ) -> Result<ShellReply, KernelFailure> {
         self.ensure_idle(handle)?;
         let id = &handle.project;
+        if save_as.is_none() {
+            self.follow_file(id);
+        }
         let mut new_lock = None;
         if let Some((path, _)) = &save_as {
             let decision = locks::open_decision(path, None);
@@ -2022,6 +2037,81 @@ impl Kernel {
             }
         }
         found
+    }
+    /// `path` (whose bytes hash to `hash`) is being opened under `id` and has
+    /// no journal of its own: if a file entry of the library is this same
+    /// file under the path it had before (it names this path already because
+    /// a save followed it there, or it was saved with exactly these bytes
+    /// and its old path no longer holds a file) and left a journal, that
+    /// journal becomes this file's, so the open offers its unsaved work.
+    /// Returns that entry's metadata. A journal replays only onto the base
+    /// it was written for, so a wrong match recovers nothing.
+    fn adopt_moved_entry(&self, id: &str, path: &std::path::Path, hash: &str) -> Option<Value> {
+        let store = self.library.as_ref()?.store();
+        let root = self.config_journal_root()?;
+        let to = root.join(id);
+        if !crate::journal::sessions(&to).is_empty() {
+            return None;
+        }
+        for row in store.projects().ok()? {
+            if row.id == id || self.sessions.contains_key(&row.id) {
+                continue;
+            }
+            let Some(meta) = store
+                .read(&format!("projectMeta.{}", row.id))
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let Some(file) = meta.get("file") else {
+                continue;
+            };
+            let was = file
+                .get("path")
+                .and_then(Value::as_str)
+                .map(std::path::Path::new);
+            let here = was == Some(path);
+            let moved = file.get("savedHash").and_then(Value::as_str) == Some(hash)
+                && was.is_some_and(|was| !was.is_file());
+            let from = root.join(&row.id);
+            if !(here || moved) || crate::journal::sessions(&from).is_empty() {
+                continue;
+            }
+            // An empty folder left by an earlier open of this id is no journal.
+            let _ = std::fs::remove_dir(&to);
+            if std::fs::rename(&from, &to).is_ok() {
+                return Some(meta);
+            }
+        }
+        None
+    }
+    /// The file session `id` saves to was renamed or moved while open: carry
+    /// on at the place the system says it is now (the same inode, its bytes
+    /// proven unchanged, never a Trash), under a lock taken there. A file
+    /// with no name any more is left to the save to report (Save As still
+    /// works from the descriptor the session holds).
+    fn follow_file(&mut self, id: &str) {
+        let Some(Destination::File(_)) = self.sessions.get(id).map(|s| &s.destination) else {
+            return;
+        };
+        let Some(version) = self
+            .project(id)
+            .and_then(|p| p.store().file().version.clone())
+        else {
+            return;
+        };
+        let Ok(Some(moved)) = version.moved() else {
+            return;
+        };
+        let Ok(lock) = FileLock::acquire(&locks::project_lock_path(&moved.path)) else {
+            return;
+        };
+        let path = moved.path.clone();
+        self.project_mut(id).unwrap().store_mut().file_moved(moved);
+        let session = self.sessions.get_mut(id).unwrap();
+        session.destination = Destination::File(path);
+        session.lock = Some(lock);
     }
     /// Opens the copy `copy` in place of the file it stands in for; the
     /// reply still says the file opened as a copy, and why.

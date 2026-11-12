@@ -508,6 +508,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         path: path.to_owned(),
         stat: after,
         hash,
+        held: file.try_clone().ok().map(durable::HeldFile::new),
     });
     from_container(container, Some(path.to_owned()), Some(version))
 }

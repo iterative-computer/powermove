@@ -904,10 +904,20 @@ impl SavePlan {
         }
 
         let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+        // Held from here on, so the session can follow this file if it is
+        // renamed or moved (only if the path still names what was published).
+        let held = File::open(dest)
+            .ok()
+            .filter(|f| {
+                f.metadata()
+                    .is_ok_and(|m| durable::stat_of(&m).same_identity(&stat))
+            })
+            .map(durable::HeldFile::new);
         let version = Arc::new(FileVersion {
             path: dest.clone(),
             stat,
             hash: file_hash.clone(),
+            held,
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
@@ -1036,7 +1046,33 @@ fn write_media(
                 ))
             };
             if !version.is_unchanged()? {
-                return Err(changed());
+                // The path no longer names the file (renamed, moved or
+                // deleted while open). The descriptor held since the version
+                // was read is still that file: copy from it while its bytes
+                // are proven the version's, before and after.
+                let Some(src) = version.held_unchanged()? else {
+                    return Err(changed());
+                };
+                copy_range(
+                    src,
+                    *offset,
+                    *length,
+                    out,
+                    &mut hasher,
+                    buf,
+                    &media_err,
+                    temp,
+                )?;
+                if version.held_unchanged()?.is_none() {
+                    return Err(changed());
+                }
+                let digest = hex(&hasher.finalize());
+                if sha256.as_deref().is_some_and(|want| want != digest) {
+                    return Err(media_err(
+                        "The project media checksum does not match.".into(),
+                    ));
+                }
+                return Ok((*length, digest));
             }
             #[cfg(test)]
             source_hooks::hit(&source_hooks::BEFORE_OPEN);

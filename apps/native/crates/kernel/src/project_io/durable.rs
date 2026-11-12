@@ -22,8 +22,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -98,12 +99,67 @@ pub(crate) fn stat_of(meta: &fs::Metadata) -> FileStat {
 
 /// A file exactly as we last read or wrote it: its identity and the SHA-256
 /// of its whole content (`FileVersion` in the old app).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct FileVersion {
     pub path: PathBuf,
     pub stat: FileStat,
     /// Lowercase hex SHA-256 of the whole file.
     pub hash: String,
+    /// The descriptor the file was read (or written) through. It stays the
+    /// same file when the path stops naming it (renamed, moved, deleted
+    /// while open), so the session can follow it and its embedded media can
+    /// still be copied out. Not part of the version's identity.
+    pub held: Option<Arc<HeldFile>>,
+}
+impl PartialEq for FileVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.stat == other.stat && self.hash == other.hash
+    }
+}
+impl Eq for FileVersion {}
+
+/// An open descriptor of a file version and the last state its bytes were
+/// proven at.
+#[derive(Debug)]
+pub struct HeldFile {
+    file: File,
+    proven: std::sync::Mutex<Option<FileStat>>,
+}
+impl HeldFile {
+    pub(crate) fn new(file: File) -> Arc<Self> {
+        Arc::new(Self {
+            file,
+            proven: std::sync::Mutex::new(None),
+        })
+    }
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
+    fn stat(&self) -> io::Result<FileStat> {
+        Ok(stat_of(&self.file.metadata()?))
+    }
+    /// Where the system says this file is now (it follows a rename or a
+    /// move on its volume). `None` when it has no name any more.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn current_path(&self) -> Option<PathBuf> {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStringExt};
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: a live descriptor and a PATH_MAX buffer, as F_GETPATH asks.
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let len = buf.iter().position(|b| *b == 0)?;
+        buf.truncate(len);
+        let linked = self.file.metadata().ok().is_some_and(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.nlink() > 0
+        });
+        linked.then(|| PathBuf::from(std::ffi::OsString::from_vec(buf)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn current_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Whether `path` names a file the editor may treat as a project file:
@@ -142,6 +198,64 @@ impl FileVersion {
             path: path.to_owned(),
             stat: info,
             hash,
+            held: Some(HeldFile::new(file)),
+        }))
+    }
+
+    /// The descriptor held since this version was read, if the file behind
+    /// it still has exactly this version's bytes: the same inode and size,
+    /// and either untouched timestamps or (a rename or move touches them) a
+    /// whole-file hash equal to the version's, proven once per state.
+    pub(crate) fn held_unchanged(&self) -> Result<Option<&File>, ProjectIoError> {
+        let Some(held) = &self.held else {
+            return Ok(None);
+        };
+        let Ok(now) = held.stat() else {
+            return Ok(None);
+        };
+        if !now.same_identity(&self.stat) || now.size != self.stat.size {
+            return Ok(None);
+        }
+        let mut proven = held.proven.lock().unwrap();
+        if now.same_file(&self.stat) || proven.as_ref() == Some(&now) {
+            return Ok(Some(held.file()));
+        }
+        if hex(&hash_reader(held.file(), &self.path)?.finalize()) != self.hash {
+            return Ok(None);
+        }
+        *proven = Some(now);
+        Ok(Some(held.file()))
+    }
+
+    /// This version at the path the file has now (it was renamed or moved
+    /// while open): the same inode and bytes, found through the descriptor
+    /// held since it was read. `None` if the path still names it, it has no
+    /// name any more, it sits in a Trash, or its bytes changed.
+    pub fn moved(&self) -> Result<Option<FileVersion>, ProjectIoError> {
+        if lstat_file(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|at| at.same_identity(&self.stat))
+        {
+            return Ok(None);
+        }
+        let Some(path) = self.held.as_ref().and_then(|held| held.current_path()) else {
+            return Ok(None);
+        };
+        let trashed = path
+            .components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some(".Trash" | ".Trashes")));
+        let Some(at) = lstat_file(&path).ok().flatten() else {
+            return Ok(None);
+        };
+        if trashed || !at.same_identity(&self.stat) || self.held_unchanged()?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(FileVersion {
+            path,
+            stat: at,
+            hash: self.hash.clone(),
+            held: self.held.clone(),
         }))
     }
 

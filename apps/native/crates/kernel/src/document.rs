@@ -1574,6 +1574,68 @@ impl DocumentStore {
         Ok(())
     }
 
+    /// The file this store saves to was renamed or moved while open and is
+    /// now at `version.path` ([`project_io::FileVersion::moved`]): saves and
+    /// embedded media follow it there. Nothing about its content changes.
+    pub fn file_moved(&mut self, version: project_io::FileVersion) {
+        let Some(old) = self.file.version.clone() else {
+            return;
+        };
+        let new = Arc::new(version);
+        let moved: Vec<_> = self
+            .file
+            .media
+            .iter()
+            .filter_map(|entry| match &entry.source {
+                project_io::MediaSource::Embedded {
+                    file,
+                    offset,
+                    length,
+                    sha256,
+                } if Arc::ptr_eq(file, &old) => Some(project_io::MediaEntry {
+                    source: project_io::MediaSource::Embedded {
+                        file: new.clone(),
+                        offset: *offset,
+                        length: *length,
+                        sha256: sha256.clone(),
+                    },
+                    ..entry.clone()
+                }),
+                _ => None,
+            })
+            .collect();
+        for entry in moved {
+            self.file.media.insert(entry);
+        }
+        self.file.path = Some(new.path.clone());
+        self.file.version = Some(new);
+    }
+
+    /// What this project's first save would work out about its undo history
+    /// on the kernel thread, as a job for another thread to run after the
+    /// open: what each step reaches and its digest, and whether the file's
+    /// history member needs an archive. Each answer is the one the save
+    /// would compute, kept where the save looks for it; a save that comes
+    /// first, or a job never run, changes nothing but who computes it.
+    pub fn save_warmup(&self) -> impl FnOnce() + Send + 'static {
+        let records = self.history.records().to_vec();
+        let judged = self.archive_judged.clone();
+        let stored = self.file.envelope.history.clone();
+        let open = self.root().and_then(model::open_comp_id);
+        move || {
+            for record in &records {
+                record.warm();
+            }
+            if let Some(stored) = stored {
+                let needs = project_io::history_needs_archive(&stored.value(), open.as_deref());
+                let mut judged = judged.lock().unwrap();
+                if judged.is_none() {
+                    *judged = Some((stored, open, needs));
+                }
+            }
+        }
+    }
+
     /// [`project_io::history_needs_archive`] for the file's `history` member.
     /// The member is what the file held when it was opened and never changes
     /// while it is open, so it is judged once per open composition: judging
