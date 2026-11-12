@@ -269,6 +269,15 @@ impl HistoryRecord {
             ids.into()
         })
     }
+    /// Finds what a save asks of this step (the assets it reaches, the
+    /// digest of its saved form) ahead of the save. Both are found once and
+    /// shared by every copy of the step, so this may run on any thread.
+    pub(crate) fn warm(&self) {
+        self.referenced_assets();
+        if self.is_document() {
+            self.digest();
+        }
+    }
     pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
             let value = saved.value();

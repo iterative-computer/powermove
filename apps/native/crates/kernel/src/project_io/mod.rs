@@ -49,6 +49,7 @@ use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_contai
 use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
+pub use durable::PublishHooks;
 pub(crate) use durable::remove_abandoned_temps;
 pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
@@ -508,6 +509,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         path: path.to_owned(),
         stat: after,
         hash,
+        held: file.try_clone().ok().map(durable::HeldFile::new),
     });
     from_container(container, Some(path.to_owned()), Some(version))
 }

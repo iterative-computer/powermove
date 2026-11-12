@@ -407,11 +407,25 @@ cannot affect a later reopen. An already-owned source cannot open twice.
 * `DiskFormat::V1_2` (default) writes plain JSON at every size. Explicit
   `V1_3` applies the shipped 32 KiB threshold **and** 90% size test, writing
   `{__powermoveDiskValue:1,encoding:"gzip",bytes,data}`. Both read paths work.
-* `store/library.lock` and `Movie.pmvlock` (for `Movie.pmv`) carry PID and
-  millisecond heartbeat, refreshed every five seconds. Local `flock` gives
-  exclusion during acquisition/reclaim. A dead PID **and** age ≥30 s are both
-  required; malformed locks are refused. Stable inodes avoid unlink/recreate
-  races; orderly release writes PID 0 before releasing the descriptor.
+* A project file on a volume only this Mac writes (a folder a sync client
+  keeps is one) is locked in the profile: `locks/<key>.lock`, an `flock` and
+  nothing else, keyed by the project's place (its folder's device and inode
+  and its file name; a save replaces the file's own inode). Nothing is
+  written beside the project, nothing is refreshed while it is held, and the
+  file is removed on release (every taker checks that the name still leads
+  to the file it locked). It excludes the instances that share the profile.
+  Two Macs editing one synced file are guarded by the save's stale-write
+  check only: a sync client carries files, not locks.
+* `store/library.lock`, and `Movie.pmvlock` beside `Movie.pmv` on a volume
+  other machines write, carry PID and millisecond heartbeat, refreshed every
+  five seconds. Local `flock` gives exclusion during acquisition/reclaim. A
+  dead PID **and** age ≥30 s are both required. An empty, torn or malformed
+  record is stale on a volume only this Mac writes (the held `flock` proves
+  no owner lives) and is rewritten; on a shared volume it is refused. Stable
+  inodes avoid unlink/recreate races, so the file stays after close (hidden
+  in Finder); orderly release writes PID 0 before releasing the descriptor.
+  A lock file whose name no longer leads to the locked inode is refused at
+  acquisition and no longer refreshed.
 * Cloud path components (including symlink targets), ancestor
   `com.apple.file-provider*` xattrs, volume read-only flags/permission bits,
   and the source profile's Chromium `SingletonLock` produce copy decisions.
