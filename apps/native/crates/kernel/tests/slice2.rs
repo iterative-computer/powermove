@@ -810,6 +810,48 @@ fn a_renamed_file_is_offered_its_unsaved_work() {
         Some(10.0)
     );
 }
+/// A journal left by a project that is not open and cannot be folded into
+/// the library (here its library slot is unreadable) never fails a quit: the
+/// quit's compaction succeeds, the library is released, and the journal is
+/// kept as it is for the next open of that project.
+#[test]
+fn a_leftover_journal_that_cannot_be_folded_never_fails_a_quit() {
+    fn find(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+        fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+            let path = e.path();
+            if path.is_dir() {
+                find(&path, name)
+            } else {
+                (e.file_name().to_string_lossy().starts_with(name)).then_some(path)
+            }
+        })
+    }
+    let dir = common::TempDir::new("quit-leftover");
+    let native = dir.path("native");
+    let mut k = kernel(&native);
+    let h = open(&mut k, "P", SessionSource::New(value()));
+    edit(&mut k, "P", 40.0);
+    // The app ends without closing it: its journal holds the edit.
+    drop(h);
+    drop(k);
+    let journal = native.join("journals/P");
+    let before = pm_kernel::journal::sessions(&journal);
+    assert!(!before.is_empty());
+    // Its slot can no longer be read.
+    let slot = find(&native, "project.P.").expect("the project's slot");
+    fs::write(&slot, b"{ not json").unwrap();
+    let mut k = kernel(&native);
+    let reply = k
+        .shell(ShellCall::PrepareQuit)
+        .expect("a quit is not refused for a project that is not open");
+    assert!(matches!(reply, ShellReply::Compacted { .. }));
+    k.shell(ShellCall::ReleaseLibrary).unwrap();
+    assert_eq!(
+        pm_kernel::journal::sessions(&journal),
+        before,
+        "the journal is kept for the next open"
+    );
+}
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");

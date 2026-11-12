@@ -939,13 +939,22 @@ impl Kernel {
             }
             // A file's entry has no body: the file is the project.
             let file = file.filter(|path| path.is_file());
-            let p = self
+            // From here on the project is one no window has open: its
+            // journal is folded into its slot if that works. Anything that
+            // does not (an unreadable slot or journal, a recovery that needs
+            // the person's decision, a close that fails) leaves the journal
+            // where it is for the next open to offer. It never fails the
+            // quit: a quit refused for a project that is not even open could
+            // be refused forever.
+            let Ok(p) = self
                 .library
                 .as_ref()
                 .ok_or_else(|| failure("Attach a native library before compaction"))?
                 .store()
                 .load(&id)
-                .map_err(failure)?;
+            else {
+                continue;
+            };
             let source = match (p, file) {
                 (_, Some(path)) => SessionSource::File(path),
                 (Some(p), None) => match p
@@ -966,20 +975,21 @@ impl Kernel {
                     // Untitled/crashed work without a slot: materialize a recovery copy.
                     match self.recover(&id, None, None) {
                         Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
-                            recovery_copies.push(self.recovery_copy(r, None)?);
-                            projects += 1;
+                            if let Ok(copy) = self.recovery_copy(r, None) {
+                                recovery_copies.push(copy);
+                                projects += 1;
+                            }
                         }
-                        Recovery::Nothing => {}
-                        Recovery::Unrecoverable { reason, .. } => return Err(failure(reason)),
+                        Recovery::Nothing | Recovery::Unrecoverable { .. } => {}
                     }
                     continue;
                 }
             };
-            let ShellReply::Opened {
+            let Ok(ShellReply::Opened {
                 session, recovery, ..
-            } = self.open_session(id, source, None)?
+            }) = self.open_session(id, source, None)
             else {
-                unreachable!()
+                continue;
             };
             if let RecoveryResult::OfferCopy { project, .. } = recovery {
                 recovery_copies.push(project);
@@ -989,11 +999,13 @@ impl Kernel {
             {
                 recovery_copies.push(slot.clone());
             }
-            let saved = self.shell(ShellCall::Close(session))?;
-            if let ShellReply::Closed { recovery_copy } = saved {
+            // A close that fails leaves the session to the library's
+            // release, which defers it (journal kept).
+            if let Ok(ShellReply::Closed { recovery_copy }) = self.shell(ShellCall::Close(session))
+            {
                 recovery_copies.extend(recovery_copy);
+                projects += 1;
             }
-            projects += 1;
         }
         Ok(ShellReply::Compacted {
             projects,
