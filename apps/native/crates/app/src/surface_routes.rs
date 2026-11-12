@@ -282,8 +282,25 @@ impl Controller {
         self.builtins.timeline_place = None;
         let library = self.library(cx)?;
         let active = self.session.as_ref().map(|s| s.project.clone());
+        // Home's own thumbnails: the cache under this profile, and the frame
+        // renderer of the project this window has open.
+        let thumbnails = appeared.then(|| crate::project_library::ThumbnailSource {
+            dir: self.profile.join("caches").join("thumbnails"),
+            renderer: active.clone().and_then(|project| {
+                crate::mcp_services::frame_renderer(
+                    self.kernel.clone(),
+                    project,
+                    self.profile.clone(),
+                    self.job_overrides.clone(),
+                )
+                .ok()
+            }),
+        });
         library.update(cx, |v, cx| {
             v.active = active;
+            if let Some(thumbnails) = thumbnails {
+                v.thumbnails = Some(thumbnails);
+            }
             if appeared {
                 let _ = v.controller.refresh();
                 v.pump(cx);

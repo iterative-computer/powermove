@@ -249,7 +249,7 @@ impl Render for TextField {
             .px(px(if bare {
                 0.
             } else if self.unit.is_some() {
-                self.tokens.metrics.inner_radius
+                self.tokens.space.xs
             } else {
                 self.tokens.metrics.gap
             }))
@@ -284,7 +284,7 @@ impl Render for TextField {
                     .children(self.unit.clone().map(|unit| {
                         div()
                             .flex_none()
-                            .ml(px(self.tokens.metrics.inner_radius))
+                            .ml(px(self.tokens.space.hair))
                             .text_color(rgb(self.tokens.colors.muted))
                             .child(unit)
                     }))

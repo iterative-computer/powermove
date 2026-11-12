@@ -894,7 +894,7 @@ impl Scene {
         match &row.content {
             RowContent::Layer { clip, summary } => {
                 if let Some(clip) = clip {
-                    paint_clip(clip, y, h, v, t, ops);
+                    paint_clip(clip, y, h, v, self.label_step(v).0, t, ops);
                 }
                 // Summary marks only while the layer is collapsed: open, its
                 // property rows show the keys themselves.
@@ -922,8 +922,9 @@ impl Scene {
                 let last = clips.partition_point(|clip| {
                     clip.from <= v.scroll_time + (v.width - v.layer_column) / v.pps
                 });
+                let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    paint_clip(clip, y, h, v, t, ops);
+                    paint_clip(clip, y, h, v, grid, t, ops);
                 }
             }
             RowContent::Property { state, keys } => {
@@ -971,6 +972,20 @@ impl Scene {
             }
         }
     }
+    /// Seconds between ruler labels: the first nice step at least 60 pt
+    /// apart, counting frames once a frame is 40 pt wide (then `true`).
+    fn label_step(&self, v: Viewport) -> (f64, bool) {
+        let frames = v.pps / self.fps >= 40.;
+        let step = if frames {
+            (60. / (v.pps / self.fps)).ceil() / self.fps
+        } else {
+            [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
+                .into_iter()
+                .find(|s| s * v.pps >= 60.)
+                .unwrap_or(3600.)
+        };
+        (step, frames)
+    }
     fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
         let (m, c) = (t.metrics, &t.colors);
         let h = m.ruler as f64;
@@ -1004,60 +1019,23 @@ impl Scene {
                 }
             }
         }
-        // Ticks are `text` ink at low alpha, so they sit in the material like
-        // the panel hairlines; Increase Contrast makes them solid.
-        let (tick, major) = if t.accessibility.increase_contrast {
-            ((c.separator, 1.), (c.secondary, 1.))
+        // Each label stands over a small dot, with a faint line down the
+        // tracks; no tick marks. Increase Contrast makes the dot solid.
+        let major = if t.accessibility.increase_contrast {
+            (c.secondary, 1.)
         } else {
-            (
-                (c.text, t.translucency.tick_minor as f64),
-                (c.text, t.translucency.tick_major as f64),
-            )
+            (c.text, t.translucency.tick_major as f64)
         };
-        // Labels at the first nice step at least 60 pt apart (frames once a
-        // frame is 40 pt wide); minor ticks split each labelled step in four,
-        // or into frames when the labels count frames.
-        let frames = v.pps / self.fps >= 40.;
-        let label_step = if frames {
-            (60. / (v.pps / self.fps)).ceil() / self.fps
-        } else {
-            [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
-                .into_iter()
-                .find(|s| s * v.pps >= 60.)
-                .unwrap_or(3600.)
-        };
-        let step = if frames {
-            1. / self.fps
-        } else {
-            label_step / 4.
-        };
+        let (label_step, frames) = self.label_step(v);
         let right = v.scroll_time + (v.width - v.layer_column) / v.pps;
-        if step * v.pps >= 6. {
-            let mut i = (v.scroll_time / step).ceil().max(0.) as u64;
-            while (i as f64) * step <= right && ops.len() < 10_000 {
-                let x = v.x(i as f64 * step);
-                let mut o = Op::new(
-                    format!("minor:{i}"),
-                    "rect",
-                    Rect::new(x, h - 3., m.border as f64, 3.),
-                    tick.0,
-                );
-                o.opacity = tick.1;
-                ops.push(o);
-                let Some(next) = i.checked_add(1) else {
-                    break;
-                };
-                i = next;
-            }
-        }
         let mut i = (v.scroll_time / label_step).ceil().max(0.) as u64;
         while i as f64 * label_step <= right && ops.len() < 10_000 {
             let time = i as f64 * label_step;
             let x = v.x(time);
             let mut o = Op::new(
                 format!("major:{i}"),
-                "rect",
-                Rect::new(x, h - 6., m.border as f64, 6.),
+                "circle",
+                Rect::new(x - 1.5, h - 7., 3., 3.),
                 major.0,
             );
             o.opacity = major.1;
@@ -1197,7 +1175,7 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
+fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops: &mut Vec<Op>) {
     let m = t.metrics;
     let colors = &t.colors;
     // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
@@ -1225,6 +1203,12 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     // selection, the hovered edge and a hidden layer.
     let material = t.strip(fill, strip_state(c));
     let strength = 1.;
+    let grid_from = if grid > 0. {
+        let time = v.scroll_time + (r.x - v.layer_column) / v.pps;
+        v.x((time / grid).ceil() * grid)
+    } else {
+        0.
+    };
     let mut o = Op::new(format!("clip:{}", c.id), "clip", r, fill);
     o.radius = radius;
     o.opacity = material.opacity as f64;
@@ -1234,6 +1218,11 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
         "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
+        "glow":material.glow.0,"glowAlpha":material.glow.1,
+        // The ruler's grid reads through the body: its first line inside
+        // the strip and the distance between lines, in points.
+        "grid":material.grid.0,"gridAlpha":material.grid.1,
+        "gridFrom":grid_from,"gridStep":grid * v.pps,
         "rim":material.rim.0,"rimAlpha":material.rim.1,
         "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":m.border,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,

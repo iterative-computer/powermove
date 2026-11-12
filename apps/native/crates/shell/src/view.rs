@@ -632,6 +632,19 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        // Development builds: `--open reviewViews` with `--save-dir` writes
+        // the window's AppKit view tree there.
+        #[cfg(debug_assertions)]
+        if cmd.name == "reviewViews" {
+            if let (Some(host), Ok(dir)) = (&self.host, std::env::var("PM_NATIVE_REVIEW_SAVE_DIR"))
+            {
+                let _ = std::fs::write(
+                    std::path::Path::new(&dir).join("views.txt"),
+                    host.borrow().view_tree(),
+                );
+            }
+            return;
+        }
         if cmd.name == "shellReplayComplete" {
             if let (Some(token), Some(host)) = (cmd.token, &self.host) {
                 host.borrow_mut().replayed(token);

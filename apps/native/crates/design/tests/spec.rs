@@ -292,7 +292,11 @@ const ROLES: &[(&str, &str)] = &[
     ),
     (
         "typography.semibold_weight",
-        "Semibold weight: titles, headings, primary buttons",
+        "Emphasis weight of panel titles and section headings (medium)",
+    ),
+    (
+        "typography.display_weight",
+        "Weight of Heading and Display, the only semibold text",
     ),
     (
         "typography.dense_leading",

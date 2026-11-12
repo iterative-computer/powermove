@@ -36,6 +36,27 @@ struct HeaderControls {
     /// What the layout and sort controls last showed.
     shown: (Layout, Sort),
 }
+/// Home's own thumbnails: a cache under the profile, and the renderer of the
+/// project this window has open. The kernel's library carries a thumbnail
+/// only for projects v1 saved; everything else gets its poster frame here.
+pub struct ThumbnailSource {
+    /// `<profile>/caches/thumbnails`: `<project>.png` and its `.stamp`.
+    pub dir: PathBuf,
+    /// One frame of the open project as PNG, through the engine's frame path.
+    pub renderer: Option<pm_compat_runner::FrameRenderer>,
+}
+/// Width of a stored poster frame; its height follows the composition.
+const POSTER_WIDTH: u32 = 640;
+fn poster_files(dir: &std::path::Path, id: &str) -> (PathBuf, PathBuf) {
+    let stem: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    (
+        dir.join(format!("{stem}.png")),
+        dir.join(format!("{stem}.stamp")),
+    )
+}
 fn sort_options() -> Vec<Value> {
     [Sort::Recent, Sort::Name]
         .map(|sort| json!({"label": sort.label(), "v": sort.key()}))
@@ -85,6 +106,12 @@ pub struct ProjectLibrary {
     /// were read from (a new save replaces it).
     thumbs: HashMap<String, (usize, Option<Arc<Image>>)>,
     native: Option<HeaderControls>,
+    /// Home's thumbnail cache and renderer (set by the window that shows it).
+    pub thumbnails: Option<ThumbnailSource>,
+    /// Projects whose cached poster has been read, and renders started
+    /// (project, the modification it was started for).
+    posters_read: std::collections::HashSet<String>,
+    posters_started: std::collections::HashSet<(String, i64)>,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
     gallery_native: Vec<Entity<NativeControl>>,
@@ -165,6 +192,9 @@ impl ProjectLibrary {
             motion: Default::default(),
             thumbs: HashMap::new(),
             native: None,
+            thumbnails: None,
+            posters_read: Default::default(),
+            posters_started: Default::default(),
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
@@ -667,33 +697,128 @@ impl ProjectLibrary {
             .into_any_element(),
         )
     }
-    /// A project's stored thumbnail (v1 saves a data URL with the project),
-    /// decoded once per source.
-    fn thumbnail(&mut self, row: &Row) -> Option<Arc<Image>> {
-        let source = row.summary.as_ref()?.thumbnail.as_deref()?;
-        if let Some((length, image)) = self.thumbs.get(&row.id)
-            && *length == source.len()
-        {
-            return image.clone();
+    /// A project's thumbnail: the one v1 stored with it (a data URL, decoded
+    /// once per source), else Home's own poster frame. A poster is read from
+    /// the cache off the main thread on first sight, and rendered (also off
+    /// the main thread) when this window has the project open and the cache
+    /// has none or an older one. Until it arrives the card shows its empty
+    /// canvas, then the image fades in.
+    fn thumbnail(&mut self, row: &Row, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+        if let Some(source) = row.summary.as_ref().and_then(|s| s.thumbnail.as_deref()) {
+            if let Some((length, image)) = self.thumbs.get(&row.id)
+                && *length == source.len()
+            {
+                return image.clone();
+            }
+            let image = source
+                .strip_prefix("data:image/")
+                .and_then(|rest| rest.split_once(";base64,"))
+                .and_then(|(kind, data)| {
+                    let format = match kind {
+                        "jpeg" | "jpg" => ImageFormat::Jpeg,
+                        "png" => ImageFormat::Png,
+                        "webp" => ImageFormat::Webp,
+                        _ => return None,
+                    };
+                    use base64::Engine as _;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .ok()?;
+                    Some(Arc::new(Image::from_bytes(format, bytes)))
+                });
+            self.thumbs
+                .insert(row.id.clone(), (source.len(), image.clone()));
+            return image;
         }
-        let image = source
-            .strip_prefix("data:image/")
-            .and_then(|rest| rest.split_once(";base64,"))
-            .and_then(|(kind, data)| {
-                let format = match kind {
-                    "jpeg" | "jpg" => ImageFormat::Jpeg,
-                    "png" => ImageFormat::Png,
-                    "webp" => ImageFormat::Webp,
-                    _ => return None,
-                };
-                use base64::Engine as _;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .ok()?;
-                Some(Arc::new(Image::from_bytes(format, bytes)))
-            });
-        self.thumbs
-            .insert(row.id.clone(), (source.len(), image.clone()));
+        let cached = self.thumbs.get(&row.id).cloned();
+        let image = cached.as_ref().and_then(|(_, image)| image.clone());
+        let Some(source) = &self.thumbnails else {
+            return image;
+        };
+        let (id, stamp) = (row.id.clone(), row.modified_ms.unwrap_or(0));
+        let (file, stamp_file) = poster_files(&source.dir, &id);
+        let fade = kit::key(&format!("poster-{id}"));
+        let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
+            v.thumbs.insert(
+                id,
+                (
+                    stamp as usize,
+                    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
+                ),
+            );
+            v.motion
+                .values
+                .borrow_mut()
+                .insert(fade, pm_design::motion::Animated::unit(0.));
+        };
+        if !self.posters_read.contains(&id) {
+            if self.posters_started.insert((id.clone(), i64::MIN)) {
+                cx.spawn(async move |this, cx| {
+                    let read = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let stamp = std::fs::read_to_string(stamp_file).ok()?;
+                            Some((stamp.trim().parse::<i64>().ok()?, std::fs::read(file).ok()?))
+                        })
+                        .await;
+                    let _ = this.update(cx, |v, cx| {
+                        v.posters_read.insert(id.clone());
+                        if let Some((stamp, png)) = read {
+                            store(v, id, stamp, png);
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            return image;
+        }
+        let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 == stamp);
+        if !fresh
+            && self.active.as_deref() == Some(id.as_str())
+            && let Some(renderer) = source.renderer.clone()
+            && self.posters_started.insert((id.clone(), stamp))
+        {
+            let (w, h) = row.dimensions().unwrap_or((1920, 1080));
+            let height = (POSTER_WIDTH as f64 * h as f64 / w.max(1) as f64).round() as u32;
+            // A third of the way in: past a fade-up, before the end card.
+            let time = row
+                .summary
+                .as_ref()
+                .and_then(|s| s.duration_seconds)
+                .map_or(1., |d| d / 3.);
+            let dir = source.dir.clone();
+            cx.spawn(async move |this, cx| {
+                let png = cx
+                    .background_executor()
+                    .spawn(async move {
+                        fn never() -> bool {
+                            false
+                        }
+                        let png = renderer(&pm_compat_runner::FrameRequest {
+                            time,
+                            width: POSTER_WIDTH,
+                            height: height.clamp(90, 2 * POSTER_WIDTH),
+                            motion_blur: false,
+                            stop: &never,
+                            published: None,
+                        })
+                        .ok()?;
+                        std::fs::create_dir_all(&dir).ok()?;
+                        std::fs::write(&file, &png).ok()?;
+                        std::fs::write(&stamp_file, stamp.to_string()).ok()?;
+                        Some(png)
+                    })
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    if let Some(png) = png {
+                        store(v, id, stamp, png);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         image
     }
     /// Click selects; double-click (or Return) opens, ⌥ in a new window;
@@ -740,6 +865,7 @@ impl ProjectLibrary {
         thumbnail: Option<Arc<Image>>,
         dimensions: Option<(u32, u32)>,
         radius: f32,
+        fade: f32,
     ) -> Div {
         let t = &kit.t;
         let dark = t.scheme == pm_design::Scheme::Dark;
@@ -765,12 +891,15 @@ impl ProjectLibrary {
             .rounded(px(radius))
             .overflow_hidden();
         match thumbnail {
+            // The whole picture in the composition's own shape, on the
+            // viewer's ground where its shape leaves room.
             Some(image) => frame
                 .bg(rgb(t.colors.viewer))
                 .child(
                     img(ImageSource::Image(image))
                         .size_full()
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Contain)
+                        .opacity(fade.clamp(0., 1.)),
                 )
                 .child(outline(radius)),
             None => {
@@ -848,7 +977,12 @@ impl ProjectLibrary {
         let t = &kit.t;
         let selected = self.controller.selected.as_ref() == Some(&row.id);
         let facts = row.facts(now);
-        let thumbnail = self.thumbnail(row);
+        let thumbnail = self.thumbnail(row, cx);
+        let fade = kit.animate(
+            kit::key(&format!("poster-{}", row.id)),
+            1.,
+            Some(Preset::Show),
+        );
         let radius = t.radius.xl;
         let frame = self
             .frame(
@@ -856,6 +990,7 @@ impl ProjectLibrary {
                 thumbnail,
                 row.dimensions(),
                 t.radius.nested(radius, CARD_PAD),
+                fade,
             )
             .w_full()
             .h(px(((width - 2. * CARD_PAD) * 9. / 16.).round()));
@@ -897,7 +1032,7 @@ impl ProjectLibrary {
         let t = &kit.t;
         let selected = self.controller.selected.as_ref() == Some(&row.id);
         let facts = row.facts(now);
-        let thumbnail = self.thumbnail(row);
+        let thumbnail = self.thumbnail(row, cx);
         let height = t.metrics.row + t.space.lg;
         let d = kit
             .row(format!("project-{}", row.id), selected)
@@ -910,7 +1045,7 @@ impl ProjectLibrary {
                 None => format!("{}, {facts}", row.name),
             })
             .child(
-                self.frame(kit, thumbnail, row.dimensions(), t.radius.xs)
+                self.frame(kit, thumbnail, row.dimensions(), t.radius.xs, 1.)
                     .h(px(height - t.space.md))
                     .w(px(((height - t.space.md) * 16. / 9.).round())),
             )
@@ -1287,8 +1422,10 @@ impl Render for ProjectLibrary {
         let width = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap
             + 2. * (CARD_PAD - MARGIN))
             .max(0.);
-        let column_gap = t.space.md;
-        let least = m.thumbnail_min * 2. + 2. * CARD_PAD;
+        // Large previews with room between them: three across at the
+        // default window size.
+        let column_gap = t.space.xl;
+        let least = m.thumbnail_min * 2.5 + 2. * CARD_PAD;
         self.columns = (((width + column_gap) / (least + column_gap)).floor() as usize).max(1);
         let card_width =
             ((width - column_gap * (self.columns - 1) as f32) / self.columns as f32).floor();
@@ -1603,6 +1740,17 @@ impl ProjectLibrary {
                         inset: true,
                     },
                 ])
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(t.strip_radius(height)))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(ink(s.glow.0, 0.), 0.42),
+                            linear_color_stop(ink(s.glow.0, s.glow.1), 1.),
+                        )),
+                )
                 .text_role(t, Text::Caption)
                 .text_color(rgb(s.foreground))
                 .child(name.to_string())

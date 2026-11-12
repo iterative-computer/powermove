@@ -194,6 +194,9 @@ pub struct TimelineSurface {
     scene: Option<Arc<Scene>>,
     graph: Option<Arc<Graph>>,
     frame: Option<Arc<Frame>>,
+    /// The clip under the pointer and the pointer's x in the panel: its strip
+    /// draws hovered, with the trim grip inside the nearer edge.
+    hover_clip: Option<(String, f64)>,
     bounds: Bounds<Pixels>,
     view: Viewed,
     /// The native playhead's time mapping: pixels per second, first second and
@@ -275,6 +278,7 @@ impl TimelineSurface {
             painting: false,
             told: None,
             skimmer: None,
+            hover_clip: None,
             activation: None,
             late: None,
         };
@@ -1493,6 +1497,9 @@ impl TimelineSurface {
         self.set_skimmer(at, cx);
     }
     fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
+        if at.is_none() && self.hover_clip.take().is_some() {
+            cx.notify();
+        }
         if at != self.skimmer {
             self.skimmer = at;
             self.delegate.skim(at, cx);
@@ -1537,6 +1544,28 @@ impl TimelineSurface {
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
         self.skim_to(x, cx);
+        let hovered = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.hit_clip(x, y))
+            .map(|(id, _)| (id.to_owned(), x));
+        // The grip only changes side at the strip's middle: repaint when the
+        // clip or the side changes, not on every pointer move.
+        let side = |h: &Option<(String, f64)>| {
+            h.as_ref().map(|(id, x)| {
+                let mid = self.frame.as_ref().and_then(|f| {
+                    f.ops
+                        .iter()
+                        .find(|o| o.id.strip_prefix("clip:") == Some(id))
+                        .map(|o| o.bounds.x + o.bounds.width / 2.)
+                });
+                (id.clone(), mid.is_some_and(|mid| *x < mid))
+            })
+        };
+        if side(&hovered) != side(&self.hover_clip) {
+            cx.notify();
+        }
+        self.hover_clip = hovered;
         let m = self.tokens.metrics;
         let cursor =
             if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
@@ -2014,6 +2043,7 @@ impl Render for TimelineSurface {
         let region = self.graph_region();
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
+        let hover_clip = self.hover_clip.clone();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -2157,6 +2187,14 @@ impl Render for TimelineSurface {
                                     .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
                                 );
                             }
+                            if let Some((id, x)) = &hover_clip
+                                && let Some(op) = frame
+                                    .ops
+                                    .iter()
+                                    .find(|o| o.id.strip_prefix("clip:") == Some(id.as_str()))
+                            {
+                                strip_hover(op, *x, bounds.origin, &tokens, window);
+                            }
                             for op in
                                 pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
                             {
@@ -2286,6 +2324,73 @@ impl Cull {
             || b.y + b.height <= -MARGIN
     }
 }
+/// A strip's rim: a ring inside its edge, then the same ring again over the
+/// top edge and its corners only, so the light is brightest there.
+fn strip_rim(
+    area: Bounds<Pixels>,
+    radius: Pixels,
+    width: Pixels,
+    smoothing: f32,
+    side: Rgba,
+    top: Rgba,
+    window: &mut Window,
+) {
+    let ring = |color: Rgba| {
+        PaintQuad::new(area)
+            .border_color(color)
+            .border_widths(width)
+            .corner_radii(radius)
+            .corner_smoothing(smoothing)
+    };
+    window.paint_quad(ring(side));
+    let band = Bounds::new(area.origin, size(area.size.width, radius + width));
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: band,
+            fade_out: Default::default(),
+        }),
+        |window| window.paint_quad(ring(top)),
+    );
+}
+/// The strip under the pointer: its rim brightens toward white (nothing else
+/// changes) and the trim grip stands inside the nearer edge.
+fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, window: &mut Window) {
+    let b = op.bounds;
+    let area = Bounds::new(
+        origin + point(px(b.x as f32), px(b.y as f32)),
+        size(px(b.width as f32), px(b.height as f32)),
+    );
+    let hover = t.strip(op.color, pm_design::StripState::Hover);
+    let tint = |(rgb, a): (u32, f32)| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
+    let radius = px(op.radius as f32).min(area.size.height / 2.);
+    strip_rim(
+        area,
+        radius,
+        px(t.metrics.border),
+        t.radius.smoothing,
+        tint(hover.rim),
+        tint((hover.rim_top.0, hover.rim_top.1 - hover.rim.1)),
+        window,
+    );
+    let grip = t.trim_grip();
+    if b.width < f64::from(grip.inset * 4. + grip.width) {
+        return;
+    }
+    let height = (b.height as f32 * grip.height).round();
+    let x = if pointer_x < b.x + b.width / 2. {
+        area.origin.x + px(grip.inset)
+    } else {
+        area.right() - px(grip.inset + grip.width)
+    };
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            point(x, area.origin.y + (area.size.height - px(height)) / 2.),
+            size(px(grip.width), px(height)),
+        ))
+        .background(rgb(grip.color))
+        .corner_radii(px(grip.width / 2.)),
+    );
+}
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
     let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
     let b = op.bounds;
@@ -2322,21 +2427,23 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 },
             );
         }
-        // A layer or clip strip (pm-design `strip`): a tinted, slightly
-        // translucent body, lighter toward the bottom, with a rim of light
-        // inside its edge that is brightest along the top.
+        // A layer or clip strip (pm-design `strip`): a slab of tinted glass.
+        // A deep top opening into a luminous lower half, the ruler's grid
+        // reading through the body, and a rim of light inside the edge that
+        // is brightest along the top and round its corners.
         "clip" => {
             let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
             let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
             let tint =
                 |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
             let radius = px(op.radius as f32).min(area.size.height / 2.);
+            let smoothing = t.radius.smoothing;
             let rim = px(number("rimWidth").max(1.) as f32);
             if number("shadowAlpha") > 0. {
                 window.paint_drop_shadows(
                     area,
                     Corners::all(radius),
-                    0.,
+                    smoothing,
                     &[BoxShadow {
                         color: tint(hex("shadow"), number("shadowAlpha")).into(),
                         offset: point(px(0.), px(number("shadowY") as f32)),
@@ -2353,27 +2460,50 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         linear_color_stop(tint(hex("top"), op.opacity), 0.),
                         linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
                     ))
-                    .corner_radii(radius),
+                    .corner_radii(radius)
+                    .corner_smoothing(smoothing),
             );
-            // The rim fades from its top value to its side value down the strip.
-            window.paint_quad(
-                PaintQuad::new(area)
-                    .border_color(tint(hex("rim"), number("rimAlpha")))
-                    .border_widths(rim)
-                    .corner_radii(radius),
-            );
-            if area.size.width > radius * 2. {
+            if number("glowAlpha") > 0. {
                 window.paint_quad(
-                    PaintQuad::new(Bounds::new(
-                        point(area.origin.x + radius, area.origin.y),
-                        size(area.size.width - radius * 2., rim),
-                    ))
-                    .background(tint(
-                        hex("rimTop"),
-                        (number("rimTopAlpha") - number("rimAlpha")).max(0.),
-                    )),
+                    PaintQuad::new(area)
+                        .background(linear_gradient(
+                            180.,
+                            linear_color_stop(tint(hex("glow"), 0.), 0.42),
+                            linear_color_stop(tint(hex("glow"), number("glowAlpha")), 1.),
+                        ))
+                        .corner_radii(radius)
+                        .corner_smoothing(smoothing),
                 );
             }
+            let (step, grid) = (number("gridStep") as f32, number("gridAlpha"));
+            if step >= 8. && grid > 0. {
+                let mut x = origin.x + px(number("gridFrom") as f32);
+                let (left, right) = (area.origin.x + radius, area.right() - radius);
+                while x < right {
+                    if x > left {
+                        window.paint_quad(
+                            PaintQuad::new(Bounds::new(
+                                point(x, area.origin.y + rim),
+                                size(rim, area.size.height - rim * 2.),
+                            ))
+                            .background(tint(hex("grid"), grid)),
+                        );
+                    }
+                    x += px(step);
+                }
+            }
+            strip_rim(
+                area,
+                radius,
+                rim,
+                smoothing,
+                tint(hex("rim"), number("rimAlpha")),
+                tint(
+                    hex("rimTop"),
+                    (number("rimTopAlpha") - number("rimAlpha")).max(0.),
+                ),
+                window,
+            );
         }
         "square" => {
             if let Some(keyline) = op.detail["keyline"].as_u64() {

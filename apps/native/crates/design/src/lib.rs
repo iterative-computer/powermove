@@ -131,7 +131,11 @@ pub struct TypeScale {
     pub timecode: f32,
     pub regular_weight: f32,
     pub medium_weight: f32,
+    /// The emphasis weight panels use for their titles and section headings:
+    /// medium, the kit's Title weight (weight is not the hierarchy).
     pub semibold_weight: f32,
+    /// Heading and Display, the only semibold text.
+    pub display_weight: f32,
     /// Line height multipliers. Leading is a multiplier, never a point size.
     pub dense_leading: f32,
     pub reading_leading: f32,
@@ -672,7 +676,9 @@ impl Tokens {
                 field: 22.,
                 value_column: 128.,
                 keyframe: 9.,
-                track_row: 28.,
+                // v1's row height: the strip is 26 pt, tall enough for its
+                // material to read, with no density lost against v1.
+                track_row: 30.,
                 property_row: 22.,
                 ruler: 24.,
                 layer_column: 320.,
@@ -733,7 +739,8 @@ impl Tokens {
                 timecode: 13.,
                 regular_weight: 400.,
                 medium_weight: 500.,
-                semibold_weight: 600.,
+                semibold_weight: 500.,
+                display_weight: 600.,
                 dense_leading: 1.3,
                 reading_leading: 1.45,
                 text_optical_size: 12.,

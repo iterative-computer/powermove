@@ -1926,7 +1926,7 @@ impl SurfaceView {
             if let Some(unit) = &node.unit {
                 element = element.child(
                     div()
-                        .ml(px(t.metrics.inner_radius))
+                        .ml(px(t.space.hair))
                         .text_color(rgb(t.colors.muted))
                         .child(unit.clone()),
                 );

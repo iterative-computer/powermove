@@ -125,11 +125,11 @@ impl Tokens {
             Text::Reading => style(ty.reading, ty.regular_weight, 0., ty.reading_leading),
             Text::Heading => style(
                 ty.heading,
-                ty.semibold_weight,
+                ty.display_weight,
                 ty.heading_tracking,
                 ty.dense_leading,
             ),
-            Text::Display => style(ty.display, ty.semibold_weight, ty.display_tracking, 1.15),
+            Text::Display => style(ty.display, ty.display_weight, ty.display_tracking, 1.15),
             Text::Timecode => TextStyle {
                 tabular: true,
                 ..style(ty.timecode, ty.medium_weight, 0., ty.dense_leading)

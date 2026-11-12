@@ -137,7 +137,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |
 | `metrics.toolbar_title_width` | Document title slot width | 160 | 160 | 160 | 160 |
-| `metrics.track_row` | Timeline layer row | 28 | 28 | 28 | 28 |
+| `metrics.track_row` | Timeline layer row | 30 | 30 | 30 | 30 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Inspector value column width shared by every row | 128 | 128 | 128 | 128 |
 | `metrics.viewer_3d_collapse` | Viewer width below which the 3D toolbar becomes one pull-down | 560 | 560 | 560 | 560 |
@@ -167,6 +167,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `typography.display` | Empty-state and onboarding display | 24 | 24 | 24 | 24 |
 | `typography.display_optical_size` | Optical size for display | 24 | 24 | 24 | 24 |
 | `typography.display_tracking` | Tracking of screen titles (pt) | -0.2 | -0.2 | -0.2 | -0.2 |
+| `typography.display_weight` | Weight of Heading and Display, the only semibold text | 600 | 600 | 600 | 600 |
 | `typography.heading` | Sheet and Settings pane headings (semibold) | 15 | 15 | 15 | 15 |
 | `typography.heading_tracking` | Tracking of headings (pt) | -0.1 | -0.1 | -0.1 | -0.1 |
 | `typography.label` | Inspector row labels | 12 | 12 | 12 | 12 |
@@ -175,7 +176,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `typography.reading` | Prose: agent replies, sheet explanations, Settings | 13 | 13 | 13 | 13 |
 | `typography.reading_leading` | Line height multiplier for prose | 1.45 | 1.45 | 1.45 | 1.45 |
 | `typography.regular_weight` | Regular weight | 400 | 400 | 400 | 400 |
-| `typography.semibold_weight` | Semibold weight: titles, headings, primary buttons | 600 | 600 | 600 | 600 |
+| `typography.semibold_weight` | Emphasis weight of panel titles and section headings (medium) | 500 | 500 | 500 | 500 |
 | `typography.text_optical_size` | Optical size for text | 12 | 12 | 12 | 12 |
 | `typography.timecode` | Transport timecode (medium, tabular figures) | 13 | 13 | 13 | 13 |
 | `typography.title` | Panel titles, section headings, window title (semibold) | 13 | 13 | 13 | 13 |

@@ -1791,6 +1791,37 @@ impl Host {
         );
         *slot = Some(view);
     }
+    /// Development builds: the window's whole AppKit view tree (class, frame,
+    /// hidden), from the theme frame down, so a review can show which system
+    /// materials and controls really exist without activating the window.
+    #[cfg(debug_assertions)]
+    pub fn view_tree(&self) -> String {
+        fn walk(view: &NSView, depth: usize, out: &mut String) {
+            let f = view.frame();
+            out.push_str(&format!(
+                "{}{} [{:.0},{:.0} {:.0}x{:.0}]{}\n",
+                "  ".repeat(depth),
+                view.class().name().to_string_lossy(),
+                f.origin.x,
+                f.origin.y,
+                f.size.width,
+                f.size.height,
+                if view.isHidden() { " hidden" } else { "" },
+            ));
+            for child in view.subviews().to_vec() {
+                walk(&child, depth + 1, out);
+            }
+        }
+        let mut out = String::new();
+        if let Some(root) = self
+            .window
+            .contentView()
+            .and_then(|c| unsafe { c.superview() })
+        {
+            walk(&root, 0, &mut out);
+        }
+        out
+    }
     /// Current toolbar title and subtitle (tests, accessibility checks).
     pub fn document_title(&self) -> (String, String) {
         self.document.borrow().clone()

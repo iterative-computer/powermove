@@ -525,7 +525,9 @@ fn hidden_layers_draw_at_half_strength_and_keys_mark_their_span_ends() {
     let f = scene_with(&t, c).prepare(viewport(&t), &t).unwrap();
     assert_eq!(
         f.ops.iter().find(|o| o.id == "clip:h").unwrap().opacity,
-        0.5
+        // A hidden layer's strip is the material's disabled state.
+        t.strip(t.colors.labels.teal, pm_design::StripState::Disabled)
+            .opacity as f64
     );
     let f = scene(&t).prepare(viewport(&t), &t).unwrap();
     let half: Vec<_> = f

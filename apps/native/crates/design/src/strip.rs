@@ -1,9 +1,13 @@
 //! The timeline's drawn materials: layer and clip strips, the playhead and the
 //! trim grip. A strip is a slab of tinted glass on the solid timeline canvas:
-//! a saturated body in the layer's own hue, lighter toward the bottom, a 1 px
-//! rim of light inside the edge instead of an outline, large corners, and
-//! enough translucency that the time grid reads through it. It is drawn by the
-//! timeline renderer (hundreds on screen while scrolling), never a system view.
+//! a deep, saturated top that opens into a luminous lower half, a 1 px rim of
+//! light in its own hue (brightest along the top edge and round the corners)
+//! instead of an outline, continuous corners about a quarter of its height,
+//! and the ruler's grid reading through the body. Hover and selection only
+//! brighten and whiten the rim. The same slab is used in both appearances: a
+//! clip is an object with its own colour, not a tint of the panel. It is
+//! drawn by the timeline renderer (hundreds on screen while scrolling), never
+//! a system view.
 use crate::{
     Scheme, Tokens,
     color::{mix, oklch, to_oklch},
@@ -14,7 +18,7 @@ pub enum StripState {
     Rest,
     /// The pointer is over the strip: the rim brightens toward white.
     Hover,
-    /// Selected: a full white rim and a slightly brighter body.
+    /// Selected: a full white rim.
     Selected,
     /// Being moved or trimmed: lifted (drop shadow) and more translucent.
     Dragging,
@@ -24,15 +28,20 @@ pub enum StripState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Strip {
-    /// Body gradient, top to bottom (the lower half is the more luminous).
+    /// Body gradient, top to bottom: deep and saturated, then luminous.
     pub top: u32,
     pub bottom: u32,
-    /// Body opacity over the canvas: the grid under it stays faintly visible.
+    /// Body opacity over the canvas.
     pub opacity: f32,
+    /// Light gathering in the lower half, as (colour, alpha at the bottom
+    /// edge); it fades to nothing at mid height.
+    pub glow: (u32, f32),
     /// 1 px ring just inside the edge, as (colour, alpha).
     pub rim: (u32, f32),
-    /// The ring's top edge, brighter: light catching the slab.
+    /// The ring along the top edge and round the top corners: brighter.
     pub rim_top: (u32, f32),
+    /// The ruler's grid where it passes through the body, as (colour, alpha).
+    pub grid: (u32, f32),
     /// Drop shadow under a dragged strip as (colour, alpha, y, blur); alpha 0 = none.
     pub shadow: (u32, f32, f32, f32),
     /// Names and glyphs on the strip: a pale tint of its own hue.
@@ -64,10 +73,9 @@ pub struct TrimGrip {
 }
 
 impl Tokens {
-    /// Corner of a strip `height` points tall: a fifth of its height, never
-    /// below the smallest radius of the scale.
+    /// Corner of a strip `height` points tall: about a quarter of its height.
     pub fn strip_radius(&self, height: f32) -> f32 {
-        (height * 0.22).clamp(self.metrics.inner_radius, self.metrics.panel_radius)
+        (height * 0.27).clamp(self.metrics.inner_radius, self.metrics.panel_radius)
     }
     /// Even space between neighbouring strips, so each reads as its own object.
     pub fn strip_gap(&self) -> f32 {
@@ -78,74 +86,67 @@ impl Tokens {
         let dark = self.scheme == Scheme::Dark;
         let (_, chroma, hue) = to_oklch(fill);
         // Neutral labels stay neutral; coloured ones are lifted to one chroma.
-        let chroma = if chroma < 0.012 {
-            0.
-        } else if state == StripState::Disabled {
-            0.035
-        } else {
-            0.125
+        let coloured = chroma >= 0.012;
+        let chroma = match (coloured, state) {
+            (false, _) => 0.,
+            (true, StripState::Disabled) => 0.04,
+            (true, _) => 0.15,
         };
         if self.accessibility.increase_contrast {
-            let body = oklch(if dark { 0.42 } else { 0.8 }, chroma * 0.8, hue);
+            let body = oklch(0.42, chroma * 0.7, hue);
+            let selected = state == StripState::Selected;
             return Strip {
                 top: body,
                 bottom: body,
                 opacity: 1.,
-                rim: (
-                    self.colors.separator,
-                    if state == StripState::Selected {
-                        0.
-                    } else {
-                        1.
-                    },
-                ),
-                rim_top: (self.colors.text, f32::from(state == StripState::Selected)),
+                glow: (0, 0.),
+                rim: (0xffffff, if selected { 1. } else { 0.6 }),
+                rim_top: (0xffffff, if selected { 1. } else { 0.6 }),
+                grid: (0xffffff, 0.),
                 shadow: (0, 0., 0., 0.),
-                foreground: self.colors.text,
-                primary: self.colors.text,
+                foreground: 0xffffff,
+                primary: 0xffffff,
             };
         }
-        // Lightness of the body's top and bottom, the labels and the marks.
-        let (top, bottom, label, mark) = if dark {
-            (0.4, 0.5, 0.94, 0.8)
+        // A light canvas shows through the body, so the slab is a step deeper
+        // there to keep its labels at 4.5:1.
+        let (top, bottom, opacity, faded) = if dark {
+            (0.33, 0.52, 0.9, 0.55)
         } else {
-            (0.78, 0.86, 0.3, 0.46)
+            (0.3, 0.45, 0.94, 0.85)
         };
-        let lift = if state == StripState::Selected {
-            if dark { 0.035 } else { -0.03 }
-        } else {
-            0.
+        let light = oklch(0.9, chroma * 0.55, hue);
+        let (rim, side, edge) = match state {
+            StripState::Rest => (light, 0.2, 0.5),
+            StripState::Hover => (mix(light, 0xffffff, 0.6), 0.5, 0.85),
+            StripState::Selected => (0xffffff, 0.92, 1.),
+            StripState::Dragging => (mix(light, 0xffffff, 0.6), 0.6, 0.9),
+            StripState::Disabled => (light, 0.1, 0.2),
         };
-        let rim = oklch(if dark { 0.9 } else { 0.99 }, chroma * 0.5, hue);
-        let (rim_alpha, top_alpha) = match state {
-            StripState::Rest => (0.16, 0.34),
-            StripState::Hover => (0.4, 0.62),
-            StripState::Selected => (0.9, 1.),
-            StripState::Dragging => (0.55, 0.8),
-            StripState::Disabled => (0.1, 0.18),
-        };
-        let white = matches!(
-            state,
-            StripState::Hover | StripState::Selected | StripState::Dragging
-        );
-        let rim = if white { mix(rim, 0xffffff, 0.7) } else { rim };
+        let disabled = state == StripState::Disabled;
         Strip {
-            top: oklch(top + lift, chroma, hue),
-            bottom: oklch(bottom + lift, chroma * 1.08, hue),
+            // More chroma at the top, where the slab is deepest.
+            top: oklch(top, chroma, hue),
+            bottom: oklch(bottom, chroma * 0.92, hue),
             opacity: match state {
-                StripState::Dragging => 0.78,
-                StripState::Disabled => 0.5,
-                _ => 0.9,
+                StripState::Dragging if dark => opacity - 0.06,
+                StripState::Disabled => faded,
+                _ => opacity,
             },
-            rim: (rim, rim_alpha),
-            rim_top: (rim, top_alpha),
+            glow: (
+                oklch(0.82, chroma * 0.8, hue),
+                if disabled { 0. } else { 0.16 },
+            ),
+            rim: (rim, side),
+            rim_top: (rim, edge),
+            grid: (light, if disabled { 0.05 } else { 0.13 }),
             shadow: if state == StripState::Dragging {
-                (0x000000, if dark { 0.45 } else { 0.18 }, 6., 16.)
+                (0x000000, if dark { 0.45 } else { 0.22 }, 6., 16.)
             } else {
                 (0, 0., 0., 0.)
             },
-            foreground: oklch(label, chroma * if dark { 0.35 } else { 0.6 }, hue),
-            primary: oklch(mark, chroma * if dark { 0.7 } else { 0.9 }, hue),
+            foreground: oklch(0.96, chroma * 0.22, hue),
+            primary: oklch(0.8, chroma * 0.62, hue),
         }
     }
     pub fn playhead(&self) -> Playhead {
