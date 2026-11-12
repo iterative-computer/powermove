@@ -70,7 +70,8 @@ The system font through CoreText (`TEXT_FONT`), one role per job
 | Title | 13 | medium | Panel and window titles |
 | Reading | 13 | regular | Running prose |
 | Heading | 15 | semibold (`display_weight`) | Sheet and section headings |
-| Display | 24 | semibold (`display_weight`) | A screen's title (Home, Settings) |
+| Headline | 17 | semibold (`display_weight`) | The title in a screen's header row (Home) |
+| Display | 24 | semibold (`display_weight`) | A screen's title (Settings) |
 | Timecode | 13 | medium, tabular | Timecode and numeric readouts |
 
 Text sizes use the font's own tracking table; Heading and Display are set
@@ -229,17 +230,34 @@ Lists are quiet text for recall by name: no glyph tiles, no dividers.
 ## Home
 
 A sidebar for navigation only (Recents, Trash, Store, the account) on the
-window's glass, and one inset sheet. The sheet's header is two rows on the
-sheet's margins: the section title, the one wide search field in the middle
-(the large system field, its shortcut at the trailing end while it is empty)
-and Open… with the one accent action; then the count and the quiet sort and
-layout controls. A project is its poster: the frame in the composition's own
-shape with a continuous corner, a hairline and a soft shadow, the name and
-one line of facts under it, and a small dot when it is open (the accent for
-this window's project). A project with no poster yet is a quiet ground of the
-same shape that says its size. Under the pointer a card rises on the hover
-springs; pressed, it sits back down; a sort or a search slides cards to their
-new places. The list is the dense alternative under the same header.
+window's glass, and one inset sheet. The sheet's header is drawn, quiet and
+borderless: nothing in it is a bezelled system control (hosted AppKit
+controls are for forms: Settings, sheets, panel option rows).
+
+- One inset (24) for the title, both header rows and the cards; one text
+  size for the header's controls (Body); one ink in alpha steps (wash 4.5 %,
+  a step deeper under the pointer or when on, deeper again while pressed).
+- First row, 48 high: the title in the Headline role (17, semibold); the
+  search in the middle of the sheet, a soft pill 32 high with no edge (a
+  magnifier, the bare native text field, the shortcut in the faint ink while
+  it is empty), at most 360 wide; at the trailing edge Open… and New Project
+  as icons alone, 32 square, no fill at rest, their names and shortcuts in
+  the tooltips. ⌘F puts the keyboard in the search; typing filters.
+- Second row, 28 high: the count in the muted ink; the sort as a text action
+  (an icon and the current order) that opens our menu; then the grid/list
+  switch, the header's one raised element (a small pill, two 30 × 24 cells,
+  the on fill gliding between them).
+- A project is a framed page: a 4 pt frame of ink around the page, corners
+  concentric (page 16, frame 20, continuous), in one shape for every card.
+  The poster fills the page when it has the page's shape and stands whole on
+  the viewer's ground otherwise; a project with no poster yet is an empty
+  page that says its size. Under the pointer the frame deepens a step;
+  selected, it carries a ring of ink inside its edge. The name and one line
+  of facts stand under the card on the page's edge, with a small dot when
+  the project is open (the accent for this window's).
+- Cards are 240 wide when four or more fit, and one to three wider ones on
+  a narrow sheet; a sort or a search slides them to their new places. The
+  list is the dense alternative under the same header.
 
 ## Settings
 
