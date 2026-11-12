@@ -94,6 +94,10 @@ pub struct EditFacts {
     /// after that start the next sample begins (index units), else 0. The
     /// straddled sample is presented from the edit's start for this long.
     pub head_gap: i64,
+    /// Where the presentation ends on the frames' timeline, when the edit
+    /// list says: a dwell lasts its segment, and an edit ending part way
+    /// through a sample ends the picture there.
+    pub end: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -302,18 +306,23 @@ impl FrameIndex {
         self.frames.iter().map(|f| f.pts).collect()
     }
 
-    /// The clip's time origin: the timestamp of the first presented frame.
+    /// Where the picture starts: the timestamp of the first presented frame.
     /// Containers start their timestamps anywhere (transport streams around
-    /// 1.4 s, program streams and fragmented MP4 at smaller offsets); a
-    /// clip's time 0 is this frame, never timestamp 0.
+    /// 1.4 s, program streams and fragmented MP4 at smaller offsets).
     pub fn origin_pts(&self) -> i64 {
         self.frames.first().map_or(0, |f| f.pts)
     }
 
-    /// Where the last presented frame ends: its timestamp plus its own
-    /// duration, or the spacing of the two last frames when the container
-    /// gives it none. The clip's length is this minus [`Self::origin_pts`].
+    /// Where the presentation ends: where the edit list ends it, else the
+    /// last presented frame's timestamp plus its own duration. A last frame
+    /// the container gives no duration (some variable-rate files) is
+    /// assumed to last as long as the one before it: a guess, stated here,
+    /// that cannot know a longer final hold. The clip's length is this
+    /// minus its origin.
     pub fn end_pts(&self) -> i64 {
+        if let Some(end) = self.edits.end {
+            return end;
+        }
         let Some(last) = self.frames.last() else {
             return 0;
         };

@@ -323,7 +323,7 @@ pub fn build(path: &Path, select: TrackSelect) -> Result<FrameIndex> {
     if samples.is_empty() {
         return Err(MediaError::invalid("track has no samples"));
     }
-    let (frames, edit_desc) =
+    let (frames, edit_desc, end) =
         apply_edits(&samples, &track.edits, movie.timescale, track.timescale)?;
     stats.edit_list = edit_desc;
     let mut idx = FrameIndex {
@@ -336,6 +336,7 @@ pub fn build(path: &Path, select: TrackSelect) -> Result<FrameIndex> {
         timebase: Rational::new(1, track.timescale as i64)?,
         edits: EditFacts {
             head_gap: head_gap(&samples, &track.edits),
+            end,
         },
         samples,
         frames,
@@ -688,13 +689,15 @@ pub fn head_gap(samples: &[Sample], edits: &[Edit]) -> i64 {
 /// presentation; media edits at rate 1 present every sample overlapping
 /// their window (a sample straddling the window start is shown from the edit
 /// start); dwell edits (rate 0) hold one sample. Samples outside every edit
-/// are decoded but not presented.
+/// are decoded but not presented. Returns the presented frames, a summary,
+/// and where the presentation ends (`None` without an edit list, or when
+/// the last sample states no duration).
 pub fn apply_edits(
     samples: &[Sample],
     edits: &[Edit],
     movie_ts: u32,
     media_ts: u32,
-) -> Result<(Vec<Frame>, Option<String>)> {
+) -> Result<(Vec<Frame>, Option<String>, Option<i64>)> {
     let all = || {
         samples
             .iter()
@@ -706,7 +709,7 @@ pub fn apply_edits(
             .collect()
     };
     if edits.is_empty() {
-        return Ok((all(), None));
+        return Ok((all(), None, None));
     }
     if movie_ts == 0 {
         return Err(MediaError::invalid("movie timescale 0 with an edit list"));
@@ -714,7 +717,8 @@ pub fn apply_edits(
     let mut frames = Vec::new();
     let mut pres = 0i64; // presentation position, media units
     let mut desc = Vec::new();
-    let mut first_media = true;
+    // Where the last shown sample stops showing.
+    let mut shown_end = None;
     let media_end = samples
         .iter()
         .map(|s| s.cts + s.duration)
@@ -740,16 +744,15 @@ pub fn apply_edits(
                 };
                 for (i, s) in samples.iter().enumerate() {
                     if s.cts + s.duration.max(1) > start && s.cts < end {
-                        let mut pts = pres + (s.cts - start);
                         // A frame straddling the edit's start shows from the
-                        // edit's start, not during what precedes it (an
-                        // earlier edit or an empty edit). Only at the very
-                        // start of the presentation does it keep its
-                        // negative time (it is the first frame shown).
-                        if !first_media || pres > 0 {
-                            pts = pts.max(pres);
-                        }
+                        // edit's start, not during what precedes it.
+                        let pts = (pres + (s.cts - start)).max(pres);
                         frames.push(Frame { sample: i, pts });
+                        let stop =
+                            (s.duration > 0).then(|| pres + (s.cts + s.duration).min(end) - start);
+                        if shown_end.is_none_or(|(at, _)| pts >= at) {
+                            shown_end = Some((pts, stop));
+                        }
                     }
                 }
                 desc.push(format!(
@@ -761,7 +764,6 @@ pub fn apply_edits(
                     }
                 ));
                 pres += end - start;
-                first_media = false;
             }
             (0, 0) => {
                 let at = samples
@@ -775,10 +777,10 @@ pub fn apply_edits(
                         sample: i,
                         pts: pres,
                     });
+                    shown_end = Some((pres, Some(pres + dur)));
                 }
                 desc.push(format!("dwell at {} for {dur}", e.media_time));
                 pres += dur;
-                first_media = false;
             }
             (r, frac) => {
                 return Err(MediaError::unsupported(format!(
@@ -794,6 +796,7 @@ pub fn apply_edits(
     Ok((
         frames,
         Some(format!("{} edit(s): {}", edits.len(), desc.join(", "))),
+        shown_end.and_then(|(_, stop)| stop),
     ))
 }
 
@@ -830,19 +833,25 @@ mod tests {
     #[test]
     fn single_edit_skips_and_keeps_a_straddling_frame() {
         let s = samples(&[0, 10, 20, 30, 40]);
-        let (f, _) = apply_edits(&s, &[edit(25, 15, 1)], 1, 1).unwrap();
-        // Window [15, 40): samples at 10 (straddles), 20, 30.
+        let (f, _, end) = apply_edits(&s, &[edit(25, 15, 1)], 1, 1).unwrap();
+        // Window [15, 40): the sample at 10 straddles its start and shows
+        // from the start; then 20 and 30, which ends with the window.
         assert_eq!(
             f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
-            vec![(1, -5), (2, 5), (3, 15)]
+            vec![(1, 0), (2, 5), (3, 15)]
         );
+        assert_eq!(end, Some(25));
+        assert_eq!(head_gap(&s, &[edit(25, 15, 1)]), 5);
+        // An edit ending part way through a sample ends the picture there.
+        let (_, _, end) = apply_edits(&s, &[edit(13, 0, 1)], 1, 1).unwrap();
+        assert_eq!(end, Some(13));
     }
 
     #[test]
     fn empty_edit_shifts_and_second_segment_repeats() {
         let s = samples(&[0, 10, 20, 30]);
         // 5 empty, then [0,20), then [0,10) again.
-        let (f, d) =
+        let (f, d, _) =
             apply_edits(&s, &[edit(5, -1, 1), edit(20, 0, 1), edit(10, 0, 1)], 1, 1).unwrap();
         assert_eq!(
             f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
@@ -856,7 +865,7 @@ mod tests {
         let s = samples(&[0, 10, 20, 30]);
         // 5 empty, then [15, 35): the sample at 10 straddles 15 and shows
         // from 5 (the end of the empty edit), not during it.
-        let (f, _) = apply_edits(&s, &[edit(5, -1, 1), edit(20, 15, 1)], 1, 1).unwrap();
+        let (f, _, _) = apply_edits(&s, &[edit(5, -1, 1), edit(20, 15, 1)], 1, 1).unwrap();
         assert_eq!(
             f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
             vec![(1, 5), (2, 10), (3, 20)]
@@ -867,11 +876,13 @@ mod tests {
     fn movie_timescale_is_rescaled_and_dwell_edits_hold() {
         let s = samples(&[0, 10, 20]);
         // Movie timescale 1, media 10: 2 movie units = 20 media units.
-        let (f, _) = apply_edits(&s, &[edit(2, 0, 1), edit(1, 15, 0)], 1, 10).unwrap();
+        let (f, _, end) = apply_edits(&s, &[edit(2, 0, 1), edit(1, 15, 0)], 1, 10).unwrap();
         assert_eq!(
             f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
             vec![(0, 0), (1, 10), (1, 20)]
         );
+        // The dwell lasts its segment, not its sample's duration.
+        assert_eq!(end, Some(30));
     }
 
     #[test]

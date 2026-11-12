@@ -143,8 +143,8 @@ fn audio_metadata(p: &MediaProbe) -> Option<AudioFacts> {
 }
 
 /// Where the selected audio stream ends on the clip's timeline, in seconds:
-/// its own length from its own first timestamp, measured from the first
-/// presented video frame when the file has a picture.
+/// its own length from its own first timestamp, measured from the start of
+/// the file's presentation ([`crate::clip::Span`]).
 fn audio_duration(p: &MediaProbe) -> Option<f64> {
     let stream = p.audio_stream.and_then(|i| p.streams.get(i))?;
     stream.audio.as_ref()?;
@@ -159,9 +159,7 @@ fn audio_duration(p: &MediaProbe) -> Option<f64> {
             p.duration_us? as f64 / 1e6 - (start - container_start)
         }
     };
-    let origin = p.video.as_ref().map_or(start, |v| {
-        v.start_pts as f64 * v.timebase[0] as f64 / v.timebase[1] as f64
-    });
+    let origin = crate::clip::Span::of(p).origin.seconds();
     Some((start - origin + length).max(0.0))
 }
 
@@ -373,7 +371,7 @@ fn video_facts(
     let (w, h) = r.display_size((v.width, v.height));
     let duration = match r.conformed() {
         Some(rate) => Some(v.frames as f64 * rate.den() as f64 / rate.num() as f64),
-        None => Some(v.duration()),
+        None => p.duration(),
     };
     MediaFacts {
         kind: MediaKind::Video,

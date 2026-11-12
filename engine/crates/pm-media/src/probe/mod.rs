@@ -141,9 +141,9 @@ pub struct VideoProbe {
     pub min_frame_duration: i64,
     pub max_frame_duration: i64,
     pub frames: usize,
-    /// The clip's timeline, in `timebase` units (seconds per unit as
-    /// [num, den]): the first presented frame starts at `start_pts`, which
-    /// is clip time 0, and the last one ends at `end_pts`.
+    /// The picture's presentation, in `timebase` units (seconds per unit as
+    /// [num, den]): the first presented frame starts at `start_pts` and the
+    /// last one ends at `end_pts`.
     pub timebase: [i64; 2],
     pub start_pts: i64,
     pub end_pts: i64,
@@ -223,12 +223,12 @@ impl VideoProbe {
 }
 
 impl MediaProbe {
-    /// How long the file plays, in seconds: its picture's length when it
-    /// has one (first frame start to last frame end), otherwise the
-    /// container's duration.
+    /// How long the file plays, in seconds: its presentation
+    /// ([`crate::clip::Span`]) when it has a picture, from its origin to
+    /// the latest end of any stream; otherwise the container's duration.
     pub fn duration(&self) -> Option<f64> {
         match &self.video {
-            Some(v) => Some(v.duration()),
+            Some(_) => crate::clip::Span::of(self).duration(),
             None => self.duration_us.map(|d| d as f64 / 1e6),
         }
     }
@@ -242,26 +242,30 @@ pub(crate) fn still_container(name: &str) -> bool {
         .any(|n| n == "image2" || n.ends_with("_pipe"))
 }
 
-/// The clip origin of a file's picture: the timestamp of its first
-/// presented frame and that timestamp's unit in seconds. `None` when the
-/// file has no picture. This is the frame index the picture is decoded by
-/// (prepared once and shared with the first [`MediaSource`] where the
-/// container allows), so sound placed against it stays with the picture.
+/// The clip origin of a file read by its presentation
+/// ([`crate::clip::Span`]): a container timestamp and its unit in seconds.
+/// A file with a picture answers from the frame index the picture is
+/// decoded by (prepared once and shared with the first [`MediaSource`]
+/// where the container allows), so sound placed against it stays with the
+/// picture.
 ///
 /// [`MediaSource`]: crate::decode::service::MediaSource
-pub fn clip_origin(path: &Path) -> Result<Option<(i64, pm_time::Rational)>> {
-    let of = |index: &FrameIndex| (index.origin_pts(), index.timebase);
+pub fn clip_origin(path: &Path) -> Result<(i64, pm_time::Rational)> {
+    let of = |probe: &MediaProbe| -> Result<(i64, pm_time::Rational)> {
+        let origin = crate::clip::Span::of(probe).origin;
+        let unit = pm_time::Rational::new(origin.timebase[0], origin.timebase[1])?;
+        Ok((origin.pts, unit))
+    };
     if let Some(prepared) = cache::lookup(path)? {
-        return Ok(Some(of(&prepared.index)));
+        return of(&prepared.probe);
     }
-    if Input::open(path)?.picture().is_none() {
-        return Ok(None);
+    if Input::open(path)?.picture().is_some() {
+        cache::prewarm(path)?;
+        if let Some(prepared) = cache::lookup(path)? {
+            return of(&prepared.probe);
+        }
     }
-    cache::prewarm(path)?;
-    if let Some(prepared) = cache::lookup(path)? {
-        return Ok(Some(of(&prepared.index)));
-    }
-    Ok(probe(path)?.index.as_ref().map(of))
+    of(&probe(path)?.probe)
 }
 
 /// Everything probe learns, plus the video index (kept for decoding).

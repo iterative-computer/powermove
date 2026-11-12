@@ -170,10 +170,10 @@ pub struct AudioStreamInfo {
     /// `timebase` (num, den) seconds, before [`Self::extra_priming`].
     pub start_pts: i64,
     pub timebase: (i64, i64),
-    /// The file also has a picture (a video stream that is not cover art):
-    /// its clip time 0 is the first presented frame, and this stream sits
-    /// on that timeline at [`Self::clip_lead`].
-    pub has_picture: bool,
+    /// The file plays nothing else: no picture (a video stream that is not
+    /// cover art) and no other audio stream. Otherwise this stream sits on
+    /// the file's clip timeline at [`Self::clip_lead`].
+    pub alone: bool,
 }
 
 impl AudioStreamInfo {
@@ -187,9 +187,9 @@ impl AudioStreamInfo {
     }
 
     /// Where program sample 0 sits on the clip timeline of a file whose
-    /// first presented video frame is stamped `origin_pts` in
-    /// `origin_timebase` (num, den) seconds: samples after clip time 0
-    /// (negative when the sound starts before the picture). Exact: one
+    /// clip time 0 is stamped `origin_pts` in `origin_timebase` (num, den)
+    /// seconds: samples after clip time 0 (negative when the sound starts
+    /// before it). Exact: one
     /// rounding to the nearest sample, ties to even.
     pub fn clip_lead(&self, origin_pts: i64, origin_timebase: (i64, i64)) -> i64 {
         let (an, ad) = (self.timebase.0 as i128, self.timebase.1 as i128);
@@ -215,16 +215,17 @@ impl AudioStreamInfo {
 /// Where program sample 0 of an open stream sits on the clip timeline an
 /// asset with `timing` addresses. An older project's source time is the
 /// program sample itself: no offset. Otherwise
-/// [`AudioStreamInfo::clip_lead`] from the same frame index the picture is
-/// shown by; 0 for a file without a picture, and for one whose picture
-/// cannot be indexed (nothing to stay in sync with).
+/// [`AudioStreamInfo::clip_lead`] from the file's presentation origin
+/// ([`crate::clip::Span`]); 0 for the only stream of a file without a
+/// picture (it is its own origin), and for a file whose origin cannot be
+/// read (nothing to stay in sync with).
 pub fn clip_lead(info: &AudioStreamInfo, timing: crate::clip::ClipTiming) -> i64 {
-    if timing == crate::clip::ClipTiming::Legacy || !info.has_picture {
+    if timing == crate::clip::ClipTiming::Legacy || info.alone {
         return 0;
     }
     match crate::probe::clip_origin(&info.path) {
-        Ok(Some((pts, tb))) => info.clip_lead(pts, (tb.num(), tb.den())),
-        _ => 0,
+        Ok((pts, tb)) => info.clip_lead(pts, (tb.num(), tb.den())),
+        Err(_) => 0,
     }
 }
 
@@ -835,7 +836,7 @@ impl AudioDecoder {
                     sample_exact_timestamps: false,
                     start_pts: 0,
                     timebase: (1, 1),
-                    has_picture: false,
+                    alone: true,
                 },
                 codec_delay: 0,
                 tb: (1, 1),
@@ -936,7 +937,10 @@ impl AudioDecoder {
             out.start_pts = start_pts;
             out.info.start_pts = start_pts;
             out.info.timebase = tb;
-            out.info.has_picture = out.input.picture().is_some();
+            let sounds = (0..(*out.input.fmt).nb_streams as usize)
+                .filter(|&i| out.input.media_type(i) == ff::AVMEDIA_TYPE_AUDIO)
+                .count();
+            out.info.alone = out.input.picture().is_none() && sounds <= 1;
             out.info.sample_rate = rate;
             out.info.speakers = speakers;
             out.info.layout = layout_name;

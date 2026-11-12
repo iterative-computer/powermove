@@ -1,14 +1,17 @@
-//! A file's sound sits on its picture's timeline: clip time 0 is the first
-//! presented video frame, and each audio stream is placed by its own
-//! timestamps relative to that. A click authored at a known time against
-//! the picture must come out of the mix at that time, whether the container
-//! starts both streams late (transport streams), starts the sound after the
-//! picture, or starts the picture after the sound.
+//! Where a file's sound sits on its clip's timeline.
 //!
-//! That is the reading of an asset with `timing: 2`. An asset without the
-//! member is an older project's: its source time is the program sample, as
-//! the earlier app's decoded buffer was addressed, wherever the container
-//! starts the stream.
+//! An asset with `timing: 2` reads the file by its presentation: clip time
+//! 0 is the earliest presented sample of any stream, and each stream keeps
+//! its offset from it (a late soundtrack is silent until it starts; a late
+//! picture shows nothing until its first frame). One exception: a picture
+//! starting within one frame after that is the origin, so a clip never
+//! opens on a blank frame because the sound leads by milliseconds, and the
+//! sound before it is not part of the clip. A click authored at a known
+//! time must come out of the mix at that time.
+//!
+//! An asset without the member is an older project's: its source time is
+//! the program sample, as the earlier app's decoded buffer was addressed,
+//! wherever the container starts the stream.
 
 mod common;
 
@@ -77,7 +80,7 @@ fn click_with(path: &std::path::Path, d: &str, timing: Option<u64>) -> (usize, f
 }
 
 #[test]
-fn sound_is_placed_against_the_first_video_frame() {
+fn sound_is_placed_against_the_start_of_the_presentation() {
     let dir = temp_dir("clip-origin");
     let wav = dir.join("click.wav");
     let click = clicks(SR as usize, &[CLICK], 0.9);
@@ -96,21 +99,33 @@ fn sound_is_placed_against_the_first_video_frame() {
         "mpegts",
     ];
     // (file, picture start, sound start, codecs, tolerance in samples)
-    let cases: [(&str, f64, f64, &[&str], i64); 5] = [
+    let cases: [(&str, f64, f64, &[&str], i64); 6] = [
         // Both streams start together, late: nothing moves, nothing is cut.
         ("together.ts", 0.0, 0.0, ts, 48),
         // The sound starts a quarter second after the picture.
         ("late-sound.ts", 0.0, 0.25, ts, 48),
         ("late-sound.mov", 0.0, 0.25, pcm_mov, 1),
-        // The picture starts after the sound: the sound before it is not
-        // part of the clip.
+        // The picture starts five frames after the sound: the sound before
+        // it is part of the clip, as authored.
         ("late-picture.ts", 0.2, 0.0, ts, 48),
         ("late-picture.mov", 0.2, 0.0, pcm_mov, 1),
+        // The picture starts no more than a frame after the sound: the clip
+        // opens on its first frame and the sound before it is dropped.
+        ("picture-one-frame-late.mov", 0.04, 0.0, pcm_mov, 1),
     ];
     for (name, picture_at, sound_at, codecs, tolerance) in cases {
         let path = dir.join(name);
         clip(&path, &wav, picture_at, sound_at, codecs);
-        let lead = ((sound_at - picture_at) * SR as f64).round() as i64;
+        // A transport stream stamps MPEG audio from the start of its
+        // encoder's 481 samples of padding, which are presented.
+        let padding = if name.ends_with(".ts") { 481.0 } else { 0.0 };
+        let sound_starts = sound_at - padding / SR as f64;
+        let origin = if (0.0..=0.04).contains(&(picture_at - sound_starts)) {
+            picture_at
+        } else {
+            f64::min(picture_at, sound_starts)
+        };
+        let lead = ((sound_at - origin) * SR as f64).round() as i64;
         for trim in [0.0, 0.04] {
             let expected = CLICK as i64 + lead - (trim * SR as f64).round() as i64;
             let (at, level) = click_with(
@@ -193,5 +208,56 @@ fn an_older_project_hears_the_program_sample_its_edits_address() {
                 "{name}, {edit}: the click is at sample {at}, {expected} expected",
             );
         }
+    }
+}
+
+/// A file without a picture: each stream keeps its offset from the
+/// earliest one. A single stream is its own origin.
+#[test]
+fn streams_of_a_file_without_a_picture_keep_their_offsets() {
+    let dir = temp_dir("clip-origin-audio-only");
+    let (first, second) = (dir.join("first.wav"), dir.join("second.wav"));
+    write_wav(&first, SR, &[clicks(SR as usize, &[CLICK], 0.9)]);
+    write_wav(&second, SR, &[clicks(SR as usize, &[30_000], 0.9)]);
+    let file = dir.join("two.mka");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&first)
+        .args(["-itsoffset", "0.25", "-i"])
+        .arg(&second)
+        .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mix = |assets: &str, path: &std::path::Path| {
+        let a = audio("A", "v", 0.0, 2.0, "", "");
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":2,"layers":[{a}],"comps":{{}},"assets":{{"v":{assets}}},"params":{{}}}}"#
+        );
+        let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+        let rig = Rig::new(&[("v", path)]);
+        let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        rig.render(&mut mixer, 0, 2 * SR as i64, 4096).remove(0)
+    };
+    let heard = |out: &[f32]| -> Vec<usize> {
+        (1..out.len())
+            .filter(|&i| out[i].abs() > 0.3 && out[i - 1].abs() <= 0.3)
+            .collect()
+    };
+    let streams = r#""audioStreams":[{"index":0,"channels":1,"sampleRate":48000,"on":true},{"index":1,"channels":1,"sampleRate":48000,"on":true}]"#;
+    let out = mix(
+        &format!(r#"{{"id":"v","kind":"audio","timing":2,{streams}}}"#),
+        &file,
+    );
+    assert_eq!(
+        heard(&out),
+        [CLICK, 30_000 + 12_000],
+        "two streams, the second 0.25 s late"
+    );
+    // One stream alone is at zero, with the member or without.
+    for timing in ["", r#","timing":2"#] {
+        let out = mix(&format!(r#"{{"id":"v","kind":"audio"{timing}}}"#), &second);
+        assert_eq!(heard(&out), [30_000], "one stream{timing}");
     }
 }

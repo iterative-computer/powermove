@@ -1,7 +1,8 @@
 //! What an asset's source times select of its file's picture.
 //!
-//! With `timing: 2` a clip's time 0 is its first presented video frame, whatever timestamp
-//! the container gives it. Transport streams start around 1.4 s, program
+//! With `timing: 2` a clip's time 0 is the start of its file's presentation
+//! (its first presented video frame unless a soundtrack starts more than a
+//! frame earlier), whatever timestamp the container gives it. Transport streams start around 1.4 s, program
 //! streams and fragmented MP4 at smaller offsets; none of that may show as
 //! a blank head or cost the tail. Distinct grey frames prove which source
 //! frame each composition frame shows, in the viewer and in export.
@@ -272,15 +273,21 @@ fn wrap(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 }
 
 /// Rewrites the video track of an MP4 whose `moov` is its last box: `edits`
-/// replaces the edit list (`(media time or -1, movie-timescale duration)`
-/// entries at rate 1), `offset` gives every sample that composition offset.
-fn retime_track(src: &std::path::Path, dst: &std::path::Path, edits: &[(i32, u32)], offset: i32) {
+/// replaces the edit list (`(media time or -1, milliseconds, rate 1 or 0
+/// for a dwell)` entries), `offset` gives every sample that composition
+/// offset.
+fn retime_track(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    edits: &[(i32, u32, u16)],
+    offset: i32,
+) {
     fn rebuild(
         buf: &[u8],
         at: usize,
         size: usize,
         video: bool,
-        edits: &[(i32, u32)],
+        (edits, movie): (&[(i32, u32, u16)], u32),
         offset: i32,
     ) -> Vec<u8> {
         let mut out = vec![];
@@ -288,23 +295,33 @@ fn retime_track(src: &std::path::Path, dst: &std::path::Path, edits: &[(i32, u32
             let raw = &buf[at..at + size];
             match &kind {
                 b"trak" => {
+                    // The handler: `vide` after MP4's zero field or QuickTime's
+                    // `mhlr` component type.
                     let video = raw
                         .windows(8)
-                        .any(|w| w[..4] == [0; 4] && &w[4..] == b"vide");
-                    out.extend(wrap(&kind, &rebuild(buf, at, size, video, edits, offset)));
+                        .any(|w| &w[4..] == b"vide" && (w[..4] == [0; 4] || &w[..4] == b"mhlr"));
+                    out.extend(wrap(
+                        &kind,
+                        &rebuild(buf, at, size, video, (edits, movie), offset),
+                    ));
                 }
                 b"mdia" | b"minf" | b"stbl" if video => {
-                    out.extend(wrap(&kind, &rebuild(buf, at, size, video, edits, offset)));
+                    out.extend(wrap(
+                        &kind,
+                        &rebuild(buf, at, size, video, (edits, movie), offset),
+                    ));
                 }
                 b"edts" | b"ctts" if video => {}
                 b"tkhd" if video && !edits.is_empty() => {
                     out.extend_from_slice(raw);
                     let mut elst = vec![0, 0, 0, 0];
                     elst.extend((edits.len() as u32).to_be_bytes());
-                    for (media_time, duration) in edits {
+                    for (media_time, duration, rate) in edits {
+                        let duration = (u64::from(*duration) * u64::from(movie) / 1000) as u32;
                         elst.extend(duration.to_be_bytes());
                         elst.extend(media_time.to_be_bytes());
-                        elst.extend([0, 1, 0, 0]);
+                        elst.extend(rate.to_be_bytes());
+                        elst.extend([0, 0]);
                     }
                     out.extend(wrap(b"edts", &wrap(b"elst", &elst)));
                 }
@@ -330,9 +347,16 @@ fn retime_track(src: &std::path::Path, dst: &std::path::Path, edits: &[(i32, u32
     let (kind, at, size) = *boxes(&buf, 0, buf.len()).last().unwrap();
     assert_eq!(&kind, b"moov", "the fixture's moov must be its last box");
     let mut out = buf[..at].to_vec();
+    // The movie timescale (version 0 `mvhd`).
+    let mvhd = boxes(&buf, at + 8, at + size)
+        .into_iter()
+        .find(|b| &b.0 == b"mvhd")
+        .expect("mvhd")
+        .1;
+    let movie = u32::from_be_bytes(buf[mvhd + 20..mvhd + 24].try_into().unwrap());
     out.extend(wrap(
         b"moov",
-        &rebuild(&buf, at, size, false, edits, offset),
+        &rebuild(&buf, at, size, false, (edits, movie), offset),
     ));
     std::fs::write(dst, out).unwrap();
 }
@@ -368,16 +392,16 @@ fn an_older_project_shows_the_frames_its_edits_selected() {
     retime_track(
         &base,
         &dir.0.join("empty-edit.mp4"),
-        &[(-1, 400), (0, 800)],
+        &[(-1, 400, 1), (0, 800, 1)],
         0,
     );
     retime_track(&base, &dir.0.join("negative.mp4"), &[], -256);
     // The edit starts half way through frame 2.
-    retime_track(&base, &dir.0.join("straddle.mp4"), &[(1280, 700)], 0);
+    retime_track(&base, &dir.0.join("straddle.mp4"), &[(1280, 700, 1)], 0);
     retime_track(
         &base,
         &dir.0.join("empty-then-straddle.mp4"),
-        &[(-1, 400), (1280, 700)],
+        &[(-1, 400, 1), (1280, 700, 1)],
         0,
     );
     // (file, the first frame shown, the source time at which it starts:
@@ -449,4 +473,148 @@ fn an_older_project_shows_the_frames_its_edits_selected() {
             }
         }
     }
+}
+
+/// With `timing: 2` a late picture is blank until its first frame, as
+/// authored, when the sound starts more than a frame before it; a picture
+/// within a frame of the sound opens the clip.
+#[test]
+fn a_clip_starts_where_its_presentation_starts() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-presentation-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut preview = Renderer::headless().unwrap();
+    let mut export = Renderer::headless().unwrap();
+    // Silence and picture both from zero; an empty edit then delays the
+    // picture exactly.
+    let with_sound: &[&str] = &[
+        "-f",
+        "lavfi",
+        "-t",
+        "1.2",
+        "-i",
+        "anullsrc=r=48000:cl=mono",
+        "-c:v",
+        "mpeg4",
+        "-q:v",
+        "2",
+        "-g",
+        "6",
+        "-bf",
+        "0",
+        "-c:a",
+        "aac",
+    ];
+    let base = dir.0.join("together.mp4");
+    steps_clip(&base, with_sound, &[]);
+    // (file, milliseconds the picture starts after the sound, blank frames)
+    for (name, late, blank) in [
+        ("five-frames-late.mp4", 200u32, 5usize),
+        ("twelve-ms-late.mp4", 12, 0),
+        ("one-frame-late.mp4", 40, 0),
+    ] {
+        let path = dir.0.join(name);
+        retime_track(&base, &path, &[(-1, late, 1), (0, 800, 1)], 0);
+        let source = pm_media::decode::service::MediaSource::open(&path).unwrap();
+        let tb = source.index.timebase;
+        let start = source.index.frames[0].pts as f64 * tb.num() as f64 / tb.den() as f64;
+        assert!(
+            (start - f64::from(late) / 1e3).abs() < 1e-3,
+            "{name}: the picture starts at {start}"
+        );
+        let expected: Vec<Option<usize>> = (0..FRAMES + 2)
+            .map(|n| n.checked_sub(blank).map(|k| k.min(FRAMES - 1)))
+            .collect();
+        let doc = load(&document(0.0, 1.0, VERSIONED));
+        for (renderer, kind) in [
+            (&mut preview, OutputKind::Preview),
+            (&mut export, OutputKind::Final),
+        ] {
+            assert_eq!(
+                shown(renderer, &doc, kind, &path),
+                expected,
+                "{name}, {kind:?}"
+            );
+        }
+    }
+}
+
+/// A clip is as long as its presentation: a dwell lasts its segment, an
+/// edit ending part way through a sample ends there, and a straddled head
+/// starts at the edit. The imported length, the source's length and the
+/// last frame a layer of that length reaches agree.
+#[test]
+fn a_clip_is_as_long_as_its_presentation() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-clip-length-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let plain: &[&str] = &["-c:v", "mpeg4", "-q:v", "2", "-g", "6", "-bf", "0"];
+    let base = dir.0.join("zero.mp4");
+    steps_clip(&base, plain, &[]);
+    // Frames 0..9, then frame 10 held for two seconds.
+    retime_track(
+        &base,
+        &dir.0.join("dwell.mp4"),
+        &[(0, 400, 1), (5120, 2000, 0)],
+        0,
+    );
+    // The edit ends half way through frame 12.
+    retime_track(&base, &dir.0.join("clipped.mp4"), &[(0, 500, 1)], 0);
+    // The edit starts half way through frame 2, which shows for 20 ms.
+    retime_track(&base, &dir.0.join("straddle.mp4"), &[(1280, 700, 1)], 0);
+    let mut renderer = Renderer::headless().unwrap();
+    // (file, seconds, frames shown at composition frames 0, 1 and the last)
+    for (name, seconds, first, second, last) in [
+        ("zero.mp4", 0.8, 0usize, 1usize, 19usize),
+        ("dwell.mp4", 2.4, 0, 1, 10),
+        ("clipped.mp4", 0.5, 0, 1, 12),
+        ("straddle.mp4", 0.7, 2, 3, 19),
+    ] {
+        let path = dir.0.join(name);
+        let facts = pm_media::facts::media_facts(&path, None).unwrap();
+        let length = facts.duration.unwrap();
+        assert!(
+            (length - seconds).abs() < 1e-6,
+            "{name}: imported as {length} s"
+        );
+        let source = pm_media::decode::service::MediaSource::open(&path).unwrap();
+        let ticks = source.duration() as f64 / pm_time::TICKS_PER_SECOND as f64;
+        assert!(
+            (ticks - seconds).abs() < 1e-6,
+            "{name}: the source says {ticks} s"
+        );
+        // A layer exactly as long as the clip, in a composition that long.
+        let frames = (seconds * f64::from(FPS)).round() as usize;
+        let mut value = document(0.0, 1.0, VERSIONED);
+        value["layers"][0]["dur"] = json!(seconds);
+        value["dur"] = json!(seconds);
+        let doc = load(&value);
+        let mut resolver = MapResolver::default();
+        resolver.paths.insert("clip".into(), path.clone());
+        let request = RenderRequest {
+            output_kind: OutputKind::Final,
+            export: true,
+            ..RenderRequest::at_scale(Size::new(SIDE, SIDE), 1.0, Precision::Float16)
+        };
+        let mut at = |n: usize| {
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks_of_frame(n), &request, &resolver)
+                .expect("render");
+            let rgba = renderer.read_rgba(&frame).unwrap();
+            renderer.recycle(frame);
+            let center = ((SIDE / 2) * SIDE + SIDE / 2) as usize * 4;
+            (rgba[center + 3] >= 0.5)
+                .then(|| ((f64::from(rgba[center]) * 255.0 - 20.0) / 10.0).round() as usize)
+        };
+        assert_eq!(
+            [at(0), at(1), at(frames - 1)],
+            [Some(first), Some(second), Some(last)],
+            "{name}: frames 0, 1 and {}",
+            frames - 1
+        );
+    }
+}
+
+fn ticks_of_frame(n: usize) -> pm_protocol::common::Ticks {
+    ticks(n as f64 / f64::from(FPS))
 }

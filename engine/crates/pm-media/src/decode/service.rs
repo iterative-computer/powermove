@@ -7,7 +7,7 @@ use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
 use super::{Backend, DecoderInfo, StreamSpec, open};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
-use crate::clip::{ClipTiming, LegacyMap};
+use crate::clip::{ClipTiming, LegacyMap, Span};
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input, PacketReader};
 use crate::frame::DecodedFrame;
@@ -39,12 +39,14 @@ pub struct MediaSource {
     startup_input: Arc<Mutex<Option<Input>>>,
     pub nominal: NominalRate,
     pub color: ColorDescription,
-    /// Presented timestamps in presentation order on the clip's timeline:
-    /// the first presented frame is 0 ([`FrameIndex::origin_pts`] is what
-    /// the container stamps it with). Index timebase units.
+    /// Presented timestamps in presentation order on the clip's timeline
+    /// ([`ClipTiming::Presentation`]): 0 is the start of the file's
+    /// presentation ([`Span`]). Index timebase units.
     pub pts: Vec<i64>,
-    /// The container timestamp of clip time 0 (the first presented frame).
+    /// The container timestamp of clip time 0, in index timebase units.
     pub origin_pts: i64,
+    /// Where the presentation ends on the clip's timeline, in ticks.
+    end: Tick,
     /// The same frames as older projects address them
     /// ([`ClipTiming::Legacy`]).
     pub legacy: LegacyMap,
@@ -108,8 +110,15 @@ impl MediaSource {
                 ));
             }
         };
-        let origin_pts = index.origin_pts();
+        let span = Span::of(&probe);
+        let origin_pts = span.origin.in_units(index.timebase);
         let pts = index.frames.iter().map(|f| f.pts - origin_pts).collect();
+        let end = match span.end {
+            Some(end) => {
+                crate::time::ticks_of(end.in_units(index.timebase) - origin_pts, index.timebase)
+            }
+            None => crate::time::ticks_of(index.end_pts() - origin_pts, index.timebase),
+        };
         let legacy = LegacyMap::of(&index);
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
@@ -121,6 +130,7 @@ impl MediaSource {
             color: video.color.interpreted,
             pts,
             origin_pts,
+            end,
             legacy,
             index,
             probe,
@@ -165,10 +175,10 @@ impl MediaSource {
         crate::time::ticks_of(self.pts[n], self.index.timebase)
     }
 
-    /// The clip's length in ticks: the end of the last presented frame
-    /// minus the start of the first.
+    /// The clip's length in ticks: from the start of the file's
+    /// presentation to the latest end of any of its streams.
     pub fn duration(&self) -> Tick {
-        crate::time::ticks_of(self.index.end_pts() - self.origin_pts, self.index.timebase)
+        self.end
     }
 
     pub fn path(&self) -> &Path {
