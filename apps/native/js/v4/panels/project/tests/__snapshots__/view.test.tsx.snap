@@ -19818,8 +19818,11 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
                       "disabled": false,
                       "label": "Search Media",
                       "style": {
+                        "background": {
+                          "token": "colors.selected_fill",
+                        },
                         "color": {
-                          "token": "colors.accent",
+                          "token": "colors.text",
                         },
                         "minHeight": {
                           "token": "metrics.hit",
