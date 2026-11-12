@@ -58,7 +58,7 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let mut media = MediaCache::new(&gpu.device);
     let convert = |media: &mut MediaCache, preview: bool| {
-        media.preview_media = preview;
+        media.preview_video = preview;
         media.draw_edge = Some(128);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
@@ -102,10 +102,11 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
 fn preview_video_downscale_averages_detail_finer_than_its_pixels() {
     let gpu = pm_gpu::Gpu::new("preview downscale filter").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/stripes-709-limited.mp4");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/stripes-709-limited.mp4");
     let mut media = MediaCache::new(&gpu.device);
     let convert = |media: &mut MediaCache, preview: bool| {
-        media.preview_media = preview;
+        media.preview_video = preview;
         media.draw_edge = Some(30);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media

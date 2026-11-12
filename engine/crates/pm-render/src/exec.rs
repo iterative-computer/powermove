@@ -549,7 +549,7 @@ impl Exec<'_> {
                         ..
                     } => {
                         self.media.draw_edge =
-                            self.media.preview_media.then(|| r.source_edge()).flatten();
+                            self.media.preview_video.then(|| r.source_edge()).flatten();
                         match self.media.video(
                             self.device,
                             self.queue,

@@ -97,6 +97,20 @@ impl FrameSpec {
             1.
         }
     }
+    /// Whether stills are read at the view's resolution (ImageIO's
+    /// filtered thumbnail of the original): every viewer frame, captures
+    /// excepted. Full-resolution stills held for paused frames cost
+    /// gigabytes on large images for no visible difference.
+    pub(crate) fn preview_stills(&self) -> bool {
+        !self.exact
+    }
+    /// Whether video frames are converted at the view's resolution: only
+    /// for frames a final picture replaces, playing and dragged ones. A
+    /// paused frame converts video as the export does, so paused Full shows
+    /// the export's pixels.
+    pub(crate) fn preview_video(&self) -> bool {
+        !self.exact && self.moment != Moment::Paused
+    }
     pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
@@ -748,7 +762,7 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
-        self.renderer.set_preview_media(false);
+        self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
         self.sync_studio(scene)?;
@@ -881,7 +895,8 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
-                self.renderer.set_preview_media(!spec.exact);
+                self.renderer
+                    .set_preview_media(spec.preview_stills(), spec.preview_video());
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
@@ -1165,7 +1180,8 @@ impl Engine {
         }
         let surface = self.cache_surface(size)?;
         // Drawn as `frame` draws this spec: the cached picture stands for it.
-        self.renderer.set_preview_media(!spec.exact);
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         self.renderer.set_draw_reuse(!spec.exact);
         self.renderer.set_scrub(false);
         self.renderer.set_playback(None);
@@ -1940,5 +1956,99 @@ mod lifetime_tests {
             }
             assert!(worst < 0.002, "{mode:?}: max signal error {worst}");
         }
+    }
+}
+
+#[cfg(test)]
+mod paused_media_tests {
+    use super::*;
+    /// A 64 × 64 composition showing 480 px of 3-px stripes at 6.25 %.
+    fn stripes() -> Scene {
+        let clip = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../../engine/crates/pm-render/tests/fixtures/video/stripes-709-limited.mp4",
+        );
+        let p = |k: &str, v: f64| format!(r#""{k}":{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            p("position.x", 32.),
+            p("position.y", 32.),
+            p("anchor.x", 0.),
+            p("anchor.y", 0.),
+            p("scale.x", 6.25),
+            p("scale.y", 6.25),
+            p("rotation", 0.),
+            p("opacity", 100.),
+        ]
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":64,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"v","type":"video","name":"clip","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"clip","trim":0,"speed":1,"w":480,"h":480}}}}],
+            "comps":{{}},"assets":{{"clip":{{"id":"clip","type":"video","name":"clip","w":480,"h":480,"dur":1}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_string(), clip)].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the clip's frame never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// A paused frame shows a large clip drawn small exactly as an export
+    /// (a capture) draws it: the source read through the export's path, not
+    /// a preview-sized copy.
+    #[test]
+    fn a_paused_frame_reads_video_as_the_export_does() {
+        let mut engine = Engine::new(Gpu::new("paused-media-test").unwrap()).unwrap();
+        let scene = stripes();
+        let output = Output {
+            width: 64,
+            height: 64,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = drawn(&mut engine, &scene, FrameSpec::exact(Ticks::ZERO, output));
+        let paused = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        assert!(!paused.preview_video());
+        let shown = drawn(&mut engine, &scene, paused);
+        // The clip is drawn (grey stripes averaged, not the black ground).
+        assert!(shown[32 * 64 + 32][0] > 0.2, "{:?}", shown[32 * 64 + 32]);
+        assert_eq!(shown, exact);
+        // Playing frames may read the smaller copy.
+        assert!(
+            FrameSpec {
+                moment: Moment::Playing,
+                ..paused
+            }
+            .preview_video()
+        );
     }
 }

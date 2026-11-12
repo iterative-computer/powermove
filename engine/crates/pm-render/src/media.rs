@@ -1121,7 +1121,10 @@ pub struct MediaCache {
     image_seen: BTreeMap<ImageKey, u64>,
     image_budget: u64,
     frame_budget: u64,
+    /// Stills at the view's resolution (ImageIO's filtered thumbnail).
     pub(crate) preview_media: bool,
+    /// Video frames converted at the view's resolution.
+    pub(crate) preview_video: bool,
     pub(crate) draw_edge: Option<u32>,
     /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
     stills: stills::StillPrefetch,
@@ -1186,6 +1189,7 @@ impl MediaCache {
             image_budget: 48 << 20,
             frame_budget: 24 << 20,
             preview_media: false,
+            preview_video: false,
             draw_edge: None,
             stills: Default::default(),
             sources: BTreeMap::new(),
@@ -1645,7 +1649,7 @@ impl MediaCache {
             format!("{interp:?}{composition:?}{sequence}{override_color:?}").hash(&mut h);
             h.finish()
         };
-        let edge = if self.preview_media
+        let edge = if self.preview_video
             && !export
             && !source_exact
             && Geometry::of(&reading, (v.width, v.height)).is_identity()
