@@ -795,3 +795,107 @@ fn a_clip_is_as_long_as_its_asset_reads_it() {
         }
     }
 }
+
+/// A proxy stands in for its original in the viewer, so for an older
+/// project's clip (no `timing`) and a new one alike every source time must
+/// select the same frame through the proxy as through the original: at
+/// 0, .02, .04, .40 and .64 s and the last reachable frame, for the
+/// head-trimming edit that straddles a sample and an empty edit followed
+/// by one (both refused today: the proxy loses the straddled sample), and
+/// an empty edit alone, whose proxy is accepted. A proxy that is refused is
+/// safe (the original plays); an accepted one must agree.
+#[test]
+fn a_proxy_shows_the_frames_its_original_shows() {
+    use pm_protocol::priority::{ProxyFormat, ProxySize};
+    use std::sync::atomic::AtomicBool;
+
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-proxy-timing-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    // H.264 states its pictures progressive, as a proxy must keep them.
+    let h264: &[&str] = &[
+        "-c:v",
+        "h264_videotoolbox",
+        "-allow_sw",
+        "1",
+        "-b:v",
+        "8M",
+        "-g",
+        "6",
+        "-bf",
+        "0",
+    ];
+    let base = dir.0.join("zero.mp4");
+    steps_clip(&base, h264, &[]);
+    retime_track(
+        &base,
+        &dir.0.join("empty-edit.mp4"),
+        &[(-1, 400, 1), (0, 800, 1)],
+        0,
+    );
+    retime_track(&base, &dir.0.join("straddle.mp4"), &[(1280, 700, 1)], 0);
+    retime_track(
+        &base,
+        &dir.0.join("empty-then-straddle.mp4"),
+        &[(-1, 400, 1), (1280, 700, 1)],
+        0,
+    );
+    let codecs = ffmpeg().parent().unwrap().to_path_buf();
+    let store = pm_proxy::ProxyStore::open(dir.0.join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let quota = |_: &std::path::Path| -> pm_proxy::Result<(u64, u64)> { Ok((40 << 30, 100 << 30)) };
+    let mut preview = Renderer::headless().unwrap();
+    let mut admitted = vec![];
+    for name in [
+        "zero.mp4",
+        "empty-edit.mp4",
+        "straddle.mp4",
+        "empty-then-straddle.mp4",
+    ] {
+        let original = dir.0.join(name);
+        let hash = blake3::hash(&std::fs::read(&original).unwrap())
+            .to_hex()
+            .to_string();
+        let generated = pm_proxy::generate_with_disk_probe(
+            pm_proxy::GenerationRequest {
+                source: &original,
+                source_hash: &hash,
+                format: ProxyFormat::ProResProxy,
+                size: ProxySize::Full,
+                ffmpeg: &codecs.join("ffmpeg"),
+                ffprobe: &codecs.join("ffprobe"),
+                store: &store,
+                control: pm_proxy::GenerationControl {
+                    cancel: &cancel,
+                    pause: &|| false,
+                    on_pause: &|_| {},
+                    on_progress: &|_| {},
+                },
+            },
+            &quota,
+        );
+        let proxy = match generated {
+            Ok(g) => g.stored.path,
+            Err(e) => {
+                eprintln!("{name}: proxy refused ({e})");
+                continue;
+            }
+        };
+        admitted.push(name);
+        for timing in [None, VERSIONED] {
+            for trim in [0.0, 0.02] {
+                let doc = load(&document(trim, 1.0, timing));
+                assert_eq!(
+                    shown(&mut preview, &doc, OutputKind::Preview, &proxy),
+                    shown(&mut preview, &doc, OutputKind::Preview, &original),
+                    "{name}: proxy against original, timing {timing:?}, trim {trim}"
+                );
+            }
+        }
+    }
+    assert!(
+        admitted.contains(&"zero.mp4") && admitted.contains(&"empty-edit.mp4"),
+        "{admitted:?}"
+    );
+    eprintln!("proxies admitted: {admitted:?}");
+}
