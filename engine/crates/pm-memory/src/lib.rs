@@ -130,6 +130,22 @@ pub fn other(value: u64) -> LeaseCategories {
         ..Default::default()
     }
 }
+/// Each client's weight, current grant and reported total (diagnostics).
+pub fn clients() -> Vec<(u64, u64, u64)> {
+    global()
+        .lock()
+        .unwrap()
+        .clients
+        .values()
+        .map(|c| {
+            (
+                c.weight,
+                c.grant.load(Ordering::Acquire),
+                c.usage.total().map_or(u64::MAX, |b| b.get()),
+            )
+        })
+        .collect()
+}
 pub fn budget() -> u64 {
     global().lock().unwrap().budget
 }

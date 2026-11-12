@@ -287,6 +287,7 @@ impl ViewerDecode {
                 return None;
             }
             self.stats.lock().unwrap().cached += 1;
+            super::diag::bump(&super::diag::FETCH_CACHED, 1);
             st.moved_to(n);
             // A drag that moves through cached frames keeps the look-ahead
             // ahead of it.
@@ -319,6 +320,7 @@ impl ViewerDecode {
             shared.wake.notify_one();
             if let Some((shown, frame)) = shared.nearest(n, &st) {
                 self.stats.lock().unwrap().stand_ins += 1;
+                    super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
                 return Some(Ok(Fetched {
                     frame,
                     shown,
@@ -328,6 +330,8 @@ impl ViewerDecode {
             // Nothing decoded yet to stand in: wait for the exact frame.
         }
         self.stats.lock().unwrap().waits += 1;
+        super::diag::bump(&super::diag::FETCH_WAITS, 1);
+        let waited = Instant::now();
         st.exact.push_back(n);
         *st.waiting.entry(n).or_default() += 1;
         st.ahead_from = None;
@@ -338,6 +342,7 @@ impl ViewerDecode {
         };
         loop {
             if let Some(frame) = st.delivered.get(&n).cloned() {
+                super::diag::bump(&super::diag::FETCH_WAIT_US, waited.elapsed().as_micros() as u64);
                 let left = st.waiting.get_mut(&n).map(|w| {
                     *w -= 1;
                     *w
@@ -380,6 +385,7 @@ impl ViewerDecode {
                     // exact frames would only ever fall further behind.
                     st.leave(n);
                     self.stats.lock().unwrap().stand_ins += 1;
+                    super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
                     return Some(Ok(Fetched {
                         frame,
                         shown,
@@ -576,6 +582,14 @@ impl Shared {
                         Job::Ahead(_) => stats.ahead += 1,
                         _ => stats.decoded += 1,
                     }
+                    super::diag::bump(
+                        if matches!(job, Job::Ahead(_)) {
+                            &super::diag::WORKER_AHEAD
+                        } else {
+                            &super::diag::WORKER_DECODED
+                        },
+                        1,
+                    );
                     drop(stats);
                     if !matches!(job, Job::Ahead(_)) {
                         st.ahead_from = Some(n);
@@ -583,6 +597,7 @@ impl Shared {
                 }
                 Ok(None) => {
                     self.stats.lock().unwrap().stopped += 1;
+                    super::diag::bump(&super::diag::WORKER_STOPPED, 1);
                     if matches!(job, Job::Ahead(_)) {
                         st.ahead_from = None;
                     }
