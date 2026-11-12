@@ -268,6 +268,10 @@ fn main() {
                 .set_font_cache_seeds(serde_json::from_value(seeds.clone()).unwrap());
         }
         let mut renderer = Renderer::headless().expect("Metal device");
+        // The exact rasterizer is what this gate holds to its reference.
+        renderer
+            .text()
+            .set_weight(pm_render::text::TextWeight::Exact);
         support::text::configure_coverage(&mut renderer);
         renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
             measure, None,

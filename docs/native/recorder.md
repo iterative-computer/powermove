@@ -78,6 +78,13 @@ existing engine workspace.
   missing records use deterministic synthesis. `FontContext` supplies element
   and root sizes and inherited weight for relative sizes and bolder/lighter;
   invalid font assignments retain the previous font.
+- `fillText` draws with today's Canvas2D weight (TEXT-SMOOTH-1,
+  `pm_text::render::smoothing`, as the engine's text does): glyphs dilated
+  and lifted at their device size, axis-aligned glyphs on Skia's subpixel
+  grid, coverage through the paint's curve. Measurement and `strokeText` are
+  unchanged. `Canvas::set_text_smoothing(Smoothing::Exact)` keeps plain
+  coverage (the Chromium raster oracle and anchoring specs); `text_weight`
+  holds the default to today's measured stems.
 - Normalized drawImage source/destination rectangles support all 3/5/9-argument
   binding forms. Negative extents do not flip pixels; out-of-source clipping
   adjusts destination coverage. Nearest or bilinear reconstruction uses

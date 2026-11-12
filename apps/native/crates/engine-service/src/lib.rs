@@ -9,6 +9,7 @@ mod frame_inputs;
 pub mod jobs;
 pub mod layers;
 pub mod media;
+pub mod memory;
 pub mod policy;
 mod present;
 pub mod qos;
@@ -130,6 +131,9 @@ pub struct MediaCatalog {
     /// in Automatic in place of their originals (Final Cut's optimized
     /// media). Exports never read them.
     pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// High-resolution originals whose preview should use a ready HD proxy.
+    /// Runtime-only policy; never serialized into the project.
+    pub automatic_proxies: std::collections::BTreeSet<String>,
     /// Always Play Original: these assets never play a proxy or optimized
     /// media, in any mode.
     pub play_original: std::collections::BTreeSet<String>,
@@ -141,7 +145,7 @@ pub struct MediaCatalog {
 /// originals whatever this says; only an explicit draft export uses proxies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MediaMode {
-    /// Originals, and a proxy for a clip whose original is missing.
+    /// HD proxies for large sources, otherwise originals/optimized media.
     #[default]
     Automatic,
     /// Originals only: a clip whose original is missing is offline.
@@ -175,6 +179,13 @@ impl MediaCatalog {
         let mut paths = BTreeMap::new();
         for map in order {
             paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if mode == MediaMode::Automatic {
+            for id in &self.automatic_proxies {
+                if let Some(proxy) = self.proxies.get(id) {
+                    paths.insert(id.clone(), proxy.clone());
+                }
+            }
         }
         for id in &self.play_original {
             match self.originals.get(id) {
@@ -337,6 +348,9 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    /// When the oldest pending command was sent (host s), for the
+    /// diagnostic trace's command-to-frame latency.
+    commands_sent: Option<f64>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -384,6 +398,7 @@ impl View {
             _ => {}
         }
         self.commands.push_back(cmd);
+        self.commands_sent.get_or_insert_with(trace::now);
         self.stamp.sequence += 1;
         self.dirty = true;
         Ok(())
@@ -392,6 +407,7 @@ impl View {
 #[derive(Default)]
 struct State {
     views: BTreeMap<u64, View>,
+    retired_documents: BTreeSet<u64>,
     next: u64,
     content: u64,
     stop: bool,
@@ -405,6 +421,7 @@ type ScopeTap = (
 );
 struct Shared {
     state: Mutex<State>,
+    memory: Mutex<memory::CacheUsage>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
@@ -414,6 +431,9 @@ struct Shared {
     disk: render_cache::DiskFrames,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test record: each drawn frame's stamp, time and scale, in order.
+    #[cfg(test)]
+    drawn: Mutex<Vec<(Stamp, Ticks, f64)>>,
     #[cfg(test)]
     lose_device: std::sync::atomic::AtomicBool,
     /// Test hook: the worker panics once, as a bug in a frame would.
@@ -822,8 +842,18 @@ impl Viewer {
     }
     pub fn retire(&self) {
         let mut state = self.shared.state.lock().unwrap();
-        state.views.remove(&self.id);
+        if let Some(view) = state.views.remove(&self.id) {
+            let doc = view.stamp.doc_id;
+            if !state.views.values().any(|v| v.stamp.doc_id == doc) {
+                state.retired_documents.insert(doc);
+            }
+        }
         state.notify();
+        drop(state);
+        let mut scopes = self.shared.scopes.lock().unwrap();
+        if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *scopes = None;
+        }
         self.shared.wake.try_send(()).ok();
     }
 }
@@ -848,11 +878,7 @@ impl EngineService {
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
-        let layer_rasters = compat::LayerRasters::start(
-            gpu.device.clone(),
-            gpu.queue.clone(),
-            Some(fonts.clone()),
-        )?;
+        let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
         // Built-in definitions load first thing on the service thread
         // (`run`): the app's window doesn't wait for a cold shader cache.
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
@@ -874,10 +900,15 @@ impl EngineService {
     pub fn forget_compat(&self, doc_id: u64) {
         self.compat.forget(doc_id);
     }
+    /// The renderer's latest cache counters (not OS or allocator footprint).
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.shared.memory.lock().unwrap().clone()
+    }
     fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
+            memory: Mutex::default(),
             wake,
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
@@ -885,6 +916,8 @@ impl EngineService {
             disk: render_cache::DiskFrames::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            drawn: Mutex::new(Vec::new()),
             #[cfg(test)]
             lose_device: Default::default(),
             #[cfg(test)]
@@ -1007,6 +1040,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                commands_sent: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1075,6 +1109,21 @@ struct Runtime {
     /// A dragged frame was drawn below full resolution: draw it exact once
     /// the playhead has stayed put until then (host s).
     refine_at: Option<f64>,
+    /// A paused picture drawn at the drawable's size that still owes its
+    /// composition-size refinement ([`FrameSpec::paused_full_scale`]).
+    full_owed: Option<Stamp>,
+    /// The fast picture was submitted: its refinement is drawn next, unless
+    /// something newer is asked for first.
+    full_due: bool,
+    /// The picture the refinement is drawn for; any newer one (a seek, an
+    /// edit, play) is drawn fast again.
+    full_for: Option<Stamp>,
+    /// What the last paused picture at the drawable's size took, worker to
+    /// GPU completion (µs): a refinement costing about this × the scale
+    /// squared within one band's budget draws whole.
+    paused_us: Option<f64>,
+    /// What refinement bands cost, for the document state they measured.
+    refine_costs: Option<((u64, u64, u64), crate::jobs::Costs)>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1384,6 +1433,29 @@ fn resume(v: &mut View, now: f64) {
     }
 }
 
+/// An autorelease pool for one pass of a long-lived thread's loop, popped when
+/// the pass ends however it ends (`continue`, `break`).
+struct LoopPool(*mut std::ffi::c_void);
+impl LoopPool {
+    fn push() -> Self {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+        }
+        // SAFETY: paired with the pop in Drop, on this thread, in LIFO order
+        // (pools pushed during the pass are popped within it).
+        Self(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for LoopPool {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+        }
+        // SAFETY: the token from `push` on this thread.
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -1418,8 +1490,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let mut played_since_idle = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
+        // Objects Metal and Core Animation autorelease on this thread outside
+        // a frame's own pool (a finished flight returning its drawable to the
+        // layer, device lookups after a rebuild) are drained every pass. This
+        // thread's implicit pool is never drained: it kept every closed
+        // project's viewer layer, and with it the layer's drawable pool.
+        let _pool = LoopPool::push();
         #[cfg(test)]
         if shared
             .lose_device
@@ -1442,7 +1521,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
+        engine.govern_memory();
         engine.poll();
+        *shared.memory.lock().unwrap() = engine.memory_usage();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
             // and draw every viewer again on the new device. A device lost
@@ -1577,6 +1658,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         cost
                     };
                     r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                    if f.spec.moment == Moment::Paused && f.spec.scale == 1. {
+                        r.paused_us = Some((t.completed - t.worker_start) * 1e6);
+                    }
                 }
                 // Frames skipped between two played ones at normal speed
                 // didn't play in real time: background rendering renders
@@ -1674,10 +1758,48 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             .filter(|id| !state.views.contains_key(id))
             .copied()
             .collect();
-        if !retired.is_empty() {
+        let closed: Vec<_> = std::mem::take(&mut state.retired_documents)
+            .into_iter()
+            .filter(|doc| !state.views.values().any(|v| v.stamp.doc_id == *doc))
+            .collect();
+        if !retired.is_empty() || !closed.is_empty() {
+            let last_view_closed = state.views.is_empty();
+            if !closed.is_empty() {
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+            }
             drop(state);
             for id in retired {
                 runtime.remove(&id);
+            }
+            if !closed.is_empty() {
+                for doc in closed {
+                    if let Some(compat) = &engine.compat {
+                        compat.forget(doc);
+                    }
+                    shared.disk.forget_document(doc);
+                }
+                engine.release_project_memory();
+                if last_view_closed {
+                    played_since_idle = false;
+                    // Metal command queues and wgpu encoder pools retain
+                    // their playback high-water storage after caches empty.
+                    // No viewer uses this device now; retire those owners as
+                    // well. The ordinary rebuild path preserves fonts/cache
+                    // configuration and recreates programs on next use.
+                    match engine.rebuild() {
+                        Ok(next) => {
+                            engine = next;
+                            *shared.device.lock().unwrap() = engine.metal().to_owned();
+                        }
+                        Err(error) => {
+                            eprintln!("Viewer cleanup could not renew the idle device: {error:#}")
+                        }
+                    }
+                    crate::memory::pressure_relief();
+                }
+                *shared.memory.lock().unwrap() = engine.memory_usage();
             }
             continue;
         }
@@ -1770,6 +1892,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     scrub: false,
                     stand_in: None,
                     refine_at: None,
+                    full_owed: None,
+                    full_due: false,
+                    full_for: None,
+                    paused_us: None,
+                    refine_costs: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -1798,7 +1925,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             // Audio starts are placed on this viewer's last known vsync line.
             r.transport.grid = r.grid.filter(|_| !legacy);
+            if let Some(sent) = v.commands_sent.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "commands": v.commands.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
+                    "sent": sent, "drained": now, "viewer_id": id,
+                }));
+            }
             while let Some(cmd) = v.commands.pop_front() {
+                // Any command (a seek, play) drops a pending refinement.
+                (r.full_owed, r.full_due, r.full_for) = (None, false, None);
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
                     r.refine_at = None;
@@ -1812,6 +1949,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A skim draws on the drag path; leaving returns exact.
                 r.scrub = v.skim.is_some();
                 r.refine_at = None;
+                (r.full_owed, r.full_due, r.full_for) = (None, false, None);
                 let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
                     (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
                 });
@@ -1893,6 +2031,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.stamp.sequence += 1;
                 v.dirty = true;
             }
+            // The paused picture landed at the drawable's size: draw it again
+            // at the composition's size, a new picture of the same time.
+            if !r.transport.running() && std::mem::take(&mut r.full_due) {
+                v.stamp.sequence += 1;
+                v.dirty = true;
+                r.full_for = Some(v.stamp);
+            }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
             }
@@ -1949,7 +2094,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
                 comp: v.config.composition.clone(),
-                media: v.paths.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else {
+                    v.paths.clone()
+                },
                 content: v.content,
             };
             cursor = id;
@@ -1961,6 +2110,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Moment::Paused
             };
             let budget = frame.max(interval);
+            let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
+            let refining = r.full_for == Some(v.stamp);
             work = Some(Work {
                 id,
                 stamp: v.stamp,
@@ -1973,17 +2124,36 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     // from exact answers (no stand-in, cache or disk frame of
                     // another moment).
                     moment: if capture { Moment::Paused } else { moment },
-                    scale: if capture {
-                        1.
-                    } else {
-                        v.quality.scale(
-                            &r.auto,
-                            if moment == Moment::Scrub && !v.adapt_drags {
-                                Moment::Paused
+                    scale: {
+                        let scale = if capture {
+                            1.
+                        } else {
+                            v.quality.scale(
+                                &r.auto,
+                                if moment == Moment::Scrub && !v.adapt_drags {
+                                    Moment::Paused
+                                } else {
+                                    moment
+                                },
+                            )
+                        };
+                        // A paused frame at Full is drawn at the drawable's size
+                        // at once, then refined at the composition's size (a
+                        // capture reads the refined picture directly); playing
+                        // and dragged frames keep their policy.
+                        // (A play waiting for its audio start draws as it is.)
+                        if scale == 1.
+                            && (capture || (moment == Moment::Paused && !r.transport.running()))
+                        {
+                            if capture || refining || full <= 1. {
+                                full
                             } else {
-                                moment
-                            },
-                        )
+                                r.full_owed = Some(v.stamp);
+                                1.
+                            }
+                        } else {
+                            scale
+                        }
                     },
                     decode_deadline: (playing && !capture).then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
@@ -2104,11 +2274,61 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
-            let result = provider
-                .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
-                .and_then(|overlays| {
-                    engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
-                });
+            // A refinement draws in bands into the frame cache first, giving
+            // way to anything newer between bands; the frame then shows it.
+            let refined = match runtime.get(&id) {
+                Some(r) if !capture && spec.scale > 1. && r.full_for == Some(stamp) => {
+                    // What bands cost is learned per document state, as a
+                    // fill learns it per job: once bands cost a whole frame,
+                    // later refinements draw whole without probing.
+                    let state = (stamp.doc_id, stamp.revision, scene.content);
+                    let mut costs = match r.refine_costs {
+                        Some((at, costs)) if at == state => costs,
+                        _ => crate::jobs::Costs::default(),
+                    };
+                    let cheap = r.paused_us.is_some_and(|us| {
+                        us * spec.scale * spec.scale <= crate::jobs::BAND_BUDGET_US
+                    });
+                    let stop = || {
+                        shared
+                            .state
+                            .lock()
+                            .unwrap()
+                            .views
+                            .get(&id)
+                            .is_none_or(|v| v.stamp != stamp)
+                    };
+                    let started = trace::now();
+                    let refined = if cheap {
+                        engine.refine_bands = 0;
+                        Ok(true)
+                    } else {
+                        engine.refine(&scene, spec, &mut costs, &stop)
+                    };
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.refine_costs = Some((state, costs));
+                    }
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "refine_bands": engine.refine_bands,
+                            "given_way": matches!(refined, Ok(false)),
+                            "started": started, "ended": trace::now(), "viewer_id": id,
+                        }));
+                    }
+                    refined
+                }
+                _ => Ok(true),
+            };
+            let result = match refined {
+                Ok(true) => provider
+                    .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
+                    .and_then(|overlays| {
+                        engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
+                    }),
+                // Given way: the newer picture is drawn next.
+                Ok(false) => Ok(None),
+                Err(e) => Err(e),
+            };
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;
@@ -2116,6 +2336,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
             {
+                played_since_idle = true;
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
                     r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
@@ -2151,6 +2372,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 match result {
                     Ok(Some(mut s)) => {
+                        #[cfg(test)]
+                        shared
+                            .drawn
+                            .lock()
+                            .unwrap()
+                            .push((stamp, spec.time, spec.scale));
                         v.status.error = None;
                         let late_layers = s.compat_late.len();
                         // A scrubbed frame's late override layers are asked
@@ -2172,12 +2399,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         }
                         v.status.stand_in_frames +=
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
-                        v.status.effective_quality = spec.scale;
+                        // A share of Full: a paused frame rendered above the
+                        // drawable is Full.
+                        v.status.effective_quality = spec.scale.min(1.);
                         if let Some(r) = runtime.get_mut(&id) {
                             // Every dragged frame settles: once the playhead
                             // rests, the same time is drawn again exact.
                             if spec.moment == Moment::Scrub {
                                 r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
+                            if r.full_owed == Some(stamp) {
+                                r.full_owed = None;
+                                r.full_due = true;
                             }
                             if capture {
                                 r.capture_waiting = None;
@@ -2248,8 +2481,28 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             }
                             _ => None,
                         };
+                        // A picture that owes its refinement asks for the
+                        // refinement's answers (at the composition's scale)
+                        // right behind its own: the realm draws them while this
+                        // picture finishes, instead of after it lands.
+                        let ahead = (pending.is_some()
+                            && runtime.get(&id).is_some_and(|r| r.full_owed == Some(stamp)))
+                        .then(|| {
+                            let full = FrameSpec::paused_full_scale(&scene, &spec.output);
+                            engine.compat_needs(
+                                &scene,
+                                spec.time,
+                                FrameSpec {
+                                    scale: full,
+                                    ..spec
+                                },
+                            )
+                        });
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
                             store.request(needs);
+                            if let Some(ahead) = ahead {
+                                store.request_behind(ahead);
+                            }
                         }
                         if let Some(recorder) = &recorder {
                             recorder.record(serde_json::json!({
@@ -2378,7 +2631,32 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
-            let _ = wakes.recv_timeout(timeout);
+            if engine.maintain_memory() {
+                shared.disk.release_idle_reads();
+                for r in runtime.values() {
+                    if let Some(audio) = &r.transport.audio {
+                        audio.send(audio::AudioCtl::MemoryPressure);
+                    }
+                }
+            }
+            if played_since_idle
+                && engine.idle_memory_released()
+                && flights.is_empty()
+                && runtime.values().all(|r| !r.transport.running())
+            {
+                match engine.renew_idle() {
+                    Ok(next) => {
+                        engine = next;
+                        *shared.device.lock().unwrap() = engine.metal().to_owned();
+                    }
+                    Err(error) => eprintln!(
+                        "Viewer cleanup could not renew stopped recording pools: {error:#}"
+                    ),
+                }
+                played_since_idle = false;
+                crate::memory::pressure_relief();
+            }
+            let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }
     drop(flights); // Command completion handlers hold their source leases.
@@ -2390,9 +2668,99 @@ pub struct Headless {
     engine: render::Engine,
 }
 impl Headless {
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.engine.memory_usage()
+    }
+
+    /// Submit a preview frame without allocating a CPU pixel readback.
+    pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        self.preview_inner(scene, spec)
+    }
+
+    /// Pump the main-thread font broker while the render thread waits for
+    /// replies, including during a frame's first text layout.
+    pub fn preview_with_pump(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        pump: impl FnMut(),
+    ) -> Result<()> {
+        with_pump(|| self.preview_inner(scene, spec), pump)
+    }
+
+    /// Keep one render thread for a sequence while the caller pumps its
+    /// main-thread services. Recreating it per frame changes allocator
+    /// ownership and does not model the app's persistent render worker.
+    pub fn run_with_pump<T: Send>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> T + Send,
+        pump: impl FnMut(),
+    ) -> T {
+        with_pump(|| run(self), pump)
+    }
+
+    fn preview_inner(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let rendered = objc2::rc::autoreleasepool(|_| -> Result<()> {
+                let Some(s) = self.engine.frame(
+                    scene,
+                    spec,
+                    None,
+                    &OverlayGeometry::default(),
+                    false,
+                    Arc::default(),
+                )?
+                else {
+                    anyhow::bail!("no headless surface");
+                };
+                s.commit();
+                s.complete()?;
+                anyhow::ensure!(
+                    s.failures.is_empty(),
+                    "memory benchmark frame omitted {} layers: {}",
+                    s.failures.len(),
+                    s.failures
+                        .iter()
+                        .map(|f| f.message.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                Ok(())
+            });
+            match rendered {
+                Ok(_) => {
+                    self.engine.poll();
+                    return Ok(());
+                }
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.engine.release_idle_memory();
+    }
+    /// Releases every cache owned by the previous project. The renderer and
+    /// device stay available for the next project in the same window.
+    pub fn release_project_memory(&mut self) {
+        self.engine.release_project_memory();
+    }
+    pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
+        memory::simulate_pressure(pressure);
+        self.engine.govern_memory();
+        self.engine.poll();
+    }
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+        objc2::rc::autoreleasepool(|_| {
+            Ok(Self {
+                engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+            })
         })
     }
     pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {
@@ -2467,10 +2835,42 @@ impl Headless {
     }
 }
 
+/// Font registries belong to the main thread; a render can synchronously
+/// request more fonts at any point. Pumping only between renders deadlocks.
+fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -> T {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| objc2::rc::autoreleasepool(|_| work()));
+        while !worker.is_finished() {
+            pump();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 #[cfg(test)]
 mod worker_tests {
     use super::*;
     use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn headless_pump_answers_fonts_during_a_blocking_render() {
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_wake(Arc::new(|| {}));
+        let worker = broker.clone();
+        with_pump(
+            move || worker.ask(Vec::new(), Vec::new(), Duration::from_millis(500)),
+            || {
+                for ask in broker.take_asks() {
+                    ask.answer(Ok(pm_text::host::FontReply::default()));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(broker.counts(), (1, 1, 0));
+    }
     #[test]
     fn revision_and_output_change_while_encoding_reject_the_submission() {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
@@ -2619,6 +3019,50 @@ mod worker_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(completed(), settled, "a paused viewer stays idle");
         assert_eq!(v.status().no_drawable, 0);
+    }
+
+    /// A closed project's viewer layer is freed with its drawables: nothing
+    /// the engine thread autoreleased while returning drawables keeps it.
+    #[test]
+    fn a_retired_viewers_layer_is_released() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-release-test").unwrap()).unwrap();
+        let weak = objc2::rc::autoreleasepool(|_| {
+            let layer = metal::MetalLayer::new();
+            layer.set_device(&service.metal_device());
+            layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            layer.set_framebuffer_only(false);
+            layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+            // This thread has no run loop to commit the implicit transaction
+            // those property changes opened (it retains the layer).
+            // SAFETY: a class method with no arguments.
+            unsafe {
+                let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+            }
+            // SAFETY: a live CAMetalLayer; the Retained takes its own reference.
+            let object = unsafe {
+                objc2::rc::Retained::retain(
+                    foreign_types::ForeignType::as_ptr(&layer).cast::<objc2::runtime::AnyObject>(),
+                )
+            }
+            .unwrap();
+            let weak = objc2::rc::Weak::from_retained(&object);
+            let v = shapes_viewer(&service, Some(layer));
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.retire();
+            weak
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while objc2::rc::autoreleasepool(|_| weak.load().is_some()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retired viewer's layer is still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -3011,8 +3455,201 @@ mod worker_tests {
         assert_eq!(skim_rate(-0.4, 0.1).num, -2);
     }
 
+    /// The fixture is 640 × 360 in a 160 × 90 drawable (Fit at a quarter):
+    /// a paused frame renders the composition at its own size, as an export
+    /// does, so pixel-sized effects look as delivered, and the final pass
+    /// shows it at the drawable's.
+    #[test]
+    fn a_paused_full_frame_renders_at_the_composition_size_and_shows_at_the_drawable() {
+        let service = EngineService::start(pm_gpu::Gpu::new("paused-full-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        let frame = status.frame.as_ref().unwrap();
+        assert_eq!(frame.pixels.as_ref().unwrap().len(), 160 * 90);
+        assert_eq!((frame.moment, frame.scale), (Moment::Paused, 4.));
+        assert_eq!(status.effective_quality, 1., "Full");
+    }
+
+    /// A paused frame shows at once at the drawable's size, then a refined
+    /// picture of the same time at the composition's; a seek starts over,
+    /// and playback never waits for (or draws) a refinement.
+    #[test]
+    fn a_paused_frame_is_shown_at_once_then_refined_and_play_skips_the_refinement() {
+        use pm_protocol::clock::SeekMode;
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("paused-refine-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let drawn = || service.shared.drawn.lock().unwrap().clone();
+        // The frames drawn of `time` from `from` on: their scales in order.
+        let scales = |from: usize, time: Ticks| -> Vec<f64> {
+            drawn()[from..]
+                .iter()
+                .filter(|(_, t, _)| *t == time)
+                .map(|(_, _, scale)| *scale)
+                .collect()
+        };
+        let refined = |from: usize, time: Ticks| {
+            wait_for(&v, "the refinement", |_| scales(from, time).contains(&4.));
+            scales(from, time)
+        };
+        let first = wait_for(&v, "a first frame", |s| s.frame.is_some())
+            .frame
+            .unwrap()
+            .time;
+        assert_eq!(refined(0, first)[..2], [1., 4.], "at once, then refined");
+        let (fast, fine) = {
+            let d = drawn();
+            let fast = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 1.)
+                .unwrap()
+                .0;
+            let fine = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 4.)
+                .unwrap()
+                .0;
+            (fast, fine)
+        };
+        assert!(
+            fine.sequence > fast.sequence,
+            "a new picture of the same time"
+        );
+        // A seek: the fast picture of the new time, then its refinement.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        assert_eq!(refined(from, seconds(1.))[..2], [1., 4.]);
+        // Play right after a pause's fast picture: nothing more is drawn at
+        // the composition's size while the transport runs.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(0.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            drawn()[from..].iter().all(|(_, _, scale)| *scale <= 1.),
+            "{:?}",
+            &drawn()[from..]
+        );
+    }
+
+    /// A crop that is the whole canvas (Fit, whose window the shell can round
+    /// a pixel narrower than its canvas) renders at the composition's size
+    /// like no crop; a zoomed-in window keeps its scale.
+    #[test]
+    fn a_whole_canvas_crop_is_fit_and_a_zoomed_one_keeps_its_scale() {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let scene = Scene {
+            doc: snapshot.document.clone(),
+            comp: snapshot.open_comp().unwrap(),
+            media: Default::default(),
+            content: 0,
+        };
+        let output = |crop| Output {
+            width: 160,
+            height: 90,
+            display: 1,
+            headroom: 1.,
+            crop,
+        };
+        let whole = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 160,
+            canvas_height: 90,
+        });
+        let zoomed = Some(crate::policy::Crop {
+            x: 40,
+            y: 20,
+            canvas_width: 640,
+            canvas_height: 360,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(None)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(whole)), 4.);
+        // Fit rounded a pixel narrow (the shell's 1265 on 1266).
+        let narrow = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 161,
+            canvas_height: 90,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(narrow)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(zoomed)), 1.);
+    }
+
+    /// The composition-size surface is admitted whole within a byte budget,
+    /// or not at all: an 8K composition in a 4K or 1440p drawable draws at
+    /// the drawable's size, a UHD one in a 1080p drawable at its own.
+    #[test]
+    fn paused_supersampling_fits_a_byte_budget() {
+        let scene = |w: u32, h: u32| {
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            (project["w"], project["h"]) = (w.into(), h.into());
+            let doc = pm_model::json::parse(&project.to_string()).unwrap();
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(doc)),
+                    1,
+                )),
+                comp: "Pshapes-primitives-root".into(),
+                media: Default::default(),
+                content: 0,
+            }
+        };
+        let output = |width, height| Output {
+            width,
+            height,
+            display: 1,
+            headroom: 1.,
+            crop: None,
+        };
+        let fill =
+            |w: u32, h: u32| FrameSpec::paused_full_scale(&scene(w, h), &output(w / 2, h / 2));
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(3840, 2160)),
+            1.
+        );
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(2560, 1440)),
+            1.
+        );
+        assert_eq!(fill(3840, 2160), 2.);
+        let bytes = 3841. * 2161. * 8.;
+        assert!(bytes <= render::PAUSED_FULL_BYTES as f64);
+    }
+
     /// A capture taken during a reduced drag (explicit Half quality, a
-    /// scrub) reads an exact frame: paused, full resolution, final resampler.
+    /// scrub) reads an exact frame: paused, at least full resolution (the
+    /// composition's size, as an export), final resampler. (Other tests'
+    /// captures share the record.)
     #[test]
     fn a_capture_during_a_reduced_drag_reads_the_exact_frame() {
         use pm_render::sampling::Sampling;
@@ -3046,7 +3683,9 @@ mod worker_tests {
         assert!(
             captured()
                 .iter()
-                .all(|c| *c == (Moment::Paused, 1., Sampling::Final)),
+                .all(|&(moment, scale, sampling)| moment == Moment::Paused
+                    && scale >= 1.
+                    && sampling == Sampling::Final),
             "{:?}",
             captured()
         );
@@ -3091,9 +3730,10 @@ mod worker_tests {
             s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
         });
         let f = s.frame.unwrap();
+        // Exact is Full: the composition's size (640 × 360 in 160 × 90).
         assert_eq!(
             (f.scale, f.moment, f.stand_ins),
-            (1., Moment::Paused, false)
+            (4., Moment::Paused, false)
         );
         v.retire();
     }
@@ -3130,6 +3770,58 @@ mod worker_tests {
         assert!(
             !asked.lock().unwrap().is_empty(),
             "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A paused picture waiting for its override answers asks for its
+    /// refinement's (at the composition's scale, 4× here) right behind its
+    /// own, so they are drawn while it finishes: the moment its batch is
+    /// answered, the refinement's goes, before the refinement is tried.
+    #[test]
+    fn a_paused_picture_asks_for_its_refinements_answers_behind_its_own() {
+        let service = EngineService::start(pm_gpu::Gpu::new("prefetch-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.command(TransportCommand::Seek {
+            time: seconds(2.),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let first: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        let scale = first[0].scale;
+        assert!(
+            first
+                .iter()
+                .all(|n| n.time == seconds(2.) && n.scale == scale)
+        );
+        // Answering the picture's batch sends the queued refinement batch.
+        store.answer_all(
+            1,
+            1,
+            first
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        let ahead = asked.lock().unwrap().clone();
+        assert!(
+            !ahead.is_empty(),
+            "the refinement's answers were not asked ahead"
+        );
+        assert!(
+            ahead
+                .iter()
+                .all(|n| n.time == seconds(2.) && (n.scale - 4. * scale).abs() < 1e-9),
+            "{ahead:?}"
         );
         v.retire();
     }
@@ -3287,7 +3979,8 @@ mod worker_tests {
         // new stamp: the window tells extensions `frame:rendered` again).
         let exact = loop {
             let status = v.status();
-            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale == 1.) {
+            // Exact: Full, the composition's size (scale 4 here).
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale >= 1.) {
                 break f;
             }
             assert!(std::time::Instant::now() < deadline, "never drawn exact");

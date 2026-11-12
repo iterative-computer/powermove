@@ -25,6 +25,7 @@ pub mod plan;
 pub(crate) mod prewarm;
 pub mod program;
 pub mod resources;
+pub(crate) mod retry;
 pub mod versions;
 pub mod watchdog;
 
@@ -68,6 +69,9 @@ struct Entry {
     prepared: Option<Arc<Prepared>>,
     /// Built on first use (the Metal compiler runs there).
     program: Option<GpuProgram>,
+    /// The last build failed because of the compiler: built again after
+    /// its backoff.
+    retry: Option<retry::Retry>,
 }
 
 /// The renderer's definitions and their programs.
@@ -111,6 +115,11 @@ pub struct Effects {
     /// Time frames spent building programs or waiting for builds in
     /// flight (µs; renderer telemetry).
     pub(crate) frame_build_us: u64,
+    /// Tests: every program build fails with this, and builds are counted.
+    #[cfg(test)]
+    fail_builds: Option<Failure>,
+    #[cfg(test)]
+    builds: u32,
 }
 
 /// Per-pixel passes around legacy programs.
@@ -275,6 +284,10 @@ impl Effects {
             simple: Default::default(),
             prewarm: Default::default(),
             frame_build_us: 0,
+            #[cfg(test)]
+            fail_builds: None,
+            #[cfg(test)]
+            builds: 0,
         }
     }
 
@@ -391,6 +404,8 @@ impl Effects {
         self.missing_ids.clear();
         self.entries.clear();
         self.watchdog.reset();
+        self.prewarm = Default::default();
+        self.uniforms = Default::default();
     }
 
     /// The definition set an export job or Collect Project embeds.
@@ -442,6 +457,7 @@ impl Effects {
                 status,
                 prepared,
                 program: None,
+                retry: None,
             },
         );
         error
@@ -628,7 +644,10 @@ impl Effects {
             }
             match b.result {
                 Ok(program) => entry.program = Some(program),
-                Err(f) => entry.status = Status::NeedsFallback(f),
+                Err(f) if remembered(&f) => entry.status = Status::NeedsFallback(f),
+                // Built again by the first frame that draws it after the
+                // backoff.
+                Err(f) => entry.retry = Some(retry::Retry::after(entry.retry.as_ref(), f)),
             }
         }
     }
@@ -755,16 +774,38 @@ impl Effects {
             return Err(f.clone());
         }
         if entry.program.is_none() {
-            let built = entry
-                .prepared
-                .as_ref()
-                .ok_or_else(|| Failure::new(pm_glsl::FailureStage::Rewrite, "no prepared program"))?
-                .finish()
-                .and_then(|p| GpuProgram::new(device, p, id));
+            if let Some(f) = entry.retry.as_ref().and_then(retry::Retry::waiting) {
+                return Err(f.clone());
+            }
+            #[cfg(test)]
+            let forced = {
+                self.builds += 1;
+                self.fail_builds.clone()
+            };
+            #[cfg(not(test))]
+            let forced: Option<Failure> = None;
+            let built = match forced {
+                Some(f) => Err(f),
+                None => entry
+                    .prepared
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Failure::new(pm_glsl::FailureStage::Rewrite, "no prepared program")
+                    })?
+                    .finish()
+                    .and_then(|p| GpuProgram::new(device, p, id)),
+            };
             match built {
-                Ok(p) => entry.program = Some(p),
+                Ok(p) => {
+                    entry.program = Some(p);
+                    entry.retry = None;
+                }
                 Err(f) => {
-                    entry.status = Status::NeedsFallback(f.clone());
+                    if remembered(&f) {
+                        entry.status = Status::NeedsFallback(f.clone());
+                    } else {
+                        entry.retry = Some(retry::Retry::after(entry.retry.as_ref(), f.clone()));
+                    }
                     return Err(f);
                 }
             }
@@ -785,6 +826,14 @@ impl Effects {
         }
         Ok(entry.program.as_mut().expect("still built"))
     }
+}
+
+/// Whether a program build's failure belongs to the definition (remembered
+/// until it changes) or only to this attempt: a busy, crashed or timed-out
+/// compiler says nothing about the source, and remembering it kept a
+/// healthy project "waiting for a shader compiler slot" for good.
+fn remembered(f: &Failure) -> bool {
+    !f.stage.retryable()
 }
 
 impl crate::composite::EffectHost for Effects {
@@ -1100,6 +1149,97 @@ mod tests {
             pm_protocol::validate::Validate::validate(d)
                 .unwrap_or_else(|e| panic!("{}: {e:?}", d.id.as_str()));
         }
+    }
+
+    /// A build refused because every compiler slot was busy (prewarm at
+    /// launch, many extensions) leaves the definition ready, to be built by
+    /// the first frame that draws it; a failure of the source is kept.
+    #[test]
+    fn a_busy_compiler_is_never_remembered_for_a_definition() {
+        let mut effects = Effects::new("test");
+        effects.set_snapshot(&builtin_definitions()).unwrap();
+        let def = builtin_definitions()
+            .definitions
+            .into_iter()
+            .find(|d| d.kind == DefinitionKind::Effect)
+            .unwrap();
+        let key = (def.kind, def.id.clone());
+        let source = effects.entries[&key].key;
+        let built = |result| prewarm::Built {
+            key: key.clone(),
+            source,
+            result,
+            us: 0,
+        };
+        let busy = built(Err(Failure::new(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all GLSL compiler process slots are occupied; retry later",
+        )));
+        effects.absorb(vec![busy]);
+        assert!(matches!(
+            effects.status(def.kind, def.id.as_str()),
+            Some(Status::Ready)
+        ));
+        let broken = built(Err(Failure::new(
+            pm_glsl::FailureStage::NagaValidate,
+            "the source does not validate",
+        )));
+        effects.absorb(vec![broken]);
+        assert!(matches!(
+            effects.status(def.kind, def.id.as_str()),
+            Some(Status::NeedsFallback(_))
+        ));
+    }
+
+    /// Draws during a busy compiler build once per backoff window (100 ms,
+    /// then 200 ms), not once per draw, and a build that works ends it.
+    #[test]
+    fn draws_during_a_busy_compiler_build_once_per_backoff_window() {
+        use std::time::Duration;
+        let gpu = pm_gpu::Gpu::new("build backoff test").unwrap();
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let mut effects = Effects::new("test");
+        effects.set_snapshot(&builtin_definitions()).unwrap();
+        let def = builtin_definitions()
+            .definitions
+            .into_iter()
+            .find(|d| d.kind == DefinitionKind::Effect)
+            .unwrap();
+        effects.fail_builds = Some(Failure::new(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all GLSL compiler process slots are occupied; retry later",
+        ));
+        let draw = |effects: &mut Effects, n: usize| {
+            for _ in 0..n {
+                assert!(
+                    effects
+                        .program(&gpu.device, def.kind, def.id.as_str(), format)
+                        .is_err()
+                );
+            }
+        };
+        draw(&mut effects, 30);
+        assert_eq!(effects.builds, 1, "one build in the first window");
+        std::thread::sleep(Duration::from_millis(120));
+        draw(&mut effects, 30);
+        assert_eq!(effects.builds, 2);
+        std::thread::sleep(Duration::from_millis(120));
+        draw(&mut effects, 30);
+        assert_eq!(effects.builds, 2, "the second window is 200 ms");
+        std::thread::sleep(Duration::from_millis(100));
+        draw(&mut effects, 30);
+        assert_eq!(effects.builds, 3);
+        assert!(matches!(
+            effects.status(def.kind, def.id.as_str()),
+            Some(Status::Ready)
+        ));
+        // The compiler is back: the next build after the window works.
+        effects.fail_builds = None;
+        std::thread::sleep(Duration::from_millis(420));
+        effects
+            .program(&gpu.device, def.kind, def.id.as_str(), format)
+            .unwrap();
+        assert_eq!(effects.builds, 4);
     }
 
     #[test]

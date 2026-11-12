@@ -228,6 +228,26 @@ fn adversarial_compilation_is_killable_and_next_request_recovers() {
     }
     assert!(pool.run(request(SRC), Duration::from_secs(20)).is_ok());
 }
+/// A helper killed by a signal mid-request frees its slot: the next
+/// request is admitted (it fails by name again), never refused as busy.
+#[test]
+fn a_crashed_helper_frees_its_slot() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = std::env::temp_dir().join(format!("pm-glsl-crash-{}", std::process::id()));
+    std::fs::write(&file, "#!/bin/sh\nkill -SEGV $$\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let pool = Pool::new(file.clone(), 1);
+    for _ in 0..3 {
+        let failure = pool
+            .run(request(SRC), Duration::from_secs(5))
+            .err()
+            .unwrap();
+        assert_ne!(failure.stage, FailureStage::CompilerBusy, "{failure:?}");
+        assert!(failure.stage.retryable(), "{failure:?}");
+        assert_eq!(pool.active(), 0);
+    }
+    std::fs::remove_file(file).unwrap();
+}
 #[test]
 fn missing_and_crashing_helpers_fail_by_name() {
     let missing = Pool::new(PathBuf::from("/nonexistent/pm-glsl-compiler"), 1);

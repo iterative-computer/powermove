@@ -64,31 +64,67 @@ pub struct BaseRaster {
 
 type Job = (BaseRequest, Sender<Result<Option<BaseRaster>, String>>);
 
-/// The base raster worker: a second renderer on the app's GPU, with the
-/// app's fonts, owned by one thread.
+/// The base raster worker: a second renderer with the app's fonts, owned by
+/// one thread. Its device is its own (rasters return as CPU pixels), made on
+/// the first request and released after [`RASTER_IDLE`] without one: most
+/// projects never ask, and a clone of the viewer's first wgpu device kept
+/// that device, its queue and programs alive through every renewal.
 pub struct LayerRasters {
     jobs: Mutex<Sender<Job>>,
 }
 
+/// How long the base raster renderer outlives its last request.
+const RASTER_IDLE: Duration = Duration::from_secs(30);
+
 impl LayerRasters {
-    pub fn start(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        fonts: Option<pm_render::text::host::RenderFonts>,
-    ) -> anyhow::Result<Arc<Self>> {
+    pub fn start(fonts: Option<pm_render::text::host::RenderFonts>) -> anyhow::Result<Arc<Self>> {
         let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()
             .name("pm-layer-rasters".into())
             .spawn(move || {
-                let mut renderer = Renderer::new(device, queue);
-                let _ = renderer.set_definitions(&pm_render::all_builtin_definitions());
-                renderer.set_captions_hidden(false);
-                let mut generation = None;
-                for (request, reply) in rx {
-                    if let Some(fonts) = &fonts {
-                        fonts.sync(&mut renderer, &mut generation);
-                    }
-                    let _ = reply.send(paint(&mut renderer, request));
+                let mut worker: Option<(Renderer, Option<u64>)> = None;
+                loop {
+                    let job = if worker.is_some() {
+                        match rx.recv_timeout(RASTER_IDLE) {
+                            Ok(job) => job,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                objc2::rc::autoreleasepool(|_| worker = None);
+                                pm_memory::pressure_relief();
+                                continue;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match rx.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        }
+                    };
+                    let (request, reply) = job;
+                    // This thread's implicit pool is never drained.
+                    objc2::rc::autoreleasepool(|_| {
+                        if worker.is_none() {
+                            match pm_gpu::Gpu::new("pm-layer-rasters") {
+                                Ok(gpu) => {
+                                    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+                                    let _ = renderer
+                                        .set_definitions(&pm_render::all_builtin_definitions());
+                                    renderer.set_captions_hidden(false);
+                                    worker = Some((renderer, None));
+                                }
+                                Err(error) => {
+                                    let _ = reply
+                                        .send(Err(format!("No GPU for layer rasters: {error}")));
+                                    return;
+                                }
+                            }
+                        }
+                        let (renderer, generation) = worker.as_mut().expect("raster renderer");
+                        if let Some(fonts) = &fonts {
+                            fonts.sync(renderer, generation);
+                        }
+                        let _ = reply.send(paint(renderer, request));
+                    });
                 }
             })?;
         Ok(Arc::new(Self {
@@ -560,6 +596,28 @@ impl CompatStore {
         }
         self.dispatch(answers, fresh);
     }
+    /// Needs asked ahead of the picture that will want them (a paused
+    /// picture's refinement): sent as [`CompatStore::request`] sends them
+    /// when no batch is in flight, else queued behind the needs already
+    /// waiting, never in their place, so the picture on screen is answered
+    /// first.
+    pub(crate) fn request_behind(&self, needs: Vec<CompatNeed>) {
+        let mut answers = self.answers.lock().unwrap();
+        let fresh = answers.fresh(needs);
+        if fresh.is_empty() {
+            return;
+        }
+        if !answers.free() {
+            let waiting: HashSet<_> = answers.queued.iter().map(need_key).collect();
+            answers.queued.extend(
+                fresh
+                    .into_iter()
+                    .filter(|n| !waiting.contains(&need_key(n))),
+            );
+            return;
+        }
+        self.dispatch(answers, fresh);
+    }
     /// Playback's look-ahead at the playhead `now` (ticks, playing at
     /// `speed`): whether to ask now, how far ahead the answers will land (the
     /// realm's measured time for a batch) and how many frames the batch
@@ -888,8 +946,8 @@ mod tests {
             Some(pm_model::canonical::canonical_project(project)),
             1,
         ));
-        let gpu = pm_gpu::Gpu::new("base window test").unwrap();
-        let rasters = LayerRasters::start(gpu.device.clone(), gpu.queue.clone(), None).unwrap();
+        // The raster worker makes its own device on the first request.
+        let rasters = LayerRasters::start(None).unwrap();
         let ask = |window: Option<PixelRect>| {
             rasters
                 .raster(BaseRequest {
@@ -1018,6 +1076,36 @@ mod tests {
         assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
         store.request(vec![need("x")]);
         assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
+    }
+    /// Needs asked ahead (a refinement's) wait behind the visible picture's
+    /// while a batch runs: the next batch sends the visible ones first.
+    #[test]
+    fn needs_asked_ahead_never_displace_the_visible_pictures() {
+        let store = CompatStore::default();
+        let batches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let log = batches.clone();
+        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
+            log.lock()
+                .unwrap()
+                .push(needs.iter().map(|n| n.layer.as_str().to_owned()).collect())
+        })));
+        store.set_state(true, 7, 1);
+        store.request(vec![need("running")]);
+        // While that batch runs: the visible picture's need, then a
+        // refinement's asked ahead.
+        store.request(vec![need("visible")]);
+        store.request_behind(vec![need("ahead")]);
+        store.answer_all(7, 1, vec![(need("running"), draw(255))]);
+        assert_eq!(
+            batches.lock().unwrap().last().unwrap(),
+            &vec!["visible".to_owned(), "ahead".to_owned()]
+        );
+        // With nothing in flight, asked ahead goes at once.
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        store.set_state(true, 7, 1);
+        store.request_behind(vec![need("ahead")]);
+        assert_eq!(*asked.lock().unwrap(), vec![(1, 1)]);
     }
     #[test]
     fn a_failed_override_fails_its_layer_without_asking_again() {

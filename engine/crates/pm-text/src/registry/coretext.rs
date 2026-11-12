@@ -818,12 +818,14 @@ impl CoreTextRegistry {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let key = source_key(&path.to_string_lossy(), meta.len(), modified);
-        // System fonts live on the sealed system volume and are mapped;
-        // other files are read, so a font replaced on disk cannot fault a
-        // mapping under the registry.
-        let data = if path.starts_with("/System/") {
+        // System fonts and root-owned fonts only an administrator can write
+        // (`/Library/Fonts`: SF Pro alone is 26 MB) are mapped, clean pages
+        // macOS can drop; other files are read, so a font the user's own
+        // tools rewrite in place cannot fault a mapping under the registry.
+        let data = if mappable_font_file(path, &meta) {
             let file = std::fs::File::open(path).ok()?;
-            // SAFETY: the sealed system volume is read-only.
+            // SAFETY: the sealed system volume is read-only, and the other
+            // mapped files can only be changed by root (see above).
             let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
             FontBytes::from_shared(Arc::new(MappedFont(map)))
         } else {
@@ -1398,7 +1400,15 @@ fn font_file_snapshot(path: &std::path::Path, meta: &std::fs::Metadata) -> Optio
     Some(data)
 }
 
-/// A read-only mapping of a system font file.
+/// Whether a font file is mapped rather than read: on the sealed system
+/// volume, or owned by root with no group or other write permission. Such a
+/// file changes only through an administrator's install, which replaces it.
+fn mappable_font_file(path: &std::path::Path, meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.starts_with("/System/") || (meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0)
+}
+
+/// A read-only mapping of a system or root-owned font file.
 struct MappedFont(memmap2::Mmap);
 
 impl AsRef<[u8]> for MappedFont {
@@ -1771,6 +1781,27 @@ mod memory_usage_tests {
 
 #[cfg(test)]
 mod snapshot_tests {
+    #[test]
+    fn only_files_no_user_can_rewrite_are_mapped() {
+        let system = std::path::Path::new("/System/Library/Fonts/Helvetica.ttc");
+        if let Ok(meta) = system.metadata() {
+            assert!(super::mappable_font_file(system, &meta));
+        }
+        // A root-owned file nobody else may write.
+        let root = std::path::Path::new("/etc/hosts");
+        let meta = root.metadata().unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            super::mappable_font_file(root, &meta),
+            meta.uid() == 0 && meta.mode() & 0o022 == 0
+        );
+        // The user's own files are read into memory.
+        let path = std::env::temp_dir().join(format!("pm-font-mappable-{}", std::process::id()));
+        std::fs::write(&path, b"user font").unwrap();
+        assert!(!super::mappable_font_file(&path, &path.metadata().unwrap()));
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn registries_share_copies_but_file_replacement_keeps_old_bytes_immutable() {
         let path = std::env::temp_dir().join(format!("pm-font-snapshot-{}", std::process::id()));

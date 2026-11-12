@@ -141,6 +141,7 @@ fn snapshot_keeps_unknown_key_fields() {
             .unwrap()
             .2
             .stored
+            .to_value()
             .get("custom")
             .unwrap()
             .get("keep"),
@@ -794,6 +795,7 @@ fn ease_shortcuts_use_kernel_interpolation_and_undo() {
             .unwrap()
             .2
             .stored
+            .to_value()
             .get("outEase")
             .is_none()
     );
@@ -829,7 +831,14 @@ fn handle_drag_is_undoable_and_option_splits_continuity() {
     .unwrap();
     block_on(c.finish_drag(true)).unwrap();
     assert_eq!(
-        c.model.index.key("a0").unwrap().2.stored.get("continuous"),
+        c.model
+            .index
+            .key("a0")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("continuous"),
         Some(&Value::Bool(false))
     );
 }
@@ -865,6 +874,7 @@ fn hold_context_toggle_applies_to_whole_selected_scope() {
                 .unwrap()
                 .2
                 .stored
+                .to_value()
                 .get("outInterp")
                 .and_then(Value::as_str),
             Some("hold")

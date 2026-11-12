@@ -894,6 +894,11 @@ impl TextGpu {
     /// pool releases accounting without explicitly destroying textures that
     /// might still be referenced by recorded commands.
     pub fn clear(&mut self) {
+        self.area_slots.clear();
+        self.area_cursor = 0;
+        self.batch = coverage::Batch::default();
+        self.direct_scratch = Vec::new();
+        self.belt = Default::default();
         for (_, c) in self.cache.drain() {
             self.raster_pool.release(c.target);
         }
@@ -911,7 +916,21 @@ impl TextGpu {
     }
 
     pub fn cached_bytes(&self) -> u64 {
-        self.raster_pool.bytes()
+        self.area_slots.iter().map(AreaSlot::bytes).sum::<u64>()
+            + self.batch.capacity_bytes()
+            + self.raster_pool.bytes()
+            + self.image_bytes
+            + self.direct.bytes
+            + self
+                .chunks_retired
+                .iter()
+                .chain(&self.chunks_free)
+                .map(|t| {
+                    u64::from(t.width())
+                        * u64::from(t.height())
+                        * u64::from(t.format().block_copy_size(None).unwrap_or(16))
+                })
+                .sum::<u64>()
     }
 
     fn image(
@@ -1466,6 +1485,20 @@ impl TextGpu {
     /// Evicts least recently used rasters until the cache holds at most
     /// `bytes` (lease pressure). Discarded handles are never reused.
     pub fn trim(&mut self, bytes: u64) {
+        if bytes == 0 {
+            self.area_slots.clear();
+            self.area_cursor = 0;
+            self.batch = coverage::Batch::default();
+            self.direct_scratch = Vec::new();
+            self.belt = Default::default();
+        }
+        if self.image_bytes + self.direct.bytes > bytes {
+            self.images.clear();
+            self.image_bytes = 0;
+            self.direct.clear();
+            self.chunks_retired.clear();
+            self.chunks_free.clear();
+        }
         self.evict(bytes, false);
         for target in self.retired.drain(..) {
             self.raster_pool.release(target);
@@ -1551,6 +1584,8 @@ impl TextGpu {
             match &item.content {
                 ItemContent::Coverage { .. } => {
                     let a = item.color[3] * item.opacity;
+                    // The smoothing's coverage curve (`params.y`, `inv1.zw`).
+                    let [weight, light, dark] = item.curve;
                     let rgb = pm_color::linear::color_to_working(
                         [item.color[0], item.color[1], item.color[2]],
                         working,
@@ -1580,14 +1615,19 @@ impl TextGpu {
                                     (px - whole[0]) as f32,
                                     (py - whole[1]) as f32,
                                 ],
-                                [3.0, 0.0, tw, th],
+                                [3.0, weight, tw, th],
                                 [
                                     (source.meta.base + source.meta.table) as f32,
                                     (source.meta.base + source.meta.list) as f32,
                                     source.meta.row_start as f32,
                                     source.meta.width as f32,
                                 ],
-                                [source.meta.rows as f32, source.meta.base as f32, 0.0, 0.0],
+                                [
+                                    source.meta.rows as f32,
+                                    source.meta.base as f32,
+                                    light,
+                                    dark,
+                                ],
                             )
                         } else {
                             (
@@ -1599,9 +1639,9 @@ impl TextGpu {
                                     0.0,
                                     0.0,
                                 ],
-                                [0.0, 0.0, tw, th],
+                                [0.0, weight, tw, th],
                                 [0.0; 4],
-                                [0.0; 4],
+                                [0.0, 0.0, light, dark],
                             )
                         };
                         out.push(Draw {

@@ -516,6 +516,34 @@ fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
     ));
     assert_eq!(off.state, JobState::Done, "{off:?}");
 }
+/// An agent's still is a look at the project, as the viewer shows it: an
+/// extension layer whose extension isn't installed draws today's
+/// missing-definition checkerboard, not a refusal of the whole frame. A
+/// delivery still refuses it by name.
+#[test]
+fn a_preview_still_shows_a_layer_without_a_definition_and_an_export_refuses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let layers = project["layers"].as_array_mut().unwrap();
+    let mut field = layers[0].clone();
+    field["id"] = "field".into();
+    field["type"] = "extension".into();
+    field["d"] = serde_json::json!({"definition":"acme.field.layer","version":1,
+        "w":{"v":640,"kf":[],"expr":null},"h":{"v":360,"kf":[],"expr":null},"data":{},"params":{}});
+    field["fx"] = serde_json::json!([]);
+    layers.insert(0, field);
+    let doc = project.to_string();
+    let mut still = request_for(&doc, dir.path().join("still"), 1);
+    still.preview = true;
+    still.bypass_missing_effects = true;
+    let drawn = finish(still);
+    assert_eq!(drawn.state, JobState::Done, "{drawn:?}");
+    let refused = finish(request_for(&doc, dir.path().join("delivery"), 1));
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains("acme.field.layer"), "{message}");
+}
 #[test]
 fn a_preview_still_draws_offline_media_and_an_export_refuses_it() {
     let dir = tempfile::tempdir().unwrap();

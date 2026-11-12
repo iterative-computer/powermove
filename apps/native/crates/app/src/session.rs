@@ -1250,9 +1250,11 @@ impl Controller {
                     reply, &name, false, saved,
                 )
                 .map(|mut r| {
-                    let asks = r.alert.buttons.iter().any(|b| {
-                        b.action == crate::surfaces::recovery::Action::Recover
-                    });
+                    let asks = r
+                        .alert
+                        .buttons
+                        .iter()
+                        .any(|b| b.action == crate::surfaces::recovery::Action::Recover);
                     if after_stop && asks {
                         r.alert = crate::surfaces::recovery::after_stop(r.alert, &name);
                     }
@@ -1267,7 +1269,9 @@ impl Controller {
                                 ..
                             }
                         ) {
-                            v.errors.borrow_mut().push("Project", &recovery.alert.message);
+                            v.errors
+                                .borrow_mut()
+                                .push("Project", &recovery.alert.message);
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));
@@ -1283,15 +1287,14 @@ impl Controller {
                     }
                 }
             }
-            let mut previous_save_failed = false;
-            if matches!(&result, Some(Ok(ShellReply::Opened { .. })))
-                && let Some(old) = old
+            let previous_save_failed = if let Some(Ok(ShellReply::Opened { session, .. })) = &result
             {
-                previous_save_failed = !matches!(
-                    kernel.shell(ShellCall::Close(old)).await,
-                    Some(Ok(ShellReply::Closed { .. }))
-                );
-            }
+                crate::lifecycle::close_replaced(&kernel, old, session)
+                    .await
+                    .is_err()
+            } else {
+                false
+            };
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
@@ -1322,9 +1325,8 @@ impl Controller {
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
                         if previous_save_failed {
-                            v.message.push_str(
-                                " · Previous project could not be saved; its recovery journal is retained",
-                            );
+                            v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
+                            v.errors.borrow_mut().push("Project", &v.message);
                         }
                         v.load_recent(cx);
                     }
@@ -1502,6 +1504,8 @@ impl Controller {
         }
         self.host.borrow_mut().close_flowchart();
         self.composition_views.clear();
+        self.rows.clear();
+        self.keyframes = 0;
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
@@ -1609,21 +1613,27 @@ impl Controller {
             return;
         }
         let old = self.session.clone();
-        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
-        if let Some(old) = old.filter(|old| self.mcp.session_of(&old.project).is_none()) {
-            let closing = self.kernel.shell(ShellCall::Close(old));
-            cx.spawn(async move |this, cx| {
-                if !matches!(closing.await, Some(Ok(ShellReply::Closed { .. }))) {
-                    let _ = this.update(cx, |v, cx| {
-                        v.message =
-                            "The previous project couldn’t be saved; its recovery journal is kept."
-                                .into();
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
+        self.adopt(
+            session.clone(),
+            pm_kernel::locks::OpenDecision::Writable,
+            false,
+            cx,
+        );
+        let old = old.filter(|old| self.mcp.session_of(&old.project).is_none());
+        let kernel = self.kernel.clone();
+        cx.spawn(async move |this, cx| {
+            if crate::lifecycle::close_replaced(&kernel, old, &session)
+                .await
+                .is_err()
+            {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
+                    v.errors.borrow_mut().push("Project", &v.message);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {

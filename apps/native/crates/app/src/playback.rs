@@ -159,28 +159,27 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let placed = current.clone();
     let main_output = entity.read(cx).main_output.clone();
     let crop = host.borrow().viewer_crop.clone();
-    let binding = pm_engine_service::layers::OutputBinding::new(
-        &host.borrow().window,
-        host.borrow().viewer_layer(),
-        Rc::new(move |output| {
-            // Zoomed past its pane, the drawable is a window onto the canvas.
-            let output = pm_engine_service::Output {
-                crop: crop.get().map(|[x, y, canvas_width, canvas_height]| {
-                    pm_engine_service::Crop {
-                        x,
-                        y,
-                        canvas_width,
-                        canvas_height,
-                    }
-                }),
-                ..output
-            };
-            main_output.set(Some(output));
-            if let Some(v) = &*placed.borrow() {
-                let _ = v.configure(output);
-            }
-        }),
-    );
+    let publish_output: Rc<dyn Fn(pm_engine_service::Output)> = Rc::new(move |output| {
+        // Zoomed past its pane, the drawable is a window onto the canvas.
+        let output = pm_engine_service::Output {
+            crop: crop.get().map(
+                |[x, y, canvas_width, canvas_height]| pm_engine_service::Crop {
+                    x,
+                    y,
+                    canvas_width,
+                    canvas_height,
+                },
+            ),
+            ..output
+        };
+        main_output.set(Some(output));
+        if let Some(v) = &*placed.borrow() {
+            let _ = v.configure(output);
+        }
+    });
+    // A project owns this binding and its layer. Home must not keep the
+    // old layer's drawable pool alive through the window-lifetime feed.
+    let mut binding = None::<pm_engine_service::layers::OutputBinding>;
     let weak = entity.downgrade();
     // The viewer's last status line shown (an error, or what a frame leaves
     // out): set when it changes, cleared only while no other message
@@ -192,14 +191,20 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
             if rx.recv().await.is_err() { break; }
             if weak.update(cx, |v,cx| {
                 let Some(viewer)=&v.viewer else{
-                    link.set_paused(true); *current.borrow_mut()=None;
+                    link.set_paused(true); *current.borrow_mut()=None; binding=None;
                     // A closed project (Home stays in the window) leaves no playhead.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];}
                     return
                 };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
                 if new_viewer {
-                    *current.borrow_mut() = Some(viewer.clone()); binding.sync();
+                    *current.borrow_mut() = Some(viewer.clone());
+                    binding = Some(pm_engine_service::layers::OutputBinding::new(
+                        &host.borrow().window,
+                        host.borrow().viewer_layer(),
+                        publish_output.clone(),
+                    ));
+                    binding.as_ref().unwrap().sync();
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,

@@ -245,12 +245,12 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
         };
         for record in steps {
             let ops = if undo {
-                &record.inverse
+                &record.inverse.to_vec()
             } else {
-                &record.forward
+                &record.forward.to_vec()
             };
             let mut replay = pm_model::Document::from_root(Some(state), root.rev());
-            if replay.apply_ops_at(ops, root.rev() + 1).is_err() {
+            if replay.apply_ops_at(&ops, root.rev() + 1).is_err() {
                 return true;
             }
             state = replay.root().expect("replayed project").clone();

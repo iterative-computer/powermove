@@ -160,6 +160,7 @@ pub struct Realm {
     inner: Arc<Inner>,
 }
 enum Command {
+    MemoryPressure,
     Measure {
         reply: SharedCompletion<Vec<GenerationMemory>>,
     },
@@ -187,6 +188,10 @@ enum Command {
     },
 }
 impl Realm {
+    /// Nonblocking; GC and V8 API access stay on the isolate owner.
+    pub fn memory_pressure(&self) -> Result<()> {
+        self.send(Command::MemoryPressure)
+    }
     fn send(&self, command: Command) -> Result<()> {
         if self.inner.control.closing.load(Ordering::Acquire) {
             return Err(Error::Closed);
@@ -975,6 +980,14 @@ fn worker(
     notifier: Weak<SyncSender<Command>>,
 ) {
     let _watchdog = WatchdogThread::new(&control, &config);
+    let pressure_sender = notifier.clone();
+    let memory = pm_memory::Registration::new(1, move |_, level| {
+        if level != pm_memory::Pressure::Normal
+            && let Some(tx) = pressure_sender.upgrade()
+        {
+            let _ = tx.try_send(Command::MemoryPressure);
+        }
+    });
     let generation = Generation {
         realm: name.clone(),
         number: next_generation(),
@@ -987,16 +1000,18 @@ fn worker(
     let mut retained: HashMap<u64, Live> = HashMap::new();
     // Set after work that grew a heap: an isolate idle this long gives back
     // what it grew past its live size.
-    let mut trim_at: Option<Instant> = None;
+    let mut trim_at = Some(Instant::now() + IDLE_TRIM);
     while !control.closing.load(Ordering::Acquire) {
         retained.retain(|_, live| Arc::strong_count(&live.pins) > 1);
-        let grown = current.as_ref().is_ok_and(|live| live.vm.grown())
-            || retained.values().any(|live| live.vm.grown());
-        if !grown {
-            trim_at = None;
-        } else if trim_at.is_none() {
-            trim_at = Some(Instant::now() + IDLE_TRIM);
-        }
+        let held = current
+            .as_ref()
+            .ok()
+            .map(|live| live.vm.memory())
+            .into_iter()
+            .chain(retained.values().map(|live| live.vm.memory()))
+            .map(|m| m.physical_heap_bytes as u64 + m.external_bytes as u64)
+            .sum();
+        memory.report(pm_memory::other(held));
         let wake = current.as_ref().ok().and_then(|live| live.next_wake);
         let deadline = match (wake, trim_at) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -1006,7 +1021,7 @@ fn worker(
             Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
-        if received.is_ok() && trim_at.is_some() {
+        if received.is_ok() {
             trim_at = Some(Instant::now() + IDLE_TRIM);
         }
         let command = match received {
@@ -1021,6 +1036,9 @@ fn worker(
                     for live in retained.values_mut() {
                         live.vm.trim();
                     }
+                    // Native host replies are allocated on this owner too.
+                    // UI/render collection cannot drain its remote frees.
+                    pm_memory::pressure_relief();
                 }
                 if wake.is_none_or(|wake| wake > Instant::now()) {
                     continue;
@@ -1048,6 +1066,15 @@ fn worker(
             }
         };
         match command {
+            Command::MemoryPressure => {
+                if let Ok(live) = &mut current {
+                    live.vm.trim();
+                }
+                for live in retained.values_mut() {
+                    live.vm.trim();
+                }
+                pm_memory::pressure_relief();
+            }
             Command::Wake => continue,
             Command::Measure { reply } => {
                 let mut measurements = Vec::new();
@@ -1281,6 +1308,7 @@ fn worker(
     control.closing.store(true, Ordering::Release);
     for command in rx.try_iter() {
         match command {
+            Command::MemoryPressure => continue,
             Command::Wake => continue,
             Command::Measure { reply } => complete(reply, Err(Error::Closed)),
             Command::Pin { reply } => complete(reply, Err(Error::Closed)),

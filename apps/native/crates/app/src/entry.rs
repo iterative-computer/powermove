@@ -212,15 +212,6 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
     cx.defer(pm_shell::open_editor);
 }
 
-/// A project opened from Home in a window that shows one: a new window,
-/// joined to that window's tabs (v1 opened it as a tab of the window).
-pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
-    cx.default_global::<Entries>()
-        .next_window
-        .push_back(pending);
-    cx.defer(move |cx| pm_shell::open_editor_tab(cx, leader));
-}
-
 fn drain(cx: &mut App) {
     if !cx.default_global::<Entries>().ready {
         return;

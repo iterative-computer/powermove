@@ -60,6 +60,7 @@ pub struct Session {
     /// Decoded frames by sample.
     window: BTreeMap<usize, DecodedFrame>,
     window_limit: usize,
+    window_bytes: usize,
     color: Option<ColorDescription>,
     /// Classifies unreferenced pictures a seek may leave out.
     skip: Option<Disposable>,
@@ -122,6 +123,7 @@ impl Session {
             drained: false,
             window: BTreeMap::new(),
             window_limit: DEFAULT_WINDOW,
+            window_bytes: 32 << 20,
             color,
             stats: SessionStats::default(),
         }
@@ -129,6 +131,12 @@ impl Session {
 
     pub fn set_window(&mut self, frames: usize) {
         self.window_limit = frames;
+        self.trim(None);
+    }
+
+    /// Keep at least the requested frame, even if that one exceeds the budget.
+    pub fn set_window_bytes(&mut self, bytes: usize) {
+        self.window_bytes = bytes;
         self.trim(None);
     }
 
@@ -349,7 +357,10 @@ impl Session {
     /// Keeps the window within its limit, dropping frames farthest from the
     /// last request.
     fn trim(&mut self, around: Option<usize>) {
-        while self.window.len() > self.window_limit.max(1) {
+        while self.window.len() > 1
+            && (self.window.len() > self.window_limit.max(1)
+                || self.window.values().map(DecodedFrame::bytes).sum::<usize>() > self.window_bytes)
+        {
             let first = *self.window.keys().next().unwrap();
             let last = *self.window.keys().next_back().unwrap();
             let c = around.unwrap_or(last);

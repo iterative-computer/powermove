@@ -26,6 +26,10 @@ static FONTS: OnceLock<RenderFonts> = OnceLock::new();
 /// One query mirror per project: it follows publications incrementally and
 /// keeps the fonts it was given.
 static MIRRORS: Mutex<BTreeMap<String, QueryMirror>> = Mutex::new(BTreeMap::new());
+#[cfg(debug_assertions)]
+pub fn mirror_count() -> Option<usize> {
+    MIRRORS.try_lock().ok().map(|mirrors| mirrors.len())
+}
 /// How long one ask may wait on the registry (it answers from main).
 const ASK: Duration = Duration::from_secs(2);
 
@@ -79,11 +83,14 @@ fn fill(q: &mut QueryContext) -> bool {
     q.add_fonts(&answers, reply.fonts).is_ok()
 }
 
-/// The faces the engine lays out the project's text with, for the compat
-/// page: `(family, weight, italic)` resolved as a text layer resolves it (the
-/// family, else `system-ui`, else the standard font) and served under the
-/// family's own name, so a hidden element an extension measures matches what
-/// the engine draws. Off main only: it waits on the registry.
+/// The faces the engine has for families the compat page's elements ask
+/// for: `(family, weight, italic)` served under the family's own name, so a
+/// hidden element an extension measures uses the face the engine draws that
+/// family with. A family this Mac lacks is not served: the page falls back
+/// to its standard font, as today's DOM did (Chromium's, Times), and an
+/// extension measuring in it measures what it always measured (a
+/// typewriter caret placed from such a measurement lands where it always
+/// landed). Off main only: it waits on the registry.
 pub fn page_faces(wanted: &[(String, u16, bool)]) -> Vec<pm_compat_host::PageFace> {
     use pm_text::font::{FontDesc, FontResolver};
     let Some(fonts) = FONTS.get() else {
@@ -98,10 +105,7 @@ pub fn page_faces(wanted: &[(String, u16, bool)]) -> Vec<pm_compat_host::PageFac
                 italic: *italic,
                 size: 16.,
             };
-            let id = resolver
-                .family(family, &desc)
-                .or_else(|| resolver.family("system-ui", &desc))
-                .or_else(|| resolver.standard(&desc))?;
+            let id = resolver.family(family, &desc)?;
             let face = resolver.face(id);
 
             let bytes = pm_text::subset::whole_face(face.data.as_slice(), face.index).ok()?;

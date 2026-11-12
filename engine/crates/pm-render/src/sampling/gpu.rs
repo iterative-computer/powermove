@@ -131,11 +131,12 @@ pub(crate) struct PyramidCache {
     idle: VecDeque<IdleTail>,
     frame: u64,
     next_revision: u64,
+    budget: u64,
 }
 
 /// Sources whose pyramids are kept.
 const CACHED_PYRAMIDS: usize = 16;
-const CACHED_PYRAMID_BYTES: u64 = 128 * 1024 * 1024;
+const CACHED_PYRAMID_BYTES: u64 = 16 * 1024 * 1024;
 
 impl PyramidCache {
     pub fn new() -> PyramidCache {
@@ -145,6 +146,7 @@ impl PyramidCache {
             idle: VecDeque::new(),
             frame: 0,
             next_revision: 0,
+            budget: CACHED_PYRAMID_BYTES,
         }
     }
 
@@ -263,7 +265,7 @@ impl PyramidCache {
 
     fn enforce_budget(&mut self) {
         while self.entries.len() + self.idle.len() > CACHED_PYRAMIDS
-            || self.retained_bytes() > CACHED_PYRAMID_BYTES
+            || self.retained_bytes() > self.budget
         {
             if self.idle.pop_front().is_some() {
                 continue;
@@ -290,6 +292,15 @@ impl PyramidCache {
         };
         self.own.push_front(pyramid.clone());
         self.own.truncate(CACHED_PYRAMIDS);
+        while self
+            .own
+            .iter()
+            .map(|p| texture_bytes(p.view.texture()))
+            .sum::<u64>()
+            > self.budget
+        {
+            self.own.pop_back();
+        }
         Pyramid {
             levels: levels.min(pyramid.levels),
             ..pyramid
@@ -301,6 +312,20 @@ impl PyramidCache {
         self.entries.clear();
         self.own.clear();
         self.idle.clear();
+    }
+
+    pub fn set_budget(&mut self, bytes: u64) {
+        self.budget = bytes;
+        self.enforce_budget();
+        while self
+            .own
+            .iter()
+            .map(|p| texture_bytes(p.view.texture()))
+            .sum::<u64>()
+            > self.budget
+        {
+            self.own.pop_back();
+        }
     }
 
     /// Retained downsample storage (the source belongs to its content cache).
@@ -340,6 +365,16 @@ impl PyramidCache {
                 })
                 .sum::<u64>()
     }
+}
+
+fn texture_bytes(texture: &wgpu::Texture) -> u64 {
+    (0..texture.mip_level_count())
+        .map(|level| {
+            u64::from((texture.width() >> level).max(1))
+                * u64::from((texture.height() >> level).max(1))
+        })
+        .sum::<u64>()
+        * u64::from(texture.format().block_copy_size(None).unwrap_or(16))
 }
 
 fn tail_bytes(width: u32, height: u32, levels: u32, format: wgpu::TextureFormat) -> u64 {

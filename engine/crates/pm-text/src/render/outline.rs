@@ -51,6 +51,7 @@ struct Key {
     size: u32,
     coords: Vec<(u32, u32)>,
     bold: (u64, u64),
+    smooth: (u64, u64),
     skew: u64,
     expand_tolerance: u64,
 }
@@ -114,6 +115,9 @@ pub struct GlyphStyle {
     /// Fake-bold outset per side in device px, x and y (0: not
     /// synthesized bold).
     pub synthetic_bold: (f64, f64),
+    /// Font-smoothing dilation per side in glyph pixels, x and y, with
+    /// round joins (`smoothing::Smoothing`; 0 for exact coverage).
+    pub smooth: (f64, f64),
     /// Synthesized oblique: `x' = x + skew × y` (y down; 0 for none).
     pub skew: f64,
     /// Kurbo fake-bold expansion tolerance in local pixels, chosen from
@@ -223,6 +227,7 @@ impl Outlines {
                 style.synthetic_bold.0.to_bits(),
                 style.synthetic_bold.1.to_bits(),
             ),
+            smooth: (style.smooth.0.to_bits(), style.smooth.1.to_bits()),
             skew: style.skew.to_bits(),
             expand_tolerance: style.expand_tolerance.to_bits(),
         };
@@ -263,6 +268,16 @@ fn build(
             &path,
             Diagonal2::new(bx, by),
             Join::Miter,
+            EXPAND_MITER_LIMIT,
+            style.expand_tolerance,
+        );
+    }
+    if style.smooth.0 > 0.0 || style.smooth.1 > 0.0 {
+        let (sx, sy) = style.smooth;
+        path = kurbo::expand_path(
+            &path,
+            Diagonal2::new(sx, sy),
+            Join::Round,
             EXPAND_MITER_LIMIT,
             style.expand_tolerance,
         );

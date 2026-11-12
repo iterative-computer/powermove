@@ -16,6 +16,8 @@ use kurbo::{BezPath, ParamCurveNearest, Shape};
 use paint::FrozenPaint;
 pub use paint::{Gradient, GradientKind, Paint, Pattern, Repetition};
 pub use path::Path;
+pub use pm_text::render::smoothing::Smoothing;
+use pm_text::render::smoothing::{self, Weight};
 use pm_vector::render::scene::{CoverageItem, ItemStyle};
 pub use pm_vector::render::{color::CanvasColor as Color, scene::FillRule};
 pub use raster::CpuRasterizer;
@@ -98,6 +100,9 @@ pub struct DrawCommand {
     composite: Composite,
     clips: Arc<Vec<Clip>>,
     clear: bool,
+    /// The coverage curve of today's text weight
+    /// (`pm_text::render::smoothing`), the identity for other draws.
+    curve: [f32; 3],
 }
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -179,6 +184,8 @@ pub struct Canvas {
     surface: CpuRasterizer,
     rendered: usize,
     promoted: Option<SourceKey>,
+    /// How `fillText` weights glyphs: today's Canvas2D by default.
+    text_smoothing: Smoothing,
 }
 impl Canvas {
     pub fn new(id: u64, width: u32, height: u32) -> Result<Self> {
@@ -195,7 +202,13 @@ impl Canvas {
             surface,
             rendered: 0,
             promoted: None,
+            text_smoothing: Smoothing::Canvas2d,
         })
+    }
+    /// Text drawn from now on draws with `smoothing`'s weight
+    /// ([`Smoothing::Exact`]: plain outline coverage, for raster oracles).
+    pub fn set_text_smoothing(&mut self, smoothing: Smoothing) {
+        self.text_smoothing = smoothing;
     }
     pub fn key(&self) -> SourceKey {
         SourceKey {
@@ -521,6 +534,17 @@ impl Canvas {
         paint: Paint,
         clear: bool,
     ) -> Result<()> {
+        self.draw_weighted(path, style, transform, paint, clear, smoothing::IDENTITY)
+    }
+    fn draw_weighted(
+        &mut self,
+        path: BezPath,
+        style: ItemStyle,
+        transform: Affine,
+        paint: Paint,
+        clear: bool,
+        curve: [f32; 3],
+    ) -> Result<()> {
         if path.elements().is_empty() {
             return Ok(());
         }
@@ -538,6 +562,7 @@ impl Canvas {
             composite: self.state.composite,
             clips: self.state.clips.clone(),
             clear,
+            curve,
         })))
     }
     fn record(&mut self, c: Command) -> Result<()> {
@@ -595,6 +620,7 @@ impl Canvas {
             composite: self.state.composite,
             clips: self.state.clips.clone(),
             clear: false,
+            curve: smoothing::IDENTITY,
         };
         self.record(Command::Draw(Box::new(command)))
     }
@@ -642,7 +668,28 @@ impl Canvas {
         if !origin.is_finite() || max_width.is_some_and(|w| !w.is_finite() || w <= 0.) {
             return Ok(());
         }
-        let layout = provider.layout(&self.state.font, text, self.state.direction)?;
+        // Fills draw with today's Canvas2D weight (TEXT-SMOOTH-1): glyphs
+        // dilated and lifted at their device size, placed on Skia's subpixel
+        // grid when axis-aligned, coverage through the paint's curve. Strokes
+        // are plain paths, and measurement is unchanged.
+        let m = self.state.transform;
+        let device = m.determinant().abs().sqrt();
+        let weight = if stroke || !device.is_finite() || device <= 0. {
+            Weight::EXACT
+        } else {
+            self.text_smoothing
+                .at(f64::from(self.state.font.desc.size) * device)
+        };
+        let layout = provider.layout_expanded(
+            &self.state.font,
+            text,
+            self.state.direction,
+            if weight.is_exact() {
+                (0., 0.)
+            } else {
+                (weight.expand_x / device, weight.expand_y / device)
+            },
+        )?;
         let (x, y) = layout.anchor(
             self.state.text_align,
             self.state.text_baseline,
@@ -659,8 +706,33 @@ impl Canvas {
             * Affine::scale_non_uniform(scale, 1.)
             * Affine::translate((-x, y));
         // maxWidth condenses glyphs, not the stroke pen. Stroke after condensation.
-        let path = local * layout.path;
-        self.draw(
+        let lift = if weight.is_exact() {
+            0.
+        } else {
+            weight.dy / device
+        };
+        let full = m * local;
+        let [fa, fb, fc, fd, _, _] = full.as_coeffs();
+        let snap = weight.snap && fb == 0. && fc == 0. && fa > 0. && fd > 0.;
+        let path = local
+            * layout.path(|origin| {
+                let origin = Point::new(origin.x, origin.y + lift);
+                if !snap {
+                    return origin;
+                }
+                let at = full * origin;
+                let (x, y) = weight.place(at.x, at.y);
+                Point::new(origin.x + (x - at.x) / fa, origin.y + (y - at.y) / fd)
+            });
+        let curve = if stroke {
+            smoothing::IDENTITY
+        } else {
+            weight.curve(match &self.state.fill {
+                Paint::Solid(c) => [c.r, c.g, c.b, c.a].map(f64::from),
+                _ => [0., 0., 0., 1.],
+            })
+        };
+        self.draw_weighted(
             path,
             if stroke {
                 ItemStyle::Stroke(self.state.line.clone())
@@ -674,6 +746,7 @@ impl Canvas {
                 self.state.fill.clone()
             },
             false,
+            curve,
         )
     }
     pub fn put_image_data(

@@ -273,7 +273,8 @@ impl FontHealth {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    fn fail(&self, why: String) {
+    /// Records a failure (the first since the last take is kept).
+    pub fn fail(&self, why: String) {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(why);
@@ -435,6 +436,12 @@ impl FontService {
     /// count of project font changes.
     pub fn generation(&self) -> u64 {
         self.layout.resolver().generation()
+    }
+
+    /// Numeric payload accounting; full font files can be memory mapped,
+    /// so these byte lengths are not a resident-memory measurement.
+    pub fn memory_usage(&self) -> crate::registry::FontMemoryUsage {
+        self.layout.resolver().memory_usage()
     }
 }
 

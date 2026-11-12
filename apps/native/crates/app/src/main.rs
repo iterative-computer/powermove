@@ -1,3 +1,12 @@
+// Rust allocations use the system allocator. The bundle launches with
+// `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
+// freed large blocks go back to macOS at once; small blocks return per 16 KiB
+// page (`pm_memory::pressure_relief`). mimalloc kept whole 64 KiB pages of
+// the project load's long-lived nodes, about 140 MB more with Paper open
+// (installed app: idle 563 → 416 MB, stopped 700 → 522 MB). Memory reviews:
+// the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
+// "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
+
 mod after_open;
 mod agent_clients;
 mod alert;
@@ -22,6 +31,8 @@ mod figma_paste;
 mod first_run;
 mod generated_panel;
 mod gizmo;
+#[cfg(all(test, target_os = "macos"))]
+mod gpui_memory_tests;
 mod keyframe_sheets;
 
 mod agent_speech;
@@ -39,6 +50,8 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod media_sequence;
+#[cfg(debug_assertions)]
+mod memory_review;
 mod migration_report;
 mod mixer_panel;
 mod notes_panel;
@@ -234,6 +247,7 @@ fn main() -> Result<()> {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
+            idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
             ..Default::default()
         });
         let mcp_host = mcp::Host::new(actor.handle(), worker_profile.clone());
@@ -343,6 +357,8 @@ fn main() -> Result<()> {
                 })
                 .detach();
                 playback::install(&entity, cx);
+                #[cfg(debug_assertions)]
+                memory_review::install(&entity, service.clone(), cx);
                 let opening = entry::take_for_new_window(cx)
                     .or_else(|| launch.take().map(entry::Pending::File));
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
@@ -405,6 +421,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--dev-agent-home" => Some("PM_DEV_AGENT_HOME"),
         // A stand-in cloud for files on demand (cloud_media::Fixture).
         "--cloud-fixture" => Some("PM_CLOUD_FIXTURE"),
+        // The v1 profile a review migrates from: a clone, never the live one.
+        "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
         _ => None,
     }
 }
@@ -443,6 +461,7 @@ mod review_override_tests {
             "--dev-store-key",
             "--dev-agent-home",
             "--cloud-fixture",
+            "--electron-profile",
         ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());

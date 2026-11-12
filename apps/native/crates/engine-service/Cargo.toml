@@ -11,6 +11,7 @@ studio-oidn = ["pm-studio/oidn"]
 native-cad-tests = ["kernel", "pm-scene3d/native-cad-tests"]
 
 [dependencies]
+pm-memory = { path = "../../../../engine/crates/pm-memory" }
 pm-studio = { path = "../../../../engine/crates/pm-studio" }
 anyhow = "1"
 async-channel = "2"
@@ -44,6 +45,7 @@ serde_json = "1"
 half = "2"
 # Process/thread QoS classes for the viewer audio thread (crate::qos).
 libc = "0.2"
+mimalloc = { version = "0.1", default-features = false }
 # Per-frame work counters in the opt-in viewer trace.
 pm-perf = { path = "../../../../engine/crates/pm-perf" }
 

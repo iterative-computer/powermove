@@ -1124,12 +1124,15 @@ impl Vm {
     /// above what lives (never under the initial slice). V8 keeps any limit
     /// it can't honour, so the account follows V8's own limit, not the ask.
     pub fn trim(&mut self) {
-        if !self.grown() || self.quota.guard.exceeded.load(Ordering::Acquire) {
+        if self.quota.guard.exceeded.load(Ordering::Acquire) {
             return;
         }
         let quota = &*self.quota as *const Quota as *mut c_void;
         let mut isolate = self.isolate.as_ref().unwrap().lock();
         isolate.low_memory_notification();
+        if !self.grown() {
+            return;
+        }
         let before = isolate.get_heap_statistics();
         let used = before.used_heap_size();
         let target = (used + used / 2 + 4 * MIB)

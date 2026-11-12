@@ -44,6 +44,9 @@ pub fn record(name: &str) -> Canvas {
     let mut c = Canvas::new(7, w, h).unwrap();
     match name {
         "text" => {
+            // The oracle is headless Chromium without macOS font smoothing:
+            // plain coverage. Today's weight has its own gate (`text_weight`).
+            c.set_text_smoothing(Smoothing::Exact);
             let mut font = fonts::engine();
             c.set_font("10px 'Recorder Test'").unwrap();
             c.fill_text(

@@ -27,6 +27,11 @@ pub struct Scene {
     pub media: Arc<pm_export::render::MediaPaths>,
     pub content: u64,
 }
+/// The viewer's rendered-frame cache (RGBA16F surfaces).
+const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+/// The most a paused composition-size surface may take: half the frame
+/// cache, so it always holds two.
+pub const PAUSED_FULL_BYTES: u64 = FRAME_CACHE_BYTES / 2;
 /// One viewer frame's request. The renderer's playback path, never an export.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameSpec {
@@ -50,6 +55,46 @@ impl FrameSpec {
             scale: 1.,
             decode_deadline: None,
             exact: true,
+        }
+    }
+    /// A paused frame at Full shows the composition as an export draws it:
+    /// rendered at the composition's size (After Effects' Full) and scaled
+    /// down to the drawable once, by the final pass's area filter, so
+    /// pixel-sized effects (an ASCII grid, grain, dither) and text weight
+    /// look as they do in a delivered file at any zoom. Zoomed-in views (a
+    /// crop) and frames of other moments keep their scale. Bounded at 4×
+    /// the drawable.
+    pub fn paused_full_scale(scene: &Scene, output: &Output) -> f64 {
+        // A crop that is the whole canvas is no crop: at Fit the shell's
+        // window can come out a pixel narrower than its canvas by rounding
+        // (a 1265 × 712 drawable on a 1266 × 712 canvas).
+        let zoomed = output.crop.is_some_and(|c| {
+            c.x != 0
+                || c.y != 0
+                || c.canvas_width.abs_diff(output.width) > 1
+                || c.canvas_height.abs_diff(output.height) > 1
+        });
+        if zoomed || output.width == 0 || output.height == 0 {
+            return 1.;
+        }
+        let Ok(comp) = pm_eval::Comp::resolve(&scene.doc, &scene.comp) else {
+            return 1.;
+        };
+        let side = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0. { v } else { 0. }
+        };
+        let ratio = (side("w") / f64::from(output.width)).max(side("h") / f64::from(output.height));
+        let scale = ratio.clamp(1., 4.);
+        // Admitted whole within [`PAUSED_FULL_BYTES`] (RGBA16F), or not at
+        // all: a share of the way gives neither the delivered pixel grid nor
+        // the drawable's (an 8K composition in a 4K drawable draws at the
+        // drawable's size). A side one pixel longer bounds the rounding.
+        let side = |v: u32| (f64::from(v) * scale).round() + 1.;
+        if side(output.width) * side(output.height) * 8. <= PAUSED_FULL_BYTES as f64 {
+            scale
+        } else {
+            1.
         }
     }
     pub(crate) fn render_size(&self) -> Size {
@@ -160,6 +205,11 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
+    /// A refinement band's target ([`Engine::refine`]).
+    strip: Option<Arc<ExportedSurface>>,
+    /// The last refinement's band count (0: drawn whole by its frame), for
+    /// the diagnostic trace.
+    pub(crate) refine_bands: u32,
     pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
@@ -198,6 +248,11 @@ pub struct Engine {
     scopes: Option<crate::scopes::Tap>,
     /// The disk render cache playback reads (`crate::render_cache`).
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
+    last_frame: Instant,
+    idle_released: bool,
+    memory_client: crate::memory::Registration,
+    memory_request: Arc<std::sync::atomic::AtomicU64>,
+    budgeted_surfaces: u64,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -223,6 +278,145 @@ pub struct Submission {
     pub compat_late: Vec<CompatNeed>,
 }
 impl Engine {
+    pub fn memory_usage(&self) -> crate::memory::CacheUsage {
+        let media = self.renderer.media_usage();
+        crate::memory::CacheUsage {
+            target_pool_bytes: self.renderer.target_pool_bytes(),
+            target_pool_idle: self.renderer.target_pool_idle(),
+            targets_created: self.renderer.target_pool_created(),
+            image_bytes: self.renderer.image_cache_bytes(),
+            converted_frame_bytes: self.renderer.converted_frame_bytes(),
+            decoded_frame_bytes: media.frame_cache as u64,
+            decoder_bytes: media.decoders as u64,
+            decoder_sessions: media.sessions,
+            decoder_pool_free_bytes: media.pool.free_bytes as u64,
+            disk_read_ahead_bytes: self.disk.as_ref().map_or(0, |disk| disk.ready_bytes()),
+            surface_bytes: self
+                .pool
+                .iter()
+                .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
+                .sum(),
+            text_bytes: self.renderer.text_cache_bytes(),
+            vector_bytes: self.renderer.vector_cache_bytes(),
+            pyramid_bytes: self.renderer.pyramid_bytes(),
+            geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
+                + self.renderer.scene3d_resident().map_bytes,
+            binding_bytes: self.renderer.binding_cache_bytes(),
+            gpu_allocated_bytes: self.metal.current_allocated_size() as u64,
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.release_idle_memory_inner());
+        crate::memory::pressure_relief();
+    }
+
+    fn release_idle_memory_inner(&mut self) {
+        self.renderer.clear_draw_reuse();
+        self.renderer.release_idle_targets();
+        self.renderer.release_idle_media();
+        self.renderer.trim(0);
+        self.cache.clear();
+        self.pool.retain(|surface| Arc::strong_count(surface) > 1);
+        self.offscreen = None;
+        self.idle_released = true;
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+    }
+
+    pub fn maintain_memory(&mut self) -> bool {
+        self.govern_memory();
+        if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
+            self.release_idle_memory();
+            return true;
+        }
+        false
+    }
+
+    pub fn idle_memory_released(&self) -> bool {
+        self.idle_released
+    }
+
+    pub fn release_project_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.release_project_memory_inner());
+        crate::memory::pressure_relief();
+    }
+
+    fn release_project_memory_inner(&mut self) {
+        self.release_idle_memory_inner();
+        self.renderer.release_project_memory();
+        self.compat_document = None;
+        self.resources = Arc::default();
+        self.studio_content = None;
+        self.font_generation = None;
+        self.hdr = None;
+        self.missing_effects.clear();
+        self.definition_failure = None;
+        self.scopes = None;
+        self.scope_frames = None;
+        self.memory_request.store(
+            self.memory_client.grant(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.govern_memory();
+        // Process deferred wgpu/Metal destruction after the last cache
+        // handles go, rather than waiting for the next project's submission.
+        self.gpu.queue.submit([]);
+        self.gpu.wait_idle();
+    }
+
+    pub fn govern_memory(&mut self) {
+        objc2::rc::autoreleasepool(|_| self.govern_memory_inner());
+    }
+
+    fn govern_memory_inner(&mut self) {
+        use std::sync::atomic::Ordering;
+        let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
+        let surfaces = self.memory_usage().surface_bytes;
+        let share = self.memory_client.grant();
+        if request != u64::MAX || surfaces != self.budgeted_surfaces {
+            self.budgeted_surfaces = surfaces;
+            // In-flight surfaces are pinned. Divide only the remainder,
+            // so every independently reusable cache shares the same allowance.
+            let cache = share.saturating_sub(surfaces);
+            self.renderer
+                .apply_media_lease(pm_media::decode::service::MediaLease {
+                    frame_cache: (cache * 15 / 100) as usize,
+                    decoders: (cache / 4) as usize,
+                });
+            self.renderer.set_image_cache_budget(cache / 5);
+            self.renderer.set_converted_frame_budget(cache / 10);
+            self.renderer.set_target_pool_budget(cache / 10);
+            self.renderer.set_vector_cache_budget(cache / 20, 512);
+            self.renderer.trim(cache / 20);
+            if request != u64::MAX {
+                self.cache.clear();
+                self.pool.retain(|s| Arc::strong_count(s) > 1);
+            }
+            if crate::memory::pressure() == crate::memory::Pressure::Critical {
+                self.release_idle_memory();
+                self.renderer.trim(0);
+                self.renderer.set_image_cache_budget(share / 5);
+                crate::memory::pressure_relief();
+            }
+        }
+        let u = self.memory_usage();
+        self.memory_client
+            .report(pm_protocol::lease::LeaseCategories {
+                frame_cache: crate::memory::bytes(u.decoded_frame_bytes),
+                render_cache: crate::memory::bytes(
+                    u.pyramid_bytes
+                        + u.target_pool_bytes
+                        + u.image_bytes
+                        + u.converted_frame_bytes
+                        + u.text_bytes
+                        + u.vector_bytes,
+                ),
+                surface_pool: crate::memory::bytes(u.surface_bytes),
+                decoders: crate::memory::bytes(u.decoder_bytes),
+                geometry_3d: crate::memory::bytes(u.geometry_bytes),
+                ..Default::default()
+            });
+    }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {
@@ -239,12 +433,22 @@ impl Engine {
         next.disk = self.disk.clone();
         Ok(next)
     }
+    /// A stopped viewer keeps its already-presented drawable. Retire the
+    /// recording pools without making that still redraw or starting a
+    /// repeated idle-cleanup cycle; the next requested frame warms normally.
+    pub fn renew_idle(&self) -> Result<Self> {
+        let mut next = self.rebuild()?;
+        next.idle_released = true;
+        Ok(next)
+    }
     pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
         *self.waker.lock().unwrap() = wake;
     }
     /// Non-blocking: runs wgpu's completed callbacks, a device loss among them.
     pub fn poll(&self) {
-        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        objc2::rc::autoreleasepool(|_| {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        });
     }
     pub fn lost(&self) -> bool {
         self.lost.load(std::sync::atomic::Ordering::Acquire)
@@ -333,7 +537,16 @@ impl Engine {
         let pipeline = metal
             .new_render_pipeline_state(&desc)
             .map_err(|s| anyhow!(s))?;
+        let memory_request = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let pending = memory_request.clone();
+        let memory_client = crate::memory::Registration::new(12, move |share, _| {
+            pending.store(share, std::sync::atomic::Ordering::Release);
+        });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+        renderer.apply_media_lease(pm_media::decode::service::MediaLease {
+            frame_cache: 24 << 20,
+            decoders: 32 << 20,
+        });
         renderer.set_draw_reuse(true);
         renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
@@ -354,10 +567,12 @@ impl Engine {
             renderer,
             metal,
             pipeline,
-            pool: Vec::with_capacity(11),
-            cache: VecDeque::with_capacity(8),
+            pool: Vec::with_capacity(4),
+            cache: VecDeque::with_capacity(4),
             offscreen: None,
             cache_enabled: true,
+            strip: None,
+            refine_bands: 0,
             studio_content: None,
             lost,
             failed,
@@ -374,6 +589,11 @@ impl Engine {
             scope_frames: None,
             scopes: None,
             disk: None,
+            last_frame: Instant::now(),
+            idle_released: false,
+            memory_client,
+            memory_request,
+            budgeted_surfaces: u64::MAX,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -528,6 +748,9 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.renderer.set_preview_media(false);
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         self.sync_studio(scene)?;
         self.sync_fonts();
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
@@ -568,6 +791,9 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        self.govern_memory();
+        self.last_frame = Instant::now();
+        self.idle_released = false;
         objc2::rc::autoreleasepool(|_| {
             self.encode_inner(scene, spec, layer, overlays, capture, trace)
         })
@@ -600,8 +826,7 @@ impl Engine {
         // by submitted consumers still protect their storage until completion.
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
-        let hit = self
-            .cache_enabled
+        let hit = (self.cache_enabled && !spec.exact)
             .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
         let mut stand_ins = false;
@@ -613,7 +838,7 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && spec.moment != Moment::Paused;
+        let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
         let disk = looked
             .then(|| self.disk.as_ref()?.read(scene, time))
             .flatten()
@@ -632,33 +857,7 @@ impl Engine {
             trace.lock().unwrap().cache_hit = true;
             found
         } else {
-            let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-            let capacity = ((128 * 1024 * 1024 / bytes).clamp(1, 8)) as usize;
-            while self.cache.len() >= capacity {
-                self.cache.pop_front();
-            }
-            self.pool
-                .retain(|s| s.size == size || Arc::strong_count(s) > 1);
-            let free = self
-                .pool
-                .iter()
-                .find(|s| s.size == size && Arc::strong_count(s) == 1)
-                .cloned();
-            let surface = match free {
-                Some(s) => s,
-                None => {
-                    anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
-                    let s = Arc::new(ExportedSurface::create(
-                        &self.gpu.device,
-                        &SurfaceRequest {
-                            size,
-                            format: SurfaceFormat::Rgba16Float,
-                        },
-                    )?);
-                    self.pool.push(s.clone());
-                    s
-                }
-            };
+            let surface = self.cache_surface(size)?;
             if let Some((_, pixels)) = disk {
                 self.gpu.queue.write_texture(
                     surface.texture.as_image_copy(),
@@ -680,10 +879,17 @@ impl Engine {
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
-                // An exact read never takes a stand-in, whatever the moment.
+                // An exact read never takes a stand-in, whatever the moment,
+                // and draws from original media without reused draws.
+                self.renderer.set_preview_media(!spec.exact);
+                self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
-                self.renderer.set_playback(spec.decode_deadline);
+                self.renderer.set_playback(if spec.exact {
+                    None
+                } else {
+                    spec.decode_deadline
+                });
                 self.renderer.set_isolate_layers(true);
                 if let Some(store) = &self.compat_document {
                     store.begin_frame(if spec.exact {
@@ -721,6 +927,7 @@ impl Engine {
                     .map(|store| store.end_frame())
                     .unwrap_or_default();
                 let rendered = rendered?;
+                self.renderer.trim_submitted_frame_caches();
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
@@ -730,7 +937,7 @@ impl Engine {
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
                 // A frame with stand-ins is not the exact picture of its time.
-                if self.cache_enabled && !stand_ins {
+                if self.cache_enabled && !spec.exact && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
                         surface: surface.clone(),
@@ -868,6 +1075,240 @@ impl Engine {
             stand_ins,
             compat_late,
         }))
+    }
+    /// A pooled surface of `size` for a frame the cache will hold, making
+    /// room in the cache first.
+    fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
+        let bytes = u64::from(size.width) * u64::from(size.height) * 8;
+        let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
+        while self.cache.len() >= capacity {
+            self.cache.pop_front();
+        }
+        self.pool
+            .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        let free = self
+            .pool
+            .iter()
+            .find(|s| s.size == size && Arc::strong_count(s) == 1)
+            .cloned();
+        Ok(match free {
+            Some(s) => s,
+            None => {
+                anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                let s = Arc::new(ExportedSurface::create(
+                    &self.gpu.device,
+                    &SurfaceRequest {
+                        size,
+                        format: SurfaceFormat::Rgba16Float,
+                    },
+                )?);
+                self.pool.push(s.clone());
+                s
+            }
+        })
+    }
+    /// Draws a paused picture's refinement (`spec`, at the composition's
+    /// size) into the frame cache in bands, as background fills submit
+    /// them ([`crate::jobs::Costs`]): each band is waited for, then `stop`
+    /// is asked, so a newer interaction waits behind at most one band
+    /// (Metal cannot preempt a submission). Where bands cost about a whole
+    /// frame (each band builds the frame's plan; a precomp renders whole for
+    /// any region), the rest draws whole, and so do later refinements with
+    /// the same `costs`. The
+    /// next [`Engine::frame`] of `spec` presents it from the cache.
+    /// `Ok(false)`: stopped; `Ok(true)`: the frame will find it, or draws
+    /// it itself (a cache that's off, a stand-in that isn't exact).
+    pub fn refine(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        costs: &mut crate::jobs::Costs,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<bool> {
+        use pm_export::render::BAND_ROWS;
+        use pm_protocol::common::PixelRect;
+        self.refine_bands = 0;
+        if !self.cache_enabled {
+            return Ok(true);
+        }
+        self.sync_studio(scene)?;
+        self.sync_fonts();
+        let size = spec.render_size();
+        let key = crate::policy::CacheKey {
+            content: scene.content,
+            revision: scene.doc.revision(),
+            time: spec.time.get(),
+            width: size.width,
+            height: size.height,
+            crop: spec.output.crop,
+            moment: spec.moment,
+        };
+        if self.cache.iter().any(|c| c.key == key) {
+            return Ok(true);
+        }
+        let mut request = spec.request(scene)?;
+        request.output_tone = self.output_tone;
+        let area = request.region.unwrap_or(PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        });
+        let total = area.height.div_ceil(BAND_ROWS).max(1);
+        costs.frame_units = costs.frame_units.max(total);
+        let whole_at_once = costs.indivisible
+            || costs
+                .whole_us
+                .is_some_and(|us| us <= crate::jobs::BAND_BUDGET_US);
+        if whole_at_once {
+            return Ok(true);
+        }
+        let surface = self.cache_surface(size)?;
+        // Drawn as `frame` draws this spec: the cached picture stands for it.
+        self.renderer.set_preview_media(!spec.exact);
+        self.renderer.set_draw_reuse(!spec.exact);
+        self.renderer.set_scrub(false);
+        self.renderer.set_playback(None);
+        self.renderer.set_isolate_layers(true);
+        if let Some(store) = &self.compat_document {
+            store.begin_frame(Moment::Paused);
+        }
+        let drawn = self.refine_bands(
+            scene, spec.time, &request, area, &surface, costs, total, stop,
+        );
+        self.renderer.set_isolate_layers(false);
+        let late = self
+            .compat_document
+            .as_ref()
+            .map(|store| store.end_frame())
+            .unwrap_or_default();
+        let Some(failures) = drawn? else {
+            return Ok(false);
+        };
+        // As for any frame: a render that met a font failure is not kept,
+        // and fonts are installed afresh before the next.
+        if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
+            return Err(FontsPending(error).into());
+        }
+        // A stand-in is not the exact picture: the frame draws it itself.
+        if late.is_empty() {
+            self.cache.push_back(CachedFrame {
+                key,
+                surface,
+                failures: failures.into(),
+            });
+        }
+        Ok(true)
+    }
+    /// A band's own target, kept for the next band of its size.
+    fn band_surface(&mut self, width: u32, height: u32) -> Result<Arc<ExportedSurface>> {
+        let size = Size::new(width, height);
+        if let Some(strip) = self.strip.as_ref().filter(|s| s.size == size) {
+            return Ok(strip.clone());
+        }
+        let strip = Arc::new(ExportedSurface::create(
+            &self.gpu.device,
+            &SurfaceRequest {
+                size,
+                format: SurfaceFormat::Rgba16Float,
+            },
+        )?);
+        self.strip = Some(strip.clone());
+        Ok(strip)
+    }
+    /// [`Engine::refine`]'s bands: `None` when `stop` said so.
+    #[allow(clippy::too_many_arguments)]
+    fn refine_bands(
+        &mut self,
+        scene: &Scene,
+        spec_time: Ticks,
+        request: &pm_render::RenderRequest,
+        area: pm_protocol::common::PixelRect,
+        surface: &ExportedSurface,
+        costs: &mut crate::jobs::Costs,
+        total: u32,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Option<Vec<LayerFailure>>> {
+        use pm_export::render::BAND_ROWS;
+        let mut failures = Vec::new();
+        let mut y = 0;
+        while y < area.height {
+            if y > 0 && stop() {
+                return Ok(None);
+            }
+            let remaining = (area.height - y).div_ceil(BAND_ROWS);
+            let units = costs.bounded(remaining).clamp(1, remaining);
+            let rows = (units * BAND_ROWS).min(area.height - y);
+            let whole = y == 0 && rows == area.height;
+            let mut band = request.clone();
+            band.region = Some(pm_protocol::common::PixelRect {
+                y: area.y + y,
+                height: rows,
+                ..area
+            });
+            let started = std::time::Instant::now();
+            let rendered = if whole {
+                band.region = request.region;
+                self.renderer.render_into(
+                    &scene.doc,
+                    &scene.comp,
+                    spec_time,
+                    &band,
+                    scene.media.as_ref(),
+                    &Target::wrap(surface.texture.clone()),
+                    None,
+                )?
+            } else {
+                let strip = self.band_surface(area.width, rows)?;
+                let rendered = self.renderer.render_into(
+                    &scene.doc,
+                    &scene.comp,
+                    spec_time,
+                    &band,
+                    scene.media.as_ref(),
+                    &Target::wrap(strip.texture.clone()),
+                    None,
+                )?;
+                let mut encoder =
+                    self.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("refine band"),
+                        });
+                encoder.copy_texture_to_texture(
+                    strip.texture.as_image_copy(),
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &surface.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: area.width,
+                        height: rows,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.gpu.queue.submit([encoder.finish()]);
+                rendered
+            };
+            self.renderer.wait_idle();
+            if let Some(error) = self.failed.lock().unwrap().take() {
+                bail!("The GPU refused this frame: {error}");
+            }
+            costs.record(
+                if whole {
+                    total
+                } else {
+                    rows.div_ceil(BAND_ROWS)
+                },
+                started.elapsed().as_secs_f64() * 1e6,
+            );
+            failures.extend(rendered.failures);
+            self.refine_bands += 1;
+            y += rows;
+        }
+        Ok(Some(failures))
     }
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
@@ -1059,6 +1500,54 @@ mod lifetime_tests {
         broker.set_generation(2);
         assert_eq!(engine.font_generation(), Some(2));
     }
+    /// A refinement whose render met a font failure is not cached: it
+    /// fails as a frame does (transient, fonts installed afresh) and the
+    /// next one is kept.
+    #[test]
+    fn a_refinement_that_met_a_font_failure_is_not_cached() {
+        let mut engine = Engine::new(Gpu::new("refine-fonts-test").unwrap()).unwrap();
+        let broker = pm_text::host::FontBroker::new();
+        engine.set_fonts(pm_render::text::host::RenderFonts::new(broker));
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        engine
+            .fonts
+            .as_ref()
+            .unwrap()
+            .health
+            .fail("the font host went away".into());
+        let mut costs = crate::jobs::Costs::default();
+        let error = engine
+            .refine(&scene, spec, &mut costs, &|| false)
+            .unwrap_err();
+        assert!(transient(&error), "{error}");
+        assert!(engine.cache.is_empty());
+        let mut costs = crate::jobs::Costs::default();
+        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
+        assert_eq!(engine.cache.len(), 1);
+    }
     #[test]
     fn delayed_metal_completion_retains_the_actual_source_texture() {
         let mut engine = Engine::new(Gpu::new("completion-lease-test").unwrap()).unwrap();
@@ -1128,6 +1617,76 @@ mod lifetime_tests {
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
     }
+    /// A refinement drawn in bands is the frame drawn whole, pixel for
+    /// pixel; a stop between bands leaves nothing in the cache.
+    #[test]
+    fn a_banded_refinement_is_the_whole_frame_and_gives_way_between_bands() {
+        let mut engine = Engine::new(Gpu::new("refine-bands-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        // Refinement refines the paused viewer's picture; exact reads
+        // (captures) never use the frame cache.
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
+        };
+        let cached = |engine: &Engine| {
+            let surface = engine.cache.back().unwrap().surface.clone();
+            pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture)
+                .unwrap()
+        };
+        // Whole, as a frame draws it.
+        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+        while engine
+            .frame(
+                &scene,
+                spec,
+                None,
+                &Default::default(),
+                false,
+                trace.clone(),
+            )
+            .unwrap()
+            .is_none()
+        {}
+        let whole = cached(&engine);
+        engine.cache.clear();
+        // Stopped after its first band: nothing is kept.
+        let mut costs = crate::jobs::Costs::default();
+        assert!(!engine.refine(&scene, spec, &mut costs, &|| true).unwrap());
+        assert!(engine.cache.is_empty());
+        // In bands: the same pixels.
+        let mut costs = crate::jobs::Costs::default();
+        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
+        assert_eq!(engine.cache.len(), 1);
+        let banded = cached(&engine);
+        assert_eq!(banded.len(), 640 * 360 * 4);
+        let worst = whole
+            .iter()
+            .zip(&banded)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(worst < 1e-3, "banded differs by {worst}");
+    }
+
     #[test]
     fn only_a_traced_frame_counts_its_work() {
         let mut engine = Engine::new(Gpu::new("work-count-test").unwrap()).unwrap();

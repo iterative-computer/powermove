@@ -76,6 +76,7 @@ pub mod library;
 pub mod library_media;
 pub mod media_archive;
 pub mod media_versions;
+pub mod memory;
 pub mod model;
 pub use media_versions::{MediaAdmission, MediaBinding};
 pub mod navigation;

@@ -1343,7 +1343,36 @@ impl Renderer {
         self.media.bytes
     }
 
-    /// Nominal texel bytes of cached text rasters.
+    pub fn image_cache_bytes(&self) -> u64 {
+        self.media.image_bytes()
+    }
+
+    /// Explicit viewer opt-in; CLI exact/reference and export paths keep
+    /// native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, enabled: bool) {
+        self.media.preview_media = enabled;
+        self.media.draw_edge = None;
+    }
+
+    pub fn set_image_cache_budget(&mut self, bytes: u64) {
+        self.media.trim_images(bytes);
+    }
+    pub fn set_converted_frame_budget(&mut self, bytes: u64) {
+        self.media.trim_frames(bytes);
+    }
+    pub fn set_target_pool_budget(&mut self, bytes: u64) {
+        self.pool.set_free_budget(bytes);
+        self.pyramids.set_budget(bytes);
+        self.binds.set_budget(bytes);
+    }
+    pub fn binding_cache_bytes(&self) -> u64 {
+        self.binds.retained_bytes()
+    }
+    pub fn converted_frame_bytes(&self) -> u64 {
+        self.media.frame_bytes()
+    }
+
+    /// Bytes of cached text rasters and reusable coverage scratch.
     pub fn text_cache_bytes(&self) -> u64 {
         self.text_gpu.cached_bytes()
     }
@@ -1413,6 +1442,12 @@ impl Renderer {
     pub fn set_isolate_layers(&mut self, on: bool) {
         self.isolate_layers = on;
         self.effects.bypass_missing = on;
+    }
+
+    /// Whether failing layers are left out of the frame
+    /// ([`Renderer::set_isolate_layers`]).
+    pub fn isolates_layers(&self) -> bool {
+        self.isolate_layers
     }
 
     /// Draws a layer without an effect whose provider isn't installed
@@ -1506,11 +1541,51 @@ impl Renderer {
     /// kept bottom of the last frame (`crate::frame_prefix`), and every
     /// content cache stay; the next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
+        self.media.retire_cold_sessions();
         let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
         self.pyramids.clear();
         self.binds.clear();
         before - self.pool.bytes()
+    }
+
+    pub fn release_idle_media(&mut self) {
+        self.media.release_idle_frames();
+        self.binds.clear();
+    }
+
+    /// Recording has submitted every reference from this frame. Its working
+    /// set may exceed a standing cache grant; stop retaining that excess now.
+    /// Command buffers own the resources their GPU work still needs.
+    pub fn trim_submitted_frame_caches(&mut self) {
+        self.vector.trim(self.vector.max_bytes());
+        self.text_gpu.trim(crate::text::gpu::CACHE_BYTES);
+    }
+
+    /// A document closed. Release content caches and worker ownership,
+    /// including media indexes and prefetched input that idle trimming keeps.
+    /// Submitted commands retain their own GPU resources until completion.
+    pub fn release_project_memory(&mut self) {
+        self.clear_draw_reuse();
+        self.trim(0);
+        self.media = MediaCache::new(&self.device);
+        self.vector = crate::vector::cache::VectorCache::new();
+        self.scene3d = Scene3dRenderer::default();
+        self.options3d.studio = None;
+        self.evaluator.reset();
+        self.text = crate::text::TextContext::default();
+        self.text_gpu.clear();
+        let runner = self.shaders.fallback_runner;
+        self.shaders = Default::default();
+        self.shaders.fallback_runner = runner;
+        self.effects.fallback = Default::default();
+        self.effects.fallback.runner = runner;
+        self.effects.assets = Default::default();
+        self.effects.effect_types = Default::default();
+        self.clear_definitions();
+        self.compat = None;
+        self.svg_warned.clear();
+        self.missing_effects.clear();
     }
 
     /// Native SVG fallback diagnostic for the most recently resolved SVG.
@@ -2054,6 +2129,9 @@ impl Renderer {
         // The previous frame's vector textures become evictable, and the
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
+        self.pool.begin_frame();
+        self.media.begin_frame();
+        self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();
         let mut encoder = self

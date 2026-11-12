@@ -524,6 +524,28 @@ fn snapshot(state: &State) -> RenderBars {
 }
 
 impl DiskFrames {
+    /// Drop CPU read-ahead while stopped, fencing queued/in-flight reads
+    /// with an empty wanted range. Authored/kept files and scene identity stay.
+    pub(crate) fn release_idle_reads(&self) {
+        let generation = self.with(|s| {
+            s.last_read = None;
+            (s.generation, false)
+        });
+        self.inner.reader.clear(generation);
+    }
+
+    pub(crate) fn ready_bytes(&self) -> u64 {
+        self.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum()
+    }
+
     /// Called (on any thread, never blocking) whenever the render bar changes.
     pub fn set_notify(&self, notify: Option<Notify>) {
         self.inner.state.lock().unwrap().notify = notify;
@@ -565,6 +587,26 @@ impl DiskFrames {
         r
     }
 
+    /// Drop a closed project's scene and read-ahead. The generation fences
+    /// any fingerprint or disk read that was already running.
+    pub(crate) fn forget_document(&self, doc_id: u64) {
+        let generation = self.with(|s| {
+            if !s.frames.as_ref().is_some_and(|f| f.source.doc_id == doc_id) {
+                return (None, false);
+            }
+            s.generation += 1;
+            s.frames = None;
+            s.media_checked = None;
+            s.indexed = None;
+            s.last_read = None;
+            (Some(s.generation), true)
+        });
+        if let Some(generation) = generation {
+            self.inner.reader.clear(generation);
+            self.cancel_fill();
+        }
+    }
+
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
     /// render cache). The same folder again finds its frames again (Clear…
     /// may have removed some). Disk work: call off the main thread.
@@ -579,7 +621,7 @@ impl DiskFrames {
             Some((dir, quota)) => Some(Arc::new(RenderCache::open(dir, *quota)?)),
             None => None,
         };
-        self.with(|s| {
+        let generation = self.with(|s| {
             s.root = root;
             s.cache = cache;
             s.generation += 1;
@@ -587,8 +629,9 @@ impl DiskFrames {
             // Observed again (and fingerprinted against the new folder).
             s.frames = None;
             s.fill = Fill::default();
-            ((), true)
+            (s.generation, true)
         });
+        self.inner.reader.clear(generation);
         Ok(())
     }
 
@@ -672,6 +715,7 @@ impl DiskFrames {
         let Some((size, rate, count)) = composition(scene) else {
             state.frames = None;
             state.generation += 1;
+            self.inner.reader.clear(state.generation);
             bump(&mut state, &self.inner.published);
             return true;
         };
@@ -699,6 +743,7 @@ impl DiskFrames {
             .filter(|f| f.identity.comp == identity.comp && f.count == count)
             .map(|f| (f.present, f.kept))
             .unwrap_or_default();
+        self.inner.reader.clear(generation);
         state.frames = Some(Frames {
             identity: identity.clone(),
             source: source.clone(),
@@ -1557,6 +1602,11 @@ impl Reader {
                     }
                     let mut ready = shared.lock().unwrap();
                     ready.asked.remove(&ask.id);
+                    if ready.wanted.is_some_and(|(g, first, last)| {
+                        ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
+                    }) {
+                        continue;
+                    }
                     if let Some(data) = data {
                         ready.frames.push_back((ask.id, Arc::new(data)));
                         while ready.frames.len() > READY_FRAMES {
@@ -1575,6 +1625,13 @@ impl Reader {
             .iter()
             .find(|(id, _)| *id == (generation, n))
             .map(|(_, bytes)| bytes.clone())
+    }
+    fn clear(&self, generation: u64) {
+        let mut ready = self.ready.lock().unwrap();
+        *ready = Ready {
+            wanted: Some((generation, 1, 0)),
+            ..Default::default()
+        };
     }
     fn want(&self, generation: u64, first: i64, last: i64) {
         self.ready.lock().unwrap().wanted = Some((generation, first, last));
@@ -1764,6 +1821,85 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_releases_read_ahead_without_forgetting_the_open_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().to_owned(), 64 << 20)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 7, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let generation = disk.inner.state.lock().unwrap().generation;
+        disk.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .push_back(((generation, 0), Arc::new(vec![0; 4096])));
+        assert_eq!(disk.ready_bytes(), 4096);
+        disk.release_idle_reads();
+        assert_eq!(disk.ready_bytes(), 0);
+        assert!(disk.inner.state.lock().unwrap().frames.is_some());
+        assert_eq!(disk.inner.state.lock().unwrap().generation, generation);
+        // The empty range refuses both queued work and a late completion;
+        // the next explicit read can establish its normal window again.
+        assert_eq!(
+            disk.inner.reader.ready.lock().unwrap().wanted,
+            Some((generation, 1, 0))
+        );
+        disk.inner.reader.want(generation, 0, 3);
+        assert_eq!(
+            disk.inner.reader.ready.lock().unwrap().wanted,
+            Some((generation, 0, 3))
+        );
+    }
+
+    #[test]
+    fn closing_document_releases_the_scene_and_ready_disk_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().to_owned(), 64 << 20)))
+            .unwrap();
+        let scene = scene();
+        let doc = Arc::downgrade(&scene.doc);
+        assert!(disk.observe(&scene, &[], None, None, None, 7, Ticks::new(0).unwrap()));
+        ready(&disk);
+        {
+            let mut ready = disk.inner.reader.ready.lock().unwrap();
+            ready.frames.push_back(((1, 0), Arc::new(vec![0; 1024])));
+        }
+        drop(scene);
+        disk.forget_document(8);
+        assert!(doc.upgrade().is_some(), "another document must stay live");
+        disk.forget_document(7);
+        assert!(disk.inner.state.lock().unwrap().frames.is_none());
+        assert!(disk.inner.reader.ready.lock().unwrap().frames.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while doc.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "fingerprint worker retained closed scene"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pixels = Arc::new(vec![0; 1024]);
+        let released = Arc::downgrade(&pixels);
+        disk.inner
+            .reader
+            .ready
+            .lock()
+            .unwrap()
+            .frames
+            .push_back(((1, 0), pixels));
+        disk.set_storage(None).unwrap();
+        assert!(
+            released.upgrade().is_none(),
+            "storage changes release old read-ahead too"
+        );
+    }
 
     fn scene() -> Scene {
         scene_from(include_str!("../tests/fixtures/shapes.json"))
@@ -2059,6 +2195,38 @@ mod tests {
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
         let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
         read_eventually(&disk, scene, time).expect("rendered frame")
+    }
+
+    /// A stored frame is a delivery: an effect whose extension isn't
+    /// installed refuses the fill and nothing is stored (the viewer draws it
+    /// bypassed live; a stored frame without it would play back silently).
+    #[test]
+    fn a_fill_refuses_an_effect_whose_extension_is_not_installed() {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] = serde_json::json!([
+            {"id":"e1","type":"acme.glow","on":true,"p":{}}
+        ]);
+        let scene = scene_from(&project.to_string());
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pm-engine-service");
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
+            .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert!(bars.error.is_some(), "{bars:?}");
+        let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        assert!(disk.read(&scene, time).is_none(), "nothing stored");
     }
 
     /// Frame 30 filled through the real child, as stored (RGBA32F values).

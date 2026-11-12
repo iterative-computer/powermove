@@ -206,6 +206,199 @@ fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
     assert_eq!(drawn[90 * 320 + 160], [0., 1., 0.]);
     assert_eq!(drawn[0], actual[0]);
 }
+
+#[test]
+fn closing_a_project_returns_every_reported_cache_to_empty() {
+    let s = snapshot();
+    let scene = scene(&s);
+    let mut h = Headless::new().unwrap();
+    let baseline = h.memory_usage();
+    let pixels = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(h.memory_usage().resident_bytes() > baseline.resident_bytes());
+    h.release_project_memory();
+    let closed = h.memory_usage();
+    assert_eq!(
+        closed.resident_bytes(),
+        baseline.resident_bytes(),
+        "{closed:?}"
+    );
+    assert_eq!(closed.decoder_sessions, 0);
+    assert_eq!(closed.binding_bytes, 0);
+    assert_eq!(closed.decoder_pool_free_bytes, 0);
+    assert_eq!(closed.target_pool_idle, 0);
+    let reopened = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        pixels, reopened,
+        "cache lifetime must not change exact pixels"
+    );
+}
+
+#[test]
+fn retiring_the_last_view_releases_its_document_and_shared_caches() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("project-retirement-test").unwrap()).unwrap();
+    let c = config(snapshot());
+    let document = Arc::downgrade(&c.snapshot.document);
+    let v = service.viewer(c).unwrap();
+    let (scopes, results) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, scopes)))
+        .unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    v.retire();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let u = service.memory_usage();
+        if u.resident_bytes() == 0 && document.upgrade().is_none() {
+            assert!(results.is_closed(), "closed viewer retained its scope tap");
+            assert_eq!(u.decoder_sessions, 0);
+            assert_eq!(u.decoder_pool_free_bytes, 0);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed document/caches retained: {u:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn stopped_playback_retires_recording_pools_without_changing_the_still() {
+    let service = EngineService::start(pm_gpu::Gpu::new("stopped-pools-test").unwrap()).unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while viewer.status().presented < 3 {
+        assert!(Instant::now() < deadline, "playback did not advance");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.command(C::Pause).unwrap();
+    while viewer
+        .status()
+        .clock
+        .is_none_or(|c| c.state != pm_protocol::clock::TransportState::Stopped)
+    {
+        assert!(Instant::now() < deadline, "playback did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.capture_next().unwrap();
+    let pixels = wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.memory_usage().targets_created != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "stopped recording pools stayed live"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        viewer.status().frame.unwrap().pixels.as_ref(),
+        Some(&pixels)
+    );
+    viewer.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap()
+    );
+    viewer.retire();
+}
+
+#[test]
+fn closing_the_last_view_retires_device_pools_and_reopens_with_identical_exact_pixels() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("idle-device-renewal-test").unwrap()).unwrap();
+    let input = snapshot();
+    let first = service.viewer(config(input.clone())).unwrap();
+    first.capture_next().unwrap();
+    let pixels = wait_frame(&first, first.stamp().unwrap()).pixels.unwrap();
+    assert!(service.memory_usage().targets_created > 0);
+    first.retire();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.memory_usage().targets_created != 0 {
+        assert!(Instant::now() < deadline, "old device pools stayed live");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let reopened = service.viewer(config(input)).unwrap();
+    reopened.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&reopened, reopened.stamp().unwrap())
+            .pixels
+            .unwrap()
+    );
+    reopened.retire();
+}
+
+#[test]
+fn closing_one_document_keeps_the_other_view_usable() {
+    let service = EngineService::start(pm_gpu::Gpu::new("other-project-test").unwrap()).unwrap();
+    let first = config(snapshot());
+    let closed = Arc::downgrade(&first.snapshot.document);
+    let a = service.viewer(first).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    a.retire();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while closed.upgrade().is_some() {
+        assert!(Instant::now() < deadline, "closed project stayed live");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    b.command(C::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Exact,
+    })
+    .unwrap();
+    wait_frame(&b, b.stamp().unwrap());
+    b.retire();
+}
+
+#[test]
+fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do_not() {
+    use pm_engine_service::MediaMode;
+    let mut catalog = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        optimized: [("large".into(), "full-size.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("hd.mov")
+    );
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Originals)["large"].to_str(),
+        Some("original.mov")
+    );
+    assert_eq!(
+        catalog.export_paths(false).paths["large"].to_str(),
+        Some("original.mov")
+    );
+    catalog.play_original.insert("large".into());
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("original.mov")
+    );
+}
 #[test]
 fn worker_exact_cache_and_revision_resize_retirement() {
     let s = snapshot();

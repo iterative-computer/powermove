@@ -597,6 +597,7 @@ pub(crate) fn needs_upgrade(document: &pm_model::Document, history: &crate::Hist
         || history
             .records()
             .iter()
+            .filter(|r| r.forward.may_have_old_3d() || r.inverse.may_have_old_3d())
             .flat_map(|r| r.forward.iter().chain(r.inverse.iter()))
             .any(|op| matches!(op, pm_model::Op::Leaf(p) if p.value.as_ref().is_some_and(value)))
 }
@@ -645,7 +646,7 @@ pub(crate) fn upgrade_document_history(
         for record in history.records()[..cursor].iter().rev() {
             revision += 1;
             original
-                .apply_ops_at(&record.inverse, revision)
+                .apply_ops_at(&record.inverse.to_vec(), revision)
                 .map_err(|e| e.to_string())?;
         }
         let prior = original
@@ -661,7 +662,7 @@ pub(crate) fn upgrade_document_history(
             }
             revision += 1;
             original
-                .apply_ops_at(&record.forward, revision)
+                .apply_ops_at(&record.forward.to_vec(), revision)
                 .map_err(|e| e.to_string())?;
             let prior = original
                 .root()

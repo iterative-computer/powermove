@@ -989,9 +989,9 @@ pub(crate) fn origin_from(name: Option<&str>) -> Origin {
 fn encode_record(m: &mut Map, r: &HistoryRecord) {
     m.insert("label", Value::from(r.label.as_str()));
     m.insert("origin", Value::from(origin_name(r.origin)));
-    m.insert("f", ops_to_value(&r.forward));
-    m.insert("i", ops_to_value(&r.inverse));
-    if let Some(saved) = &r.saved {
+    m.insert("f", ops_to_value(&r.forward.to_vec()));
+    m.insert("i", ops_to_value(&r.inverse.to_vec()));
+    if let Some(saved) = r.saved_form().filter(|_| r.saved.is_some()) {
         m.insert(
             "s",
             Value::Array(vec![patches_to_value(&saved.0), patches_to_value(&saved.1)]),

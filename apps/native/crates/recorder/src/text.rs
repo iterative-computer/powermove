@@ -9,6 +9,7 @@ use pm_text::{
     render::outline::{Coords, FaceRef, GlyphStyle, Outlines},
 };
 use read_fonts::TableProvider;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
@@ -440,7 +441,8 @@ fn horizontal_baselines<'a>(
 }
 #[derive(Debug, Clone)]
 pub struct TextLayout {
-    pub path: BezPath,
+    /// Each glyph's outline at its origin on the baseline.
+    pub glyphs: Vec<(kurbo::Point, Arc<BezPath>)>,
     pub width: f64,
     pub ascent: f64,
     pub descent: f64,
@@ -448,7 +450,19 @@ pub struct TextLayout {
 }
 pub trait TextProvider {
     /// The host must resolve loaded project/system fonts before entering the worker.
-    fn layout(&mut self, font: &Font, text: &[u16], direction: Direction) -> Result<TextLayout>;
+    fn layout(&mut self, font: &Font, text: &[u16], direction: Direction) -> Result<TextLayout> {
+        self.layout_expanded(font, text, direction, (0., 0.))
+    }
+    /// [`TextProvider::layout`] with each glyph's outline dilated by
+    /// `expand` per side, x and y, in glyph pixels (round joins: today's
+    /// font smoothing, `pm_text::render::smoothing`). Advances are unchanged.
+    fn layout_expanded(
+        &mut self,
+        font: &Font,
+        text: &[u16],
+        direction: Direction,
+        expand: (f64, f64),
+    ) -> Result<TextLayout>;
 }
 /// Platform-independent pm-text adapter. R may be the native font broker or a Linux test resolver.
 pub struct TextEngine<R> {
@@ -466,7 +480,13 @@ impl<R: FontResolver> TextEngine<R> {
     }
 }
 impl<R: FontResolver> TextProvider for TextEngine<R> {
-    fn layout(&mut self, font: &Font, text: &[u16], direction: Direction) -> Result<TextLayout> {
+    fn layout_expanded(
+        &mut self,
+        font: &Font,
+        text: &[u16],
+        direction: Direction,
+        expand: (f64, f64),
+    ) -> Result<TextLayout> {
         // HTML normalizes ASCII whitespace to U+0020 and does not wrap lines.
         let text: Vec<u16> = text
             .iter()
@@ -507,7 +527,7 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
                 unicode_bidi::Level::ltr()
             }),
         );
-        let mut path = BezPath::new();
+        let mut glyphs = Vec::new();
         let mut x = 0.;
         for paragraph in &bidi.paragraphs {
             let (_, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
@@ -535,6 +555,7 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
                         } else {
                             (0., 0.)
                         },
+                        smooth: expand,
                         skew: if info.synthetic_italic {
                             pm_text::render::outline::SYNTHETIC_ITALIC_SKEW
                         } else {
@@ -562,11 +583,13 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
                                 glyph.glyph,
                                 style,
                             ) {
-                                let m = Affine::translate((
-                                    x + glyph.x_offset as f64 / 65536.,
-                                    -(glyph.y_offset as f64) / 65536.,
+                                glyphs.push((
+                                    kurbo::Point::new(
+                                        x + glyph.x_offset as f64 / 65536.,
+                                        -(glyph.y_offset as f64) / 65536.,
+                                    ),
+                                    outline.path.clone(),
                                 ));
-                                path.extend(outline.path.iter().map(|el| m * el));
                             }
                         }
                         x += glyph.advance as f64 / 65536.;
@@ -575,7 +598,7 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
             }
         }
         Ok(TextLayout {
-            path,
+            glyphs,
             width: x,
             ascent,
             descent,
@@ -584,6 +607,15 @@ impl<R: FontResolver> TextProvider for TextEngine<R> {
     }
 }
 impl TextLayout {
+    /// The glyphs' outlines, each at its origin as `place` moves it.
+    pub fn path(&self, mut place: impl FnMut(kurbo::Point) -> kurbo::Point) -> BezPath {
+        let mut path = BezPath::new();
+        for (origin, outline) in &self.glyphs {
+            let m = Affine::translate(place(*origin).to_vec2());
+            path.extend(outline.iter().map(|el| m * el));
+        }
+        path
+    }
     pub(crate) fn anchor(
         &self,
         align: TextAlign,
@@ -626,10 +658,11 @@ impl TextLayout {
         direction: Direction,
     ) -> TextMetrics {
         let (x, y) = self.anchor(align, baseline, direction);
-        let b = if self.path.elements().is_empty() {
+        let path = self.path(|at| at);
+        let b = if path.elements().is_empty() {
             Rect::ZERO
         } else {
-            self.path.bounding_box()
+            path.bounding_box()
         };
         TextMetrics {
             width: self.width,

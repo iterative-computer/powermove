@@ -392,7 +392,10 @@ pub(crate) fn extension_layer<'d>(
     };
     let sized = size(scope, layer, d, output, scale, time)?;
     let Some(snapshot) = effects.get(DefinitionKind::Layer, definition) else {
-        if !effects.is_missing(DefinitionKind::Layer, definition) {
+        // A frame that shows the project (`Effects::bypass_missing`: the
+        // viewer, agent stills) draws an uninstalled extension's layer as
+        // today's compositor draws any undefined one; an export refuses it.
+        if !effects.is_missing(DefinitionKind::Layer, definition) && !effects.bypass_missing {
             return Ok(Some(Planned::Unsupported(Feature::Definition(format!(
                 "layer {definition}"
             )))));
