@@ -181,6 +181,19 @@ impl Decoder {
         }
     }
 
+    /// Invalidates a VideoToolbox session as the system does when it
+    /// takes the hardware away; `false` for other decoders. For tests.
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        match self {
+            Decoder::Vt { dec, .. } => {
+                dec.invalidate();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Frames copied into GPU-shareable memory so far.
     pub fn copies(&self) -> usize {
         match self {

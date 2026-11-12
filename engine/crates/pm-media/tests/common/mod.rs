@@ -155,7 +155,7 @@ pub struct FileRun {
     pub errors: Vec<String>,
 }
 
-fn norm_hash(f: &DecodedFrame) -> String {
+pub fn norm_hash(f: &DecodedFrame) -> String {
     use md5::{Digest, Md5};
     let (l, c) = f.reference().unwrap();
     let mut h = Md5::new();

@@ -327,8 +327,14 @@ impl SessionGuard<'_> {
         if let Some(f) = self.service.cache.get(&key) {
             return Ok(Some(f));
         }
+        let mut f = self.session.as_mut().unwrap().sample_with(sample, stop);
+        if f.is_err() {
+            f = self.recover(sample, stop, f);
+        }
         let s = self.session.as_mut().unwrap();
-        let f = s.sample_with(sample, stop);
+        if f.is_ok() {
+            s.replacement = false;
+        }
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
             let key = FrameKey {
@@ -346,6 +352,55 @@ impl SessionGuard<'_> {
             s.clear_window();
         }
         f
+    }
+
+    /// A VideoToolbox session that failed is not asked again: once the
+    /// system invalidates it (a GPU reset, sleep and wake), every later
+    /// sample fails. The session is dropped and a new one opened, once; if
+    /// the sample still fails and the stream has a software backend, that
+    /// decodes it. A sample that fails everywhere is damaged: its error
+    /// stands, and the session that tried last stays, marked, so a damaged
+    /// sample does not reopen decoders on every request.
+    fn recover(
+        &mut self,
+        sample: usize,
+        stop: &mut dyn FnMut(super::session::Progress) -> bool,
+        failed: Result<Option<DecodedFrame>>,
+    ) -> Result<Option<DecodedFrame>> {
+        let old = self.session.as_ref().unwrap();
+        if old.replacement || old.decoder_info().backend != Backend::VideoToolbox {
+            return failed;
+        }
+        let software = super::backends(&self.source.info, &self.source.index)
+            .into_iter()
+            .find(|b| *b != Backend::VideoToolbox);
+        let mut last = failed;
+        for prefer in [None, software] {
+            if prefer.is_none() && last.is_ok() {
+                break;
+            }
+            let Ok(mut fresh) = self
+                .service
+                .open_session(&self.source, self.key.purpose, prefer)
+            else {
+                continue;
+            };
+            fresh.replacement = true;
+            last = fresh.sample_with(sample, stop);
+            // The failed session closes here; the new one takes its place.
+            self.session = Some(fresh);
+            self.service.open_sessions.fetch_sub(1, Ordering::Relaxed);
+            if last.is_ok() || software.is_none() {
+                break;
+            }
+        }
+        last
+    }
+
+    /// See [`Session::invalidate_hardware`].
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        self.session.as_mut().unwrap().invalidate_hardware()
     }
 
     /// See [`Session::set_window`].
@@ -503,34 +558,7 @@ impl DecodeService {
         });
         let session = match reused {
             Some(s) => s,
-            None => {
-                // The probe's demuxer serves the first session.
-                let input = match source.startup_input.lock().unwrap().take() {
-                    Some(input) => input,
-                    None => Input::open(source.path())?,
-                };
-                let spec = StreamSpec {
-                    input: &input,
-                    stream: source.stream,
-                    info: &source.info,
-                    index: &source.index,
-                    extradata: &source.extradata,
-                };
-                let (decoder, _skipped) = open(
-                    &spec,
-                    purpose,
-                    &self.pool,
-                    self.arbiter.as_ref(),
-                    self.config.threads,
-                    prefer,
-                )?;
-                let reader = PacketReader::new(source.path(), source.stream)?;
-                let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
-                s.set_window(self.config.session_window);
-                s.set_window_bytes(32 << 20);
-                self.open_sessions.fetch_add(1, Ordering::Relaxed);
-                s
-            }
+            None => self.open_session(source, purpose, prefer)?,
         };
         Ok(SessionGuard {
             service: self,
@@ -538,6 +566,41 @@ impl DecodeService {
             source: source.clone(),
             session: Some(session),
         })
+    }
+
+    /// A new session for `source` (counted as open).
+    fn open_session(
+        &self,
+        source: &Arc<MediaSource>,
+        purpose: DecodePurpose,
+        prefer: Option<Backend>,
+    ) -> Result<Session> {
+        // The probe's demuxer serves the first session.
+        let input = match source.startup_input.lock().unwrap().take() {
+            Some(input) => input,
+            None => Input::open(source.path())?,
+        };
+        let spec = StreamSpec {
+            input: &input,
+            stream: source.stream,
+            info: &source.info,
+            index: &source.index,
+            extradata: &source.extradata,
+        };
+        let (decoder, _skipped) = open(
+            &spec,
+            purpose,
+            &self.pool,
+            self.arbiter.as_ref(),
+            self.config.threads,
+            prefer,
+        )?;
+        let reader = PacketReader::new(source.path(), source.stream)?;
+        let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
+        s.set_window(self.config.session_window);
+        s.set_window_bytes(32 << 20);
+        self.open_sessions.fetch_add(1, Ordering::Relaxed);
+        Ok(s)
     }
 
     /// Closes every idle session of an instance (a viewer closed, an export
