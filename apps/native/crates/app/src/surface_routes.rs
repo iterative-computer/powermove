@@ -27,6 +27,12 @@ impl Controller {
                 self.hide_home(cx)
             }
             "home" | "projects" => self.show_home(cx),
+            // Development builds: the control kit in every state, on Home.
+            #[cfg(debug_assertions)]
+            "reviewKit" => {
+                pm_shell::kit::GALLERY.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.show_home(cx)
+            }
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {

@@ -893,6 +893,17 @@ impl Kit {
         .size(px(0.))
     }
 }
+impl Kit {
+    /// A control that cannot be used now: dimmed, with its events left off
+    /// by the caller.
+    pub fn disabled<E: Styled>(&self, element: E) -> E {
+        element.opacity(0.45)
+    }
+}
+/// Development builds: Home shows the kit gallery instead of the projects
+/// (`--open reviewKit`).
+#[cfg(debug_assertions)]
+pub static GALLERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Tabular figures for counts, sizes and times.
 pub fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))

@@ -1232,6 +1232,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         "from":c.from,"duration":c.duration,
         "cursor":if c.locked {"notAllowed"}else{"openHand"},
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
+        "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
         "rim":material.rim.0,"rimAlpha":material.rim.1,
         "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":m.border,
@@ -1729,14 +1730,12 @@ impl Frame {
     /// One accessible element per painted clip, in paint order: its name and
     /// times, whether it is selected, and its visible body within the tracks.
     pub fn clip_nodes(&self) -> Vec<ClipNode> {
-        // One pass indexes each clip's name and selection ring.
+        // One pass indexes each clip's name; the strip itself says whether
+        // it is selected.
         let mut names = HashMap::new();
-        let mut rings = std::collections::HashSet::new();
         for o in &self.ops {
             if let Some(id) = o.id.strip_prefix("clip-content:") {
                 names.insert(id, o.text.as_deref().unwrap_or_default());
-            } else if let Some(id) = o.id.strip_prefix("clip-ring:") {
-                rings.insert(id);
             }
         }
         self.ops
@@ -1758,7 +1757,7 @@ impl Frame {
                     name: names.get(id).copied().unwrap_or_default().to_owned(),
                     from: o.detail["from"].as_f64().unwrap_or(0.),
                     duration: o.detail["duration"].as_f64().unwrap_or(0.),
-                    selected: rings.contains(id),
+                    selected: o.detail["selected"] == true,
                     bounds,
                 })
             })

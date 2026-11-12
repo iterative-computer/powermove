@@ -1286,6 +1286,12 @@ impl Render for ProjectLibrary {
                 }
             }
         };
+        #[cfg(debug_assertions)]
+        let body = if kit::GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
+            self.gallery(&kit)
+        } else {
+            body
+        };
         // One inset sheet on the window ground, as Settings.
         let content = div()
             .flex_1()
@@ -1315,6 +1321,278 @@ impl Render for ProjectLibrary {
             .child(content)
             .children(menu)
             .child(kit.settle())
+    }
+}
+/// Development builds: every kit control and strip state in place of the
+/// projects (`--open reviewKit`), so a design review sees the whole system on
+/// screen in either appearance without a pointer.
+#[cfg(debug_assertions)]
+impl ProjectLibrary {
+    fn gallery(&self, kit: &Kit) -> AnyElement {
+        use pm_design::StripState;
+        let t = &kit.t;
+        let c = &t.colors;
+        let section = |title: &str| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap(px(t.space.md))
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_role(t, Text::Caption)
+                        .text_color(rgb(c.muted))
+                        .child(title.to_string()),
+                )
+        };
+        let line = || div().flex().flex_wrap().items_center().gap(px(t.space.md));
+        let none = |_: usize, _: &mut Window, _: &mut App| {};
+        let buttons = |disabled: bool| {
+            let row = line()
+                .child(kit.button(
+                    format!("g-primary-{disabled}"),
+                    "New Project",
+                    Button::Primary,
+                    Some("plus"),
+                    None,
+                ))
+                .child(kit.button(
+                    format!("g-neutral-{disabled}"),
+                    "Open…",
+                    Button::Neutral,
+                    None,
+                    None,
+                ))
+                .child(kit.button(
+                    format!("g-popup-{disabled}"),
+                    "Dark",
+                    Button::Neutral,
+                    None,
+                    Some("chevron.down"),
+                ))
+                .child(kit.button(
+                    format!("g-quiet-{disabled}"),
+                    "Recently edited",
+                    Button::Quiet,
+                    None,
+                    Some("chevron.down"),
+                ))
+                .child(kit.button(
+                    format!("g-danger-{disabled}"),
+                    "Delete",
+                    Button::Destructive,
+                    None,
+                    None,
+                ));
+            if disabled { kit.disabled(row) } else { row }
+        };
+        let strip = |fill: u32, state: StripState, name: &str| {
+            let s = t.strip(fill, state);
+            let height = t.metrics.track_row - 2. * t.strip_gap();
+            div()
+                .relative()
+                .flex()
+                .flex_none()
+                .items_center()
+                .w(px(96.))
+                .h(px(height))
+                .px(px(t.space.md))
+                .rounded(px(t.strip_radius(height)))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(ink(s.top, s.opacity), 0.),
+                    linear_color_stop(ink(s.bottom, s.opacity), 1.),
+                ))
+                .shadow(vec![
+                    BoxShadow {
+                        color: ink(s.rim_top.0, (s.rim_top.1 - s.rim.1).max(0.)).into(),
+                        offset: point(px(0.), px(1.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(0.),
+                        inset: true,
+                    },
+                    BoxShadow {
+                        color: ink(s.rim.0, s.rim.1).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(1.),
+                        inset: true,
+                    },
+                ])
+                .text_role(t, Text::Caption)
+                .text_color(rgb(s.foreground))
+                .child(name.to_string())
+                .when(state == StripState::Hover, |d| {
+                    let grip = t.trim_grip();
+                    d.child(
+                        div()
+                            .absolute()
+                            .right(px(grip.inset))
+                            .top(relative((1. - grip.height) / 2.))
+                            .w(px(grip.width))
+                            .h(relative(grip.height))
+                            .rounded_full()
+                            .bg(rgb(grip.color)),
+                    )
+                })
+        };
+        let states = [
+            (StripState::Rest, "Rest"),
+            (StripState::Hover, "Hover"),
+            (StripState::Selected, "Selected"),
+            (StripState::Dragging, "Dragging"),
+            (StripState::Disabled, "Disabled"),
+        ];
+        let roles = [
+            (Text::Display, "Display 24"),
+            (Text::Heading, "Heading 15"),
+            (Text::Title, "Title 13"),
+            (Text::Reading, "Reading 13"),
+            (Text::Label, "Label 12"),
+            (Text::Body, "Body 12"),
+            (Text::Caption, "Caption 11"),
+            (Text::Timecode, "00:01:23:12"),
+        ];
+        div()
+            .id("kit-gallery")
+            .flex_1()
+            .overflow_y_scroll()
+            .px(px(MARGIN))
+            .pb(px(t.space.xxl))
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .gap(px(t.space.section))
+            .child(
+                section("Buttons: rest, then disabled")
+                    .child(buttons(false))
+                    .child(buttons(true)),
+            )
+            .child(
+                section("Icon buttons, segmented control, tabs")
+                    .child(
+                        line()
+                            .child(kit.icon_button("g-icon-a", "magnifyingglass", "Search", false))
+                            .child(kit.icon_button("g-icon-b", "plus", "Add", false))
+                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true))
+                            .child(kit.segmented(
+                                "g-seg-symbols",
+                                &[
+                                    Item::Symbol("square.grid.2x2", "Grid view"),
+                                    Item::Symbol("list.bullet", "List view"),
+                                ],
+                                0,
+                                false,
+                                none,
+                            ))
+                            .child(kit.segmented(
+                                "g-seg-titles",
+                                &[Item::Title("Layers"), Item::Title("Tracks")],
+                                0,
+                                false,
+                                none,
+                            )),
+                    )
+                    .child(kit.segmented(
+                        "g-tabs",
+                        &[
+                            Item::Title("Project"),
+                            Item::Title("Effect Controls"),
+                            Item::Title("Notes"),
+                        ],
+                        0,
+                        true,
+                        none,
+                    )),
+            )
+            .child(
+                section("Search, switch, checkbox, radio, slider, progress")
+                    .child(kit.search(None, Some("⌘F")))
+                    .child(
+                        line()
+                            .child(kit.switch("g-switch-off", false))
+                            .child(kit.switch("g-switch-on", true))
+                            .child(kit.check("g-check-off", false, false))
+                            .child(kit.check("g-check-on", true, false))
+                            .child(kit.check("g-radio-off", false, true))
+                            .child(kit.check("g-radio-on", true, true))
+                            .child(kit.disclosure(false))
+                            .child(kit.disclosure(true)),
+                    )
+                    .child(kit.slider("g-slider", 0.35))
+                    .child(kit.progress(Some(0.6)))
+                    .child(kit.progress(None)),
+            )
+            .child(
+                section("Rows and a menu")
+                    .child(kit.row("g-row-a", false).child("Gaussian Blur"))
+                    .child(kit.row("g-row-b", true).child("Directional Blur"))
+                    .child(kit.row("g-row-c", false).child("Sharpen"))
+                    .child(
+                        kit.menu()
+                            .w(px(220.))
+                            .child(kit.menu_row("g-menu-a", "Recently edited", Some(true), None))
+                            .child(kit.menu_row("g-menu-b", "Name", Some(false), None))
+                            .child(kit.menu_row(
+                                "g-menu-c",
+                                "Open in New Window",
+                                Some(false),
+                                Some("⌘O"),
+                            )),
+                    ),
+            )
+            .child(
+                section("Card and form rows, banner, empty state")
+                    .child(
+                        kit.card()
+                            .child(kit.form_row(
+                                "Reopen last project on launch",
+                                Some("Open only the project you were last working on."),
+                                kit.switch("g-form-switch", true).into_any_element(),
+                            ))
+                            .child(kit.form_row(
+                                "Appearance",
+                                Some("Follow your system setting, or pick a light or dark theme."),
+                                kit.button(
+                                    "g-form-popup",
+                                    "Dark",
+                                    Button::Neutral,
+                                    None,
+                                    Some("chevron.down"),
+                                )
+                                .into_any_element(),
+                            )),
+                    )
+                    .child(kit.banner("checkmark.circle.fill", c.success, "Exported to Desktop"))
+                    .child(kit.empty_state(
+                        "magnifyingglass",
+                        "No Results",
+                        "No project matches this search.",
+                    )),
+            )
+            .child(
+                section("Timeline strips by layer colour and state")
+                    .w(px(560.))
+                    .children(
+                        [c.labels.teal, c.labels.violet, c.labels.orange, c.labels.gray].map(
+                            |fill| {
+                                line()
+                                    .gap(px(t.strip_gap()))
+                                    .children(states.map(|(state, name)| strip(fill, state, name)))
+                            },
+                        ),
+                    ),
+            )
+            .child(
+                section("Type scale").children(roles.map(|(role, sample)| {
+                    div()
+                        .text_role(t, role)
+                        .text_color(rgb(c.text))
+                        .child(sample)
+                })),
+            )
+            .into_any_element()
     }
 }
 /// The defaults of `createNewProjectForm`, for a window with no project.

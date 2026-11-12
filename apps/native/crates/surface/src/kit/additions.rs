@@ -283,7 +283,7 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
             slider_track: t.metrics.keyframe + t.metrics.drag_threshold,
             slider_thumb: t.metrics.track_row / 2.
                 + (t.metrics.control_radius - t.metrics.inner_radius),
-            row_gap: t.metrics.gap + t.metrics.inner_radius,
+            row_gap: t.metrics.gap + t.space.xs,
             checker: metric("metrics.checker"),
             fill_modes: bool_option(node, "fill"),
             recent_limit: 8,

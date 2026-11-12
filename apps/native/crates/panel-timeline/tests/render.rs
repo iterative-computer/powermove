@@ -60,6 +60,9 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
         assert_eq!(clip.detail["top"], material.top);
         assert_eq!(clip.detail["rim"], material.rim.0);
         assert!(material.rim.1 > rest.rim.1 * 2., "selection is the rim");
+        // Accessibility reads selection from the strip, with no ring to find.
+        let node = f.clip_nodes().into_iter().find(|n| n.id == "selected");
+        assert!(node.is_some_and(|n| n.selected));
         assert!(
             f.ops
                 .iter()
