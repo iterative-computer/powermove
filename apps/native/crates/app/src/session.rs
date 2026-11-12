@@ -1540,16 +1540,23 @@ impl Controller {
         self.mcp.bind_window(self.window_key, self.session.clone());
     }
     fn bind_composition(&mut self) {
-        if let Some(viewer) = self.viewer.take() {
-            viewer.retire();
-        }
+        // The viewer before this one changes places with the next in one
+        // step (`replace_viewer`): retired first, its document would be
+        // without a view for a moment, and the engine closes a document
+        // without views (its override answers, caches and programs go).
+        let old = self.viewer.take();
+        let retire = |old: Option<Viewer>| {
+            if let Some(viewer) = old {
+                viewer.retire();
+            }
+        };
         let Some(p) = self.published.clone() else {
-            return;
+            return retire(old);
         };
         let comp = p.snapshot.render_comp();
         // A document without a root has nothing to view.
         let Some(root) = p.snapshot.document.root() else {
-            return;
+            return retire(old);
         };
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
         let number = |key: &str, default| {
@@ -1566,7 +1573,7 @@ impl Controller {
             .get("bg")
             .and_then(crate::node_string)
             .and_then(panels::parse_background);
-        match self.engine.viewer(ViewerConfig {
+        let config = ViewerConfig {
             snapshot: p.snapshot.clone(),
             composition: comp,
             media,
@@ -1581,7 +1588,12 @@ impl Controller {
             rate: self.rate,
             end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
             audio: true,
-        }) {
+        };
+        let placed = match &old {
+            Some(old) => self.engine.replace_viewer(old, config),
+            None => self.engine.viewer(config),
+        };
+        match placed {
             Ok(viewer) => {
                 // The editor's viewer drags a slow project at reduced resolution.
                 let _ = viewer.adapt_drags(true);
@@ -1589,13 +1601,17 @@ impl Controller {
                 self.skimming.at = None;
                 self.viewer = Some(viewer)
             }
-            Err(e) => self.message = format!("Viewer failed: {e}"),
+            Err(e) => {
+                retire(old);
+                self.message = format!("Viewer failed: {e}")
+            }
         }
         self.apply_extension_resources();
     }
-    /// MCP placed a project in this window (open_project, create_project): show
-    /// it, then close the one shown before, as opening from the window does.
-    /// Other windows' projects are theirs; this never follows them.
+    /// MCP placed a project in this window (open_project, create_project): an
+    /// empty window shows it; a window that shows a project keeps it and the
+    /// placed one joins its tabs, as opening from the window does. Other
+    /// windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
         if self.opening || self.close_pending {
             return;
