@@ -382,6 +382,15 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
 }
+/// The size the editor lays a composition out at: its stored size, held to
+/// at least one pixel a side. A file needs only finite numbers to open, so a
+/// stored 0 (or a negative) is possible; fit, zoom and overlay math divide
+/// by this. The stored value is not rewritten: it changes only when the
+/// person edits the composition's settings.
+fn composition_size(w: f64, h: f64) -> [f64; 2] {
+    let side = |v: f64| if v.is_finite() { v.max(1.) } else { 1. };
+    [side(w), side(h)]
+}
 /// Where the playhead of a composition being left is: the viewer's clock, or,
 /// while a viewer bound a moment ago has not reported one yet, the time last
 /// asked for (written to the transport state by every seek). Reading only the
@@ -1745,7 +1754,7 @@ impl Controller {
                 .unwrap_or(default)
         };
         self.duration = number("dur", 1.).max(0.001);
-        self.dimensions = [number("w", 1920.), number("h", 1080.)];
+        self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
         let media = self.media.clone();
         self.background = composition
@@ -2565,6 +2574,13 @@ mod save_note_tests {
         assert!(alert.informative.contains("“cut — Native”"));
         let two = stranded_copies_alert("cut.pmv", &["a".to_owned(), "b".to_owned()]);
         assert!(two.message.contains("copies of") && two.informative.contains("“a” and 1 more"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_composition_is_laid_out_at_a_positive_size_whatever_is_stored() {
+        assert_eq!(composition_size(1920., 1080.), [1920., 1080.]);
+        assert_eq!(composition_size(0., 1080.), [1., 1080.]);
+        assert_eq!(composition_size(-5., f64::NAN), [1., 1.]);
+        assert_eq!(composition_size(f64::INFINITY, 0.5), [1., 1.]);
     }
     #[::core::prelude::v1::test]
     fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
