@@ -15,6 +15,9 @@ pub enum Stage {
     BeforePublish,
     /// While publishing, before the publication is visible.
     InPublish,
+    /// In the shared history budget, right after a record of some project
+    /// (not necessarily the call's own) was trimmed.
+    InHistoryTrim,
 }
 
 #[cfg(any(test, feature = "fault-injection"))]

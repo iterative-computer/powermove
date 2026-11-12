@@ -514,6 +514,13 @@ impl Kernel {
         }
     }
 
+    /// Tests: the shared budget, not applied until the next call that
+    /// maintains it (so a test chooses which call trims).
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn set_history_budget_later(&mut self, max_entries: usize) {
+        self.history_max_entries = max_entries;
+    }
+
     fn maintain_history(&mut self, active: &str) {
         self.history_order
             .retain(|p| p != active && self.slots.contains_key(p));
@@ -531,6 +538,7 @@ impl Kernel {
                 if !slot.project.store_mut().trim_history_one() {
                     break;
                 }
+                crate::fault_injection::hit(crate::fault_injection::Stage::InHistoryTrim);
                 let after = slot.project.store().history().stats();
                 entries -= before.entries - after.entries;
                 bytes -= before.bytes - after.bytes;

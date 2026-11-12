@@ -407,6 +407,9 @@ enum Msg {
         stage: crate::fault_injection::Stage,
         project: String,
     },
+    /// `KernelHandle::set_history_budget_later`.
+    #[cfg(any(test, feature = "fault-injection"))]
+    HistoryBudget(usize),
     Shutdown,
 }
 
@@ -652,6 +655,13 @@ impl KernelHandle {
             stage,
             project: project.to_owned(),
         });
+    }
+
+    /// Tests: the shared undo budget in entries, applied by the next call
+    /// that maintains it.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn set_history_budget_later(&self, max_entries: usize) {
+        self.send(Msg::HistoryBudget(max_entries));
     }
 
     /// Runs `request` on `project`; resolves with the acknowledgement.
@@ -949,7 +959,7 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::DurabilityErrors
         | Msg::Shutdown => Scope::Nothing,
         #[cfg(any(test, feature = "fault-injection"))]
-        Msg::ArmFault { .. } => Scope::Nothing,
+        Msg::ArmFault { .. } | Msg::HistoryBudget(_) => Scope::Nothing,
     }
 }
 
@@ -1511,6 +1521,8 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
         }
         #[cfg(any(test, feature = "fault-injection"))]
         Msg::ArmFault { stage, project } => crate::fault_injection::arm(stage, project),
+        #[cfg(any(test, feature = "fault-injection"))]
+        Msg::HistoryBudget(max_entries) => kernel.set_history_budget_later(max_entries),
         Msg::DurabilityErrors => {
             if let Some(d) = kernel.durability() {
                 for (project, message) in d.take_errors() {

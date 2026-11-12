@@ -1647,7 +1647,7 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
     let volumes = std::env::var("PM_TEST_VOLUMES").expect("PM_TEST_VOLUMES");
     for volume in volumes.split(':').filter(|v| !v.is_empty()) {
         let dir = common::TempDir::new("volume");
-        let folder = Path::new(volume).join("pm-save-test");
+        let folder = Path::new(volume).join(format!("pm-save-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).unwrap();
         let file = folder.join("cut.pmv");
