@@ -1333,8 +1333,9 @@ fn plan_export_checked(
         tags,
         alpha,
         working: WorkingEncoding::Standard,
-        // On is the engine's measured rule (EXPORT-DITHER-1): 8-bit PNG is
-        // dithered; lossy codecs and 10-bit and deeper outputs are not.
+        // On is the engine's measured rule (`Dither::Default`): 8-bit PNG,
+        // and H.264 with bits to hold it, are dithered; other lossy codecs
+        // and 10-bit and deeper outputs are not.
         dither: if s.dither {
             Dither::Default
         } else {

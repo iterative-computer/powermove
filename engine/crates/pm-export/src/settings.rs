@@ -398,12 +398,24 @@ pub enum WorkingEncoding {
 /// Dither (section 17): blue-noise RPDF of ±0.5 LSB after the matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dither {
-    /// On for final 8-bit images (8-bit PNG); off for lossy codecs, which would
-    /// code the noise as content (EXPORT-DITHER-1), and for 10 bits and above.
+    /// On for final 8-bit images (8-bit PNG), and for H.264 given at least
+    /// [`H264_DITHER_BITS_PER_PIXEL`]; off for other lossy codecs and leaner
+    /// H.264, which would code the noise as content and smear it
+    /// (EXPORT-DITHER-1), and for 10 bits and above.
     Default,
     On,
     Off,
 }
+
+/// The H.264 bit rate per pixel per frame (`bitrate ÷ (width × height × fps)`)
+/// from which dither survives the encoder and removes banding. Measured on a
+/// 0.40 to 0.42 grey gradient, 1920 × 512 at 24 fps, VideoToolbox H.264
+/// (`tests/dither_delivery.rs`, worst 16-column window of column means):
+/// undithered 0.48 codes at every rate; dithered 0.91 at 0.05, 0.53 at 0.1,
+/// 0.58 at 0.5, 0.46 at 1.0, 0.44 at 1.25, 0.31 at 1.5, 0.15 at 2.0, 0.08 at
+/// 3.0. Below 1.5 the encoder spends the dither as noise (up to 500 times the
+/// undithered file's bits) for no less banding.
+pub const H264_DITHER_BITS_PER_PIXEL: f64 = 1.5;
 
 /// What happens when the destination already exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -673,7 +685,16 @@ impl ExportSpec {
         match self.dither {
             Dither::On => true,
             Dither::Off => false,
-            Dither::Default => matches!(self.codec, Codec::Png { sixteen_bit: false }),
+            Dither::Default => match self.codec {
+                Codec::Png { sixteen_bit: false } => true,
+                Codec::H264 { bitrate_bps } => {
+                    let pixels_per_second =
+                        f64::from(self.width) * f64::from(self.height) * self.rate.num() as f64
+                            / self.rate.den() as f64;
+                    f64::from(bitrate_bps) >= H264_DITHER_BITS_PER_PIXEL * pixels_per_second
+                }
+                _ => false,
+            },
         }
     }
 }
@@ -756,9 +777,6 @@ mod tests {
     #[test]
     fn dither_defaults_on_for_8_bit_png_only() {
         for lossy in [
-            Codec::H264 {
-                bitrate_bps: 4_000_000,
-            },
             Codec::Hevc {
                 bitrate_bps: 4_000_000,
                 ten_bit: false,
@@ -776,6 +794,17 @@ mod tests {
         ] {
             assert!(!spec(lossy).dither_enabled(), "{lossy:?}");
         }
+        // H.264 is dithered from 1.5 bits per pixel per frame: 40 Mb/s
+        // holds it at 720p (1.81) but not at 1080p (0.80) at 23.976 fps.
+        let h264 = |width, height| ExportSpec {
+            width,
+            height,
+            ..spec(Codec::H264 {
+                bitrate_bps: 40_000_000,
+            })
+        };
+        assert!(h264(1280, 720).dither_enabled());
+        assert!(!h264(1920, 1080).dither_enabled());
         assert!(spec(Codec::Png { sixteen_bit: false }).dither_enabled());
         assert!(!spec(Codec::Png { sixteen_bit: true }).dither_enabled());
         assert!(!spec(Codec::ProRes(ProResProfile::Hq)).dither_enabled());

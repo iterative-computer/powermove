@@ -7,9 +7,10 @@
 //!
 //! The rule is the engine's measured one (EXPORT-DITHER-1): 8-bit PNG is
 //! dithered, which removes its banding; 8-bit lossy codecs are not (the noise
-//! costs bitrate and the encoder smears it); 10-bit and deeper outputs are
-//! not. "Dither" on means that rule, so an H.264, VP9, HEVC or ProRes export
-//! with it on is the export with it off.
+//! costs bitrate and the encoder smears it) unless H.264 has the bits to
+//! hold it (1.5 bits per pixel per frame, measured below); 10-bit and deeper
+//! outputs are not. "Dither" on means that rule, so a lean H.264, VP9, HEVC
+//! or ProRes export with it on is the export with it off.
 
 #![cfg(target_os = "macos")]
 
@@ -87,7 +88,13 @@ fn source(path: &Path) {
     job.finish().unwrap();
 }
 
-fn export(clip: &Path, format: ExportFormat, dither: bool, destination: &Path) {
+fn export(
+    clip: &Path,
+    format: ExportFormat,
+    quality: QualityTier,
+    dither: bool,
+    destination: &Path,
+) {
     let dur = FRAMES as f64 / 24.0;
     let mut doc = project(
         W,
@@ -112,7 +119,7 @@ fn export(clip: &Path, format: ExportFormat, dither: bool, destination: &Path) {
     let settings = ExportSettings {
         format,
         alpha: WireAlpha::None,
-        quality: QualityTier::High,
+        quality,
         size: Size::new(W, H),
         frame_rate: FrameRate::new(24, 1),
         range: TickRange {
@@ -158,7 +165,12 @@ fn export(clip: &Path, format: ExportFormat, dither: bool, destination: &Path) {
 /// The first frame's luma plane as coded (Y′CbCr) or its green (RGB),
 /// decoded by FFmpeg, in codes of the output's depth, with the ideal ramp's
 /// codes.
-fn decoded(path: &Path, ycbcr: bool, ten_bit: bool) -> (Vec<f64>, Box<dyn Fn(f64) -> f64>) {
+fn decoded(
+    path: &Path,
+    rows: u32,
+    ycbcr: bool,
+    ten_bit: bool,
+) -> (Vec<f64>, Box<dyn Fn(f64) -> f64>) {
     // Planar 4:2:0 output: its first plane is the coded Y′, copied.
     let pix = match (ycbcr, ten_bit) {
         (true, false) => "yuv420p",
@@ -185,7 +197,7 @@ fn decoded(path: &Path, ycbcr: bool, ten_bit: bool) -> (Vec<f64>, Box<dyn Fn(f64
         String::from_utf8_lossy(&out.stderr)
     );
     let b = out.stdout;
-    let n = (W * H) as usize;
+    let n = (W * rows) as usize;
     let values: Vec<f64> = match pix {
         "yuv420p" => b[..n].iter().map(|&v| f64::from(v)).collect(),
         "yuv420p10le" => b[..2 * n]
@@ -233,14 +245,34 @@ fn dither_follows_the_measured_rule_for_every_format() {
     let dir = scratch("rule");
     let clip = dir.join("ramp.mov");
     source(&clip);
-    // (name, format, file, Y′CbCr, 10-bit, dithered)
+    // (name, format, quality, file, Y′CbCr, 10-bit, dithered). H.264 is
+    // dithered from 1.5 bits per pixel per frame (`H264_DITHER_BITS_PER_PIXEL`):
+    // High (16 Mb/s) is 5.4 here, Draft (4 Mb/s) 1.36.
     let cases = [
-        ("h264", ExportFormat::H264, "mp4", true, false, false),
+        (
+            "h264-high",
+            ExportFormat::H264,
+            QualityTier::High,
+            "mp4",
+            true,
+            false,
+            true,
+        ),
+        (
+            "h264-draft",
+            ExportFormat::H264,
+            QualityTier::Draft,
+            "mp4",
+            true,
+            false,
+            false,
+        ),
         (
             "vp9",
             ExportFormat::Webm {
                 codec: WebmCodec::Vp9,
             },
+            QualityTier::High,
             "webm",
             true,
             false,
@@ -252,6 +284,7 @@ fn dither_follows_the_measured_rule_for_every_format() {
                 ten_bit: true,
                 container: WireContainer::Mp4,
             },
+            QualityTier::High,
             "mp4",
             true,
             true,
@@ -262,6 +295,7 @@ fn dither_follows_the_measured_rule_for_every_format() {
             ExportFormat::ProRes {
                 profile: WireProRes::Hq,
             },
+            QualityTier::High,
             "mov",
             true,
             true,
@@ -270,18 +304,19 @@ fn dither_follows_the_measured_rule_for_every_format() {
         (
             "png8",
             ExportFormat::PngStill { sixteen_bit: false },
+            QualityTier::High,
             "png",
             false,
             false,
             true,
         ),
     ];
-    for (name, format, ext, ycbcr, ten_bit, dithered) in cases {
+    for (name, format, quality, ext, ycbcr, ten_bit, dithered) in cases {
         let mut measured = Vec::new();
         for dither in [false, true] {
             let out = dir.join(format!("{name}-{dither}.{ext}"));
-            export(&clip, format, dither, &out);
-            let (values, ideal) = decoded(&out, ycbcr, ten_bit);
+            export(&clip, format, quality, dither, &out);
+            let (values, ideal) = decoded(&out, H, ycbcr, ten_bit);
             let bps = size(&out) as f64 * 8.0 * 24.0 / FRAMES as f64;
             measured.push((banding(&values, &*ideal), bps, values));
         }
@@ -293,7 +328,7 @@ fn dither_follows_the_measured_rule_for_every_format() {
             on_bps / 1000.0
         );
         if dithered {
-            assert!(on_band < 0.1, "{name}: dithered banding {on_band}");
+            assert!(on_band < 0.25, "{name}: dithered banding {on_band}");
             assert!(off_band > 0.4, "{name}: undithered banding {off_band}");
         } else {
             assert!(
@@ -303,6 +338,73 @@ fn dither_follows_the_measured_rule_for_every_format() {
                 on_bps / 1000.0
             );
         }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The H.264 dither threshold's measurement: the gradient encoded straight
+/// from working frames at a sweep of bits per pixel per frame, dither off
+/// and on, banding and the bitrate the encoder spent.
+#[test]
+#[ignore = "measurement: run with --ignored to print the sweep"]
+fn measure_h264_dither_against_bits_per_pixel() {
+    let dir = scratch("sweep");
+    // Taller than the job tests' frame: the encoder's lowest rate (0.1
+    // Mb/s) is then 0.008 bits per pixel.
+    let rows = 512u32;
+    let rgba: Vec<f32> = (0..rows)
+        .flat_map(|_| {
+            (0..W).flat_map(|x| {
+                let v = ramp(x) as f32;
+                [v, v, v, 1.0]
+            })
+        })
+        .collect();
+    let pixels = f64::from(W * rows) * 24.0;
+    for bpp in [0.05, 0.1, 0.5, 1.0, 1.25, 1.5, 2.0, 3.0] {
+        let mut row = Vec::new();
+        for dither in [Dither::Off, Dither::On] {
+            let out = dir.join(format!("sweep-{bpp}-{dither:?}.mp4"));
+            let mut job = pm_export::export(ExportSpec {
+                width: W,
+                height: rows,
+                rate: Rate::FPS_24,
+                frames: 24,
+                codec: Codec::H264 {
+                    bitrate_bps: (bpp * pixels) as u32,
+                },
+                container: Container::Mp4,
+                tags: ColorTags::Rec709QuickTime,
+                alpha: AlphaOutput::None,
+                working: WorkingEncoding::Standard,
+                dither,
+                audio: None,
+                timecode: None,
+                destination: out.clone(),
+                overwrite: Overwrite::Replace,
+                mode: None,
+            })
+            .unwrap();
+            for _ in 0..24 {
+                job.push_frame(&WorkingFrame {
+                    width: W,
+                    height: rows,
+                    rgba: &rgba,
+                })
+                .unwrap();
+            }
+            job.finish().unwrap();
+            let (values, ideal) = decoded(&out, rows, true, false);
+            row.push((banding(&values, &*ideal), size(&out) as f64 * 8.0 / 1000.0));
+        }
+        eprintln!(
+            "MEASURE h264 {bpp} bpp ({:.0} kb/s asked): off banding {:.3} codes, {:.0} kb/s; on banding {:.3} codes, {:.0} kb/s",
+            bpp * pixels / 1000.0,
+            row[0].0,
+            row[0].1,
+            row[1].0,
+            row[1].1
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

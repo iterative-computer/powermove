@@ -501,12 +501,20 @@ mod tests {
         assert!(sink.frames.iter().all(|f| f.format == InputFormat::V420));
         // Same pixels, different frame index: opt-in dither differs per frame.
         assert_ne!(sink.frames[0], sink.frames[1]);
-        // H.264 is not dithered by default (EXPORT-DITHER-1): same pixels, same input.
-        let mut p = Pipeline::new(spec(h264, 2), MemorySink::default()).unwrap();
+        // Lean H.264 is not dithered by default (4 Mb/s at 640 × 360, 25 fps:
+        // 0.69 bits per pixel, under `H264_DITHER_BITS_PER_PIXEL`): same
+        // pixels, same input.
+        let lean = ExportSpec {
+            width: 640,
+            height: 360,
+            ..spec(h264, 2)
+        };
+        let f = [0.3f32, 0.5, 0.7, 1.0].repeat(640 * 360);
+        let mut p = Pipeline::new(lean, MemorySink::default()).unwrap();
         for _ in 0..2 {
             p.push_frame(&WorkingFrame {
-                width: 32,
-                height: 16,
+                width: 640,
+                height: 360,
                 rgba: &f,
             })
             .unwrap();
