@@ -1291,14 +1291,32 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
         .is_some_and(is_uuid_v4)
 }
 
-/// Whether `destination` holds the file a save just installed: the same
-/// file (whose bytes were synced and read back before anything was moved),
-/// or, where a rename gives a file a new number, the same content.
-fn installed_at(destination: &Path, incoming: &FileStat, new_hash: &str) -> bool {
-    lstat_file(destination).ok().flatten().is_some_and(|now| {
-        now.same_identity(incoming)
-            || (now.size == incoming.size && hash_file(destination).is_ok_and(|h| h == new_hash))
-    })
+/// The file a save installed, held open from the moment it was confirmed
+/// under the project's name: what the receipt adopts, and what the save
+/// compares the name with once everything after the install is done.
+#[derive(Debug)]
+pub(crate) struct Installed {
+    pub file: File,
+    pub stat: FileStat,
+}
+
+/// The file `destination` names now, opened, if it is the file a save just
+/// installed: the same file (whose bytes were synced and read back before
+/// anything was moved), or, where a rename gives a file a new number (a
+/// network share), a file with exactly the new bytes, read through the very
+/// descriptor that is then held. A file that is neither is never taken for
+/// the save.
+fn installed_at(destination: &Path, incoming: &FileStat, new_hash: &str) -> Option<Installed> {
+    let named = lstat_file(destination).ok().flatten()?;
+    let file = File::open(destination).ok()?;
+    let stat = stat_of(&file.metadata().ok()?);
+    if !stat.same_identity(&named) {
+        return None;
+    }
+    let ours = stat.same_identity(incoming)
+        || (stat.size == incoming.size
+            && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash));
+    ours.then_some(Installed { file, stat })
 }
 
 /// After the install: the path must hold the file just installed, and the
@@ -1311,13 +1329,74 @@ fn confirm_installed(
     incoming: &FileStat,
     new_hash: &str,
     hooks: &PublishHooks,
-) -> Result<(), ProjectIoError> {
-    if !installed_at(destination, incoming, new_hash) {
-        return Err(ProjectIoError::ChangedOnDisk);
-    }
+) -> Result<Installed, ProjectIoError> {
+    let installed =
+        installed_at(destination, incoming, new_hash).ok_or(ProjectIoError::ChangedOnDisk)?;
     let dir = destination.parent().unwrap_or(Path::new("."));
     folder_sync_as(dir, tx.folder(), hooks).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
-    tx.step("installed")
+    tx.step("installed")?;
+    Ok(installed)
+}
+
+/// The last look, after everything the save did once its file was installed
+/// (judging, retaining and pruning earlier versions): the name must still
+/// hold the installed file. Another writer may have put a version there in
+/// the meantime; that version is never adopted with this save's hash. Then
+/// this save's bytes, read from the descriptor held since the install
+/// (which keeps them even where the name no longer does), are kept beside
+/// the project under a plain name, the record says so and knows the version
+/// now under the name, and the save fails ([`ProjectIoError::KeptBeside`]):
+/// the session keeps its work, its journal and its unsaved state.
+fn still_installed(
+    tx: &mut Transaction,
+    destination: &Path,
+    installed: Installed,
+    new_hash: &str,
+) -> Result<Installed, ProjectIoError> {
+    let now = installed
+        .file
+        .metadata()
+        .map(|m| stat_of(&m))
+        .unwrap_or(installed.stat);
+    if let Some(again) = installed_at(destination, &now, new_hash) {
+        return Ok(again);
+    }
+    let kept = (|| {
+        let (temp, mut out) = TempFile::create(destination).ok()?;
+        let mut copied = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut offset = 0u64;
+        loop {
+            #[cfg(unix)]
+            let n = {
+                use std::os::unix::fs::FileExt;
+                read_retry(|| installed.file.read_at(&mut buf, offset)).ok()?
+            };
+            #[cfg(not(unix))]
+            let n = 0;
+            if n == 0 {
+                break;
+            }
+            use std::io::Write;
+            out.write_all(&buf[..n]).ok()?;
+            copied.update(&buf[..n]);
+            offset += n as u64;
+        }
+        sync_file(&out).ok()?;
+        (hex(&copied.finalize()) == new_hash).then_some(())?;
+        tx.keep(temp.keep(), "recovered").ok()
+    })();
+    let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
+    // The record knows the version under the name now, so its notice is
+    // this project's at the next open.
+    let there = FileVersion::read(destination).ok().flatten();
+    tx.settled(there.as_ref().map(|v| v.hash.as_str()));
+    Err(match kept {
+        Some(kept) => ProjectIoError::KeptBeside { kept },
+        // Not even a copy could be written: the work is still the session's
+        // (unsaved, journalled), and the name holds the other version.
+        None => ProjectIoError::ChangedOnDisk,
+    })
 }
 
 /// Replaces the file at `destination` with the staged `temp` on a volume
@@ -1419,10 +1498,14 @@ fn replace_aside(
         }
     }
     // Not confirmed: the file moved aside stays where the record names it.
-    confirm_installed(tx, destination, incoming, new_hash, hooks).inspect_err(|_| tx.strand())?;
+    let installed = confirm_installed(tx, destination, incoming, new_hash, hooks)
+        .inspect_err(|_| tx.strand())?;
     // What was moved aside is read only now: the name was empty for no
     // longer than the two renames, and the new file is confirmed in place.
-    let mut published = Published::default();
+    let mut published = Published {
+        installed: Some(installed),
+        ..Default::default()
+    };
     if judged(&aside, expected, false) {
         published.backup = retire(aside, &expected.hash, tx, host);
     } else {
@@ -1471,6 +1554,9 @@ pub(crate) struct Published {
     /// machine until the file is read back.
     pub unproven: bool,
     pub local_copy: Option<PathBuf>,
+    /// The published file, held open since it was confirmed under the
+    /// name and confirmed again after the save's last step.
+    pub installed: Option<Installed>,
 }
 
 /// The system's way for programs to take turns at a file (on macOS,
@@ -1772,11 +1858,11 @@ fn publish_now(
             let confirmed = confirm_installed(&mut tx, destination, &incoming, new_hash, hooks);
             // The folder did not sync: the displaced file stays where the
             // record names it, for the next open or save to settle.
-            if let Err(ProjectIoError::Finalize(_)) = &confirmed {
+            if let Err(e @ ProjectIoError::Finalize(_)) = confirmed {
                 let _ = temp.keep();
                 tx.strand();
                 tx.finish();
-                return confirmed.map(|()| published);
+                return Err(e);
             }
             // `temp.path` names the displaced file: the version we were
             // allowed to replace (retained), or one to keep beside.
@@ -1787,19 +1873,22 @@ fn publish_now(
                 published.displaced = Some(kept.unwrap_or_else(|private| private));
             }
             // The path no longer holds the file just published.
-            if confirmed.is_err() {
-                let _ = sync_directory(dir);
-                tx.settled(None);
-                tx.finish();
-                return Err(match published.displaced {
-                    Some(recovery_path) => ProjectIoError::Conflict {
-                        message: "The project file was replaced by something else while it was \
-                                  being saved."
-                            .into(),
-                        recovery_path,
-                    },
-                    None => ProjectIoError::ChangedOnDisk,
-                });
+            match confirmed {
+                Ok(installed) => published.installed = Some(installed),
+                Err(_) => {
+                    let _ = sync_directory(dir);
+                    tx.settled(None);
+                    tx.finish();
+                    return Err(match published.displaced {
+                        Some(recovery_path) => ProjectIoError::Conflict {
+                            message: "The project file was replaced by something else while it \
+                                      was being saved."
+                                .into(),
+                            recovery_path,
+                        },
+                        None => ProjectIoError::ChangedOnDisk,
+                    });
+                }
             }
         }
         Some(expected) => {
@@ -1839,9 +1928,12 @@ fn publish_now(
                     return Err(e);
                 }
             }
-            if let Err(e) = confirm_installed(&mut tx, destination, &incoming, new_hash, hooks) {
-                tx.finish();
-                return Err(e);
+            match confirm_installed(&mut tx, destination, &incoming, new_hash, hooks) {
+                Ok(installed) => published.installed = Some(installed),
+                Err(e) => {
+                    tx.finish();
+                    return Err(e);
+                }
             }
         }
     }
@@ -1863,6 +1955,21 @@ fn publish_now(
             }
         }
     }
+    // Only now, after everything done since the install, is the name looked
+    // at for the last time: what the receipt adopts is the file found here.
+    let installed = published
+        .installed
+        .take()
+        .ok_or(ProjectIoError::ChangedOnDisk)
+        .and_then(|installed| still_installed(&mut tx, destination, installed, new_hash));
+    let installed = match installed {
+        Ok(installed) => installed,
+        Err(e) => {
+            tx.finish();
+            return Err(e);
+        }
+    };
+    published.installed = Some(installed);
     if let Some(expected) = expected {
         transaction::carry_notices(destination, &tx, &expected.hash, new_hash);
     }

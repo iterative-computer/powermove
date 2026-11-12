@@ -936,24 +936,21 @@ impl SavePlan {
                 }
             }
         }
-        let published = published?;
-        let backup = published.backup.or(backup);
+        let mut published = published?;
+        let backup = published.backup.take().or(backup);
 
-        let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
-        // Held from here on, so the session can follow this file if it is
-        // renamed or moved (only if the path still names what was published).
-        let held = File::open(dest)
-            .ok()
-            .filter(|f| {
-                f.metadata()
-                    .is_ok_and(|m| durable::stat_of(&m).same_identity(&stat))
-            })
-            .map(durable::HeldFile::new);
+        // The file the save installed and found under the name after its
+        // last step, held from here on, so the session can follow it if it
+        // is renamed or moved. Never whatever the name holds by then.
+        let installed = published
+            .installed
+            .take()
+            .ok_or(ProjectIoError::ChangedOnDisk)?;
         let version = Arc::new(FileVersion {
             path: dest.clone(),
-            stat,
+            stat: installed.stat,
             hash: file_hash.clone(),
-            held,
+            held: Some(durable::HeldFile::new(installed.file)),
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
