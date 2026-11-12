@@ -521,15 +521,17 @@ pub fn down_mix(bus: &[Vec<f32>], out: &mut [Vec<f32>], at: usize, n: usize) {
 
 /// [`down_mix`] of `n` channels as a matrix (rows L, R).
 pub fn down_mix_matrix(n: usize) -> Vec<Vec<f32>> {
-    let mut m = vec![vec![0f32; n]; 2];
-    for j in 0..n {
-        let bus: Vec<Vec<f32>> = (0..n).map(|c| vec![f32::from(c == j)]).collect();
-        let mut out = vec![vec![0f32; 1]; 2];
-        down_mix(&bus, &mut out, 0, 1);
-        m[0][j] = out[0][0];
-        m[1][j] = out[1][0];
-    }
-    m
+    let columns: Vec<[f32; 2]> = (0..n)
+        .map(|j| {
+            let bus: Vec<Vec<f32>> = (0..n).map(|c| vec![f32::from(c == j)]).collect();
+            let mut out = vec![vec![0f32; 1]; 2];
+            down_mix(&bus, &mut out, 0, 1);
+            [out[0][0], out[1][0]]
+        })
+        .collect();
+    (0..2)
+        .map(|side| columns.iter().map(|c| c[side]).collect())
+        .collect()
 }
 
 /// Where a stereo signal goes on a bus that `fold` (rows L, R) folds to
