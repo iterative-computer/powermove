@@ -210,8 +210,11 @@ the hue that holds 4.5:1 on the body under them (`under_label`). A 1 px rim of
 light in the strip's hue runs inside the edge, brightest along the top and
 round its corners, faint down the sides, with no outline; corners are
 continuous and about a quarter of the strip's height (`strip_radius`); an even
-`strip_gap` parts neighbours; the ruler's grid reads through the body
-(`grid`). A waveform is a soft filled shape in a paler tone standing on the
+`strip_gap` parts neighbours; the ruler's grid reads through the body as a
+top-lit highlight: brightest at the strip's top edge and gone by the middle
+of its height (`grid`, `GRID_FADE`), with the faint full-height line showing
+only between rows. The foot gathers as much light as the hue allows while a
+label still holds 4.5:1 under a name (a pale layer colour takes less). A waveform is a soft filled shape in a paler tone standing on the
 foot; silence draws nothing. A collapsed layer's keys are small marks in the
 foot, under the name. Hover brightens and whitens the rim and shows the trim
 grip (`trim_grip`) inside the nearer edge, with the name starting clear of it.
