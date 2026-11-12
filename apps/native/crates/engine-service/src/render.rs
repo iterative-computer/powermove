@@ -2062,3 +2062,83 @@ mod paused_media_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod viewer_output_tests {
+    use super::*;
+    use crate::color::Mastering;
+    /// An SDR project's view shows its delivery: a white solid pushed to
+    /// twice white (one stop of exposure) shows as white, as the SDR file
+    /// holds it; the EDR view keeps the light above white.
+    #[test]
+    fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
+        let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 32.),
+            ("position.y", 18.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let exposure = ch(1.);
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"s","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":64,"h":36}},
+              "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{exposure}}}}}]}}],
+            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 64,
+            height: 36,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut shown = |mastering| {
+            engine.mastering = mastering;
+            let sub = engine
+                .frame(
+                    &scene,
+                    FrameSpec::exact(Ticks::ZERO, output),
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            sub.pixels()[18 * 64 + 32]
+        };
+        let edr = shown(Mastering::Edr);
+        assert!(
+            edr.iter().all(|c| *c > 1.5),
+            "EDR keeps light above white: {edr:?}"
+        );
+        let sdr = shown(Mastering::LinearP3);
+        assert!(
+            sdr.iter().all(|c| (*c - 1.).abs() < 0.002),
+            "the SDR view shows white: {sdr:?}"
+        );
+    }
+}
