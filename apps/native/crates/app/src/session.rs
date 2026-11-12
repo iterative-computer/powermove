@@ -136,9 +136,14 @@ pub struct Controller {
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
+    /// The project and revision Home's poster was last written from.
+    pub poster_revision: Option<((String, u64), std::time::Instant)>,
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// A change could not be written to the recovery data and no save has
+    /// succeeded since: said in a sheet once, and in the subtitle until then.
+    unprotected: bool,
     /// What this window's close (or the app's quit) is waiting for, once
     /// the person has answered: shown in the status line over any other
     /// message, and named by a second Quit's prompt.
@@ -173,8 +178,9 @@ pub struct Controller {
 /// How long arrow keys rest before a run of nudges becomes its undo step.
 const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
 
-/// Why a project opened as a copy, in user language (never the enum name).
-/// A banner with a lock badge replaces this status copy in P3.
+/// Why a project opened as a copy, in user language (never the enum name):
+/// said when it opens. The window's subtitle keeps saying it
+/// ([`copy_subtitle`]).
 pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static str> {
     use pm_kernel::locks::{CopyReason::*, OpenDecision};
     let OpenDecision::AsCopy(reason) = decision else {
@@ -184,14 +190,107 @@ pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static
         ForeignLibrary => "Opened as a copy because the project belongs to another library.",
         ChangedOnDisk => "Opened as a copy because the file changed on disk.",
         OfflineFile => "Opened as a copy because the file isn’t downloaded.",
-        CloudFolder => "Opened as a copy because the file is in a syncing folder.",
-        ReadOnly => "Opened as a copy because the file is read-only.",
-        OlderElectron => "Opened as a copy because an earlier version of Powermove saved it.",
-        Locked => "Opened as a copy because the project is open somewhere else.",
+        ReadOnly => {
+            "This is a copy: the file is read-only, so changes are kept in your projects. Use Save As to write a file."
+        }
+        OlderElectron => {
+            "This is a copy: the original Powermove app is running, so changes are kept in your projects. Use Save As to write a file."
+        }
+        Locked => {
+            "This is a copy: the file is open somewhere else, so changes are kept in your projects. Use Save As to write a file."
+        }
         UncertainLock => {
-            "Opened as a copy because Powermove couldn’t confirm the project isn’t open elsewhere."
+            "This is a copy: Powermove couldn’t confirm the file isn’t open elsewhere, so changes are kept in your projects. Use Save As to write a file."
         }
     })
+}
+
+/// The window subtitle of a project: its save state, and for a copy that
+/// stands in for a file (the entry's `copyOf`), which file and why, for as
+/// long as the window shows it.
+pub fn copy_subtitle(session: Option<&pm_model::Value>, state: &'static str) -> String {
+    let copy = session.and_then(|meta| meta.get("copyOf"));
+    let Some(file) = copy
+        .and_then(|c| c.get("path"))
+        .and_then(pm_model::Value::as_str)
+        .and_then(|path| std::path::Path::new(path).file_name())
+    else {
+        return state.to_owned();
+    };
+    let why = match copy
+        .and_then(|c| c.get("reason"))
+        .and_then(pm_model::Value::as_str)
+    {
+        Some("ReadOnly") => "the file is read-only",
+        Some("OlderElectron") => "the original app is running",
+        Some("Locked") => "the file is open elsewhere",
+        _ => "the file couldn’t be locked",
+    };
+    let copy = format!("Copy of {} ({why})", file.to_string_lossy());
+    if state.is_empty() {
+        copy
+    } else {
+        format!("{copy} — {state}")
+    }
+}
+
+/// The offer when a file that opens in place has copies in the library that
+/// hold work for it (earlier builds opened files in syncing folders as
+/// copies named "… — Native"). `true` opens the copy.
+fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, which) = match copies {
+        [one] => (
+            format!("Your projects hold a copy of “{file}” with work that isn’t in this file."),
+            format!("“{one}”"),
+        ),
+        [first, rest @ ..] => (
+            format!("Your projects hold copies of “{file}” with work that isn’t in this file."),
+            format!("“{first}” and {} more", rest.len()),
+        ),
+        [] => (String::new(), String::new()),
+    };
+    Alert::new(
+        message,
+        format!(
+            "Powermove opened this file as a copy before and kept your changes there instead of in the file: {which}. The file now opens and saves in place. The copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Open the Copy", true).default(),
+            Button::new("Keep Working in This File", false).key(Key::Escape),
+        ],
+    )
+}
+/// Said once when a file in a folder a sync client keeps opens in place.
+const SYNCED_FOLDER: &str = "In a synced folder: a change made on another computer is noticed when you save, and both versions are kept.";
+
+/// Whether a background recovery-data failure for `project` leaves the work
+/// in the window showing `shown` unprotected.
+fn unprotects(project: &str, shown: Option<&str>) -> bool {
+    shown == Some(project)
+}
+
+/// Said when a file opened as a new copy although the library holds a copy
+/// made under its name: that copy was made of another file (this one
+/// replaced it, or changed somewhere else since), so it was not opened in
+/// its place. `true` opens the earlier copy.
+fn earlier_copy_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let which = match copies {
+        [one] => format!("“{one}”"),
+        [first, rest @ ..] => format!("“{first}” and {} more", rest.len()),
+        [] => String::new(),
+    };
+    Alert::new(
+        format!("“{file}” isn’t the file your earlier copy was made from."),
+        format!(
+            "A file with this name opened as a copy before, and your changes to it are in your projects: {which}. The file here now is a different one (it was replaced, or changed somewhere else), so it opened as a new copy of its own. The earlier copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Keep This One", false).default().cancel(),
+            Button::new("Open the Earlier Copy", true),
+        ],
+    )
 }
 
 pub struct Bridge(pub Entity<Controller>);
@@ -316,6 +415,23 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
 }
+/// The size the editor lays a composition out at: its stored size, held to
+/// at least one pixel a side. A file needs only finite numbers to open, so a
+/// stored 0 (or a negative) is possible; fit, zoom and overlay math divide
+/// by this. The stored value is not rewritten: it changes only when the
+/// person edits the composition's settings.
+fn composition_size(w: f64, h: f64) -> [f64; 2] {
+    let side = |v: f64| if v.is_finite() { v.max(1.) } else { 1. };
+    [side(w), side(h)]
+}
+/// Where the playhead of a composition being left is: the viewer's clock, or,
+/// while a viewer bound a moment ago has not reported one yet, the time last
+/// asked for (written to the transport state by every seek). Reading only the
+/// clock left a composition at 0 s when the person came back to it and left
+/// again before its first frame.
+fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
+    clock.or(asked).unwrap_or(0.)
+}
 impl Controller {
     /// A passing status note (v1's status toast): shown in the status line,
     /// then the line returns to Saved/Edited unless something replaced it.
@@ -418,16 +534,25 @@ impl Controller {
                     .update(cx, |v, cx| {
                         for e in events {
                             match e {
-                                KernelEvent::Durability { message } => {
-                                    v.message = format!("Recovery warning: {message}");
-                                    v.errors.borrow_mut().push("Recovery", &message);
+                                // A change acknowledged earlier could not be made
+                                // durable afterwards: the window showing that
+                                // project says so exactly as for a change
+                                // refused at the time (sheet, subtitle until a
+                                // save succeeds, Error Log row).
+                                KernelEvent::Durability { project, message } => {
+                                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                                    if unprotects(&project, shown) {
+                                        v.notice(pm_kernel::Notice::NotDurable { message }, cx);
+                                    }
                                 }
                                 KernelEvent::Fault { message, .. } => {
                                     v.message = "Something went wrong; see the Error Log.".into();
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
-                                KernelEvent::Notice { notice, .. } => {
-                                    v.message = format!("Kernel notice: {notice:?}")
+                                KernelEvent::Notice { project, notice }
+                                    if v.session.as_ref().is_some_and(|s| s.project == project) =>
+                                {
+                                    v.notice(notice, cx);
                                 }
                                 _ => {}
                             }
@@ -541,8 +666,10 @@ impl Controller {
             reopening_stopped: false,
             mcp,
             job_overrides: Default::default(),
+            poster_revision: None,
             window_key: 0,
             close_pending: false,
+            unprotected: false,
             closing_note: None,
             close_window: None,
             close_operation: None,
@@ -573,6 +700,21 @@ impl Controller {
             .detach();
         match opening {
             Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
+            Some(crate::entry::Pending::Library(project)) => self.open_named(
+                SessionSource::Library {
+                    profile: self.profile.clone(),
+                    project,
+                },
+                None,
+                cx,
+            ),
+            Some(crate::entry::Pending::Session(session)) => {
+                // Gone before this window took it: nothing to show.
+                if self.kernel.published(&session.project).is_some() {
+                    self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+                    self.mcp.activate_window(self.window_key);
+                }
+            }
             Some(crate::entry::Pending::Adopt { reply, name, file }) => {
                 self.adopt_reply(*reply, name, file, cx)
             }
@@ -657,7 +799,13 @@ impl Controller {
                 self.composition_views.insert(
                     (old.snapshot.doc_id, id),
                     CompositionView {
-                        time: self.time(),
+                        time: left_at(
+                            self.viewer
+                                .as_ref()
+                                .and_then(|v| v.status().clock)
+                                .map(|c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64),
+                            old.ui_state.transport.get("time").and_then(|v| v.as_f64()),
+                        ),
                         timeline: old.ui_state.timeline.clone(),
                         viewer: old.ui_state.viewer.clone(),
                     },
@@ -745,7 +893,14 @@ impl Controller {
             .unwrap_or("Untitled");
         self.host.borrow().set_document_metadata(
             title,
-            pm_shell::document_subtitle(p.dirty, saving),
+            &copy_subtitle(
+                p.session.as_ref().map(|s| &s.metadata),
+                if self.unprotected && !saving {
+                    "Not protected: save now"
+                } else {
+                    pm_shell::document_subtitle(p.dirty, saving)
+                },
+            ),
             p.dirty,
             self.path.as_deref(),
         );
@@ -855,7 +1010,7 @@ impl Controller {
                             v.message = e.to_string();
                         }
                     }
-                    other => v.message = format!("Edit failed: {other:?}"),
+                    other => v.edit_failed(other.and_then(Result::err)),
                 }
                 v.refresh(cx);
             });
@@ -1044,7 +1199,7 @@ impl Controller {
                         v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
                     }
                 }
-                other => v.message = format!("Edit failed: {other:?}"),
+                other => v.edit_failed(other.and_then(Result::err)),
             });
         })
         .detach();
@@ -1074,15 +1229,12 @@ impl Controller {
     }
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
         let mut target = None;
-        if let Some(v) = &self.viewer {
-            let frame = self
-                .rate
-                .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
-            if let Ok(time) = self.rate.frame_start(frame) {
-                target = Some(time as f64 / TICKS_PER_SECOND as f64);
-                if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
-                    self.message = e.to_string();
-                }
+        if let Some(v) = &self.viewer
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration))
+        {
+            target = Some(time as f64 / TICKS_PER_SECOND as f64);
+            if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                self.message = e.to_string();
             }
         }
         // The viewer's clock lands later (always so for a viewer bound a
@@ -1154,6 +1306,19 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        // A window's project is never replaced by an open: the file joins
+        // the window's tabs and the project shown stays as it is.
+        if self.session.is_some() {
+            match source {
+                SessionSource::File(path) => {
+                    let leader = self.shell_window_id(cx);
+                    crate::entry::open_in_new_tab(crate::entry::Pending::File(path), leader, cx);
+                }
+                _ => self.message = "Close this project before opening another here.".into(),
+            }
+            cx.notify();
+            return;
+        }
         let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try opening again when it finishes.".into();
@@ -1197,6 +1362,19 @@ impl Controller {
         file: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        // This window shows a project (or is opening one): the opened one
+        // joins its tabs, and Home gives way to the project behind it.
+        if self.session.is_some() || self.opening {
+            let leader = self.shell_window_id(cx);
+            let reply = Box::new(reply);
+            crate::entry::open_in_new_tab(
+                crate::entry::Pending::Adopt { reply, name, file },
+                leader,
+                cx,
+            );
+            self.hide_home(cx);
+            return;
+        }
         let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try opening again when it finishes.".into();
@@ -1227,8 +1405,9 @@ impl Controller {
         pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
         cx: &mut Context<Self>,
     ) {
-        // Switching is explicitly saved through the session API; never drop dirty work.
-        let old = self.session.clone();
+        // Only a window without a project opens one (`open_named`,
+        // `adopt_reply`): nothing is closed or saved to make room.
+        debug_assert!(self.session.is_none());
         let kernel = self.kernel.clone();
         let after_stop = std::mem::take(&mut self.reopening_stopped);
         // Commands still waiting on an earlier open never reach this project.
@@ -1287,14 +1466,6 @@ impl Controller {
                     }
                 }
             }
-            let previous_save_failed = if let Some(Ok(ShellReply::Opened { session, .. })) = &result
-            {
-                crate::lifecycle::close_replaced(&kernel, old, session)
-                    .await
-                    .is_err()
-            } else {
-                false
-            };
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
@@ -1322,13 +1493,16 @@ impl Controller {
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
+                        let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
-                        if previous_save_failed {
-                            v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
-                            v.errors.borrow_mut().push("Project", &v.message);
-                        }
                         v.load_recent(cx);
+                        v.offer_stranded_copies(cx);
+                        // No lock reaches another computer through a sync
+                        // client: say what does guard the file.
+                        if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {
+                            v.message = SYNCED_FOLDER.into();
+                        }
                     }
                     // Already open in a window: that window comes forward.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
@@ -1343,10 +1517,81 @@ impl Controller {
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
-                    other => v.message = format!("Open failed: {other:?}"),
+                    other => {
+                        v.message = format!("“{name}” couldn’t be opened.");
+                        v.errors.borrow_mut().push(
+                            "Project",
+                            &format!(
+                                "“{name}” couldn’t be opened: {}",
+                                crate::lifecycle::reason(other)
+                            ),
+                        );
+                    }
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+    /// A file that opened in place: if the library holds copies with work
+    /// for it that the person hasn't been told about, say so once and offer
+    /// the newest (it opens as a tab; the file stays open here). A file that
+    /// opened as a new copy because an earlier copy under its name was made
+    /// of another file is told about that earlier copy the same way.
+    fn offer_stranded_copies(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::CopiesOf(session));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Copies(rows))) = asked.await else {
+                return;
+            };
+            let field = |row: &pm_model::Value, key: &str| {
+                row.get(key).and_then(pm_model::Value::as_str).map(str::to_owned)
+            };
+            let names: Vec<String> = rows.iter().filter_map(|r| field(r, "name")).collect();
+            let Some(newest) = rows.first().and_then(|r| field(r, "id")) else {
+                return;
+            };
+            let different = rows.iter().any(|r| r.get("different").is_some());
+            let named = rows.first().and_then(|r| field(r, "file"));
+            let Ok(answer) = this.update(cx, |v, _| {
+                let file = named
+                    .or_else(|| {
+                        v.path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_default();
+                if different {
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!(
+                            "“{file}” isn’t the file an earlier copy was made from. That copy is still in your projects: “{}”.",
+                            names.join("”, “")
+                        ),
+                    );
+                    return earlier_copy_alert(&file, &names).sheet(&v.host.borrow().window);
+                }
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!(
+                        "Your projects hold a copy of “{file}” with work that isn’t in the file: “{}”.",
+                        names.join("”, “")
+                    ),
+                );
+                stranded_copies_alert(&file, &names).sheet(&v.host.borrow().window)
+            }) else {
+                return;
+            };
+            if answer.recv().await.ok().flatten() == Some(true) {
+                let _ = this.update(cx, |v, cx| {
+                    let leader = v.shell_window_id(cx);
+                    crate::entry::open_in_new_tab(crate::entry::Pending::Library(newest), leader, cx);
+                });
+            }
         })
         .detach();
     }
@@ -1394,12 +1639,12 @@ impl Controller {
             gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
             return;
         }
-        if let Some(window) = cx
-            .windows()
-            .into_iter()
-            .find(|w| w.window_id().as_u64() == key)
-        {
-            let _ = window.update(cx, |_, w, _| w.activate());
+        // Only while the app is active, as for this window: activating the
+        // window activates the app, which would bring a background app (a
+        // launch restoring its windows that is also handed one of their
+        // files, an agent's open) in front of the one the person is using.
+        if let Some(editor) = crate::entry::editor(key, cx) {
+            gpui_macos::child_window::raise_if_active(&editor.read(cx).host.borrow().window);
         }
     }
     /// An internal error stopped this window's project: the kernel takes no
@@ -1540,16 +1785,23 @@ impl Controller {
         self.mcp.bind_window(self.window_key, self.session.clone());
     }
     fn bind_composition(&mut self) {
-        if let Some(viewer) = self.viewer.take() {
-            viewer.retire();
-        }
+        // The viewer before this one changes places with the next in one
+        // step (`replace_viewer`): retired first, its document would be
+        // without a view for a moment, and the engine closes a document
+        // without views (its override answers, caches and programs go).
+        let old = self.viewer.take();
+        let retire = |old: Option<Viewer>| {
+            if let Some(viewer) = old {
+                viewer.retire();
+            }
+        };
         let Some(p) = self.published.clone() else {
-            return;
+            return retire(old);
         };
         let comp = p.snapshot.render_comp();
         // A document without a root has nothing to view.
         let Some(root) = p.snapshot.document.root() else {
-            return;
+            return retire(old);
         };
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
         let number = |key: &str, default| {
@@ -1559,14 +1811,14 @@ impl Controller {
                 .unwrap_or(default)
         };
         self.duration = number("dur", 1.).max(0.001);
-        self.dimensions = [number("w", 1920.), number("h", 1080.)];
+        self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
             .and_then(crate::node_string)
             .and_then(panels::parse_background);
-        match self.engine.viewer(ViewerConfig {
+        let config = ViewerConfig {
             snapshot: p.snapshot.clone(),
             composition: comp,
             media,
@@ -1581,7 +1833,12 @@ impl Controller {
             rate: self.rate,
             end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
             audio: true,
-        }) {
+        };
+        let placed = match &old {
+            Some(old) => self.engine.replace_viewer(old, config),
+            None => self.engine.viewer(config),
+        };
+        match placed {
             Ok(viewer) => {
                 // The editor's viewer drags a slow project at reduced resolution.
                 let _ = viewer.adapt_drags(true);
@@ -1589,13 +1846,17 @@ impl Controller {
                 self.skimming.at = None;
                 self.viewer = Some(viewer)
             }
-            Err(e) => self.message = format!("Viewer failed: {e}"),
+            Err(e) => {
+                retire(old);
+                self.message = format!("Viewer failed: {e}")
+            }
         }
         self.apply_extension_resources();
     }
-    /// MCP placed a project in this window (open_project, create_project): show
-    /// it, then close the one shown before, as opening from the window does.
-    /// Other windows' projects are theirs; this never follows them.
+    /// MCP placed a project in this window (open_project, create_project): an
+    /// empty window shows it; a window that shows a project keeps it and the
+    /// placed one joins its tabs, as opening from the window does. Other
+    /// windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
         if self.opening || self.close_pending {
             return;
@@ -1612,28 +1873,14 @@ impl Controller {
             self.mcp.bind_window(self.window_key, self.session.clone());
             return;
         }
-        let old = self.session.clone();
-        self.adopt(
-            session.clone(),
-            pm_kernel::locks::OpenDecision::Writable,
-            false,
-            cx,
-        );
-        let old = old.filter(|old| self.mcp.session_of(&old.project).is_none());
-        let kernel = self.kernel.clone();
-        cx.spawn(async move |this, cx| {
-            if crate::lifecycle::close_replaced(&kernel, old, &session)
-                .await
-                .is_err()
-            {
-                let _ = this.update(cx, |v, cx| {
-                    v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
-                    v.errors.borrow_mut().push("Project", &v.message);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        if self.session.is_some() {
+            // This window still shows its own project.
+            self.mcp.bind_window(self.window_key, self.session.clone());
+            let leader = self.shell_window_id(cx);
+            crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            return;
+        }
+        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
         cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {
@@ -1707,10 +1954,13 @@ impl Controller {
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 let close = v.close_after_save.take();
+                // A save that kept another version beside the file has
+                // something to say first: the window stays.
                 let saved = matches!(
                     &result,
                     Some(Ok(ShellReply::Saved {
                         recovery_copy: None,
+                        displaced: None,
                         ..
                     }))
                 );
@@ -1718,17 +1968,23 @@ impl Controller {
                     Some(Ok(ShellReply::Saved {
                         session,
                         recovery_copy,
+                        displaced,
                     })) => {
                         v.session = Some(session);
                         if as_path.is_some() {
                             v.path = as_path;
                         }
+                        v.unprotected = false;
                         v.message = recovery_copy.map_or(String::new(), |_| {
-                            "Saved to a recovery copy; original was not overwritten".into()
+                            "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
                         v.load_recent(cx);
+                        if let Some(kept) = displaced {
+                            v.other_version_kept(kept, cx);
+                        }
+                        v.write_poster(cx);
                     }
-                    other => v.message = format!("Save failed; recovery data retained: {other:?}"),
+                    other => v.save_failed(&crate::lifecycle::reason(other), cx),
                 }
                 v.refresh(cx);
                 if let Some(intent) = close {
@@ -1741,6 +1997,136 @@ impl Controller {
             });
         })
         .detach();
+    }
+    fn project_name(&self) -> String {
+        self.published
+            .as_ref()
+            .and_then(|p| p.snapshot.document.root())
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned()
+    }
+    /// The save went through, and a version that arrived meanwhile was kept
+    /// beside the file: a sheet that names it, a way to it, an Error Log row.
+    fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, other_version_kept};
+        let name = self.project_name();
+        let file_name = |path: &std::path::Path| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let file = self.path.as_deref().map(file_name).unwrap_or_default();
+        self.message = format!("“{name}” was saved. Another version of its file was kept.");
+        self.errors.borrow_mut().push(
+            "Save",
+            &format!(
+                "While “{name}” was being saved, another version of its file arrived. It was kept at {}",
+                kept.display()
+            ),
+        );
+        let answer =
+            other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
+        cx.spawn(async move |_, _| {
+            if answer.recv().await.ok().flatten() == Some(Action::ShowInFinder) {
+                platform::reveal(&kept);
+            }
+        })
+        .detach();
+    }
+    /// A save that did not happen is a sheet in plain words (S5): Save As
+    /// and Show in Finder are one press away, and the kernel's own account
+    /// is an Error Log row, never copy.
+    fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, WriteFailure, save_failed};
+        let name = self.project_name();
+        self.message = format!("“{name}” couldn’t be saved.");
+        self.errors
+            .borrow_mut()
+            .push("Save", &format!("“{name}” couldn’t be saved: {detail}"));
+        let path = self.path.clone().filter(|p| p.exists());
+        let answer = save_failed(&name, WriteFailure::of(detail), path.is_some())
+            .sheet(&self.host.borrow().window);
+        cx.spawn(
+            async move |this, cx| match answer.recv().await.ok().flatten() {
+                Some(Action::SaveAs) => {
+                    let _ = this.update(cx, |v, cx| v.save_dialog(cx));
+                }
+                Some(Action::ShowInFinder) => {
+                    if let Some(path) = path {
+                        platform::reveal(&path);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+    }
+    /// An edit the kernel refused or could not answer: plain words in the
+    /// status bar, the kernel's account in the Error Log.
+    fn edit_failed(&mut self, error: Option<KernelFailure>) {
+        self.message = "That change couldn’t be made.".into();
+        let detail =
+            error.map_or_else(|| "the project didn’t answer".to_owned(), |e| e.to_string());
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("A change couldn’t be made: {detail}"));
+    }
+    /// What the kernel says about this window's project, in the person's
+    /// words. A change that could not be written to the recovery data is the
+    /// one moment unsaved work isn't protected: a sheet, an Error Log row,
+    /// and the subtitle until a save succeeds.
+    fn notice(&mut self, notice: pm_kernel::Notice, cx: &mut Context<Self>) {
+        use pm_kernel::Notice::*;
+        match notice {
+            NotDurable { message } => {
+                use crate::surfaces::documents::{Action, WriteFailure, not_protected};
+                let name = self.project_name();
+                self.errors.borrow_mut().push(
+                    "Recovery",
+                    &format!(
+                        "A change to “{name}” couldn’t be written to its recovery data: {message}"
+                    ),
+                );
+                self.message =
+                    format!("Powermove couldn’t protect your latest change to “{name}”. Save now.");
+                if std::mem::replace(&mut self.unprotected, true) {
+                    // Already said, and still showing in the subtitle.
+                    return;
+                }
+                let answer = not_protected(&name, WriteFailure::of(&message))
+                    .sheet(&self.host.borrow().window);
+                cx.spawn(async move |this, cx| {
+                    if answer.recv().await.ok().flatten() == Some(Action::Save) {
+                        let _ = this.update(cx, |v, cx| v.save(None, cx));
+                    }
+                })
+                .detach();
+            }
+            CommitWithNotice { label, reason } => {
+                self.message =
+                    format!("“{label}” was kept: cancelling it would have removed later work.");
+                self.errors
+                    .borrow_mut()
+                    .push("Project", &format!("“{label}” was kept: {reason}"));
+            }
+            ForeignSplit { label, writes } => {
+                self.message = format!(
+                    "“{label}” was cancelled. {writes} change{} made meanwhile by something else {} kept as a separate undo step.",
+                    if writes == 1 { "" } else { "s" },
+                    if writes == 1 { "was" } else { "were" }
+                );
+            }
+            Sealed { label, .. } => {
+                self.message = format!("“{label}” was finished for an extension that stopped.");
+            }
+            Barrier { label } => {
+                self.message = format!(
+                    "Undo stopped at “{label}”: the extension that made it is no longer running."
+                );
+            }
+        }
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         let rx = platform::paths(&self.host.borrow().window, true);
@@ -2241,15 +2627,111 @@ pub(crate) fn sync_render_storage(
     std::thread::Builder::new()
         .name("pm-render-storage".into())
         .spawn(move || {
+            disk.set_content_named(Some(pro_media.objects().to_owned()));
             let _ = disk.set_storage(pro_media.render_frames());
         })
         .ok();
+}
+/// The start tick of the frame on screen at `seconds`. Seconds round to the
+/// nearest tick, never truncate: a frame start written in seconds is often a
+/// hair under its tick (frame 247 at 30 fps is 5,809,439,999.99… ticks), and
+/// truncating lands on the frame before.
+pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
+    let tick = (seconds * TICKS_PER_SECOND as f64).round() as i64;
+    rate.frame_start(rate.frame_of(tick)).ok()
 }
 
 #[cfg(test)]
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn a_typed_timecode_lands_on_its_frame() {
+        use pm_time::Rate;
+        for rate in [Rate::FPS_30, Rate::FPS_29_97, Rate::FPS_24, Rate::FPS_59_94] {
+            let fps = rate.num() as f64 / rate.den() as f64;
+            for frame in 0..2000 {
+                let typed = format!(
+                    "00:{:02}:{:02}:{:02}",
+                    frame / 30 / 60,
+                    frame / 30 % 60,
+                    frame % 30
+                );
+                let nominal = fps.round();
+                let n = (frame / 30) as f64 * nominal + (frame % 30) as f64;
+                let seconds = pm_panel_timeline::v4::parse_timecode(&typed, fps).unwrap();
+                assert_eq!(
+                    frame_start_at(rate, seconds),
+                    rate.frame_start(n as i64).ok(),
+                    "{typed} at {fps} fps"
+                );
+            }
+        }
+    }
+    #[::core::prelude::v1::test]
+    fn a_copy_says_what_it_is_for_as_long_as_its_window_shows_it() {
+        let meta = pm_model::json::parse(
+            r#"{"copyOf":{"path":"/Volumes/Share/job/cut.pmv","reason":"ReadOnly"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            copy_subtitle(Some(&meta), ""),
+            "Copy of cut.pmv (the file is read-only)"
+        );
+        assert_eq!(
+            copy_subtitle(Some(&meta), "Edited"),
+            "Copy of cut.pmv (the file is read-only) — Edited"
+        );
+        let plain = pm_model::json::parse("{}").unwrap();
+        assert_eq!(copy_subtitle(Some(&plain), "Edited"), "Edited");
+        assert_eq!(copy_subtitle(None, ""), "");
+    }
+    #[::core::prelude::v1::test]
+    fn a_file_with_stranded_copies_offers_the_copy_and_keeps_the_file() {
+        let alert = stranded_copies_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(
+            alert.labels(),
+            ["Open the Copy", "Keep Working in This File"]
+        );
+        assert!(alert.buttons[0].default && alert.buttons[0].action);
+        assert!(!alert.buttons[1].action);
+        assert!(alert.message.contains("a copy of “cut.pmv”"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        let two = stranded_copies_alert("cut.pmv", &["a".to_owned(), "b".to_owned()]);
+        assert!(two.message.contains("copies of") && two.informative.contains("“a” and 1 more"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_different_file_under_a_copied_name_is_told_about_the_earlier_copy() {
+        let alert = earlier_copy_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(alert.labels(), ["Keep This One", "Open the Earlier Copy"]);
+        // The file just opened stays unless the person asks for the other.
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.message.contains("“cut.pmv” isn’t the file"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        assert!(alert.informative.contains("stays in your projects"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_background_recovery_failure_concerns_the_window_of_its_project() {
+        assert!(unprotects("file-1", Some("file-1")));
+        assert!(!unprotects("file-1", Some("file-2")));
+        assert!(!unprotects("file-1", None));
+    }
+    #[::core::prelude::v1::test]
+    fn a_composition_is_laid_out_at_a_positive_size_whatever_is_stored() {
+        assert_eq!(composition_size(1920., 1080.), [1920., 1080.]);
+        assert_eq!(composition_size(0., 1080.), [1., 1080.]);
+        assert_eq!(composition_size(-5., f64::NAN), [1., 1.]);
+        assert_eq!(composition_size(f64::INFINITY, 0.5), [1., 1.]);
+    }
+    #[::core::prelude::v1::test]
+    fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
+        // A viewer that reported a clock is where it says (playing included).
+        assert_eq!(left_at(Some(3.5), Some(12.)), 3.5);
+        // One bound a moment ago has none yet: the seek that restored it.
+        assert_eq!(left_at(None, Some(12.)), 12.);
+        assert_eq!(left_at(None, None), 0.);
+    }
     #[::core::prelude::v1::test]
     fn ntsc_projects_get_the_exact_rate_the_viewer_needs() {
         let rate = |json: &str| {

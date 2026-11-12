@@ -43,18 +43,23 @@ pub(crate) struct Resolved {
     pub pyramid: Option<crate::sampling::gpu::Pyramid>,
 }
 
+/// [`Resolved::source_edge`] of a draw by its matrix, UV window and whether
+/// it is placed on a plane (also asked of a plan before it is resolved, to
+/// decode a still ahead at the size its draw reads).
+pub(crate) fn source_edge(matrix: &[f64; 6], uv: [f64; 4], plane: bool) -> Option<u32> {
+    if plane {
+        return None;
+    }
+    let width = matrix[0].hypot(matrix[1]) / (uv[2] - uv[0]).abs().max(0.0001);
+    let height = matrix[2].hypot(matrix[3]) / (uv[3] - uv[1]).abs().max(0.0001);
+    Some((width.max(height).ceil().clamp(64., 16384.) as u32).next_power_of_two())
+}
+
 impl Resolved {
     /// Pixel density the viewer actually reads. Round to powers of two to
     /// avoid decoding another still for every pixel of an animated scale.
     fn source_edge(&self) -> Option<u32> {
-        if self.plane.is_some() {
-            return None;
-        }
-        let width =
-            self.matrix[0].hypot(self.matrix[1]) / (self.uv[2] - self.uv[0]).abs().max(0.0001);
-        let height =
-            self.matrix[2].hypot(self.matrix[3]) / (self.uv[3] - self.uv[1]).abs().max(0.0001);
-        Some((width.max(height).ceil().clamp(64., 16384.) as u32).next_power_of_two())
+        source_edge(&self.matrix, self.uv, self.plane.is_some())
     }
     /// Whether this draw can read beyond mip zero. Projective draws retain
     /// the full pyramid because their Jacobian changes across the quad.
@@ -196,6 +201,9 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
+    /// Final output (an export, a cached frame, an agent capture): its
+    /// regions equal the whole frame bit for bit.
+    pub final_frame: bool,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -564,7 +572,7 @@ impl Exec<'_> {
                         ..
                     } => {
                         self.media.draw_edge =
-                            self.media.preview_media.then(|| r.source_edge()).flatten();
+                            self.media.preview_video.then(|| r.source_edge()).flatten();
                         match self.media.video(
                             self.device,
                             self.queue,

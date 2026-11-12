@@ -232,6 +232,10 @@ const CHANGE_LOG: usize = 256;
 
 type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 
+/// A file's `history` member, the open composition it was judged with, and
+/// whether it needs an archive.
+type ArchiveJudgment = (crate::history::CompactJson, Option<String>, bool);
+
 /// The single document authority. See the crate documentation for the
 /// threading model.
 pub struct DocumentStore {
@@ -243,6 +247,10 @@ pub struct DocumentStore {
     history: History,
     /// Whether the history now differs from the file's `history` member.
     history_owned: bool,
+    /// Whether the file's `history` member needs an archive before a save
+    /// replaces it ([`Self::file_history_needs_archive`]), for the member
+    /// and open composition it was judged with.
+    archive_judged: Arc<std::sync::Mutex<Option<ArchiveJudgment>>>,
     selection: Selection,
     queries: QueryContext,
     gesture: Option<Gesture>,
@@ -369,6 +377,7 @@ impl DocumentStore {
             file,
             history,
             history_owned,
+            archive_judged: Default::default(),
             selection: Selection::default(),
             queries,
             gesture: None,
@@ -1463,9 +1472,9 @@ impl DocumentStore {
             .filter(|m| self.file.media.is_linked(&m.id))
             .map(|m| m.id.clone())
             .collect();
-        let raw_history = self.file.envelope.history.as_ref().map(|h| h.value());
-        let history = match (&raw_history, self.history_owned) {
-            (Some(raw), false) => HistoryToWrite::Raw(raw.clone()),
+        let file_history = self.file.envelope.history.as_ref();
+        let history = match (file_history, self.history_owned) {
+            (Some(raw), false) => HistoryToWrite::Raw(raw.value()),
             _ => HistoryToWrite::Session(self.history.snapshot()),
         };
         let mut extra = self.file.envelope.extra.clone();
@@ -1480,12 +1489,10 @@ impl DocumentStore {
             );
         }
         if self.history_owned
-            && let Some(raw) = &raw_history
-            && project_io::history_needs_archive(
-                raw,
-                model::open_comp_id(self.root().expect("project root")).as_deref(),
-            )
+            && let Some(stored) = file_history
+            && self.file_history_needs_archive(stored)
         {
+            let raw = &stored.value();
             // Preserve the complete input after editing a history whose newer
             // metadata this kernel cannot represent. Never overwrite a future
             // archive with the same key: retain both as values.
@@ -1571,26 +1578,92 @@ impl DocumentStore {
         Ok(())
     }
 
+    /// The file this store saves to was renamed or moved while open and is
+    /// now at `version.path` ([`project_io::FileVersion::moved`]): saves and
+    /// embedded media follow it there. Nothing about its content changes.
+    pub fn file_moved(&mut self, version: project_io::FileVersion) {
+        let Some(old) = self.file.version.clone() else {
+            return;
+        };
+        let new = Arc::new(version);
+        let moved: Vec<_> = self
+            .file
+            .media
+            .iter()
+            .filter_map(|entry| match &entry.source {
+                project_io::MediaSource::Embedded {
+                    file,
+                    offset,
+                    length,
+                    sha256,
+                } if Arc::ptr_eq(file, &old) => Some(project_io::MediaEntry {
+                    source: project_io::MediaSource::Embedded {
+                        file: new.clone(),
+                        offset: *offset,
+                        length: *length,
+                        sha256: sha256.clone(),
+                    },
+                    ..entry.clone()
+                }),
+                _ => None,
+            })
+            .collect();
+        for entry in moved {
+            self.file.media.insert(entry);
+        }
+        self.file.path = Some(new.path.clone());
+        self.file.version = Some(new);
+    }
+
+    /// What this project's first save would work out about its undo history
+    /// on the kernel thread, as a job for another thread to run after the
+    /// open: what each step reaches and its digest, and whether the file's
+    /// history member needs an archive. Each answer is the one the save
+    /// would compute, kept where the save looks for it; a save that comes
+    /// first, or a job never run, changes nothing but who computes it.
+    pub fn save_warmup(&self) -> impl FnOnce() + Send + 'static {
+        let records = self.history.records().to_vec();
+        let judged = self.archive_judged.clone();
+        let stored = self.file.envelope.history.clone();
+        let open = self.root().and_then(model::open_comp_id);
+        move || {
+            for record in &records {
+                record.warm();
+            }
+            if let Some(stored) = stored {
+                let needs = project_io::history_needs_archive(&stored.value(), open.as_deref());
+                let mut judged = judged.lock().unwrap();
+                if judged.is_none() {
+                    *judged = Some((stored, open, needs));
+                }
+            }
+        }
+    }
+
+    /// [`project_io::history_needs_archive`] for the file's `history` member.
+    /// The member is what the file held when it was opened and never changes
+    /// while it is open, so it is judged once per open composition: judging
+    /// inflates and imports the whole of it, which every save of a project
+    /// with a long history paid again.
+    fn file_history_needs_archive(&self, stored: &crate::history::CompactJson) -> bool {
+        let open = model::open_comp_id(self.root().expect("project root"));
+        let mut judged = self.archive_judged.lock().unwrap();
+        if let Some((member, comp, needs)) = &*judged
+            && member == stored
+            && *comp == open
+        {
+            return *needs;
+        }
+        let needs = project_io::history_needs_archive(&stored.value(), open.as_deref());
+        *judged = Some((stored.clone(), open, needs));
+        needs
+    }
+
     /// Asset ids the project or its undo history can still reach.
     pub fn reachable_assets(&self) -> HashSet<String> {
         let mut ids = HashSet::new();
-        let mut add_keys = |v: Option<&Value>, ids: &mut HashSet<String>| {
-            if let Some(Value::Object(map)) = v {
-                ids.extend(map.keys().filter_map(|k| k.as_str().map(str::to_owned)));
-            }
-        };
         for record in self.history.records() {
-            if let Some((f, b)) = record.saved_form().filter(|_| record.saved.is_some()) {
-                for p in f.iter().chain(b.iter()) {
-                    project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
-                }
-            } else {
-                for op in record.forward.iter().chain(record.inverse.iter()) {
-                    if let Op::Leaf(p) = op {
-                        project_io::collect_patch_assets(&p, &mut ids, &mut add_keys);
-                    }
-                }
-            }
+            ids.extend(record.referenced_assets().iter().cloned());
         }
         if let Some(NodeKind::Object(assets)) =
             self.root().and_then(|r| r.get("assets")).map(Node::kind)
@@ -1599,19 +1672,6 @@ impl DocumentStore {
         }
         if let Some(root) = self.root() {
             crate::commands::scene3d::collect_original_assets(&root.to_value(), &mut ids);
-        }
-        for record in self.history.records() {
-            for op in record.forward.iter().chain(record.inverse.iter()) {
-                // A deleted layer's value is what Undo would reinsert.
-                let value = match &op {
-                    Op::Leaf(p) => p.value.as_ref(),
-                    Op::Insert { value, .. } => Some(value),
-                    _ => None,
-                };
-                if let Some(value) = value {
-                    crate::commands::scene3d::collect_original_assets(value, &mut ids);
-                }
-            }
         }
         ids
     }

@@ -1,608 +1,291 @@
-# Powermove Native design language
+# Powermove Native design system
 
-Status: **governing spec** for every visual lane of the native rewrite.
-Owner: design lead. Values live in `pm-design` (see [tokens.md](tokens.md));
-the gate is [review-checklist.md](review-checklist.md); the reference picture is
-[editor-mockup-v3.html](editor-mockup-v3.html). Per-panel build specs live in
-[panels/](panels/README.md) (pictures: [panels-mockup.html](panels-mockup.html));
-where a panel spec is more specific than this page, the panel spec wins.
+One system, in `apps/native/crates/design` (values) and
+`apps/native/crates/shell/src/kit.rs` (controls). A view never writes a colour,
+size, radius, duration or font; it asks for a role. The generated value table
+is [tokens.md](tokens.md).
 
-Powermove Native is the **same Powermove**, refined so that it is at home on
-the Mac. It is not a redesign. Where the two disagree:
+The bar: next to Final Cut Pro, Finder and Xcode it reads as a first-class Mac
+app, and it is better than v1 on every surface side by side.
 
-- **Arrangement** follows the Electron app: Project / Effect Controls on the
-  left, the viewer in the centre, the timeline beneath both, Properties over
-  Effects & Presets in a full-height right dock, status bar at the bottom.
-- **Placement and look** follow the Apple Human Interface Guidelines (HIG):
-  window chrome, toolbar, menus, sheets, popovers, focus, materials, type.
-- **Behaviour and shortcuts** follow the Electron app. A Mac convention never
-  silently replaces a Powermove shortcut; if the two conflict, the Powermove
-  binding stays and the Mac binding is added only where it is free.
+Kit API, additive changes since the first hand-back: `Kit::disabled`;
+`pm_shell::native_control` (the real AppKit control host, moved from the app,
+with `Radio`, `Segmented` and `Slider` kinds, `tint` and `symbol`);
+`typography.display_weight`; `Strip::glow`, `Strip::grid`, `Strip::under_label`
+and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`;
+the surface host's native `SegmentedControl`; the `flexWrap` panel style;
+the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
+text field's `metadata.search`; `metrics.symbol_action`;
+`pm_shell::native::selected_color`; `ControlSpec::quiet` and the panel
+variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
+`TreeItem`) are rounded; `pm_shell::resize_from_top`;
+`NativeControl::stretch` (a `SegmentedControl` with `flexGrow`); a sheet's
+`data-pm-slot="body"`; a `Switch` in a sheet. Nothing was renamed or removed.
 
-Sources: `packages/tokens/tokens.css` and `apps/desktop/css/app.css` on
-`main` (tokens win the cascade), the shipped `v1.2.0` layout, the Nov 2026
-design commits (sheets on the panel material, Title Case dialog names, aligned
-value columns, neutral-grey dark), the owner-approved
-[editor-mockup-v2.html](editor-mockup-v2.html), [T1](../t1-themes.md) and the
-running Electron app.
+## Colour
 
----
+Seven roles per appearance, chosen in OKLCH (`Colors::of`): an ink, four
+grounds (window, panel, recess, viewer), a floating surface and the accent.
+Dark is warm stone (hue about 55°, chroma under 0.01); light is cool paper
+(hue 286°). Everything else neutral is the ink over a ground at an alpha step:
 
-## 1. Principles
-
-1. **The work is the colour.** The UI is neutral grey; footage, artwork and
-   the one orange accent carry all the colour. No tinted chrome, no gradients
-   on work surfaces, no decorative colour.
-2. **One accent, used as a mark.** Orange marks *the thing that matters now*:
-   the playhead, the selection ring, set keyframes, the primary button, the
-   active tool. It is never a large fill behind content.
-3. **Solid where you work, glass where you reach.** Panels, the viewer, the
-   timeline, the inspector and the agent conversation are opaque. Liquid Glass
-   is reserved for controls that float above content: the toolbar, viewer
-   overlays, popovers, sheets, menus and the palette.
-4. **Dense, aligned, calm.** A pro editor shows a lot at once. Density comes
-   from tight, consistent rhythm (2 pt grid, shared columns, one row height),
-   never from smaller type. 11 pt is the floor.
-5. **Numbers never jump.** Every value, timecode and counter uses tabular
-   figures and a fixed column, so scrubbing and playback read as motion, not
-   jitter.
-6. **System first.** Use the AppKit control, menu, sheet, popover, focus ring
-   and SF Symbol before drawing our own. Draw our own only for surfaces AppKit
-   does not have (timeline, viewer gizmos, scrubbable values), and then match
-   the system's metrics.
-7. **Same behaviour, quieter surface.** Every Electron behaviour and shortcut
-   survives. What changes is chrome: fewer borders, fewer custom buttons,
-   system placement.
-8. **Accessible by construction.** Contrast, Increase Contrast, Reduce
-   Transparency, Reduce Motion, full keyboard access and VoiceOver labels are
-   token- and test-enforced, not afterthoughts.
-
----
-
-## 2. Window anatomy
-
-```
-┌ traffic lights · Sidebar · Title/Edited ·· [ tool capsule ] ·· Agent · Tasks · Export · Inspector ┐  52 pt unified toolbar (glass)
-│┌ Project | Effect Controls ┐┌ viewer bar (Fit (54 %) ⌄)(Auto ⌄)┐┌ Properties ────────┐│
-││                            ││                               ││                       ││  panels: one material, 8 pt radius,
-│└────────────────────────────┘│                               ││                       ││  6 pt gaps and window edge
-│┌ Timeline ─────────────────────────────────────────────────┐│├ Effects & Presets ───┤│
-││ ▶ 00:01:25:13 · 30 fps            header (38 pt)          │││                       ││
-│└───────────────────────────────────────────────────────────┘│└───────────────────────┘│
-└ status bar (24 pt): Saved · 133 layers · 11 keyframes        Paused · 1920×1080 · 30 fps ┘
-```
-
-- **Toolbar** is an `NSToolbar` in a unified title bar (`metrics.toolbar` =
-  52 pt). Leading: system traffic lights, Sidebar toggle, document title with
-  `Edited` subtitle (title menu gives Rename, Move, Duplicate, Revert, as in
-  any document app). Centre: the tool capsule (Select V, Hand H, Zoom Z,
-  Crop/Anchor, Orbit, Shape, Pen, Text — Electron order and keys). Trailing:
-  Agent, Background Tasks (only while a task runs), **Export** (the one
-  prominent orange button), Inspector toggle.
-- **No Settings gear, no Home button** in the toolbar: Settings is
-  `Powermove ▸ Settings…` (⌘,) and the project library is
-  `File ▸ Project Library` plus the Welcome window, as Mac document apps do.
-  Workspaces (Default / Animation / Effects …) move from toolbar tabs to a
-  `Window ▸ Workspace` submenu and a toolbar pop-up the user can add via
-  Customize Toolbar; their Electron shortcuts are kept.
-- **Docks** keep the Electron arrangement and default sizes (left 300 pt,
-  right 300 pt, timeline 344 pt, Effects 268 pt; see `pm_design::workspace`).
-  Panels are separate cards on the window ground with `metrics.gap` (6 pt)
-  between them and to the window edge; `metrics.inset` (12 pt) is the
-  content inset inside a panel.
-- **Status bar** (`metrics.status` = 24 pt) sits on the window ground, not in
-  a panel: quiet `muted` text, left = document facts, right = playback and
-  format facts. Nothing in it is a primary control.
-- **No panel touches a window corner** (toolbar above, status bar below), so
-  panel radii only need to be concentric with their own contents.
-
----
-
-## 3. Materials
-
-| Surface | Material | Why |
-|---|---|---|
-| Toolbar, tool capsule, toolbar buttons | Liquid Glass (`NSGlassEffectView`, macOS 26); `NSVisualEffectView` `.titlebar` before 26 | HIG: glass is the control layer above content |
-| Viewer overlays (zoom/quality pop-ups in Focus, 3D status capsule, Light panel frame) | Glass, small, clear variant | Floats over the image; content scrolls/plays beneath |
-| Popovers (colour, easing, gradient, zoom, layer blend) | System `NSPopover` (glass on 26) | Transient, anchored to a control |
-| Menus, context menus, palette, field menu | System menus; palette/field menu are glass child panels | System behaviour |
-| Sheets (Save Layout, New Composition, Export, Composition Settings) | System sheet frame (glass); content on **panel** material in cards | Electron's Nov 2026 rule: dialogs are cut from the panel material. The system owns the frame; we own the content. |
-| Alerts (destructive confirmations, Full Access) | `NSAlert` | Exact system look and keyboard behaviour |
-| Window ground, status bar | `translucency.ground` at `translucency.window` over a behind-window blur (`NSVisualEffectView`, `.underWindowBackground`); solid `colors.window` under Reduce Transparency (`Tokens::ground`) | The owner's demo: a heavy tint, so only a hint of the desktop comes through. The tint is darker than `colors.window` because the blur lightens it, so panels still step lighter than the ground |
-| Panels, inspector, lists, timeline, agent conversation | One shared material: `colors.panel` at `translucency.panel`, a `text` hairline edge (`translucency.edge`) | Not glass: no refraction, and the tint keeps dense text legible. Panel bodies never repeat the fill |
-| Viewer surround | Solid `colors.viewer`, the deepest neutral | Footage must read true; no material tint |
-
-Rules:
-
-- **Never** glass under dense content (inspector rows, lists, timeline,
-  conversation, code). If a floating surface holds dense content (Background
-  Tasks list, a large popover), its content area is solid `colors.floating`
-  inside the glass frame.
-- **Never** stack glass on glass. A popover from a toolbar item is fine (it is
-  one surface); a glass button inside a glass popover is not — use a plain
-  borderless button there.
-- **Reduce Transparency** → every glass surface becomes solid
-  (`colors.floating`, or `colors.window` for the toolbar band), and the window
-  ground and panel material become opaque (`translucency.*` = 1, no blur).
-  Enforced by `Tokens::material` and `Tokens::translucent`.
-- **Increase Contrast** → glass gets the system's high-contrast border; GPUI
-  borders double (`metrics.border` = 2), panel edges and dividers become solid
-  `separator` (`Tokens::edge`, `Tokens::line`) and secondary text steps up.
-- Elevation in solid surfaces is tonal, not shadowed: window → panel → field →
-  floating each step lighter in dark. Floating surfaces (`colors.floating`)
-  stay **lifted above panels** in both schemes; never set them equal to the
-  panel colour. Only floating surfaces cast a shadow, and the system draws it.
-
----
-
-## 4. Colour
-
-All values: [tokens.md](tokens.md). Two schemes; the app follows the system
-appearance unless the user picks one in Settings ▸ General.
-
-**Dark is neutral grey**, R = G = B, from the deepest viewer surround
-(`#0E0E0E`) through window `#111111`, panel `#1A1A1A`, field `#262626` to
-floating `#2C2C2C`. No warm Stone, no blue-grey. (Test: `dark_is_neutral_grey`.)
-
-**Light keeps Powermove's cool ink** (`#1B1D23` text on `#FDFDFE` panels over
-an `#EEEEF1` window), as the Electron light theme does.
-
-**Text** has three steps: `text` (primary), `secondary` (row labels),
-`muted` (captions, units, metadata, placeholders). All three pass 4.5:1 on
-every surface they appear on; secondary passes 7:1 under Increase Contrast.
-Do not dim text with opacity — use the step.
-
-**Accent.** `#FF6019` in dark, `#F0580A` in light (the Electron light accent;
-white bold labels on it pass 3:1 for large text). Use:
-
-| Use | Token |
+| Step | Role |
 |---|---|
-| Fill of the primary button (Export, default button of a sheet) | `accent` + `selected_text` |
-| Playhead, selection ring, set keyframes, active tool glyph, snapping guide | `accent` |
-| Accent as text or a 1 pt mark on a panel (links, "Edited" badge, active tab underline) | `accent_text` (≥ 4.5:1) |
-| Drop target, active guide bed | `accent_wash` (opaque) |
-| Keyboard focus ring | GPUI surfaces draw the neutral `focus` ring; never the accent (owner rule, 2026-11-08) |
+| `text` | Primary text and glyphs |
+| `secondary` | Row labels, quiet buttons |
+| `muted` | Metadata, captions, units (4.5:1 on every ground) |
+| `faint` | Placeholders, shortcut hints, disabled |
+| `fill` / hover, `selected`, `pressed` | Washes and soft wells |
+| `hairline`, `separator` | Edges and dividers |
 
-The app's **AccentColor asset is Powermove orange**, so system controls
-(focused field ring, default button, checkboxes, switches, slider fill)
-tint orange — never the user's blue system accent next to our orange
-Export button. List and table **selection uses `selected_fill`** (neutral),
-because an orange row fill would compete with the artwork; the selected
-item's marks (ring, diamond, thumbnail outline) carry the accent.
+- The accent marks one action or one state per view (the primary button, a
+  drop target, progress). It is never a selected fill and never a focus ring.
+- Selected is the raised neutral surface (`colors.raised` with
+  `Elevation::Raised`) or a neutral ink fill. An active window gives a
+  system "on" control the accent, so a hosted segmented control takes
+  `selected_color()` as its bezel (the selected tab's pill: paper on a light
+  ground, a lift on a dark one) and draws each segment's title or glyph
+  itself in the label ink, because AppKit would paint them white on a custom
+  bezel. Judge selection in an active window, not only in a background
+  capture.
+- Elevation is tonal: viewer below window below panel below floating.
+- Increase Contrast lifts the text steps to 7:1 and 4.5:1, separators to 3:1
+  and doubles strokes; a theme patch cannot lower them.
 
-**Semantic**: `danger` (offline media, errors, destructive buttons),
-`warning` (missing-but-recoverable, proxy-only), `success` (rendered, online).
-Never use them decoratively, and never alone: pair with an SF Symbol and words.
+## Type
 
-**Over the image.** Anything drawn *on top of* footage or artwork — viewer
-gizmo keylines and labels, the Focus/full-screen overlay capsule, viewer
-banners, the source-preview transport, badges and hover buttons on Project
-thumbnails — uses the **dark-scheme** tokens in both appearances (plus
-`media_badge` for badge fills). Media is dark on average, and light chrome on
-a black frame reads as a hole; this is how QuickTime and Photos treat
-controls over content. The panel chrome around the image (viewer bar,
-surround) follows the app appearance.
+The system font through CoreText (`TEXT_FONT`), one role per job
+(`Tokens::text(Text::…)`, `Recipes::text_role`):
 
-**Light viewer surround** is pure neutral (`viewer` `#E4E4E4`, R = G = B),
-so footage reads true in light mode too; the composition frame keeps its
-1 px `separator` outline when its background is transparent or close to the
-surround. (Changed 2026-11-01 from the cool `#E6E6EA`; see
-[panels/README.md §6](panels/README.md#6-token-additions-and-changes-requested).)
+| Role | Size | Weight | Use |
+|---|---|---|---|
+| Caption | 11 | regular | Metadata, counts, shortcut hints |
+| Body | 12 | regular | Rows, fields, menus |
+| Label | 12 | medium | Button labels, the name in a row |
+| Title | 13 | medium | Panel and window titles |
+| Reading | 13 | regular | Running prose |
+| Heading | 15 | semibold (`display_weight`) | Sheet and section headings |
+| Display | 24 | semibold (`display_weight`) | A screen's title (Home, Settings) |
+| Timecode | 13 | medium, tabular | Timecode and numeric readouts |
 
-**Labels** (clips and layers): eight muted fills (`labels.*`) — blue, violet,
-orange, red, yellow, green, teal, gray — tuned so `text` on them is ≥ 7:1 and
-so a timeline full of clips stays quieter than the viewer. Defaults by layer
-kind are in the token roles; users can relabel (Electron behaviour).
+Text sizes use the font's own tracking table; Heading and Display are set
+tighter (`typography.*_tracking`). Counts, sizes and times use tabular figures
+(`kit::tabular`). Weight is not the hierarchy: a panel title is medium, never
+semibold. Panels ask for `typography.semibold_weight` for their titles and
+section headings; it is the medium weight, so every panel matches the kit.
 
----
+## Space and shape
 
-## 5. Typography
+- One spacing scale (`Tokens::space`): 2, 4, 6, 8, 12, 16, 24, 32.
+- One radius scale from a base of 4 (`Tokens::radius`): 4, 6, 8, 12, 16.
+  Controls are 8, wells and segments 6, panels and menus 12, popovers and
+  sheets 16.
+- Nested corners are concentric: child = parent − inset, never below 6
+  (`Radii::nested`). Surfaces of 12 and more use continuous corners
+  (`Recipes::corner`); small controls stay circular so nested corners match.
+- Docked panels are borderless surfaces `metrics.dock_gap` apart.
 
-SF Pro via `.SystemUIFont` (automatic optical sizes); SF Pro Display only for
-≥ 20 pt; SF Mono only for code, expressions, shader source and logs.
+## Edges and elevation
 
-| Role | Size / weight | Where |
-|---|---|---|
-| `minimum` | 11 / regular | Captions, ruler labels, status bar, units, thumbnails metadata. Nothing smaller, ever. |
-| `body` | 12 / regular | Dense UI: values, list rows, layer names, effect names, menus drawn in panels |
-| `label` | 12 / regular, `secondary` | Inspector row labels |
-| `title` | 13 / semibold | Panel titles and tabs, inspector section headings, document title |
-| `reading` | 13 / regular, 1.45 leading | Prose: agent replies, sheet explanations, Settings descriptions |
-| `timecode` | 13 / medium, tabular | Transport timecode, current-time field |
-| `heading` | 15 / semibold | Sheet titles in custom sheets, Settings pane titles, empty-state headings |
-| `display` | 22 / semibold, SF Pro Display | Welcome window, onboarding, large empty states |
+Edges are hairline shadows, never borders (`Tokens::elevation`,
+`Recipes::elevated`): `Well`, `Raised`, `Panel`, `Menu`, `Sheet`. GPUI draws
+outer shadows under the whole element, so translucent surfaces (`Panel`,
+`Well`) carry their hairline inside the edge.
 
-- **Numbers** (values, timecode, frame counts, sizes, percentages, hex colours)
-  use SF Pro with **tabular figures** (`NSFont.monospacedDigitSystemFont`,
-  CSS `font-variant-numeric: tabular-nums` in compat surfaces). This replaces
-  the Electron app's Geist Mono numbers: same steadiness, at home on the Mac.
-- **Units** follow the number after a space, in `muted`, inside the well:
-  `34 px`, `100 %`, `0°`, `1.2` (leading is a unitless multiplier).
-- Leading: `dense_leading` 1.3 for UI, `reading_leading` 1.45 for prose.
-- Weights: regular 400, medium 500 (tabs, timecode, a value being edited),
-  semibold 600 (titles, headings, primary buttons). No bold, no light.
-- Never letter-space UI text; never all-caps labels (the Electron
-  `TEMPORARY · PHASE 1`/`SAVED` style caps go away — see §15).
+## Materials
 
----
+Real system material through AppKit, for what the system itself makes glass:
 
-## 6. Spacing, grid and density
+- Toolbar and title bar controls: the window's `NSToolbar` in the regular
+  unified style, at the system's own height and spacing. Its items are Home,
+  the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
+  own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
+  and hidden from the menus and by their tabs, not from the toolbar.
+- The project strip (Home and the open projects, in the toolbar's leading
+  glass) is one control drawn in cells. Every cell stands 4 pt inside the
+  glass on all four sides, so a pill's corner is the glass's corner less the
+  inset. Tabs share one width: the widest while there is room, then narrower
+  together down to a readable least; past that the strip shows the run that
+  holds the selected tab and a pull-down lists every project. A title stands
+  in the middle of its tab and is cut in the middle, keeping the start and
+  the end of a name. The leading slot holds the close button (under the
+  pointer) or the edited dot and is always kept, so the title never moves.
+  The selected cell is a raised neutral pill; the one under the pointer a
+  wash of the same shape; hairlines part resting tabs and vanish beside
+  either. The pull-down and New Project are round targets after the last
+  rule, each in a cell that shows the strip's wash under the pointer. A tab is carried along the strip to reorder it.
+- Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
+  heavy tint of the window colour) in a column under the GPUI view, which
+  leaves that column unpainted. The glass runs on under the content sheet's
+  leading corners, so its rim is hidden. In both appearances the sidebar
+  recedes into the window (a shade under the window ground) and the content
+  sheet stands out from it: the change of value is the only line between
+  them.
+- Popovers with their own window: `popover_frame`. The palette and field menu
+  are pooled child windows (`native::Popup`).
+- The window ground is a tint over a behind-window blur.
 
-- **2 pt grid** for every metric; most rhythm in 4s.
-- `gap` 6 between panels and to the window edge; `inset` 12 inside panels.
-- `header` 38: panel header, viewer bar and timeline header share one height
-  (the owner's demo), with a `line` divider under panel headers.
-- `row` 28: inspector rows, list rows; a `field` (22) sits centred in it.
-- `track_row` 28 / `property_row` 22 / `ruler` 24 in the timeline.
-- `control` 28 for standalone buttons and pop-ups; toolbar capsules 34
-  (`capsule_radius` 17 = height ÷ 2).
-- `hit` 24: any glyph smaller than 24 × 24 gets a padded hit area.
-- **Density** (Settings ▸ General ▸ Density: Compact / Normal / Comfortable,
-  kept from Electron) moves lengths relative to these natives through the
-  theme pipeline (compact takes 4 pt off rows and 2 pt off gaps). It never
-  changes type below `minimum`.
+The viewer, the timeline and dense panels are solid. Glass has no hover of its
+own and no drawn bloom or rim. Reduce Transparency makes every material solid;
+before macOS 26 glass falls back to the matching visual effect.
 
----
+## Motion
 
-## 7. Corner radii (concentric)
+`pm_design::motion`: substepped, velocity-carrying springs; retargeting keeps
+value and velocity, so everything is interruptible. A view owns one
+`pm_shell::motion::Motion`, calls `frame` at the top of `render`, and nothing
+ticks while nothing moves.
 
-| Element | Radius |
+| Preset | Use |
 |---|---|
-| Window | System (macOS 26 toolbar windows) |
-| Panel | `panel_radius` 8 |
-| Control inside a panel (field, button, segmented track, thumbnail) | `control_radius` 6; content sits `inset` 12 in, clear of the panel corner |
-| Control inside a control (segment, chip in a field) | `inner_radius` 4 |
-| Toolbar capsule, toolbar button group, tags | height ÷ 2 (capsule) |
-| Popovers, sheets, menus | System |
+| `Layout` | A gliding selection, rows and cards sliding to new places |
+| `HoverIn` / `HoverOut` / `HoverSwitch` | Washes: fast in, slow out, gone at once when the pointer moves to a neighbour |
+| `Enter` / `Exit` | Menus, popovers, sheets (half-bounce 0.15 in, none out) |
+| `Show`, `Pop` | A row appearing; a mark confirming an action |
 
-A shape's radius equals its container's radius minus the inset between them.
-If an inset differs, compute the radius; do not reuse a token that no longer
-nests. Thumbnails in the Project grid use `control_radius`; timeline clips use
-`inner_radius` (they nest in 28 pt rows with 3–4 pt insets).
+Press answers on pointer-down with no animation. Keyboard-driven changes do
+not animate. Reduce Motion snaps anything that moves and turns fades into a
+0.15 s cross-fade.
 
----
+## Controls
 
-## 8. Iconography
+Real controls first. Wherever AppKit has the control and the system draws it
+(liquid glass on macOS 26 and later), host the real one:
+`pm_shell::native_control::NativeControl` with a `ControlSpec` of kind `Push`
+(optionally tinted, the view's one accent action), `Popup`, `Segmented`,
+`Switch`, `Checkbox`, `Radio`, `Slider` or `Search` (the system search
+field, with no focus ring: Return, Escape and Down hand the keyboard back to
+the window's content and reach the view as keys; ⌘F on Home calls `focus`).
+A view creates them once (an entity
+each), places them like any element, and subscribes to their values. Each
+sits in its own clipping wrapper above the GPUI view and is staged with the
+element's bounds and the content mask of its scroll region, so it scrolls and
+clips with the panel. Focus, disabled state, Reduce Transparency and both
+appearances are the system's own. Extension panels get the same controls from
+the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
+`SegmentedControl`, and a `TextField` with `metadata.search`). A borderless
+pop-up in a bar of controls (`data-pm-variant="inline"`: the viewer's zoom
+and resolution) keeps the primary ink; one in an option row under the content
+it qualifies (`"quiet"`: a composer's options, Home's sort) is titled in the
+secondary ink. A panel's
+header is the child it marks
+`data-pm-slot="header"`: the dock shows it as the panel's one title row. A
+composer is the kit's multi-line `TextField` with `metadata.submitOnReturn`,
+written on a surface its panel draws.
 
-- **SF Symbols** everywhere AppKit or GPUI draws a glyph. Custom glyphs only
-  for Powermove concepts SF Symbols lacks (Powermove mark, keyframe diamond,
-  easing curves, pen/anchor tools), drawn on the SF Symbols template grid and
-  exported as custom symbols so they scale and weight-match.
-- Sizes: `symbol_toolbar` 15 (regular), `symbol_panel` 13 (medium) for header
-  buttons, `symbol_inline` 11 (regular) inside rows. Weight matches adjacent
-  text.
-- Rendering: monochrome, `secondary` at rest, `text` on hover, `accent` when
-  the glyph represents an active state (active tool, keyframe set, record).
-  Hierarchical rendering for status symbols (`checkmark.circle`,
-  `exclamationmark.triangle`) in their semantic colour.
-- Suggested mapping: Select `cursorarrow`, Hand `hand.raised`, Zoom
-  `plus.magnifyingglass`, Sidebar `sidebar.leading`, Inspector
-  `sidebar.trailing`, Agent `sparkles`, Export `square.and.arrow.up`,
-  Background Tasks `circle.dashed` progress, visibility `eye`/`eye.slash`,
-  lock `lock`/`lock.open`, audio `speaker.wave.2`, add `plus`, search
-  `magnifyingglass`, effect `fx` → `wand.and.rays` (keep the Electron `fx`
-  mono badge only in compat surfaces).
-- Layer-kind badges in the timeline and Project list use symbols, not
-  letters: text `textformat`, shape `square.on.circle`, media `film`,
-  image `photo`, audio `waveform`, adjustment `slider.horizontal.3`,
-  null `circle.dashed`, camera `camera`, group `square.stack`.
+Drawn controls (`pm_shell::kit`) are for where a view per control cannot work:
+long scrolling lists, the timeline, anything over the viewer, and windows with
+no AppKit view (tests). `Kit::new(&tokens, &motion, access, window, cx)` once
+per frame, then: `button` (primary, neutral, quiet, destructive),
+`icon_button`, `segmented` (pill track or flat tabs, gliding selection),
+`search`, `switch` (the system switch's shape at the small size), `check`
+(checkbox or radio), `slider`, `disclosure`, `row`, `menu` and `menu_row`,
+`card` and `form_row` (the Settings anatomy sheets reuse), `progress`,
+`empty_state`, `banner`, `tooltip`, `disabled`. Text and numeric fields are
+`pm_shell::text::TextField` (a native field in a drawn well). Right-click
+menus are `NSMenu` (`Host::context_menu`).
 
----
+Every drawn control: arrow cursor, hover wash, pressed fill, neutral
+keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
+(`metrics.symbol_toolbar` 14, `symbol_panel` 14, `symbol_inline` 12, and
+`symbol_action` 20 for a surface's one primary action glyph, a composer's
+Send). A value in a well starts on the same inset with or without a unit, in
+the text font, so it sits on its row label's baseline. A section heading in a
+panel is the Label role, a step under the panel's Title.
+Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
-## 9. Controls
+## Home
 
-### Inspector rows (Properties, Effect Controls, composition sheets)
+A sidebar for navigation only (Recents, Trash, Store, the account) on the
+window's glass, and one inset sheet. The sheet's header is two rows on the
+sheet's margins: the section title, the one wide search field in the middle
+(the large system field, its shortcut at the trailing end while it is empty)
+and Open… with the one accent action; then the count and the quiet sort and
+layout controls. A project is its poster: the frame in the composition's own
+shape with a continuous corner, a hairline and a soft shadow, the name and
+one line of facts under it, and a small dot when it is open (the accent for
+this window's project). A project with no poster yet is a quiet ground of the
+same shape that says its size. Under the pointer a card rises on the hover
+springs; pressed, it sits back down; a sort or a search slides cards to their
+new places. The list is the dense alternative under the same header.
 
-```
-◇  Label ............  [ value          unit ]   ← one shared value column
-   12 pt 'secondary'      field 22 pt in a 28 pt row, width value_column
-```
+## Settings
 
-- Leading 9 pt **keyframe diamond** (`metrics.keyframe`) in its own column:
-  outline `muted` = not animated, filled `accent` = keyframe at playhead,
-  half-filled = animated, off-key. Click toggles (Electron behaviour).
-- **Label column** flexible, truncates with an ellipsis; tooltips show the
-  full name.
-- **Value column** `value_column` (128 pt) wide, right edge at the panel
-  inset, **shared by every row** of the panel and by composition sheets. Two-
-  part values (Scale X/Y, Position X/Y) split the column into equal wells
-  with a 4 pt gap, link toggle trailing *outside* the column.
-- Values are **left-aligned in the well**, tabular, unit trailing in `muted`
-  (Electron Nov 2026 rule).
-- Section headings: `title` weight, 12 pt top / 6 pt bottom padding, a
-  disclosure chevron on hover; Electron's collapse state is kept per project.
+Its own window in Home's shape (`pm_shell::sidebar_frame`): the sections on
+the window's glass below the window buttons (the system search field, quiet
+group headings, rows whose selected state is a rounded neutral wash) and one
+content sheet. A page is a title and a line of description, then cards
+(`FormGroup`) under section headings. Every row of a card is the same
+anatomy: a title over its description, and a control of its natural width at
+the trailing edge (the real pop-up, switch, push button; a text or number
+field in its well). The page title, its description, every section heading
+and every row title start on one x: a card bleeds past that column by the
+row inset. Lists that are not settings (speech models, installed extensions,
+the Store, memory notes) are rows of the same cards, never loose text. A
+search lists every section with a match and dims the others in the sidebar.
 
-### Scrubbable numbers
+## Sheets
 
-Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
+A form in a sheet is a Settings page in a sheet: the title, then cards of
+rows under quiet headings, then Cancel and the default action at the trailing
+edge of the bottom (no rule above them). A row is its title over its notes
+(a description, or what is wrong with the value), with a real control of its
+natural width at the trailing edge: the pop-up, the system switch (never a
+checkbox or Off | On segments for a yes-or-no row), a text or number field, a
+colour well. Numbers end before one unit column, so their right edges line
+up whatever the unit. Radios keep their own titles, one to a row.
 
-- Hover: the well lightens to `hover`, pointer becomes the horizontal resize
-  cursor. A drag starts after 3 pt (`drag_threshold`); scrub speed is the
-  property's step × 0.5 per point, ⇧ ×10, ⌥ ×0.1. The pointer is unbounded
-  during the drag (Electron `infinite`); on release it reappears at the well.
-  The whole drag is one undo step named for the property.
-- Click without dragging: becomes an AppKit text field (P-TEXT dense field)
-  with the system focus ring, contents selected. Return or clicking away
-  commits, Esc restores. Arithmetic is accepted: `90/2`, and a leading
-  operator applies to the current value (`+10`, `*2`).
-- ↑/↓ step by the property's step (⇧ ×10) while editing.
-- Scroll wheel over a hovered well adjusts it (⇧ ×10, ⌥ ×0.1), as in
-  Electron — but only after the pointer has rested on the well, so scrolling
-  the inspector past a value never changes it.
+One text column: the sheet's title, a destination's description, section
+headings, row titles, notes and the summary all start on
+`sheet_inset + inset` (32 pt); cards start on `sheet_inset`. Measure it in a
+capture before showing a sheet.
 
-### Buttons and pop-ups
+Two builders, one anatomy: a panel sheet is `SheetAnchor` with `FormGroup`
+and `FormRow` (Export), and an AppKit sheet is `surfaces::sheet_layout`
+(`Sheet`: `text`, `number`, `pair`, `control`, `toggle`, `swatch`, `option`,
+`note`, `heading`, `line`, laid out by `footer`), which every `Surface` form
+goes through (composition settings, new composition and project, pre-compose,
+keyframe value, velocity and scale, captions, sequence import, sign-in and
+Store forms). Confirmations are the system's alert sheets.
 
-- **Push buttons**: system `NSButton` at `control` height. One prominent
-  (accent) button per sheet or toolbar; secondary buttons are the system
-  default style. Destructive actions use `danger` text, never a red fill.
-- **Pop-up buttons** for choices (font, blend mode, quality, zoom):
-  `NSPopUpButton` showing the current value and the system chevron
-  (`Fit (54 %) ⌄`), not a row of three chips.
-- **Borderless icon buttons** in panel headers (`+`, search, filter):
-  `symbol_panel`, `secondary`, `hover` fill on hover, tooltip with the command
-  name and shortcut.
+A sheet whose content changes height marks the part between its title and
+its actions `data-pm-slot="body"`. Its window follows the body's height on
+the layout spring from a fixed top edge (`pm_shell::resize_from_top`; AppKit
+would centre the sheet again on every frame, so the window class hangs it
+from the top it was first given), the actions ride the bottom edge, and
+nothing else moves. Hosted controls keep their distance from the window's
+top between a resize and the next paint.
 
-### Segmented controls
+## Timeline strips
 
-- System `NSSegmentedControl` in sheets and toolbars. In GPUI inspector rows
-  (Align, axis selectors) draw the same shape: `field` track, 2 pt padding,
-  `inner_radius` segments, selected segment `floating` with `text` glyph.
-- Panel tab groups (Project | Effect Controls) are quiet text tabs in the
-  panel header: `title` size, medium weight, the active title in `text`, the
-  rest in `muted`, a `hover` pill only under the pointer. Titles never
-  truncate; tabs that do not fit fold into the trailing More Panels menu
-  (2026-11-08, replaces the stretched segmented strip).
+`Tokens::strip(layer colour, StripState)`: a slab of tinted glass on the solid
+timeline canvas, the same in both appearances (a clip is an object with its
+own colour). The band a name stands on is deep and saturated; light gathers in
+the foot below it (`glow`, from `GLOW_FROM` of the way down), so the slab is
+luminous without costing the name its contrast. Labels are the palest tint of
+the hue that holds 4.5:1 on the body under them (`under_label`). A 1 px rim of
+light in the strip's hue runs inside the edge, brightest along the top and
+round its corners, faint down the sides, with no outline; corners are
+continuous and about a quarter of the strip's height (`strip_radius`); an even
+`strip_gap` parts neighbours; the ruler's grid reads through the body as a
+top-lit highlight: brightest at the strip's top edge and gone by the middle
+of its height (`grid`, `GRID_FADE`), with the faint full-height line showing
+only between rows. The foot gathers as much light as the hue allows while a
+label still holds 4.5:1 under a name (a pale layer colour takes less). A waveform is a soft filled shape in a paler tone standing on the
+foot; silence draws nothing. A collapsed layer's keys are small marks in the
+foot, under the name. Hover brightens and whitens the rim and shows the trim
+grip (`trim_grip`) inside the nearer edge, with the name starting clear of it.
+Selection is a 2 px white ring: at the edge on a dark canvas, inside a band of
+the strip's own colour on a light one (`rim_inset`). Dragging lifts it;
+disabled drops chroma and opacity. Rows are 30 pt (v1's height), so a strip is
+26 pt. Ruler labels stand over a small dot with a faint line down the tracks.
+`Tokens::playhead` is a hairline with a round head. Strips are drawn by the
+timeline renderer, never system views.
 
-### Popovers
+## Three mistakes to avoid
 
-- `NSPopover`, anchored to the control that opened it, arrow towards it.
-  Default width `popover_width` (260). Transient: dismiss on click outside or
-  Esc. Used for colour picker, easing editor, gradient stops, zoom presets,
-  layer blend/opacity quick edit.
-- A popover never contains its own OK/Cancel — edits apply live and undo as one
-  step on close.
-
-### Sheets and alerts
-
-- Sheets for any task that needs several fields: Save Layout, New
-  Composition, Composition Settings, Export, Pre-compose, Replace Media.
-  Window-modal system sheets (`NSWindow.beginSheet`). **Placement belongs to
-  the system:** on macOS 26 and later (including macOS 27) the system
-  presents a sheet as a floating glass card **centred in the window**; on
-  earlier systems it slides down below the toolbar. Powermove never
-  positions, offsets or re-parents a sheet, and never fakes one with a
-  centred child window. A save/open panel started from a sheet is a sheet on
-  that sheet. Width `sheet_width` (480) unless content needs more
-  (`sheet_width_wide` for Export).
-- Layout: `heading` title (Title Case), one `reading` sentence of
-  explanation if needed, fields in inspector grammar (label left, shared value
-  column), footer buttons trailing: Cancel, then the accent default button
-  named for the action (`Save`, `Export`, `Create`) — never `OK`.
-- Alerts (`NSAlert`) only for confirmations and errors. Destructive default is
-  Cancel. Full Access consent is an alert with a warning symbol.
-
-### Menus
-
-- The main menu is the single complete command surface (every toolbar,
-  context and palette command is also in a menu, with its shortcut).
-- Context menus: system `NSMenu`; group with separators; current state shown
-  with a checkmark (e.g., current dock side), not by omission.
-- The palette (⌘K) and field menu are glass child panels: search field with a
-  `magnifyingglass` icon, `menu_row` rows, shortcuts right-aligned in a fixed
-  column in `muted`, height shrinks to content (max `palette_height`).
-
-### Lists and tabs
-
-- Project grid: thumbnails `control_radius`, duration badge top-left in a
-  dark capsule, name below (`body`), metadata (`minimum`, `muted`). Selected =
-  2 pt `accent` ring on the thumbnail + name in `text` on `selected_fill`.
-- Lists (layers, effects, Settings): `row` height, full-width `selected_fill`
-  for selection, `hover` on hover, disclosure triangles at leading.
-- Panel tabs close with a hover `×` at the **leading** edge of the tab (Mac
-  tab convention), and via the context menu.
-
-### Progress, tasks and status
-
-- Determinate progress: system bar or circular indicator; indeterminate:
-  system spinner. Never a fake percentage.
-- Background work appears as a toolbar Background Tasks item (circular
-  progress) only while something runs; it opens the Background Tasks
-  popover/window (see [reviews/na-cloud-promedia.md](reviews/na-cloud-promedia.md)).
-- Toasts become quiet transient banners at the bottom of the viewer, or
-  nothing: prefer state that is visible where the change happened.
-
----
-
-## 10. Viewer
-
-- Surround `colors.viewer`; the composition frame is drawn at its real
-  bounds with a 1 px `separator` outline when the comp background is
-  transparent (checkerboard) or matches the surround.
-- No panel title. The viewer bar (`header` 32) holds, trailing: the zoom
-  pop-up (`Fit (54 %) ⌄`), then the preview-resolution pop-up (`Auto ⌄`, or
-  `Auto (Half) ⌄` when Auto has lowered it). Both titles have fixed widths so
-  they never jump. Electron put them bottom-left as pills; native puts them
-  in the bar so they never cover the image. There is no guides/safe-area
-  toggle (v1.2.0 has none). In Focus or full-screen viewer modes the same two
-  controls become a glass `ViewerOverlay` capsule (dark scheme) that fades in
-  on pointer movement. Full spec: [panels/viewer-chrome.md](panels/viewer-chrome.md).
-- Gizmos: bounding box 1 pt `accent`, handles 7 pt squares `accent` with
-  1 pt `viewer` keyline; anchor point circle; rotation handle above. Gizmos
-  scale with the display, not with zoom.
-- Rulers/guides use `accent_text` at 60 %; snapping lines `accent`.
-- The viewer never adds a material, tint or rounded mask to the image; the
-  preview-corner preference (`square` / `rounded`) affects only the surround.
-
----
-
-## 11. Timeline
-
-- Header (`header` 32): play button, **timecode** (`timecode` 13 medium,
-  tabular, `text`; Electron's orange timecode becomes neutral — orange is the
-  playhead's), fps in `muted`, composition tabs, then trailing: Layers/Tracks
-  mode, the Dope Sheet / Dope Sheet and Graph / Graph Editor view control,
-  graph options and the snap toggle. Full spec:
-  [panels/timeline.md](panels/timeline.md).
-- Layer column `layer_column` (232) on `panel_secondary`: index (tabular,
-  `muted`), kind symbol in a label-colour badge, name (`body`), trailing
-  visibility/lock/solo glyphs at `symbol_inline` shown on hover or when set.
-- Ruler `ruler` 24: tick labels in `minimum`, tabular, `muted`; major ticks
-  `secondary`.
-- Clips: label-colour fill, `inner_radius`, 20 pt tall in a 28 pt row, name
-  inside in `body` (`text`), trimmed with an ellipsis. Selection is a 1.5 pt
-  `accent` ring plus brighter fill — **never a solid accent fill** (that is
-  how a selected clip would hide its keyframes). The selected row is filled
-  in the layer column only (the owner's demo, 2026-11-08).
-- Property sub-rows `property_row` 22: keyframe navigator (‹ ◆ ›, three
-  `hit` squares from the inset), label `secondary` after it, and the value
-  readout trailing in the layer column when it fits.
-- Keyframes: 9 pt diamonds; unselected `text` at 90 %, selected `accent`
-  with a 1 pt `panel` keyline; easing shown by shape (diamond linear, circle
-  ease, hourglass hold) as in Electron.
-- Playhead: `playhead` 1.5 pt `accent` line through ruler and tracks with an
-  11 pt rounded head in the ruler.
-- Render bar (Keep Rendered): a 3 pt strip under the ruler — see promedia
-  review for the state colours.
-- Work-area / in-out range: `accent_wash` bed in the ruler with `accent`
-  handles.
-
----
-
-## 12. Agent panel
-
-- Opens from the toolbar Agent button as a **popover** (glass frame, solid
-  `floating` content), as Electron's launcher does; **Pin** docks it as a
-  solid panel (`Surface::AgentPanel`, default `agent_width` 360) in the right
-  dock, and closing the docked panel returns it to the popover. Full spec:
-  [panels/agent-panel.md](panels/agent-panel.md).
-- Messages in `reading` 13; the user's messages right-aligned on
-  `floating` with `control_radius`; agent replies are plain text on the panel
-  (no bubble), markdown rendered with the language's type scale, code in SF
-  Mono 12 on `field`.
-- Work steps (tool calls) collapse into a single disclosure line in
-  `muted` (`› 4 tool calls`), as Electron does; expanded steps are list rows.
-- Composer: multi-line native text view on `field`, `control_radius`, send
-  button `arrow.up.circle.fill` in `accent` when enabled. It is not glass: the
-  composer sits on solid panel material (dense text).
-- Questions from the agent appear inline as a card with system buttons; they
-  never open a modal alert.
-
----
-
-## 13. Motion
-
-- Surfaces appear with a spring (`motion.enter` 0.32 s, `bounce` 0.15) from
-  `start_scale` 0.96 and fade out in `exit` 0.12 s. Hover, press and selection
-  feedback take `interaction` 0.075 s, linear. Nothing else animates by
-  default.
-- Motion explains a change of place (a dock moving, a panel opening); it never
-  decorates. No looping animation outside an active progress indicator and
-  playback.
-- **Reduce Motion**: springs and scales become a `reduced` 0.15 s cross-fade;
-  drag previews snap; the playhead still moves (it is content).
-- Interrupted animations continue from their presentation value (shell
-  already seeds springs from the presentation layer).
-
----
-
-## 14. Copy style
-
-- **Title Case** (HIG title-style capitalisation) for: menu items, menu
-  titles, button labels, window and sheet titles, toolbar item labels,
-  tab/panel names, command names in the palette, property and effect names.
-  Examples: `Save Layout…`, `Reveal All Animated Properties`, `Effects &
-  Presets`, `Anchor Point`.
-- **Sentence case** for everything descriptive: section headings that
-  describe (`Type settings`), explanations, placeholder text, tooltips' second
-  line, empty-state explanations, status bar facts, errors, notifications.
-  Empty-state **titles** are Title Case (`No Media`), like the system's
-  content-unavailable view.
-- Ellipsis `…` (U+2026, not three dots) when a command needs more input before
-  it acts. Use `▸` only in prose paths (`Window ▸ Layouts`) and `→` never.
-- Never all caps, never internal names (`fxbrowser`, `TEMPORARY · PHASE 1`,
-  `Writable`) in the UI. Status reads like a person: `Saved`, `Paused`,
-  `Edited`.
-- Button labels are verbs naming the result (`Export`, `Replace`, `Trust`), not
-  `OK`/`Yes`.
-- Use Mac words: Settings (not Preferences), Move to Trash / Put Back (not
-  Archive / Restore), Show in Finder (not Reveal in Explorer).
-- Numbers and units: `1920×1080` (multiplication sign), `30 fps`, `34 px`,
-  `100 %`, `0:12` durations, `00:01:25:13` timecode.
-
----
-
-## 15. What changes from the Electron look, and why
-
-| Electron (main, Nov 2026) | Native | Why |
-|---|---|---|
-| Custom traffic lights, tools inline in a flat title bar | System traffic lights; `NSToolbar` with a glass tool capsule | HIG window chrome; automatic full-screen, tabs, customisation |
-| Home button, Settings gear, workspace tabs in the toolbar | File ▸ Project Library + Welcome window; ⌘, Settings; Window ▸ Workspace (+ optional toolbar pop-up) | HIG placement: app settings and navigation live in menus; toolbar holds document actions |
-| `1 task running` text pill | Background Tasks toolbar item with circular progress, only while running | Quieter; standard progress affordance |
-| Inter (`Powermove Inter`) UI, Geist Mono numbers | SF Pro with optical sizes; tabular SF Pro numbers; SF Mono only for code | At home on the Mac; same steady numbers |
-| Units glued to numbers (`34px`) | `34 px`, unit in `muted` | Readability, HIG unit spacing |
-| Orange timecode | Neutral timecode; orange reserved for the playhead | One accent, used as a mark |
-| Uppercase status (`SAVED`) | `Saved` | Copy style |
-| Zoom/quality pills over the bottom-left of the viewer | Pop-up buttons in the viewer bar; glass overlay only in Focus | Never cover the image; system pop-up |
-| Dialogs centred, panel material, custom buttons | System sheets (system-placed: centred on macOS 26+), panel-material content, system buttons, orange default | HIG sheets; same material rule as Electron |
-| Electron-drawn menus imitating macOS | Real `NSMenu` | Exact system behaviour, accessibility |
-| Blue system focus ring possible beside orange accent | AccentColor = Powermove orange | One accent |
-| Letter badges for tracks (`V1`, `A1`) and `fx` badges | SF Symbol kind badges in label colours (track names stay) | System iconography |
-| 38/30 px headers/rows, 10 px gaps | 32 pt headers, 28 pt rows, 6 pt gaps, 12 pt inset | Owner-approved v2 density; Electron's own latest header height |
-| Warm Stone dark (v1.2.0) | Neutral grey dark (R = G = B) | Owner rule, Nov 2026 |
-| Selected clip in solid accent (seen in native lanes) | Ring + brighter label fill | Keeps keyframes visible; accent as a mark |
-
-Unchanged on purpose: panel arrangement and sizes, every shortcut and drag
-behaviour, inspector grammar (label + shared value column), keyframe diamond
-semantics, effect and property names, light-mode palette, the orange accent.
-
----
-
-## 16. Accessibility
-
-- Contrast floors (tested): text 7:1; secondary/muted 4.5:1; accent text and
-  semantic colours 4.5:1; accent marks 3:1; under Increase Contrast secondary
-  7:1 and separators 3:1.
-- Never colour alone: status pairs a symbol and words; selected keyframes
-  change shape keyline as well as colour; render-bar states differ in pattern.
-- Full Keyboard Access: every control reachable by Tab; panels cycle with
-  ⌃Tab / ⌃⇧Tab (Electron behaviour kept where bound); splitters focusable and
-  arrow-resizable (`keyboard_step`). The focus ring is always visible on the
-  focused element; a theme cannot hide it.
-- VoiceOver: every GPUI element exposes a role, label and value; values read
-  with units (`Opacity, 100 percent`); keyframe diamonds read their state;
-  the timeline reads clips as `Headline, text layer, 0:00 to 0:20`.
-- Reduce Transparency, Increase Contrast, Reduce Motion and Differentiate
-  Without Colour are observed live (shell rebuilds tokens on the system
-  notification).
-- Dynamic type: macOS has none system-wide; the Density setting and the 11 pt
-  floor cover it. Text never truncates without a tooltip.
-
----
-
-## 17. Decisions for the owner
-
-These are made in this document; reverse any of them here and in pm-design.
-
-**Approved by the owner (Chike, 2026-11-01):** all five, as written below.
-
-1. Values left-aligned in wells (Electron Nov 2026) rather than right-aligned
-   (mockup v2). Chosen: left, to match the shipped app.
-2. Timecode neutral, not orange. Chosen: neutral.
-3. List selection neutral (`selected_fill`), not accent. Chosen: neutral.
-4. Workspace switcher leaves the toolbar for Window ▸ Workspace plus an
-   optional toolbar item. Chosen: menu + optional item.
-5. Panel header 32 pt (Electron latest) rather than 36 pt (mockup v2).
-   Superseded 2026-11-08 by the owner's demo: 38 pt headers, 8 pt panel
-   radius, 24 pt status line, translucent window and panel material.
-
-**Design-lead resolutions (2026-11-01).** Three open design items, decided
-within the rules above (reverse here if the owner disagrees):
-
-- *Sheet placement on macOS 27*: the system centres sheets; we use system
-  sheets and never place them (§9 *Sheets and alerts*).
-- *Light-mode palette over the black viewer*: chrome follows the
-  appearance; everything drawn over the image uses dark-scheme tokens; the
-  light surround becomes neutral `#E4E4E4` (§4 *Over the image*).
-- *Quality pop-up placement*: viewer bar, trailing, right after zoom, titled
-  `Auto (Half)` when Auto lowers it (§10, [panels/viewer-chrome.md](panels/viewer-chrome.md)).
-
+1. A border or an outer shadow on a translucent surface. Use the elevation
+   recipe; on panels the hairline is inside.
+2. An accent selected state or focus ring. Selection is neutral and raised.
+3. A literal size, colour or duration, or a second hover or spring
+   implementation. Ask the tokens and the view's `Motion`.

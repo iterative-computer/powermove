@@ -331,7 +331,7 @@ test("accessibility exposes dialog, exact control labels, units and actual progr
   });
   expect(
     row.ax.find((n: any) => n.id === named(f.root, "export.audio").id),
-  ).toMatchObject({ role: "CheckBox", label: "Include Audio" });
+  ).toMatchObject({ role: "Switch", label: "Include Audio" });
   await f.root.dispose();
   s.run = { phase: "rendering", frame: 120, total: 300, elapsed: 2, eta: 120 };
   const g = await mounted(s);

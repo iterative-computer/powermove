@@ -31,7 +31,6 @@
 use crate::Error;
 use crate::dither::dither_offset;
 use crate::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
-use pm_color::css_srgb;
 
 pub const KR: f64 = 0.2126;
 pub const KB: f64 = 0.0722;
@@ -224,18 +223,30 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
-/// Resolve output alpha and transfer while RGB is floating. For 8-bit
-/// Rec.709-primary delivery, map once in straight sRGB E before any requested
-/// encoded-domain premultiplication. Wider formats skip that CSS mapping.
+/// Resolve output alpha and transfer while RGB is floating. With `deliver`
+/// (every SDR RGB output, 8 and 16 bit) the shared delivery rule
+/// (`pm_color::delivery`) applies to straight display-encoded Rec.709 before
+/// the transfer. SDR Y′CbCr keeps its codable headroom (superwhites and
+/// sub-blacks of untouched footage pass through, section 2's transparency
+/// bar), which players show as the same clipped picture.
 fn tagged_output_rgba(
     w: [f32; 4],
     working: WorkingEncoding,
     alpha: AlphaOutput,
     tags: ColorTags,
-    map_css: bool,
+    deliver: bool,
 ) -> ([f64; 3], f64) {
-    if !map_css && !tags.bt709_transfer() {
-        return output_rgba(w, working, alpha);
+    let sdr = deliver && !tags.is_hdr();
+    if alpha == AlphaOutput::Premultiplied && !tags.bt709_transfer() {
+        // The identity output transform: premultiplied values as they are,
+        // each channel bounded by its coverage.
+        let (rgb, a) = output_rgba(w, working, alpha);
+        let rgb = if sdr {
+            pm_color::delivery::sdr_premultiplied(rgb, a)
+        } else {
+            rgb
+        };
+        return (rgb, a);
     }
     let straight_alpha = if alpha == AlphaOutput::Premultiplied {
         AlphaOutput::Straight
@@ -243,7 +254,11 @@ fn tagged_output_rgba(
         alpha
     };
     let (rgb, a) = output_rgba(w, working, straight_alpha);
-    let rgb = if map_css { css_srgb(rgb) } else { rgb };
+    let rgb = if sdr {
+        pm_color::delivery::sdr(rgb)
+    } else {
+        rgb
+    };
     let rgb = if tags.bt709_transfer() {
         rgb.map(|v| pm_color::transfer::bt709_oetf(e_decode(v)))
     } else {
@@ -255,6 +270,29 @@ fn tagged_output_rgba(
         1.0
     };
     (rgb.map(|v| v * scale), a)
+}
+
+/// The normalized luma and chroma a Y′CbCr input format can code (its
+/// quantizers' clipping ranges, below).
+fn codable(format: InputFormat) -> ([f64; 2], [f64; 2]) {
+    let (luma, chroma) = match format {
+        InputFormat::Y416 => (
+            ((256.0 - 4096.0) / 56064.0, (65264.0 - 4096.0) / 56064.0),
+            ((256.0 - 32768.0) / 57344.0, (65264.0 - 32768.0) / 57344.0),
+        ),
+        InputFormat::V216 | InputFormat::X420 => (
+            ((4.0 - 64.0) / 876.0, (1019.0 - 64.0) / 876.0),
+            ((4.0 - 512.0) / 896.0, (1019.0 - 512.0) / 896.0),
+        ),
+        _ => (
+            ((1.0 - 16.0) / 219.0, (254.0 - 16.0) / 219.0),
+            ((1.0 - 128.0) / 224.0, (254.0 - 128.0) / 224.0),
+        ),
+    };
+    // Two codes of slack: footage at the edge of the range (its decode and
+    // reconversion in float) is still the footage's own value.
+    let (l, c) = (2.0 / 219.0, 2.0 / 224.0);
+    ([luma.0 - l, luma.1 + l], [chroma.0 - c, chroma.1 + c])
 }
 
 /// Quantize one mapped, transfer-encoded SDR output pixel. Call only at an
@@ -336,7 +374,7 @@ fn rgba_quant(
     scale: f64,
 ) -> [f64; 4] {
     let p = pixel(frame, x, y);
-    let (c, a) = tagged_output_rgba(p, params.working, params.alpha, params.tags, false);
+    let (c, a) = tagged_output_rgba(p, params.working, params.alpha, params.tags, true);
     let d = |ch| {
         if params.dither {
             dither_offset(params.frame, x as u32, y as u32, ch)
@@ -444,20 +482,45 @@ pub fn convert_tagged(
             0.0
         }
     };
-    // Y′CbCr carries extended RGB within its codable range (superwhites,
-    // sub-blacks and footage's own out-of-gamut colors), so untouched
-    // footage keeps its luma; only RGB 8-bit outputs take the CSS mapping.
+    // SDR Y′CbCr carries extended RGB that the stream can code (superwhites,
+    // sub-blacks and footage's own out-of-gamut colors keep their values, so
+    // untouched footage passes through, and a player's per-channel display
+    // clip shows the delivery rule's picture). A colour it cannot code takes
+    // the delivery rule (`pm_color::delivery`) first, never a chroma clip
+    // that shifts its hue.
+    // The decision is made where chroma is sited (the first pixel of a 4:2:2
+    // pair or a 4:2:0 block, whose chroma is the coded sample) and holds for
+    // every pixel sharing it, so reconstruction overshoot between samples
+    // never changes footage.
+    let (luma, chroma) = codable(format);
+    let extended = |x: usize, y: usize| {
+        tagged_output_rgba(
+            pixel(frame, x, y),
+            params.working,
+            params.alpha,
+            tags,
+            false,
+        )
+    };
+    let fits = |x: usize, y: usize| {
+        let (x, y) = (
+            if horizontal { x - x % 2 } else { x },
+            if vertical { y - y % 2 } else { y },
+        );
+        let v = rgb_to_ycbcr(extended(x, y).0);
+        (luma[0]..=luma[1]).contains(&v[0])
+            && (chroma[0]..=chroma[1]).contains(&v[1])
+            && (chroma[0]..=chroma[1]).contains(&v[2])
+    };
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
         if tags.is_hdr() {
             crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
         } else {
-            let (c, a) = tagged_output_rgba(
-                pixel(frame, x, y),
-                params.working,
-                params.alpha,
-                tags,
-                false,
-            );
+            let (c, a) = if fits(x, y) {
+                extended(x, y)
+            } else {
+                tagged_output_rgba(pixel(frame, x, y), params.working, params.alpha, tags, true)
+            };
             (rgb_to_ycbcr(c), a)
         }
     };
@@ -706,15 +769,20 @@ pub fn sample_ycbcra(input: &EncoderInput, x: usize, y: usize) -> [f64; 4] {
 mod tests {
     use super::*;
 
+    /// The SDR delivery rule, independently: each straight channel clipped.
+    fn delivered(c: [f64; 3]) -> [f64; 3] {
+        c.map(|v| v.clamp(0.0, 1.0))
+    }
+
     #[test]
-    fn srgb8_boundary_maps_straight_rgb_before_alpha_and_rounding() {
+    fn srgb8_boundary_clips_straight_rgb_before_alpha_and_rounding() {
         let source = [0.6f32, -0.1, 0.2, 0.5];
         let straight = [
             f64::from(source[0]) / f64::from(source[3]),
             f64::from(source[1]) / f64::from(source[3]),
             f64::from(source[2]) / f64::from(source[3]),
         ];
-        let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+        let mapped = delivered(straight);
         let quantize = |v: f64| (v * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
         let straight_bytes = rgba8_pixel(
             source,
@@ -745,9 +813,7 @@ mod tests {
             ColorTags::SrgbImage,
             [0.0; 3],
         );
-        let over_black = pm_reference::color::css_gamut_map_srgb(
-            [source[0], source[1], source[2]].map(f64::from),
-        );
+        let over_black = delivered([source[0], source[1], source[2]].map(f64::from));
         for ch in 0..3 {
             assert!(opaque[ch].abs_diff(quantize(over_black[ch])) <= 1);
         }
@@ -778,13 +844,13 @@ mod tests {
     }
 
     #[test]
-    fn bt709_tags_reencode_after_one_css_mapping() {
+    fn bt709_tags_reencode_after_the_delivery_clip() {
         use pm_reference::color::Transfer;
 
         let source = [0.6f32, -0.1, 0.2, 0.5];
         let straight =
             [source[0], source[1], source[2]].map(|v| f64::from(v) / f64::from(source[3]));
-        let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+        let mapped = delivered(straight);
         let expected = mapped.map(|v| {
             let linear = Transfer::Srgb.to_linear(v);
             (Transfer::Bt709.from_linear(linear) * 255.0)
@@ -829,8 +895,8 @@ mod tests {
     #[test]
     fn transparent_png_unpremultiplies_the_working_floats() {
         // Straight RGB is the premultiplied float divided by alpha while
-        // still extended, then gamut-mapped and rounded once. The reference
-        // mapper is independent of pm_color.
+        // still extended, then clipped by the delivery rule and rounded once.
+        // The reference clip is independent of pm_color.
         for values in [
             [0.2f32, 0.1, 0.0, 0.5],
             [0.0003, 0.0006, 0.0009, 0.003],
@@ -846,7 +912,7 @@ mod tests {
             let byte = convert(&frame, InputFormat::Rgba8, &p).unwrap();
             let a = f64::from(values[3]);
             let straight = [values[0], values[1], values[2]].map(|v| f64::from(v) / a);
-            let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+            let mapped = delivered(straight);
             let expected = mapped.map(|v| (v * 255.0).round_ties_even() as u8);
             assert_eq!(
                 byte.planes[0].u8().unwrap(),
@@ -1194,27 +1260,28 @@ mod tests {
     }
 
     #[test]
-    fn superwhites_and_subblacks_clip_to_the_codable_range() {
-        let f = frame(2, 2, |x, _| {
-            if x == 0 {
-                [-0.5, -0.5, -0.5, 1.0]
-            } else {
-                [2.0, 2.0, 2.0, 1.0]
-            }
+    fn codable_superwhites_pass_and_uncodable_light_takes_the_delivery_rule() {
+        // Twice white and half below black can't be coded: the delivery rule
+        // makes them nominal white and black. A superwhite the stream can
+        // code (1.05) is carried as untouched footage's is.
+        let f = frame(4, 2, |x, _| match x {
+            0 => [-0.5, -0.5, -0.5, 1.0],
+            1 => [2.0, 2.0, 2.0, 1.0],
+            _ => [1.05, 1.05, 1.05, 1.0],
         });
         let wf = WorkingFrame {
-            width: 2,
+            width: 4,
             height: 2,
             rgba: &f,
         };
         let v = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, false)).unwrap();
-        assert_eq!(&v.planes[0].u8().unwrap()[..2], &[1, 254]);
+        assert_eq!(&v.planes[0].u8().unwrap()[..3], &[16, 235, 246]);
         let v = convert(&wf, InputFormat::V216, &params(AlphaOutput::None, false)).unwrap();
-        assert_eq!(v.planes[0].u16().unwrap()[1], 256);
-        assert_eq!(v.planes[0].u16().unwrap()[3], 65216);
+        assert_eq!(v.planes[0].u16().unwrap()[1], 64 << 6);
+        assert_eq!(v.planes[0].u16().unwrap()[3], 940 << 6);
         let v = convert(&wf, InputFormat::Y416, &params(AlphaOutput::None, false)).unwrap();
-        assert_eq!(v.planes[0].u16().unwrap()[1], 256);
-        assert_eq!(v.planes[0].u16().unwrap()[5], 65264);
+        assert_eq!(v.planes[0].u16().unwrap()[1], 4096);
+        assert_eq!(v.planes[0].u16().unwrap()[5], 60160);
     }
 
     #[test]

@@ -50,6 +50,7 @@ function Button({
   destructive?: boolean;
   disabled?: boolean;
   onClick: () => void;
+  key?: string;
 }) {
   return (
     <UI.PushButton
@@ -133,6 +134,36 @@ function RowControl({
     );
   return null;
 }
+/** A row of a card: its title over its description, the control trailing. */
+const rowStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: t("metrics.inset"),
+  minHeight: t("metrics.form_row"),
+  paddingLeft: t("metrics.inset"),
+  paddingRight: t("metrics.inset"),
+  paddingTop: t("metrics.gap"),
+  paddingBottom: t("metrics.gap"),
+};
+const trailing = {
+  display: "flex",
+  flexShrink: 0,
+  alignItems: "center",
+  gap: t("metrics.gap"),
+};
+function RowCopy({ title, detail }: { title: string; detail?: string }) {
+  return (
+    <div style={{ ...column, flexGrow: 1, gap: t("metrics.border") }}>
+      <text style={{ ...text, fontSize: t("typography.title") }}>{title}</text>
+      {detail && (
+        <text style={{ ...help, fontSize: t("typography.label") }}>
+          {detail}
+        </text>
+      )}
+    </div>
+  );
+}
 function SettingRow({
   row,
   model,
@@ -196,72 +227,74 @@ function SpeechRow({
   model: SettingsModel;
   key?: string;
 }) {
-  const act = (
-    action: "download" | "cancel" | "remove" | "retry" | "use",
-  ) => {
+  const act = (action: "download" | "cancel" | "remove" | "retry" | "use") => {
     void model.perform({ type: "speech", id: item.id, action });
   };
   const disabled = !model.services || model.pending.has(item.id);
   return (
-    <div role="group" label={item.name}>
-      <Copy>
-        {item.recommended && item.state !== "installed"
-          ? `${item.name} · Recommended`
-          : item.name}
-      </Copy>
-      <Copy secondary>{item.size}</Copy>
-      {item.state === "available" && (
-        <Button
-          label="Download"
-          disabled={disabled}
-          onClick={() => act("download")}
-        />
-      )}
-      {item.state === "downloading" && (
-        <>
-          <UI.ProgressRow label={item.name} value={item.progress} />
+    <div role="group" label={item.name} style={rowStyle}>
+      <RowCopy
+        title={
+          item.recommended && item.state !== "installed"
+            ? `${item.name} · Recommended`
+            : item.name
+        }
+        detail={item.size}
+      />
+      <div style={trailing}>
+        {item.state === "available" && (
           <Button
-            label="Cancel"
+            label="Download"
             disabled={disabled}
-            onClick={() => act("cancel")}
+            onClick={() => act("download")}
           />
-        </>
-      )}
-      {item.state === "installed" && (
-        <>
-          {item.inUse ? (
-            <Copy>In Use</Copy>
-          ) : (
+        )}
+        {item.state === "downloading" && (
+          <>
+            <UI.ProgressRow label={item.name} value={item.progress} />
             <Button
-              label="Use"
+              label="Cancel"
               disabled={disabled}
-              onClick={() => act("use")}
+              onClick={() => act("cancel")}
             />
-          )}
-          <Button
-            label="Delete…"
-            disabled={disabled}
-            onClick={() => act("remove")}
-          />
-        </>
-      )}
-      {item.state === "error" && (
-        <>
-          <div
-            role="status"
-            label={item.error ?? ""}
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
-            style={{ color: t("colors.danger") }}
-          >
-            {item.error}
-          </div>
-          <Button
-            label="Retry"
-            disabled={disabled}
-            onClick={() => act("retry")}
-          />
-        </>
-      )}
+          </>
+        )}
+        {item.state === "installed" && (
+          <>
+            {item.inUse ? (
+              <Copy>In Use</Copy>
+            ) : (
+              <Button
+                label="Use"
+                disabled={disabled}
+                onClick={() => act("use")}
+              />
+            )}
+            <Button
+              label="Delete…"
+              disabled={disabled}
+              onClick={() => act("remove")}
+            />
+          </>
+        )}
+        {item.state === "error" && (
+          <>
+            <div
+              role="status"
+              label={item.error ?? ""}
+              metadata={{ symbol: "exclamationmark.triangle.fill" }}
+              style={{ color: t("colors.danger") }}
+            >
+              {item.error}
+            </div>
+            <Button
+              label="Retry"
+              disabled={disabled}
+              onClick={() => act("retry")}
+            />
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -332,106 +365,148 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
     );
   return (
     <>
-      <UI.TextField
-        label="Filter extensions"
-        binding={bindings.extensionSearch}
-        value={model.extensionQuery}
-        onInput={(e) => {
-          if (typeof e.value === "string") model.filterExtensions(e.value);
+      {/* The filter stands on the page's text column, over the list's card. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: t("metrics.gap"),
+          height: t("metrics.form_row"),
+          paddingLeft: t("metrics.inset"),
+          paddingRight: t("metrics.inset"),
         }}
-      />
-      <UI.PopUpButton
-        label="Extension Type"
-        binding={bindings.extensionType}
-        value={model.extensionType}
-        options={[...extensionTypes]}
-        onChange={(e) => {
-          if (
-            extensionTypes.includes(e.value as (typeof extensionTypes)[number])
-          )
-            model.filterExtensions(
-              model.extensionQuery,
-              e.value as (typeof extensionTypes)[number],
-            );
-        }}
-      />
-      {model.publication.extensionsState === "loading" ? (
-        <UI.ProgressRow label="Loading extensions…" />
-      ) : model.publication.extensionsState === "error" ? (
-        <UI.EmptyState
-          label="Extensions couldn’t be loaded."
-          explanation=""
-          action={
-            <Button
-              label="Try Again"
-              disabled={!model.services}
-              onClick={() => {
-                void model.perform({ type: "extensions.retry" });
-              }}
-            />
-          }
-        />
-      ) : model.publication.extensionsState === "unavailable" ? (
-        <UI.EmptyState
-          label="Extensions are unavailable in this session."
-          explanation=""
-          action={null}
-        />
-      ) : model.extensions.length === 0 &&
-        (model.extensionQuery.trim() || model.extensionType !== "All Types") ? (
-        <UI.EmptyState
-          label="No Results"
-          explanation="No extensions match this filter."
-          action={null}
-        />
-      ) : model.extensions.length === 0 ? (
-        <UI.EmptyState
-          label="No Extensions"
-          explanation="Extensions you install appear here."
-          action={null}
-        />
-      ) : (
-        // API GAP: structural virtual-list is the existing wire primitive; the kit
-        // has no VirtualList/source-list component or AXRowCount projection yet.
-        <virtual-list
-          id="settings.extensions"
-          role="list"
-          label="Extensions"
-          count={model.extensions.length}
-          range={model.range}
-          metadata={{
-            rowCount: model.extensions.length,
-            rowHeightToken: "metrics.row",
-            anchorId: model.anchorId ?? "",
+      >
+        <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
+          <UI.TextField
+            label="Filter extensions"
+            binding={bindings.extensionSearch}
+            value={model.extensionQuery}
+            metadata={{ placeholder: "Filter", search: true }}
+            onInput={(e) => {
+              if (typeof e.value === "string") model.filterExtensions(e.value);
+            }}
+          />
+        </div>
+        <UI.PopUpButton
+          label="Extension Type"
+          binding={bindings.extensionType}
+          value={model.extensionType}
+          options={[...extensionTypes]}
+          onChange={(e) => {
+            if (
+              extensionTypes.includes(
+                e.value as (typeof extensionTypes)[number],
+              )
+            )
+              model.filterExtensions(
+                model.extensionQuery,
+                e.value as (typeof extensionTypes)[number],
+              );
           }}
-          onRangeChange={(event) => {
-            if (event.range)
-              model.viewport(event.range[0], event.range[1] - event.range[0]);
+        />
+      </div>
+      <UI.FormGroup title="Installed">
+        <div
+          style={{
+            ...column,
+            paddingTop: t("metrics.inset"),
+            paddingBottom: t("metrics.inset"),
           }}
         >
-          {model.visibleExtensions.map((extension) => (
-            <UI.ListItem
-              key={extension.id}
-              id={`settings.extension.${extension.id}`}
-              label={extension.name}
-              selected={false}
-              onSelect={() => model.viewExtension(extension.id)}
+          {model.publication.extensionsState === "loading" ? (
+            <UI.ProgressRow label="Loading extensions…" />
+          ) : model.publication.extensionsState === "error" ? (
+            <UI.EmptyState
+              label="Extensions couldn’t be loaded."
+              explanation=""
+              action={
+                <Button
+                  label="Try Again"
+                  disabled={!model.services}
+                  onClick={() => {
+                    void model.perform({ type: "extensions.retry" });
+                  }}
+                />
+              }
+            />
+          ) : model.publication.extensionsState === "unavailable" ? (
+            <UI.EmptyState
+              label="Extensions are unavailable in this session."
+              explanation=""
+              action={null}
+            />
+          ) : model.extensions.length === 0 &&
+            (model.extensionQuery.trim() ||
+              model.extensionType !== "All Types") ? (
+            <UI.EmptyState
+              label="No Results"
+              explanation="No extensions match this filter."
+              action={null}
+            />
+          ) : model.extensions.length === 0 ? (
+            <UI.EmptyState
+              label="No Extensions"
+              explanation="Extensions you install appear here."
+              action={null}
+            />
+          ) : (
+            // API GAP: structural virtual-list is the existing wire primitive; the kit
+            // has no VirtualList/source-list component or AXRowCount projection yet.
+            <virtual-list
+              id="settings.extensions"
+              role="list"
+              label="Extensions"
+              count={model.extensions.length}
+              range={model.range}
+              metadata={{
+                rowCount: model.extensions.length,
+                rowHeightToken: "metrics.row",
+                anchorId: model.anchorId ?? "",
+              }}
+              onRangeChange={(event) => {
+                if (event.range)
+                  model.viewport(
+                    event.range[0],
+                    event.range[1] - event.range[0],
+                  );
+              }}
             >
-              <Copy>{extension.name}</Copy>
-              <Copy secondary>{`${extension.type} · ${extension.source}`}</Copy>
-              {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
-            </UI.ListItem>
-          ))}
-        </virtual-list>
-      )}
-      <Copy>Publish and manage your extensions on the Store.</Copy>
-      <Button
-        label="Open Store"
-        disabled={!model.services}
-        onClick={() => {
-          void model.perform({ type: "store.open" });
-        }}
-      />
+              {model.visibleExtensions.map((extension) => (
+                <UI.ListItem
+                  key={extension.id}
+                  id={`settings.extension.${extension.id}`}
+                  label={extension.name}
+                  selected={false}
+                  onSelect={() => model.viewExtension(extension.id)}
+                >
+                  <Copy>{extension.name}</Copy>
+                  <Copy
+                    secondary
+                  >{`${extension.type} · ${extension.source}`}</Copy>
+                  {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
+                </UI.ListItem>
+              ))}
+            </virtual-list>
+          )}
+        </div>
+      </UI.FormGroup>
+      <UI.FormGroup title="Store">
+        <div role="group" label="Powermove Store" style={rowStyle}>
+          <RowCopy
+            title="Powermove Store"
+            detail="Publish and manage your extensions on the Store."
+          />
+          <div style={trailing}>
+            <Button
+              label="Open Store"
+              disabled={!model.services}
+              onClick={() => {
+                void model.perform({ type: "store.open" });
+              }}
+            />
+          </div>
+        </div>
+      </UI.FormGroup>
     </>
   );
 }
@@ -456,13 +531,14 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
   );
   if (!memory.entries.length)
     return (
-      <div role="group" label="No Notes Yet" style={column}>
-        <Copy>No Notes Yet</Copy>
-        <Copy secondary>
-          When an agent records a goal, rule or decision for this project, it
-          will show up here.
-        </Copy>
-      </div>
+      <UI.FormGroup title="Notes">
+        <div role="group" label="No Notes Yet" style={rowStyle}>
+          <RowCopy
+            title="No Notes Yet"
+            detail="When an agent records a goal, rule or decision for this project, it will show up here."
+          />
+        </div>
+      </UI.FormGroup>
     );
   return (
     <>
@@ -544,6 +620,10 @@ function SectionContent({
       (!model.query.trim() || model.matches.rows.has(row.id)),
   );
   const groups = [...new Set(rows.map((row) => row.group))];
+  const speech = model.publication.speech.filter(
+    (item) =>
+      !model.query.trim() || model.matches.rows.has(`speech.${item.id}`),
+  );
   return (
     <div
       id={`settings.section.${section}`}
@@ -593,14 +673,13 @@ function SectionContent({
         </UI.FormGroup>
       ))}
       {section === "memory" && <MemoryNotes model={model} />}
-      {section === "transcription" &&
-        model.publication.speech
-          .filter(
-            (item) =>
-              !model.query.trim() ||
-              model.matches.rows.has(`speech.${item.id}`),
-          )
-          .map((item) => <SpeechRow key={item.id} item={item} model={model} />)}
+      {section === "transcription" && speech.length > 0 && (
+        <UI.FormGroup title="Models">
+          {speech.map((item) => (
+            <SpeechRow key={item.id} item={item} model={model} />
+          ))}
+        </UI.FormGroup>
+      )}
       {section === "extensions" && (
         <Extensions model={model} bindings={bindings} />
       )}
@@ -624,7 +703,9 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
         widthToken: "metrics.settings_width",
         heightToken: "metrics.settings_height",
       }}
-      style={{ display: "flex", background: t("colors.panel") }}
+      // The window is Home's shape: the sections on the window's glass (the
+      // host leaves that column to the sidebar material) and one sheet.
+      style={{ display: "flex" }}
       onKeyDown={(event) => {
         event.stopPropagation();
         // Native cancellation must already have happened in the shell planner.
@@ -639,19 +720,29 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
           ...column,
           width: t("metrics.settings_sidebar"),
           padding: t("metrics.gap"),
+          // Below the window's buttons, which stand over this column.
+          paddingTop: t("metrics.titlebar"),
           gap: t("metrics.gap"),
         }}
       >
-        <UI.TextField
-          id="settings.search"
-          label="Search"
-          binding={bindings.search}
-          value={model.query}
-          metadata={{ searching: model.searching, placeholder: "Search" }}
-          onInput={(event) => {
-            if (typeof event.value === "string") void model.search(event.value);
-          }}
-        />
+        {/* A slot of its own height: a search field fills what it is given. */}
+        <div style={{ display: "flex", height: t("metrics.control") }}>
+          <UI.TextField
+            id="settings.search"
+            label="Search"
+            binding={bindings.search}
+            value={model.query}
+            metadata={{
+              searching: model.searching,
+              placeholder: "Search",
+              search: true,
+            }}
+            onInput={(event) => {
+              if (typeof event.value === "string")
+                void model.search(event.value);
+            }}
+          />
+        </div>
         <UI.List
           label="Settings sections"
           id="settings.sections"
@@ -706,49 +797,66 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
             ))}
         </UI.List>
       </div>
-      <scroll
-        id="settings.detail"
-        role="group"
-        label={sectionCopy[model.active].title}
+      <div
+        style={{
+          display: "flex",
+          flexGrow: 1,
+          flexShrink: 1,
+          paddingTop: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+          paddingBottom: t("metrics.gap"),
+        }}
       >
-        {model.query.trim() && model.matches.count === 0 ? (
-          // settings.md §5: centred reading text, not an empty-state title.
-          <div
-            role="status"
-            label="No settings found."
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <text
+        <scroll
+          id="settings.detail"
+          role="group"
+          label={sectionCopy[model.active].title}
+          style={{
+            flexGrow: 1,
+            flexShrink: 1,
+            background: t("colors.panel"),
+            borderRadius: t("metrics.panel_radius"),
+          }}
+        >
+          {model.query.trim() && model.matches.count === 0 ? (
+            // settings.md §5: centred reading text, not an empty-state title.
+            <div
+              role="status"
+              label="No settings found."
               style={{
-                fontSize: t("typography.reading"),
-                color: t("colors.secondary"),
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
               }}
             >
-              No settings found.
-            </text>
-          </div>
-        ) : (
-          // One section per page, as v1 and System Settings; a search lists
-          // every section with a match.
-          (model.query.trim()
-            ? model.visibleSections
-            : model.visibleSections.filter(
-                (section) => section === model.active,
-              )
-          ).map((section) => (
-            <SectionContent
-              key={section}
-              section={section}
-              model={model}
-              bindings={bindings}
-            />
-          ))
-        )}
-      </scroll>
+              <text
+                style={{
+                  fontSize: t("typography.reading"),
+                  color: t("colors.secondary"),
+                }}
+              >
+                No settings found.
+              </text>
+            </div>
+          ) : (
+            // One section per page, as v1 and System Settings; a search lists
+            // every section with a match.
+            (model.query.trim()
+              ? model.visibleSections
+              : model.visibleSections.filter(
+                  (section) => section === model.active,
+                )
+            ).map((section) => (
+              <SectionContent
+                key={section}
+                section={section}
+                model={model}
+                bindings={bindings}
+              />
+            ))
+          )}
+        </scroll>
+      </div>
     </div>
   );
 }

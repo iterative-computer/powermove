@@ -50,6 +50,53 @@ fn visit_plan(plan: &CompPlan, visit: &mut impl FnMut(&str, &Source)) {
     }
 }
 
+/// The still draws of a plan, nested compositions included: each file, its
+/// asset's interpretation, and the edge its draw reads it at
+/// (`crate::exec::source_edge`, from the same matrix, UV window and plane
+/// the draw resolves with).
+fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, bool, Option<u32>)) {
+    fn content(
+        c: &Content,
+        matrix: &[f64; 6],
+        plane: bool,
+        visit: &mut impl FnMut(&std::path::Path, bool, Option<u32>),
+    ) {
+        match c {
+            Content::Texture { source, uv, .. } => match source {
+                Source::Image {
+                    path, interpret, ..
+                } => visit(
+                    path,
+                    interpret.is_some(),
+                    crate::exec::source_edge(matrix, *uv, plane),
+                ),
+                Source::Comp(plan) | Source::Accumulate(plan) => visit_stills(plan, visit),
+                _ => {}
+            },
+            Content::Placed(placed) => content(
+                &placed.content,
+                matrix,
+                plane || placed.plane.is_some(),
+                visit,
+            ),
+            Content::Composite(node) => {
+                if let composite::Node::Layer(layer) = &**node {
+                    for draw in &layer.content {
+                        content(&draw.content, &draw.matrix, false, visit);
+                    }
+                    if let Some(matte) = &layer.matte {
+                        visit_stills(&matte.source, visit);
+                    }
+                }
+            }
+            Content::Solid(_) => {}
+        }
+    }
+    for draw in &plan.draws {
+        content(&draw.content, &draw.matrix, false, visit);
+    }
+}
+
 /// The video draws of a plan, nested compositions included.
 pub(super) fn planned_videos(plan: &CompPlan) -> Vec<crate::media::PlannedVideoDraw> {
     let mut out = Vec::new();
@@ -134,10 +181,8 @@ impl Renderer {
         // left a project with one such layer without any look-ahead).
         let mut result = MediaPreparation::default();
         if !request.export {
-            visit_plan(&plan, &mut |_, source| {
-                if let Source::Image { path, .. } = source {
-                    self.media.prepare_image(path);
-                }
+            visit_stills(&plan, &mut |path, interpreted, edge| {
+                self.media.prepare_image(path, edge, interpreted);
             });
         }
         for v in planned_videos(&plan) {
@@ -165,6 +210,7 @@ impl Renderer {
     /// Wait for queued preparation in headless tests and performance runs.
     /// The interactive presenter must use `prepare_media` alone.
     pub fn finish_media_preparation(&mut self) -> Vec<String> {
+        self.media.wait_for_stills();
         self.media
             .wait_for_preparation()
             .into_iter()

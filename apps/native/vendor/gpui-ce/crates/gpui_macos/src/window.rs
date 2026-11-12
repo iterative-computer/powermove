@@ -593,6 +593,21 @@ unsafe fn build_window_class(
             sel!(makeFirstResponder:),
             composition_make_first_responder as unsafe extern "C" fn(_, _, _) -> _,
         );
+        // Powermove P-SHEET-TOP: a sheet can keep its top edge while its
+        // height changes (AppKit centres a sheet again on every new frame).
+        decl.add_ivar::<f64>(SHEET_TOP_IVAR);
+        decl.add_method(
+            sel!(pmPinSheetTop:),
+            pin_sheet_top as unsafe extern "C" fn(_, _, _),
+        );
+        decl.add_method(
+            sel!(constrainFrameRect:toScreen:),
+            if is_panel {
+                constrain_panel_frame as unsafe extern "C" fn(_, _, _, _) -> _
+            } else {
+                constrain_window_frame as unsafe extern "C" fn(_, _, _, _) -> _
+            },
+        );
         if is_panel {
             decl.add_method(sel!(dealloc), dealloc_panel as unsafe extern "C" fn(_, _));
         } else {
@@ -2736,6 +2751,87 @@ unsafe fn drop_window_state(object: &Objc2Object) {
 
 unsafe extern "C" fn yes(_: &Objc2Object, _: Sel) -> Bool {
     Bool::new(true)
+}
+
+/// How far under its parent's top edge a pinned sheet's top stands; zero
+/// while the sheet is where AppKit centres it.
+const SHEET_TOP_IVAR: &std::ffi::CStr = c"pmSheetTop";
+
+/// `pmPinSheetTop:`: from now on this sheet keeps its top edge where a
+/// sheet `height` tall stands when it is centred in its parent. The first
+/// call decides; later ones change nothing.
+unsafe extern "C" fn pin_sheet_top(this: &Objc2Object, _: Sel, height: f64) {
+    // SAFETY: registered only on GPUI window classes, which declare the ivar;
+    // AppKit calls on the main thread and `sheetParent` is a live window or nil.
+    unsafe {
+        let parent: ObjcId = msg_send![this, sheetParent];
+        let Some(ivar) = this.class().instance_variable(SHEET_TOP_IVAR) else {
+            return;
+        };
+        let pinned = ivar.load_ptr::<f64>(this);
+        if parent.is_null() || *pinned > 0. {
+            return;
+        }
+        let outer: Objc2NSRect = msg_send![parent, frame];
+        *pinned = ((outer.size.height - height) / 2.)
+            .round()
+            .max(f64::MIN_POSITIVE);
+    }
+}
+
+/// AppKit asks this with the frame it is about to give the window: for a
+/// sheet, one centred in its parent. A pinned sheet answers with the same
+/// frame hung from the top edge it was pinned at, so it grows and shrinks
+/// downwards and follows its parent when that moves or is resized.
+unsafe extern "C" fn constrain_window_frame(
+    this: &Objc2Object,
+    _: Sel,
+    rect: Objc2NSRect,
+    screen: ObjcId,
+) -> Objc2NSRect {
+    // SAFETY: registered on GPUIWindow, whose superclass is NSWindow.
+    unsafe {
+        let rect: Objc2NSRect = msg_send![
+            super(this, class!(NSWindow)),
+            constrainFrameRect: rect,
+            toScreen: screen
+        ];
+        hang_pinned_sheet(this, rect)
+    }
+}
+unsafe extern "C" fn constrain_panel_frame(
+    this: &Objc2Object,
+    _: Sel,
+    rect: Objc2NSRect,
+    screen: ObjcId,
+) -> Objc2NSRect {
+    // SAFETY: registered on GPUIPanel, whose superclass is NSPanel.
+    unsafe {
+        let rect: Objc2NSRect = msg_send![
+            super(this, class!(NSPanel)),
+            constrainFrameRect: rect,
+            toScreen: screen
+        ];
+        hang_pinned_sheet(this, rect)
+    }
+}
+/// A pinned sheet's frame, hung from the top edge it was pinned at.
+///
+/// # Safety
+/// `this` is a GPUI window on the main thread.
+unsafe fn hang_pinned_sheet(this: &Objc2Object, mut rect: Objc2NSRect) -> Objc2NSRect {
+    unsafe {
+        let pinned = this
+            .class()
+            .instance_variable(SHEET_TOP_IVAR)
+            .map_or(0., |ivar| *ivar.load::<f64>(this));
+        let parent: ObjcId = msg_send![this, sheetParent];
+        if pinned > 0. && !parent.is_null() {
+            let outer: Objc2NSRect = msg_send![parent, frame];
+            rect.origin.y = outer.origin.y + outer.size.height - pinned - rect.size.height;
+        }
+        rect
+    }
 }
 
 unsafe extern "C" fn dealloc_window(this: &Objc2Object, _: Sel) {

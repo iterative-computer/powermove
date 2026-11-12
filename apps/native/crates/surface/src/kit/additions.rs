@@ -197,6 +197,18 @@ pub(crate) fn over_image(surface: &Surface, node: &Node) -> bool {
     }
     false
 }
+/// A sheet is the Settings anatomy in a dialog: its rows take the same
+/// controls a Settings page does.
+pub(crate) fn in_sheet(surface: &Surface, node: &Node) -> bool {
+    let mut current = node.parent.and_then(|id| surface.node(id));
+    while let Some(n) = current {
+        if Component::of(n) == Some(Component::SheetAnchor) {
+            return true;
+        }
+        current = n.parent.and_then(|id| surface.node(id));
+    }
+    false
+}
 pub(crate) fn settings_host(surface: &Surface, node: &Node) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {
@@ -278,12 +290,11 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
             radius: t.metrics.control_radius,
             thumb: t.metrics.inset,
             ring: t.metrics.control_radius - t.metrics.inner_radius,
-            // Approved concentric math in inspector.md §7 (keyframe + 3;
-            // track_row / 2 + 2; gap + 4) expressed using existing tokens.
+            // The track is the keyframe glyph plus the drag threshold; the
+            // thumb and the row gap come from the spacing scale.
             slider_track: t.metrics.keyframe + t.metrics.drag_threshold,
-            slider_thumb: t.metrics.track_row / 2.
-                + (t.metrics.control_radius - t.metrics.inner_radius),
-            row_gap: t.metrics.gap + t.metrics.inner_radius,
+            slider_thumb: t.space.xl,
+            row_gap: t.metrics.gap + t.space.xs,
             checker: metric("metrics.checker"),
             fill_modes: bool_option(node, "fill"),
             recent_limit: 8,

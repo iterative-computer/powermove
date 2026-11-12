@@ -67,7 +67,9 @@ fn wait_frame(v: &Viewer, stamp: Stamp) -> FrameReport {
         }
         assert!(
             start.elapsed() < Duration::from_secs(20),
-            "frame timed out: {stamp:?}"
+            "frame timed out: {stamp:?}, the viewer is at {:?}: {:?}",
+            v.stamp(),
+            v.status()
         );
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -122,6 +124,8 @@ fn cache_key_includes_every_content_coordinate() {
         height: 100,
         crop: None,
         moment: policy::Moment::Paused,
+        scale: 1f64.to_bits(),
+        sampling: pm_render::sampling::Sampling::Final,
     };
     for other in [
         policy::CacheKey { content: 2, ..k },
@@ -141,6 +145,21 @@ fn cache_key_includes_every_content_coordinate() {
         assert!(!k.same_content(other));
     }
     assert_ne!(k, policy::CacheKey { time: 8, ..k });
+    // Another density or resampler at one render size is another picture.
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            scale: 0.5f64.to_bits(),
+            ..k
+        }
+    );
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            sampling: pm_render::sampling::Sampling::Playback,
+            ..k
+        }
+    );
     // A playing frame is never the exact paused picture of its time.
     assert_ne!(
         k,
@@ -276,9 +295,70 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
     }
 }
 
+/// A paused playhead in a rendered range shows the rendered frame: its
+/// picture is the composition-size frame on disk, so it is not drawn again
+/// and has no refinement to wait for (whatever a background fill is doing
+/// to the GPU). Outside the range a paused picture is drawn and refined.
 #[test]
-fn stopped_playback_retires_recording_pools_without_changing_the_still() {
-    let service = EngineService::start(pm_gpu::Gpu::new("stopped-pools-test").unwrap()).unwrap();
+fn a_paused_frame_in_a_rendered_range_shows_the_rendered_frame() {
+    let service = EngineService::start(pm_gpu::Gpu::new("paused-disk-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&viewer, viewer.stamp().unwrap());
+    // Frames 30 to 32 rendered (the fill child), once the scene is read.
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let start = Instant::now();
+    while disk
+        .start_fill(1., 1.1, exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(20), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            disk.bars()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let settled = |ticks: i64| {
+        viewer
+            .command(C::Seek {
+                time: Ticks::new(ticks).unwrap(),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        // Any refinement has landed after this long.
+        std::thread::sleep(Duration::from_secs(3));
+        let stamp = viewer.stamp().unwrap();
+        wait_frame(&viewer, stamp)
+    };
+    // The composition is twice the drawable: a drawn paused picture is
+    // refined at scale 2; the rendered frame is shown as it is.
+    let drawn = settled(2 * TICKS_PER_SECOND);
+    assert_eq!(drawn.scale, 2., "outside the range: drawn and refined");
+    // Frame 30 starts the reader on the range (a slow test build may still
+    // draw it); frame 31 is then read when the playhead gets to it.
+    settled(TICKS_PER_SECOND);
+    let rendered = settled(TICKS_PER_SECOND + TICKS_PER_SECOND / 30);
+    assert_eq!(rendered.scale, 1., "in the range: the frame on disk");
+    viewer.retire();
+}
+
+/// A stop releases what is idle (targets, read-ahead) and keeps the engine:
+/// its device, compiled programs and pipelines stay, so the next play
+/// starts warm. (Renewing the device two seconds after every stop gave the
+/// recording pools' high-water storage back, and made every play after a
+/// pause compile and upload everything again.) The still stays as it was.
+#[test]
+fn a_stop_releases_idle_targets_and_keeps_the_engine_warm() {
+    let service = EngineService::start(pm_gpu::Gpu::new("stopped-warm-test").unwrap()).unwrap();
     let viewer = service.viewer(config(snapshot())).unwrap();
     viewer
         .command(C::Play {
@@ -301,14 +381,21 @@ fn stopped_playback_retires_recording_pools_without_changing_the_still() {
     }
     viewer.capture_next().unwrap();
     let pixels = wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while service.memory_usage().targets_created != 0 {
-        assert!(
-            Instant::now() < deadline,
-            "stopped recording pools stayed live"
-        );
+    let created = service.memory_usage().targets_created;
+    assert!(created > 0);
+    // The idle release (two seconds after the last frame), and well past it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while service.memory_usage().target_pool_idle != 0 {
+        assert!(Instant::now() < deadline, "idle targets stayed");
         std::thread::sleep(Duration::from_millis(10));
     }
+    std::thread::sleep(Duration::from_secs(3));
+    let after = service.memory_usage();
+    assert_eq!(after.target_pool_idle, 0);
+    assert_eq!(
+        after.targets_created, created,
+        "the same engine: nothing was made again, and no new one took its place"
+    );
     assert_eq!(
         viewer.status().frame.unwrap().pixels.as_ref(),
         Some(&pixels)
@@ -399,6 +486,39 @@ fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do
         Some("original.mov")
     );
 }
+/// Rendered frames are drawn from what a paused frame reads, never from
+/// Automatic's HD proxy, even when the frame that opened the composition
+/// to the disk cache was a playing one reading that proxy.
+#[test]
+fn rendered_frames_are_drawn_from_originals_while_playback_reads_an_hd_proxy() {
+    let service = EngineService::start(pm_gpu::Gpu::new("rendered-media-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let mut config = config(snapshot());
+    config.media = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    let viewer = service.viewer(config).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let start = Instant::now();
+    while viewer.status().presented < 3 {
+        assert!(start.elapsed() < Duration::from_secs(20), "no playback");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let from = disk.rendered_from().expect("the composition is observed");
+    assert_eq!(from["large"].to_str(), Some("original.mov"));
+    viewer.retire();
+}
+
 #[test]
 fn worker_exact_cache_and_revision_resize_retirement() {
     let s = snapshot();

@@ -177,6 +177,10 @@ impl Host {
             .ok()
             .map(|_| Operation(self.operations.clone()))
     }
+    /// Whether a session transition holds the fence now.
+    pub fn operation_in_progress(&self) -> bool {
+        self.operations.load(Ordering::Acquire)
+    }
     /// While `project`'s open waits on a recovery choice in the window, tools
     /// say so instead of reporting a bare operation in progress.
     pub fn awaiting_recovery(&self, project: Option<String>) {
@@ -333,6 +337,7 @@ impl Host {
             ShellReply::Saved {
                 session,
                 recovery_copy: None,
+                ..
             } => {
                 let p = self
                     .kernel

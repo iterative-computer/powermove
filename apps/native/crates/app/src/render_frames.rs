@@ -57,6 +57,14 @@ pub(crate) fn watch() -> async_channel::Receiver<()> {
     rx
 }
 
+/// Why background rendering is not rendering, when the disk is why.
+pub(crate) fn background_paused_note() -> Option<String> {
+    let bars = DISK.get()?.bars();
+    (bars.background && bars.disk_full)
+        .then(|| bars.error.clone())
+        .flatten()
+}
+
 /// The render bar of `composition` (`None`: the open root composition), as
 /// the timeline paints it.
 pub(crate) fn bars(composition: Option<&str>) -> Vec<pm_panel_timeline::render::Bar> {

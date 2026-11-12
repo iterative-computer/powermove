@@ -196,6 +196,9 @@ pub struct HistoryRecord {
     /// The digest of the form the file stores for this step, computed once
     /// and shared by every copy ([`History::identity`]).
     digest: Arc<std::sync::OnceLock<String>>,
+    /// The assets the step refers to ([`Self::referenced_assets`]), found
+    /// once and shared by every copy.
+    assets: Arc<std::sync::OnceLock<Box<[String]>>>,
 }
 
 impl HistoryRecord {
@@ -222,6 +225,59 @@ impl HistoryRecord {
     /// The leaf patches the file stores for this record (`forward`,
     /// `backward`). `None` for a structural edit too large to keep whole: it
     /// saves as operations, and its entry costs what it changed.
+    /// The asset ids the step's operations refer to: what its patches add
+    /// under `assets`, and the originals of anything undoing or redoing it
+    /// would put back (a deleted layer's value). A save keeps those media
+    /// live. The step's operations never change, so they are read once: a
+    /// save asks every step, and inflating a long history's stored
+    /// operations on each save made every save slow.
+    pub(crate) fn referenced_assets(&self) -> &[String] {
+        self.assets.get_or_init(|| {
+            let mut ids = std::collections::HashSet::new();
+            let mut add_keys = |v: Option<&Value>, ids: &mut std::collections::HashSet<String>| {
+                if let Some(Value::Object(map)) = v {
+                    ids.extend(map.keys().filter_map(|k| k.as_str().map(str::to_owned)));
+                }
+            };
+            let ops: Vec<Op> = self.forward.iter().chain(self.inverse.iter()).collect();
+            if self.saved.is_some()
+                && let Some((f, b)) = self.saved_form()
+            {
+                for p in f.iter().chain(b.iter()) {
+                    crate::project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
+                }
+            } else {
+                for op in &ops {
+                    if let Op::Leaf(p) = op {
+                        crate::project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
+                    }
+                }
+            }
+            for op in &ops {
+                // A deleted layer's value is what Undo would reinsert.
+                let value = match op {
+                    Op::Leaf(p) => p.value.as_ref(),
+                    Op::Insert { value, .. } => Some(value),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    crate::commands::scene3d::collect_original_assets(value, &mut ids);
+                }
+            }
+            let mut ids: Vec<String> = ids.into_iter().collect();
+            ids.sort();
+            ids.into()
+        })
+    }
+    /// Finds what a save asks of this step (the assets it reaches, the
+    /// digest of its saved form) ahead of the save. Both are found once and
+    /// shared by every copy of the step, so this may run on any thread.
+    pub(crate) fn warm(&self) {
+        self.referenced_assets();
+        if self.is_document() {
+            self.digest();
+        }
+    }
     pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
             let value = saved.value();
@@ -509,6 +565,7 @@ impl History {
             external: None,
             selection: None,
             digest: Default::default(),
+            assets: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -541,6 +598,7 @@ impl History {
             external: Some(external),
             selection: None,
             digest: Default::default(),
+            assets: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -570,6 +628,7 @@ impl History {
             external: None,
             selection: Some(Arc::new((before, after))),
             digest: Default::default(),
+            assets: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -905,6 +964,7 @@ impl History {
                 external: None,
                 selection: None,
                 digest: Default::default(),
+                assets: Default::default(),
             });
             history.total_bytes += bytes;
         }

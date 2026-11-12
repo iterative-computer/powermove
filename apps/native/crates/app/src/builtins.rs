@@ -399,7 +399,10 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
+            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            // The Agent panel is a popover while its own window is open, a docked panel otherwise.
+            "agentPopover":self.builtins.opening_windows.contains("agent")
+                || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -777,7 +780,13 @@ impl Controller {
         let parent = (kind != WindowKind::Normal).then(|| window.window_handle());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
+        // The panel's first publication in this window already knows where it is shown.
+        let facts = self.facts(cx);
         cx.spawn(async move |this, cx| {
+            let told = runtime.clone();
+            cx.background_executor()
+                .spawn(async move { told.update_facts(facts) })
+                .await;
             if let Ok(ticket) = runtime.show(&id) {
                 let _ = ticket.await;
             }
@@ -801,8 +810,11 @@ impl Controller {
             }
             let mut options = WindowOptions::new().kind(kind);
             options.parent = parent;
-            if popover.is_some() {
-                // Clear GPUI content over the popover material (language §12).
+            // Settings is laid out as Home is: a sidebar on the window's
+            // glass and a content sheet beside it.
+            let sidebar = (id == "settings").then(pm_shell::tokens);
+            if popover.is_some() || sidebar.as_ref().is_some_and(|t| t.translucent()) {
+                // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
             let result = cx.open_window(
@@ -821,6 +833,9 @@ impl Controller {
                 |window, cx| {
                     if let Some(tokens) = &popover {
                         pm_shell::popover_frame(window, tokens);
+                    }
+                    if let Some(tokens) = &sidebar {
+                        pm_shell::sidebar_frame(window, tokens, tokens.metrics.settings_sidebar);
                     }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
@@ -1148,6 +1163,7 @@ impl Controller {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
+                    self.update_builtins(cx);
                     gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }
@@ -1628,15 +1644,27 @@ impl Render for SurfaceWindow {
         let popover = self.panel == "agent";
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
+        // Settings draws its own sheet beside a sidebar on the window's
+        // glass: the window paints only the ground around the sheet.
+        let sidebar = self.panel == "settings";
         let (mut fill, mut band) = (0, 0.);
+        let mut ground = None;
         let body = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
+                if sidebar {
+                    ground = Some((t.ground(), t.metrics.settings_sidebar));
+                }
                 (t.metrics.header, t.colors.panel, t.metrics.titlebar)
             };
             fill = colour;
-            // Windows with a transparent title bar keep their content below it.
-            band = if popover || sheet { 0. } else { titlebar };
+            // Windows with a transparent title bar keep their content below
+            // it; Settings keeps only its sidebar below the window buttons.
+            band = if popover || sheet || sidebar {
+                0.
+            } else {
+                titlebar
+            };
             v.builtin_panel(
                 &panel,
                 pm_shell::layout::Rect {
@@ -1655,7 +1683,18 @@ impl Render for SurfaceWindow {
             .size_full()
             .overflow_hidden()
             .pt(px(band))
-            .when(!popover, |d| d.bg(rgb(fill)))
+            .when(!popover && !sidebar, |d| d.bg(rgb(fill)))
+            .when_some(ground, |d, ((colour, alpha), side)| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .left(px(side))
+                        .bg(gpui::rgba((colour << 8) | (alpha * 255.).round() as u32)),
+                )
+            })
             .children(body)
     }
 }

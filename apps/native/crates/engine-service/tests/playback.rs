@@ -295,7 +295,8 @@ fn playback_frames_take_the_viewer_path_and_a_stop_lands_the_exact_frame() {
     let stopped = wait(&v, "the exact stopped frame", |s| {
         s.frame
             .as_ref()
-            .is_some_and(|f| f.moment == Moment::Paused && f.scale == 1. && !f.stand_ins)
+            // Full: the drawable's size, then the composition's (refined).
+            .is_some_and(|f| f.moment == Moment::Paused && f.scale >= 1. && !f.stand_ins)
     });
     assert_eq!(stopped.error, None);
 }
@@ -348,8 +349,9 @@ fn a_fixed_quality_renders_every_frame_at_that_resolution() {
     })
     .unwrap();
     v.quality(Quality::Auto).unwrap();
+    // Full: the drawable's size, then the composition's (refined).
     wait(&v, "Auto is full when stopped", |s| {
-        s.frame.as_ref().is_some_and(|f| f.scale == 1.)
+        s.frame.as_ref().is_some_and(|f| f.scale >= 1.)
     });
 }
 

@@ -172,6 +172,9 @@ pub struct NodeView {
     /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
     /// its own font, so a changing readout (timecode) never reflows its row.
     pub fixed_width: Option<SharedString>,
+    /// `data-pm-slot="body"`: the part of a sheet between its title and its
+    /// actions, which gives way while the sheet's height changes.
+    pub sheet_body: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NumberFacts {
@@ -330,6 +333,8 @@ fn compile(
                     .mx(px(t.metrics.gap))
                     .px(px(t.metrics.gap))
                     .gap(px(t.metrics.gap))
+                    // A selected or hovered row is never a square slab.
+                    .rounded(px(radius))
             }
             // Band rows (the timeline outline) share their band with native
             // track rows: selection spans the whole row, as in After Effects.
@@ -573,6 +578,7 @@ fn compile(
         .flatten();
     let meta = node.props.get("metadata");
     NodeView {
+        sheet_body: node.props.get("data-pm-slot").and_then(Value::as_str) == Some("body"),
         fixed_width: meta
             .and_then(|m| m.get("fixedWidthSample"))
             .and_then(Value::as_str)
@@ -885,6 +891,13 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
                     e.flex_row()
                 } else {
                     e.flex_col()
+                };
+            }
+            "flexWrap" => {
+                e = if s == Some("wrap") {
+                    e.flex_wrap()
+                } else {
+                    e.flex_nowrap()
                 };
             }
             "alignItems" => {

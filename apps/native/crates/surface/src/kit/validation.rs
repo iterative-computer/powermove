@@ -89,7 +89,10 @@ pub fn validate_panel_with_table(
         if node.props.contains_key("data-pm-component") && component.is_none() {
             flag("data-pm-component", "unknownComponent");
         }
-        if component == Some(Component::Switch) && !super::additions::settings_host(surface, node) {
+        if component == Some(Component::Switch)
+            && !super::additions::settings_host(surface, node)
+            && !super::additions::in_sheet(surface, node)
+        {
             flag("metadata.hostWindow", "switchOutsideSettings");
         }
         if component == Some(Component::SecureField) {
@@ -186,6 +189,7 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
         "position" => &["relative", "absolute"][..],
         "inset" => &["fill"][..],
         "flexDirection" => &["row", "column"][..],
+        "flexWrap" => &["wrap", "nowrap"][..],
         "alignItems" | "justifyContent" => {
             &["start", "end", "center", "stretch", "space-between"][..]
         }

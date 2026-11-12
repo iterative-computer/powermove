@@ -94,6 +94,42 @@ fn kernel_reply_uses_ticket_and_exact_decisions() {
     assert!(PreparedRecovery::from_reply(&none, "Synthetic", true, true).is_none());
 }
 #[test]
+fn another_files_work_is_offered_by_name_and_left_alone_when_declined() {
+    let reply = ShellReply::RecoveryRequired {
+        ticket: "ticket".into(),
+        recovery: RecoveryResult::FromOtherFile {
+            name: "cut.pmv".into(),
+            truncated: false,
+        },
+    };
+    let p = PreparedRecovery::from_reply(&reply, "cut restored", true, true).unwrap();
+    assert_eq!(
+        p.alert.message,
+        "Recover unsaved changes from “cut.pmv” into “cut restored”?"
+    );
+    assert!(p.alert.informative.contains("they stay with “cut.pmv”"));
+    assert_eq!(labels(&p.alert), ["Recover", "Leave Them"]);
+    assert_eq!(on_return(&p.alert), Some(Action::Recover));
+    assert!(matches!(
+        p.decision(Action::Recover),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::Recover,
+            ..
+        })
+    ));
+    assert!(matches!(
+        p.decision(Action::Leave),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::Discard,
+            ..
+        })
+    ));
+    // Nothing destructive, and no copy, is offered for work that may not be
+    // this file's.
+    assert!(p.decision(Action::Discard).is_none());
+    assert!(p.decision(Action::OpenAsCopy).is_none());
+}
+#[test]
 fn unrecoverable_reply_never_leaks_diagnostics_or_discards() {
     let p = PreparedRecovery::from_reply(
         &ShellReply::RecoveryRequired {

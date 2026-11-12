@@ -2286,7 +2286,7 @@ mod tests {
                 let n = ((y1 - y0) * (x1 - x0)) as f32;
                 let o = (py * pw as usize + px) * 4;
                 let rgb = (sum.map(|v| v / n)).map(f64::from);
-                let mapped = pm_color::css_srgb(rgb);
+                let mapped = pm_color::delivery::sdr(rgb);
                 for k in 0..3 {
                     out[o + k] = (mapped[k] * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
                 }

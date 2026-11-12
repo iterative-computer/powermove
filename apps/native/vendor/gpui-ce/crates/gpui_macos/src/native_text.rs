@@ -399,6 +399,17 @@ impl NativeTextSlot {
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(4., 3.));
+            if kind == TextKind::Composer {
+                // A prompt is not prose to rewrite: no Writing Tools badge
+                // beside the empty field (NSWritingToolsBehaviorNone).
+                unsafe {
+                    let supported: bool =
+                        msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)];
+                    if supported {
+                        let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                    }
+                }
+            }
             Editor::Multiline(v)
         } else {
             let v = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
@@ -497,12 +508,17 @@ impl NativeTextSlot {
         // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
         // No input-context replacement or keyDown override is installed.
         if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
+            // As a hosted control: it keeps its distance from the window's
+            // top edge until the next paint places it.
+            let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
+            state.wrapper.setAutoresizingMask(top);
             content.addSubview_positioned_relativeTo(
                 &state.wrapper,
                 NSWindowOrderingMode::Above,
                 Some(gpui),
             );
             if let Some((host, _)) = &state.caret {
+                host.setAutoresizingMask(top);
                 content.addSubview_positioned_relativeTo(
                     host,
                     NSWindowOrderingMode::Above,

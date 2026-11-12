@@ -17,8 +17,19 @@ use std::time::{Duration, Instant};
 use pm_media::image::StillImage;
 use pm_media::pool::FramePool;
 
-/// A file at one stamp (length, modification time).
-type StillKey = (PathBuf, u64, u128);
+/// A file at one stamp (length, modification time), asked for as a draw
+/// reads it ([`StillAsk`]).
+type StillKey = (PathBuf, u64, u128, StillAsk);
+
+/// How the frame that draws a still reads it: the viewer's preview edge (the
+/// longest side it shows the still at, when it draws previews) and whether
+/// the asset has Interpret Footage overrides. The worker decodes what
+/// `MediaCache::image_scaled` would for the same ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct StillAsk {
+    pub edge: Option<u32>,
+    pub interpreted: bool,
+}
 
 /// Stills queued or waiting for their frame at once.
 const MAX_READY: usize = 8;
@@ -30,10 +41,14 @@ const MAX_READY_BYTES: usize = 24 << 20;
 /// dropped: the playhead went elsewhere.
 const READY_TTL: Duration = Duration::from_secs(4);
 
+/// A decoded still and the preview edge it was decoded at (none: the whole
+/// still at its native depth).
+type Decoded = (StillImage, Option<u32>);
+
 /// The decode worker: requests in, decoded stills out.
 struct Worker {
     ask: Sender<StillKey>,
-    answers: Receiver<(StillKey, Option<StillImage>)>,
+    answers: Receiver<(StillKey, Option<Decoded>)>,
     _thread: JoinHandle<()>,
 }
 
@@ -41,7 +56,7 @@ pub(crate) struct StillPrefetch {
     worker: Option<Worker>,
     pending: HashSet<StillKey>,
     /// Decoded stills and when they were last asked for.
-    ready: HashMap<StillKey, (StillImage, Instant)>,
+    ready: HashMap<StillKey, (Decoded, Instant)>,
     /// Bytes of decoded stills, ready or still in the channel.
     held: Arc<AtomicUsize>,
     limit: usize,
@@ -70,10 +85,17 @@ impl StillPrefetch {
         }
     }
 
-    /// Queues `path` at `stamp` for decoding, unless it is queued or ready.
-    pub(crate) fn request(&mut self, path: &Path, stamp: (u64, u128), pool: &FramePool) {
+    /// Queues `path` at `stamp` for decoding as `ask` reads it, unless it is
+    /// queued or ready.
+    pub(crate) fn request(
+        &mut self,
+        path: &Path,
+        stamp: (u64, u128),
+        ask: StillAsk,
+        pool: &FramePool,
+    ) {
         self.drain();
-        let key = (path.to_path_buf(), stamp.0, stamp.1);
+        let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
         if let Some((_, asked)) = self.ready.get_mut(&key) {
             *asked = Instant::now();
             return;
@@ -91,11 +113,27 @@ impl StillPrefetch {
                 .spawn(move || {
                     for key in asks {
                         // The frame's probe reads the file's facts first,
-                        // once per stamp: warm that cache here too.
-                        let _ = super::still_facts(&key.0);
+                        // once per stamp (a whole decode): warm that cache
+                        // here too. They also say whether the frame reads a
+                        // preview of this still or the whole of it.
+                        let facts = super::still_facts(&key.0);
+                        let edge = key
+                            .3
+                            .edge
+                            .filter(|_| facts.is_ok_and(|f| f.previewed(key.3.interpreted)));
+                        let decoded = match edge {
+                            Some(edge) => {
+                                pm_media::image::imageio::read_preview(&key.0, &pool, edge)
+                                    .map(|still| (still, Some(edge)))
+                                    .or_else(|_| {
+                                        pm_media::image::read(&key.0, &pool).map(|s| (s, None))
+                                    })
+                            }
+                            None => pm_media::image::read(&key.0, &pool).map(|s| (s, None)),
+                        };
                         // Only a still that fits beside the held ones is
                         // kept; the frame decodes the others itself.
-                        let still = pm_media::image::read(&key.0, &pool).ok().filter(|still| {
+                        let still = decoded.ok().filter(|(still, _)| {
                             let size = bytes(still);
                             held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
                                 (h + size <= limit).then_some(h + size)
@@ -123,12 +161,33 @@ impl StillPrefetch {
         }
     }
 
-    /// The still decoded for `path` at `stamp`, if the worker has it.
-    pub(crate) fn take(&mut self, path: &Path, stamp: (u64, u128)) -> Option<StillImage> {
+    /// The still decoded for `path` at `stamp` and `ask`, if the worker has
+    /// it decoded at `edge` (the preview edge the frame is about to read at;
+    /// none: the whole still). One decoded another way is left to expire.
+    pub(crate) fn take(
+        &mut self,
+        path: &Path,
+        stamp: (u64, u128),
+        ask: StillAsk,
+        edge: Option<u32>,
+    ) -> Option<StillImage> {
         self.drain();
-        let (still, _) = self.ready.remove(&(path.to_path_buf(), stamp.0, stamp.1))?;
+        let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
+        if self.ready.get(&key)?.0.1 != edge {
+            return None;
+        }
+        let ((still, _), _) = self.ready.remove(&key)?;
         self.held.fetch_sub(bytes(&still), Ordering::AcqRel);
         Some(still)
+    }
+
+    /// Waits until the worker has answered every request (headless tests
+    /// and performance runs; a frame never waits).
+    pub(crate) fn settle(&mut self) {
+        while !self.pending.is_empty() {
+            std::thread::sleep(Duration::from_millis(2));
+            self.drain();
+        }
     }
 
     fn drain(&mut self) {
@@ -142,7 +201,7 @@ impl StillPrefetch {
             }
         }
         let (held, ttl) = (&self.held, self.ttl);
-        self.ready.retain(|_, (still, asked)| {
+        self.ready.retain(|_, ((still, _), asked)| {
             let keep = now.duration_since(*asked) < ttl;
             if !keep {
                 held.fetch_sub(bytes(still), Ordering::AcqRel);
@@ -184,10 +243,10 @@ mod tests {
         let pool = FramePool::new(0);
         let stamp = crate::media::stamp(&path).expect("fixture exists");
         let mut prefetch = StillPrefetch::default();
-        prefetch.request(&path, stamp, &pool);
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
         let started = std::time::Instant::now();
         let still = loop {
-            if let Some(still) = prefetch.take(&path, stamp) {
+            if let Some(still) = prefetch.take(&path, stamp, StillAsk::default(), None) {
                 break still;
             }
             assert!(started.elapsed().as_secs() < 30, "the worker answers");
@@ -210,10 +269,19 @@ mod tests {
             )
         );
         assert_eq!(plane_bytes(&still), plane_bytes(&direct));
-        assert!(prefetch.take(&path, stamp).is_none(), "taken once");
-        prefetch.request(&path, stamp, &pool);
+        assert!(
+            prefetch
+                .take(&path, stamp, StillAsk::default(), None)
+                .is_none(),
+            "taken once"
+        );
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(prefetch.take(&path, (stamp.0 + 1, stamp.1)).is_none());
+        assert!(
+            prefetch
+                .take(&path, (stamp.0 + 1, stamp.1), StillAsk::default(), None)
+                .is_none()
+        );
     }
 
     fn fixture() -> (PathBuf, (u64, u128)) {
@@ -224,12 +292,45 @@ mod tests {
     }
 
     fn settle(prefetch: &mut StillPrefetch) {
-        let started = std::time::Instant::now();
-        while !prefetch.pending.is_empty() {
-            assert!(started.elapsed().as_secs() < 30, "the worker answers");
-            std::thread::sleep(Duration::from_millis(5));
-            prefetch.drain();
-        }
+        prefetch.settle();
+    }
+
+    /// Asked for at the viewer's preview edge, an ordinary still is decoded
+    /// no larger than that edge and only a frame reading that edge takes it;
+    /// an interpreted asset's still is decoded whole, as its frame reads it.
+    #[test]
+    fn a_preview_ask_is_decoded_at_the_edge_the_frame_reads() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let whole = pm_media::image::read(&path, &pool).unwrap();
+        let (w, h) = (whole.frame.format.width, whole.frame.format.height);
+        let edge = (w.max(h) / 4).next_power_of_two() as u32;
+        assert!(
+            (edge as usize) < w.max(h),
+            "the fixture is larger than the edge"
+        );
+        let ask = StillAsk {
+            edge: Some(edge),
+            interpreted: false,
+        };
+        let mut prefetch = StillPrefetch::default();
+        prefetch.request(&path, stamp, ask, &pool);
+        settle(&mut prefetch);
+        assert!(
+            prefetch.take(&path, stamp, ask, None).is_none(),
+            "a frame reading the whole still does not get a preview"
+        );
+        let still = prefetch.take(&path, stamp, ask, Some(edge)).unwrap();
+        let side = still.frame.format.width.max(still.frame.format.height);
+        assert!(side <= edge as usize, "{side} > {edge}");
+        let interpreted = StillAsk {
+            edge: Some(edge),
+            interpreted: true,
+        };
+        prefetch.request(&path, stamp, interpreted, &pool);
+        settle(&mut prefetch);
+        let still = prefetch.take(&path, stamp, interpreted, None).unwrap();
+        assert_eq!(still.frame.format.width, w);
     }
 
     /// A still no frame takes leaves after the TTL, with its bytes, and
@@ -239,13 +340,13 @@ mod tests {
         let (path, stamp) = fixture();
         let pool = FramePool::new(0);
         let mut prefetch = StillPrefetch::with_limits(MAX_READY_BYTES, Duration::from_millis(150));
-        prefetch.request(&path, stamp, &pool);
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
         settle(&mut prefetch);
         assert_eq!(prefetch.ready.len(), 1);
         assert!(prefetch.held.load(Ordering::Acquire) > 0);
         // Asking again keeps it.
         std::thread::sleep(Duration::from_millis(100));
-        prefetch.request(&path, stamp, &pool);
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
         std::thread::sleep(Duration::from_millis(100));
         prefetch.drain();
         assert_eq!(prefetch.ready.len(), 1, "asked for again within the TTL");
@@ -256,15 +357,22 @@ mod tests {
         assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
         // Fill every place with stamps no frame will take; they expire too.
         for n in 0..MAX_READY as u64 {
-            prefetch.request(&path, (stamp.0, stamp.1 + u128::from(n) + 1), &pool);
+            prefetch.request(
+                &path,
+                (stamp.0, stamp.1 + u128::from(n) + 1),
+                StillAsk::default(),
+                &pool,
+            );
         }
         settle(&mut prefetch);
         assert_eq!(prefetch.ready.len(), MAX_READY);
         std::thread::sleep(Duration::from_millis(200));
-        prefetch.request(&path, stamp, &pool);
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
         settle(&mut prefetch);
         assert!(
-            prefetch.take(&path, stamp).is_some(),
+            prefetch
+                .take(&path, stamp, StillAsk::default(), None)
+                .is_some(),
             "a place was free again"
         );
         assert_eq!(prefetch.ready.len(), 0);
@@ -280,12 +388,16 @@ mod tests {
         let one = bytes(&pm_media::image::read(&path, &pool).unwrap());
         let mut prefetch = StillPrefetch::with_limits(one * 2, READY_TTL);
         for n in 0..4u128 {
-            prefetch.request(&path, (stamp.0, stamp.1 + n), &pool);
+            prefetch.request(&path, (stamp.0, stamp.1 + n), StillAsk::default(), &pool);
         }
         settle(&mut prefetch);
         assert_eq!(prefetch.ready.len(), 2, "two fit");
         assert_eq!(prefetch.held.load(Ordering::Acquire), one * 2);
-        assert!(prefetch.take(&path, stamp).is_some());
+        assert!(
+            prefetch
+                .take(&path, stamp, StillAsk::default(), None)
+                .is_some()
+        );
         assert_eq!(prefetch.held.load(Ordering::Acquire), one);
     }
 }

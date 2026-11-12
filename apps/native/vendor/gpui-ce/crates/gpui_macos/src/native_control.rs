@@ -1,7 +1,7 @@
 //! AppKit control slots staged with the same frame transaction and AX ordering
 //! as native text. A slot owns no callbacks, model, focus policy or persistence.
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
-use objc2_app_kit::{NSView, NSWindowOrderingMode};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::{
     cell::{Cell, RefCell},
@@ -25,6 +25,10 @@ impl NativeControlSlot {
         let wrapper = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
         wrapper.setWantsLayer(true);
         wrapper.setHidden(true);
+        // GPUI lays out from the top: between a change of the window's
+        // height and the next paint, a control keeps its distance from the
+        // top edge, not from the bottom one.
+        wrapper.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
         if let Some(layer) = wrapper.layer() {
             layer.setMasksToBounds(true);
         }

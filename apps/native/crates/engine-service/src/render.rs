@@ -97,15 +97,52 @@ impl FrameSpec {
             1.
         }
     }
+    /// Whether stills are read at the view's resolution (ImageIO's
+    /// filtered thumbnail of the original): every viewer frame, captures
+    /// excepted. Full-resolution stills held for paused frames cost
+    /// gigabytes on large images for no visible difference.
+    pub(crate) fn preview_stills(&self) -> bool {
+        !self.exact
+    }
+    /// Whether video frames are converted at the view's resolution: only
+    /// for frames a final picture replaces, playing and dragged ones. A
+    /// paused frame converts video as the export does, so paused Full shows
+    /// the export's pixels.
+    pub(crate) fn preview_video(&self) -> bool {
+        !self.exact && self.moment != Moment::Paused
+    }
     pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
     }
+    /// The composition's own size, when this frame is the whole composition
+    /// at its own size: a frame at the paused Full scale above 1
+    /// ([`Self::paused_full_scale`]: paused or captured, not zoomed, within
+    /// its bounds). It is drawn on the composition's pixel grid exactly, as
+    /// an export and a rendered frame on disk are, and presented as they
+    /// are (the drawable's window of the canvas, one footprint filter):
+    /// `output × scale` rounds to another size whenever the drawable's
+    /// aspect is a pixel off the composition's (1081 rows for 1080).
+    pub(crate) fn whole_composition(&self, scene: &Scene) -> Option<Size> {
+        if self.scale <= 1. || self.scale != Self::paused_full_scale(scene, &self.output) {
+            return None;
+        }
+        composition_size(scene)
+    }
+    /// The size the frame is rendered at.
+    pub(crate) fn size_in(&self, scene: &Scene) -> Size {
+        self.whole_composition(scene)
+            .unwrap_or_else(|| self.render_size())
+    }
     pub(crate) fn request(&self, scene: &Scene) -> Result<pm_render::RenderRequest> {
         use pm_protocol::frame::MotionBlurKind;
         let playing = self.moment == Moment::Playing;
-        let mut request = pm_render::RenderRequest::sized(self.render_size(), Precision::Float16);
-        if let Some(crop) = self.output.crop {
+        let whole = self.whole_composition(scene);
+        let mut request = pm_render::RenderRequest::sized(
+            whole.unwrap_or_else(|| self.render_size()),
+            Precision::Float16,
+        );
+        if let Some(crop) = self.output.crop.filter(|_| whole.is_none()) {
             let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp)
                 .map_err(|_| RenderError::Composition(scene.comp.clone()))?;
             let side = |key: &str| {
@@ -121,35 +158,59 @@ impl FrameSpec {
                 f64::from(crop.y) * self.scale,
             ));
         }
-        // Today's viewer: 6 motion samples while playing, 12 stopped.
-        request.motion_blur = pm_render::motion::MotionBlur::Kind(if playing {
+        // Playing and dragged frames are previews: 6 motion samples playing,
+        // 12 dragged. A paused frame and a capture are the picture a
+        // delivery draws, and the one a rendered frame on disk holds: the
+        // export's count (16, or the composition's own), so a paused
+        // picture is the same drawn or read from disk.
+        request.motion_blur = pm_render::motion::MotionBlur::Kind(if playing && !self.exact {
             MotionBlurKind::PreviewPlaying
-        } else {
+        } else if self.moment == Moment::Scrub && !self.exact {
             MotionBlurKind::PreviewPaused
+        } else {
+            MotionBlurKind::Export
         });
         request.sampling = self.sampling();
+        // A capture reads the exact picture: final output, as an export
+        // (effects at the composition's density, `pm_render::plan`).
+        if self.exact {
+            request.output_kind = pm_render::OutputKind::Final;
+        }
         #[cfg(test)]
         SAMPLED
             .lock()
             .unwrap()
             .push((self.exact, self.moment, self.scale, request.sampling));
+        #[cfg(test)]
+        MEDIA_SAMPLED
+            .lock()
+            .unwrap()
+            .push((self.exact, self.moment, scene.media.clone()));
         Ok(request)
     }
 
-    /// Frames while playing, and a drag's reduced frames (a preview the
-    /// final resampler redraws once the playhead settles), take the
-    /// playback resampler (pm-render's rule for scrub frames); paused
-    /// frames, drags at full resolution (which nothing redraws), and exact
-    /// reads such as captures, the final one.
-    fn sampling(&self) -> pm_render::sampling::Sampling {
-        if !self.exact
-            && (self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.))
-        {
+    /// A drag's reduced frames (a preview the final resampler redraws once
+    /// the playhead settles) take the playback resampler; every frame a
+    /// person watches, playing or paused, and exact reads such as captures
+    /// take the final one (Lanczos-3), so footage and precomps don't sharpen
+    /// when playback stops. Its cost on a real project's playing frames was
+    /// within run-to-run noise.
+    pub(crate) fn sampling(&self) -> pm_render::sampling::Sampling {
+        if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
         } else {
             pm_render::sampling::Sampling::Final
         }
     }
+}
+/// The composition's size in whole pixels.
+fn composition_size(scene: &Scene) -> Option<Size> {
+    let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp).ok()?;
+    let side = |key: &str| {
+        let v = pm_eval::node::to_number(comp.member(key)).round();
+        (v.is_finite() && v >= 1. && v <= f64::from(u32::MAX)).then_some(v as u32)
+    };
+    Some(Size::new(side("w")?, side("h")?))
 }
 /// A frame that could not be drawn yet: the picture stays and it is drawn again.
 #[derive(Debug)]
@@ -170,9 +231,23 @@ impl std::fmt::Display for CompilerBusy {
     }
 }
 impl std::error::Error for CompilerBusy {}
+/// A playing frame is on disk and was still being read when its turn came.
+/// It gives way for a tick (the clock goes on and the reader catches up)
+/// instead of being drawn again: it is on disk because drawing it takes
+/// longer than its interval, and drawing it would leave the reader reading
+/// frames the playhead has passed.
+#[derive(Debug)]
+pub(crate) struct DiskFramePending;
+impl std::fmt::Display for DiskFramePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the rendered frame is still being read")
+    }
+}
+impl std::error::Error for DiskFramePending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<FontsPending>()
         || error.is::<CompilerBusy>()
+        || error.is::<DiskFramePending>()
         || matches!(
             error.downcast_ref::<RenderError>(),
             Some(
@@ -181,6 +256,23 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
                     | RenderError::ShaderFallbackPending(_)
             )
         )
+}
+/// A rendered frame uploaded ahead of its turn: the pixels of one frame key
+/// under one cache generation ([`crate::render_cache::Held`]).
+struct DiskUpload {
+    held: crate::render_cache::Held,
+    time: Ticks,
+    size: Size,
+    surface: Arc<ExportedSurface>,
+}
+impl DiskUpload {
+    /// Whether it is still `scene`'s rendered frame at `time`: the cache
+    /// has that frame under the key and generation it was read under. A
+    /// document, media, font, tone or override change, a storage change or
+    /// a deletion since the upload each fail this.
+    fn is(&self, disk: &crate::render_cache::DiskFrames, scene: &Scene, time: Ticks) -> bool {
+        self.time == time && disk.held(scene, time) == Some(self.held)
+    }
 }
 struct CachedFrame {
     key: crate::policy::CacheKey,
@@ -214,6 +306,8 @@ pub struct Engine {
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
+    /// A capture of an SDR view: the frame presented without the delivery clip.
+    capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
     /// Set by the device's lost callback or an internal GPU error: the
@@ -250,6 +344,11 @@ pub struct Engine {
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
     last_frame: Instant,
     idle_released: bool,
+    /// Playing frames in a row that gave way to the disk reader.
+    disk_late: u32,
+    /// The next playing frame's rendered frame, uploaded already
+    /// ([`Engine::upload_ahead`]).
+    disk_next: Option<DiskUpload>,
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
@@ -269,6 +368,10 @@ pub struct Submission {
     pub command: metal::CommandBuffer,
     pub surface: Arc<ExportedSurface>,
     pub readback: Option<metal::Buffer>,
+    /// Tests: the presented picture of a capture whose readback skipped the
+    /// presentation's SDR clip.
+    #[cfg(test)]
+    pub presented: Option<metal::Buffer>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -304,8 +407,10 @@ impl Engine {
             geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
                 + self.renderer.scene3d_resident().map_bytes,
             binding_bytes: self.renderer.binding_cache_bytes(),
-            gpu_allocated_bytes: self.metal.current_allocated_size() as u64,
+            gpu_allocated_bytes: self.metal.current_allocated_size(),
             scrub_extra_bytes: self.budgeted_extra,
+            // Counted by the service across engine rebuilds.
+            project_releases: 0,
         }
     }
 
@@ -320,6 +425,7 @@ impl Engine {
         self.renderer.release_idle_media();
         self.renderer.trim(0);
         self.cache.clear();
+        self.disk_next = None;
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
         self.idle_released = true;
@@ -333,10 +439,6 @@ impl Engine {
             return true;
         }
         false
-    }
-
-    pub fn idle_memory_released(&self) -> bool {
-        self.idle_released
     }
 
     pub fn release_project_memory(&mut self) {
@@ -389,6 +491,9 @@ impl Engine {
 
     fn govern_memory_inner(&mut self) {
         use std::sync::atomic::Ordering;
+        if let Some(disk) = &self.disk {
+            disk.memory_pressure(crate::memory::pressure());
+        }
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
@@ -451,7 +556,7 @@ impl Engine {
         let u = self.memory_usage();
         self.memory_client
             .report(pm_protocol::lease::LeaseCategories {
-                frame_cache: crate::memory::bytes(u.decoded_frame_bytes),
+                frame_cache: crate::memory::bytes(u.decoded_frame_bytes + u.disk_read_ahead_bytes),
                 render_cache: crate::memory::bytes(
                     u.pyramid_bytes
                         + u.target_pool_bytes
@@ -480,14 +585,6 @@ impl Engine {
         }
         next.set_compat(self.compat.clone());
         next.disk = self.disk.clone();
-        Ok(next)
-    }
-    /// A stopped viewer keeps its already-presented drawable. Retire the
-    /// recording pools without making that still redraw or starting a
-    /// repeated idle-cleanup cycle; the next requested frame warms normally.
-    pub fn renew_idle(&self) -> Result<Self> {
-        let mut next = self.rebuild()?;
-        next.idle_released = true;
         Ok(next)
     }
     pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
@@ -568,7 +665,15 @@ impl Engine {
             }));
         let metal = metal_device(&gpu);
         let library = metal
-            .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
+            .new_library_with_source(
+                &format!(
+                    "#define SDR_MIN {:?}\n#define SDR_MAX {:?}\n{}",
+                    pm_color::delivery::SDR_MIN,
+                    pm_color::delivery::SDR_MAX,
+                    include_str!("viewer.metal")
+                ),
+                &metal::CompileOptions::new(),
+            )
             .map_err(|s| anyhow!(s))?;
         let desc = metal::RenderPipelineDescriptor::new();
         let vertex = library
@@ -624,6 +729,7 @@ impl Engine {
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
             offscreen: None,
+            capture_target: None,
             cache_enabled: true,
             strip: None,
             refine_bands: 0,
@@ -645,6 +751,8 @@ impl Engine {
             disk: None,
             last_frame: Instant::now(),
             idle_released: false,
+            disk_late: 0,
+            disk_next: None,
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
@@ -698,6 +806,61 @@ impl Engine {
     pub fn media_landed(&self) -> u64 {
         self.renderer.media_landed()
     }
+    /// A frame read from disk into `surface`.
+    fn upload(&self, surface: &ExportedSurface, size: Size, pixels: &[u8]) {
+        self.gpu.queue.write_texture(
+            surface.texture.as_image_copy(),
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.width * 8),
+                rows_per_image: Some(size.height),
+            },
+            surface.texture.size(),
+        );
+        self.gpu.queue.submit([]);
+    }
+
+    /// After a playing frame is submitted: the frame after it, if it is
+    /// rendered on disk and read already, is uploaded now, in the slack
+    /// before its turn. Uploading a composition-size frame when its turn
+    /// came took 5 ms on a quiet machine and 12 to 100 ms on a busy one,
+    /// of the 15 ms a frame has before its refresh.
+    pub fn upload_ahead(&mut self, scene: &Scene, time: Ticks) {
+        let Some(disk) = self.disk.clone() else {
+            self.disk_next = None;
+            return;
+        };
+        if self
+            .disk_next
+            .as_ref()
+            .is_some_and(|n| n.is(&disk, scene, time))
+        {
+            return;
+        }
+        self.disk_next = None;
+        let crate::render_cache::Read::Frame(size, pixels, held) =
+            disk.read_within(scene, time, std::time::Duration::ZERO)
+        else {
+            return;
+        };
+        let Ok(surface) = self.cache_surface(size) else {
+            return;
+        };
+        self.upload(&surface, size, &pixels);
+        self.disk_next = Some(DiskUpload {
+            held,
+            time,
+            size,
+            surface,
+        });
+    }
+    /// The rendered frames' state changed (a new observation): a frame
+    /// uploaded ahead is of the state before.
+    pub(crate) fn drop_upload_ahead(&mut self) {
+        self.disk_next = None;
+    }
+
     /// Opens and warms the videos of a coming frame on background workers, so
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
@@ -708,6 +871,11 @@ impl Engine {
         let Ok(request) = spec.request(scene) else {
             return Vec::new();
         };
+        // Media is prepared as the frame will read it (a viewer frame's
+        // stills at the size it draws them, paused or playing; video at the
+        // view's size only while playing or dragging).
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(
@@ -804,7 +972,7 @@ impl Engine {
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
         self.renderer.clear_scrub_mark();
-        self.renderer.set_preview_media(false);
+        self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
         self.sync_studio(scene)?;
@@ -863,11 +1031,16 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        {
+            let mut t = trace.lock().unwrap();
+            t.enter_ms = (now() - t.worker_start) * 1e3;
+        }
         self.sync_studio(scene)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
-        let size = spec.render_size();
+        let size = spec.size_in(scene);
+        let drawn_whole = spec.whole_composition(scene).is_some();
         let hdr = self.sync_hdr(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
@@ -877,6 +1050,8 @@ impl Engine {
             height: size.height,
             crop: output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
@@ -887,49 +1062,121 @@ impl Engine {
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
-        // A frame Render Selection put on disk: shown while playing or
-        // scrubbing an uncropped viewer instead of drawn again (the present
-        // pass scales it to the drawable).
+        // A frame rendered on disk: shown in an uncropped viewer instead of
+        // drawn again (the present pass scales it to the drawable), playing,
+        // scrubbing and paused alike: it is the composition-size frame an
+        // export draws, so a paused playhead in a rendered range shows its
+        // picture at once, whatever else the GPU is doing. A capture always
+        // draws its own exact frame.
         // Never upscaled: a canvas larger than the composition renders.
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
-        let disk = looked
-            .then(|| self.disk.as_ref()?.read(scene, time))
+        let looked = hit.is_none() && !spec.exact;
+        // A playing or paused frame waits a moment for its frame on disk
+        // rather than drawing what was rendered because it can't be drawn
+        // in time (a dragged one never waits).
+        let patience = match spec.moment {
+            Moment::Playing => crate::render_cache::PATIENCE,
+            Moment::Paused => crate::render_cache::PAUSED_PATIENCE,
+            Moment::Scrub => std::time::Duration::ZERO,
+        };
+        // A paused frame shows the frame on disk only where it would draw
+        // that very picture itself: the whole composition at its own size
+        // (its refinement at the paused Full scale, or a drawable that is
+        // the composition's size). Where a paused frame is drawn otherwise
+        // (zoomed in, or so far out that Full is bounded to the drawable),
+        // it is drawn as ever: whether a frame is rendered on disk never
+        // changes a paused picture.
+        let paused_whole = || {
+            let full = FrameSpec::paused_full_scale(scene, &output);
+            let refined = FrameSpec {
+                scale: full,
+                ..spec
+            };
+            refined.whole_composition(scene).is_some()
+                || (output.crop.is_none()
+                    && composition_size(scene) == Some(Size::new(output.width, output.height)))
+        };
+        let as_drawn = spec.moment != Moment::Paused || paused_whole();
+        let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
+        let asked = std::time::Instant::now();
+        // Uploaded in the slack after the frame before: nothing to read.
+        // Shown only while it still is this frame's picture.
+        let uploaded = self.disk_next.take().filter(|next| {
+            looked
+                && fits(&next.size)
+                && self
+                    .disk
+                    .as_ref()
+                    .is_some_and(|disk| next.is(disk, scene, time))
+        });
+        let disk = match (looked && uploaded.is_none())
+            .then(|| Some(self.disk.as_ref()?.read_within(scene, time, patience)))
             .flatten()
-            .filter(|(size, _)| canvas.0 <= size.width && canvas.1 <= size.height);
-        let whole = disk.is_some();
-        trace.lock().unwrap().disk = match (looked, whole) {
+        {
+            Some(crate::render_cache::Read::Frame(size, pixels, _)) if fits(&size) => {
+                self.disk_late = 0;
+                Some((size, pixels))
+            }
+            Some(crate::render_cache::Read::Late(size))
+                if spec.moment == Moment::Playing
+                    && fits(&size)
+                    && self.disk_late < crate::render_cache::LATE_AT_MOST =>
+            {
+                self.disk_late += 1;
+                return Err(DiskFramePending.into());
+            }
+            other => {
+                // Drawn after all: the frames after it give way again.
+                if matches!(other, Some(crate::render_cache::Read::Late(_))) {
+                    self.disk_late = 0;
+                }
+                None
+            }
+        };
+        // A paused playhead keeps the frames a play starts from read.
+        if spec.moment == Moment::Paused
+            && let Some(disk) = &self.disk
+        {
+            disk.warm(scene, time);
+        }
+        if uploaded.is_some() {
+            self.disk_late = 0;
+        }
+        let from_disk = disk.is_some() || uploaded.is_some();
+        // The source is the whole composition: presented as the drawable's
+        // window of the canvas, a rendered frame and a drawn one alike.
+        let whole = from_disk || drawn_whole;
+        trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
+        trace.lock().unwrap().disk = match (looked, from_disk) {
             (false, _) => 0,
             (true, false) => 1,
             (true, true) => 2,
         };
         let size = disk.as_ref().map_or(size, |(size, _)| *size);
-        let (surface, failures) = if let Some(index) = hit {
+        let size = uploaded.as_ref().map_or(size, |next| next.size);
+        let (surface, failures) = if let Some(next) = uploaded {
+            trace.lock().unwrap().cache_hit = true;
+            (next.surface, Arc::from(Vec::new()))
+        } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
             self.cache.push_back(entry);
             trace.lock().unwrap().cache_hit = true;
             found
         } else {
+            let uploading = std::time::Instant::now();
             let surface = self.cache_surface(size)?;
             if let Some((_, pixels)) = disk {
-                self.gpu.queue.write_texture(
-                    surface.texture.as_image_copy(),
-                    &pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(size.width * 8),
-                        rows_per_image: Some(size.height),
-                    },
-                    surface.texture.size(),
-                );
-                self.gpu.queue.submit([]);
+                self.upload(&surface, size, &pixels);
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
-                trace.lock().unwrap().cache_hit = true;
+                let mut t = trace.lock().unwrap();
+                t.cache_hit = true;
+                t.disk_upload_ms = uploading.elapsed().as_secs_f64() * 1e3;
+                drop(t);
                 (surface, Arc::from(Vec::new()))
             } else {
                 let target = Target::wrap(surface.texture.clone());
@@ -937,8 +1184,11 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
+                // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
+                let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
                 self.renderer.set_preview_media(
-                    !spec.exact && pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0),
+                    preview && spec.preview_stills(),
+                    preview && spec.preview_video(),
                 );
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
@@ -1063,15 +1313,7 @@ impl Engine {
             || self.offscreen.as_ref().unwrap().as_ref(),
             |d| d.texture(),
         );
-        let desc = metal::RenderPassDescriptor::new();
-        let color = desc.color_attachments().object_at(0).unwrap();
-        color.set_texture(Some(destination));
-        color.set_load_action(metal::MTLLoadAction::Clear);
-        color.set_store_action(metal::MTLStoreAction::Store);
         let command = self.queue.new_command_buffer().to_owned();
-        let pass = command.new_render_command_encoder(desc);
-        pass.set_render_pipeline_state(&self.pipeline);
-        pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
         params.output = hdr
             .map_or(self.mastering, |v| {
@@ -1090,21 +1332,52 @@ impl Engine {
             ],
             None => [0., 0., output.width as f32, output.height as f32],
         };
-        pass.set_fragment_bytes(
-            0,
-            size_of_val(&params) as u64,
-            (&params as *const crate::OverlayParams).cast(),
-        );
-        pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
-        pass.end_encoding();
-        let readback = if capture {
+        // A capture reads the engine's frame, not the display's picture: the
+        // SDR delivery clip (mode 3) is presentation only, so a capture of an
+        // SDR view is drawn again without it.
+        let unclipped_capture = capture && params.output[0] == 3.;
+        if unclipped_capture
+            && self.capture_target.as_ref().is_none_or(|t| {
+                t.width() != output.width as u64 || t.height() != output.height as u64
+            })
+        {
+            let desc = metal::TextureDescriptor::new();
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            desc.set_width(output.width as u64);
+            desc.set_height(output.height as u64);
+            desc.set_storage_mode(metal::MTLStorageMode::Private);
+            desc.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            self.capture_target = Some(self.metal.new_texture(&desc));
+        }
+        let present = |target: &metal::TextureRef, params: &crate::OverlayParams| {
+            let desc = metal::RenderPassDescriptor::new();
+            let color = desc.color_attachments().object_at(0).unwrap();
+            color.set_texture(Some(target));
+            color.set_load_action(metal::MTLLoadAction::Clear);
+            color.set_store_action(metal::MTLStoreAction::Store);
+            let pass = command.new_render_command_encoder(desc);
+            pass.set_render_pipeline_state(&self.pipeline);
+            pass.set_fragment_texture(0, Some(&source));
+            pass.set_fragment_bytes(
+                0,
+                size_of_val(params) as u64,
+                (params as *const crate::OverlayParams).cast(),
+            );
+            pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+            pass.end_encoding();
+        };
+        present(destination, &params);
+        let read = |texture: &metal::TextureRef| {
             let b = self.metal.new_buffer(
                 output.width as u64 * output.height as u64 * 8,
                 metal::MTLResourceOptions::StorageModeShared,
             );
             let blit = command.new_blit_command_encoder();
             blit.copy_from_texture_to_buffer(
-                destination,
+                texture,
                 0,
                 0,
                 metal::MTLOrigin { x: 0, y: 0, z: 0 },
@@ -1120,7 +1393,26 @@ impl Engine {
                 metal::MTLBlitOption::None,
             );
             blit.end_encoding();
-            Some(b)
+            b
+        };
+        #[cfg(test)]
+        let mut presented = None;
+        let readback = if unclipped_capture {
+            let target = self.capture_target.as_ref().unwrap();
+            present(
+                target,
+                &crate::OverlayParams {
+                    output: [0.; 4],
+                    ..params
+                },
+            );
+            #[cfg(test)]
+            {
+                presented = Some(read(destination));
+            }
+            Some(read(target))
+        } else if capture {
+            Some(read(destination))
         } else {
             None
         };
@@ -1131,6 +1423,8 @@ impl Engine {
             command,
             surface,
             readback,
+            #[cfg(test)]
+            presented,
             width: output.width,
             height: output.height,
             failures,
@@ -1206,7 +1500,7 @@ impl Engine {
         }
         self.sync_studio(scene)?;
         self.sync_fonts();
-        let size = spec.render_size();
+        let size = spec.size_in(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
             revision: scene.doc.revision(),
@@ -1215,6 +1509,8 @@ impl Engine {
             height: size.height,
             crop: spec.output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         if self.cache.iter().any(|c| c.key == key) {
             return Ok(true);
@@ -1238,7 +1534,8 @@ impl Engine {
         }
         let surface = self.cache_surface(size)?;
         // Drawn as `frame` draws this spec: the cached picture stands for it.
-        self.renderer.set_preview_media(!spec.exact);
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         self.renderer.set_draw_reuse(!spec.exact);
         self.renderer.set_scrub(false);
         self.renderer.set_playback(None);
@@ -1411,6 +1708,11 @@ impl Engine {
 pub(crate) static SAMPLED: std::sync::Mutex<
     Vec<(bool, Moment, f64, pm_render::sampling::Sampling)>,
 > = std::sync::Mutex::new(Vec::new());
+/// Every viewer request's (exact, moment, media files), for tests.
+#[cfg(test)]
+pub(crate) static MEDIA_SAMPLED: std::sync::Mutex<
+    Vec<(bool, Moment, Arc<pm_export::render::MediaPaths>)>,
+> = std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -1530,7 +1832,7 @@ mod sampling_tests {
     use pm_render::sampling::Sampling;
 
     #[test]
-    fn only_frames_a_final_one_replaces_take_the_playback_resampler() {
+    fn only_reduced_drag_frames_take_the_playback_resampler() {
         let output = Output {
             width: 64,
             height: 36,
@@ -1544,7 +1846,8 @@ mod sampling_tests {
             exact: false,
             ..FrameSpec::exact(Ticks::new(0).unwrap(), output)
         };
-        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Playback);
+        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Final);
+        assert_eq!(spec(Moment::Playing, 0.5).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Scrub, 0.5).sampling(), Sampling::Playback);
         assert_eq!(spec(Moment::Scrub, 1.).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Paused, 0.5).sampling(), Sampling::Final);
@@ -1758,6 +2061,77 @@ mod lifetime_tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(worst < 1e-3, "banded differs by {worst}");
+    }
+
+    /// The frame cache holds viewer pictures only. A paused viewer frame at
+    /// a scale is kept and served again at that scale; an exact read of the
+    /// same time and scale (a capture, an export frame) is drawn from the
+    /// originals every time, is never kept, and never takes or displaces
+    /// the viewer picture that is.
+    #[test]
+    fn an_exact_frame_at_a_scale_is_drawn_each_time_beside_the_cached_viewer_frame() {
+        let mut engine = Engine::new(Gpu::new("exact-scale-cache-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
+        };
+        let viewer = FrameSpec {
+            exact: false,
+            ..exact
+        };
+        // Draws `spec` and says whether the frame cache served it.
+        let draw = |engine: &mut Engine, spec: FrameSpec| {
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            while engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    false,
+                    trace.clone(),
+                )
+                .unwrap()
+                .is_none()
+            {}
+            trace.lock().unwrap().cache_hit
+        };
+        assert!(
+            !draw(&mut engine, viewer),
+            "the first viewer frame is drawn"
+        );
+        assert_eq!(engine.cache.len(), 1, "and kept at its scale");
+        assert!(draw(&mut engine, viewer), "the same viewer frame is served");
+        for read in 1..=2 {
+            assert!(
+                !draw(&mut engine, exact),
+                "exact read {read} took a cached picture"
+            );
+            assert_eq!(engine.cache.len(), 1, "exact read {read} was kept");
+        }
+        assert!(
+            draw(&mut engine, viewer),
+            "the viewer frame is still served after the exact reads"
+        );
     }
 
     #[test]
@@ -2013,5 +2387,515 @@ mod lifetime_tests {
             }
             assert!(worst < 0.002, "{mode:?}: max signal error {worst}");
         }
+    }
+}
+
+#[cfg(test)]
+mod paused_media_tests {
+    use super::*;
+    /// A 64 × 64 composition showing 480 px of 3-px stripes at 6.25 %.
+    fn stripes() -> Scene {
+        let clip = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../../engine/crates/pm-render/tests/fixtures/video/stripes-709-limited.mp4",
+        );
+        let p = |k: &str, v: f64| format!(r#""{k}":{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            p("position.x", 32.),
+            p("position.y", 32.),
+            p("anchor.x", 0.),
+            p("anchor.y", 0.),
+            p("scale.x", 6.25),
+            p("scale.y", 6.25),
+            p("rotation", 0.),
+            p("opacity", 100.),
+        ]
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":64,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"v","type":"video","name":"clip","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"clip","trim":0,"speed":1,"w":480,"h":480}}}}],
+            "comps":{{}},"assets":{{"clip":{{"id":"clip","type":"video","name":"clip","w":480,"h":480,"dur":1}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_string(), clip)].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the clip's frame never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// A paused frame shows a large clip drawn small exactly as an export
+    /// (a capture) draws it: the source read through the export's path, not
+    /// a preview-sized copy.
+    #[test]
+    fn a_paused_frame_reads_video_as_the_export_does() {
+        let mut engine = Engine::new(Gpu::new("paused-media-test").unwrap()).unwrap();
+        let scene = stripes();
+        let output = Output {
+            width: 64,
+            height: 64,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = drawn(&mut engine, &scene, FrameSpec::exact(Ticks::ZERO, output));
+        let paused = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        assert!(!paused.preview_video());
+        let shown = drawn(&mut engine, &scene, paused);
+        // The clip is drawn (grey stripes averaged, not the black ground).
+        assert!(shown[32 * 64 + 32][0] > 0.2, "{:?}", shown[32 * 64 + 32]);
+        assert_eq!(shown, exact);
+        // Playing frames may read the smaller copy.
+        assert!(
+            FrameSpec {
+                moment: Moment::Playing,
+                ..paused
+            }
+            .preview_video()
+        );
+    }
+}
+
+#[cfg(test)]
+mod viewer_output_tests {
+    use super::*;
+    use crate::color::Mastering;
+    /// `n` white solids `w` px wide, every other `w` px from x = 0, one stop
+    /// over white (2.0 encoded), on black, in a 64 × 36 composition.
+    fn columns(n: usize, w: f64) -> Scene {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let layers = (0..n)
+            .map(|i| {
+                // The anchor (0, 0) is the solid's top-left corner.
+                let x = 2. * w * i as f64;
+                let transform = [
+                    ("position.x", x),
+                    ("position.y", 0.),
+                    ("anchor.x", 0.),
+                    ("anchor.y", 0.),
+                    ("scale.x", 100.),
+                    ("scale.y", 100.),
+                    ("rotation", 0.),
+                    ("opacity", 100.),
+                ]
+                .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+                .join(",");
+                format!(
+                    r##"{{"id":"s{i}","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+                    "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":{w},"h":36}},
+                    "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{}}}}}]}}"##,
+                    ch(1.)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{layers}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        }
+    }
+    fn halves(b: &metal::Buffer, len: usize) -> Vec<[f64; 3]> {
+        let values = unsafe { std::slice::from_raw_parts(b.contents().cast::<u16>(), len * 4) };
+        values
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]].map(|v| half::f16::from_bits(v).to_f64()))
+            .collect()
+    }
+    /// (capture readback, presented picture) at the middle of the drawable.
+    fn draw(
+        engine: &mut Engine,
+        scene: &Scene,
+        spec: FrameSpec,
+        mastering: Mastering,
+    ) -> ([f64; 3], Option<[f64; 3]>) {
+        engine.mastering = mastering;
+        let sub = engine
+            .frame(scene, spec, None, &Default::default(), true, Arc::default())
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+        assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+        let (w, h) = (sub.width as usize, sub.height as usize);
+        let at = (h / 2) * w + w / 2;
+        (
+            sub.pixels()[at],
+            sub.presented.as_ref().map(|b| halves(b, w * h)[at]),
+        )
+    }
+    fn output(width: u32, height: u32) -> Output {
+        Output {
+            width,
+            height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        }
+    }
+    /// An SDR project's view shows its delivery: a white solid pushed to
+    /// twice white (one stop of exposure) shows as white, as the SDR file
+    /// holds it; the EDR view keeps the light above white. A capture is the
+    /// engine's frame, not the display's picture: it keeps the light.
+    #[test]
+    fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
+        let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+        let scene = columns(1, 64.);
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (edr, _) = draw(&mut engine, &scene, spec, Mastering::Edr);
+        assert!(
+            edr.iter().all(|c| *c > 1.5),
+            "EDR keeps light above white: {edr:?}"
+        );
+        let (captured, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        assert!(
+            shown.iter().all(|c| (*c - 1.).abs() < 0.002),
+            "the SDR view shows white: {shown:?}"
+        );
+        assert!(
+            captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
+            "a capture is the engine's frame: {captured:?} vs {edr:?}"
+        );
+    }
+    /// The SDR view shows a colour past white as every SDR file delivers it
+    /// (`pm_color::delivery`, channel by channel in Rec.709): two (0.8, 0.25,
+    /// 0.1) solids added make (1.6, 0.5, 0.2), shown as (1, 0.5, 0.2).
+    #[test]
+    fn an_sdr_view_shows_out_of_range_colour_by_the_delivery_rule() {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let solid = |id: &str, blend: &str| {
+            format!(
+                r##"{{"id":"{id}","type":"solid","name":"{id}","from":0,"dur":1,"on":true,"solo":false,"mblur":false,"blend":"{blend}",
+                "p":{{{transform}}},"fx":[],"masks":[],"d":{{"color":"#CC401A","w":64,"h":36}}}}"##
+            )
+        };
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{},{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##,
+            solid("a", "add"),
+            solid("b", "normal")
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("sdr-colour-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        let encoded = [0xCC, 0x40, 0x1A].map(|v: u8| f64::from(v) / 255.0 * 2.0);
+        let dec = |v: f64| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let l = pm_color::delivery::sdr(encoded).map(dec);
+        let want = [
+            0.8224621 * l[0] + 0.1775380 * l[1],
+            0.0331941 * l[0] + 0.9668058 * l[1],
+            0.0170827 * l[0] + 0.0723974 * l[1] + 0.9105199 * l[2],
+        ];
+        assert!(
+            shown.iter().zip(want).all(|(s, w)| (s - w).abs() < 0.004),
+            "{shown:?} vs the delivered {want:?}"
+        );
+    }
+    /// The SDR view clips each engine sample before it reduces the frame to
+    /// the drawable: 1-px columns of twice white and black, drawn at the
+    /// composition's size and shown at half size, average to the delivered
+    /// grey (encoded 0.5), not to clipped white.
+    #[test]
+    fn an_sdr_view_clips_before_it_reduces() {
+        let mut engine = Engine::new(Gpu::new("sdr-reduce-test").unwrap()).unwrap();
+        let scene = columns(32, 1.);
+        let spec = FrameSpec {
+            scale: 2.,
+            ..FrameSpec::exact(Ticks::ZERO, output(32, 18))
+        };
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        // Encoded 0.5 is 0.214 linear (sRGB); white would be 1.0.
+        assert!(
+            shown.iter().all(|c| (*c - 0.214).abs() < 0.03),
+            "half white, half black: {shown:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_cache_tests {
+    use super::*;
+    /// A 256 × 256 still of 1-px black and white stripes (a 24-bit BMP).
+    fn stripes(dir: &std::path::Path) -> std::path::PathBuf {
+        let (w, h) = (256u32, 256u32);
+        let row = w * 3;
+        let size = 54 + row * h;
+        let mut b = Vec::with_capacity(size as usize);
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&size.to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&(w as i32).to_le_bytes());
+        b.extend_from_slice(&(h as i32).to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&[0; 24]);
+        for _ in 0..h {
+            for x in 0..w {
+                let v = if x % 2 == 0 { 255 } else { 0 };
+                b.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let path = dir.join("stripes.bmp");
+        std::fs::write(&path, b).unwrap();
+        path
+    }
+    fn scene(path: &std::path::Path) -> Scene {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 64.),
+            ("position.y", 36.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 23.),
+            ("scale.y", 23.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":128,"h":72,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"i","type":"image","name":"stripes","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":256,"h":256}}}}],
+            "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"stripes","w":256,"h":256,"dur":0}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("pic".to_string(), path.to_path_buf())].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the still never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// A playing frame draws a reduced still with the final resampler, as the
+    /// paused frame of the same time and density does: footage and
+    /// precomps don't sharpen when playback stops.
+    #[test]
+    fn playing_and_paused_frames_resample_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = Output {
+            width: 128,
+            height: 72,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = |moment| FrameSpec {
+            moment,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
+        let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
+        let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
+        assert_eq!(playing, paused);
+    }
+    /// A rendered frame uploaded ahead of its turn is of one cache state.
+    /// When a media file its composition draws from changes on disk, the
+    /// document untouched, the cache's next observation retires that state:
+    /// the frame already uploaded is not shown either.
+    #[test]
+    fn an_uploaded_frame_is_dropped_when_its_media_changes() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let still = stripes(dir.path());
+        let scene = scene(&still);
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let (first, next) = (disk.test_put(3, 0.25), disk.test_put(4, 0.25));
+        let mut engine = Engine::new(Gpu::new("upload-pin").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        // A playing frame: whether it came from disk (2) or was drawn (1),
+        // and its picture.
+        let shown = |engine: &mut Engine, time: Ticks| {
+            let spec = FrameSpec {
+                moment: Moment::Playing,
+                exact: false,
+                ..FrameSpec::exact(
+                    time,
+                    Output {
+                        width: 128,
+                        height: 72,
+                        display: 0,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                )
+            };
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+                match engine.frame(&scene, spec, None, &Default::default(), true, trace.clone()) {
+                    Ok(sub) => {
+                        let sub = sub.unwrap();
+                        sub.commit();
+                        sub.complete().unwrap();
+                        if !sub.stand_ins {
+                            return (trace.lock().unwrap().disk, sub.pixels());
+                        }
+                    }
+                    Err(e) => assert!(e.is::<DiskFramePending>(), "{e:#}"),
+                }
+                assert!(Instant::now() < deadline, "the frame never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let (from, rendered) = shown(&mut engine, first);
+        assert_eq!(from, 2, "the frame on disk plays");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while engine.disk_next.is_none() {
+            engine.upload_ahead(&scene, next);
+            assert!(Instant::now() < deadline, "the next frame was never read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The still is saved again by another app.
+        let mut bytes = std::fs::read(&still).unwrap();
+        for b in &mut bytes[54..] {
+            *b = 255 - *b;
+        }
+        bytes.push(0);
+        std::fs::write(&still, bytes).unwrap();
+        disk.test_recheck_media();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, next));
+        disk.test_ready();
+        let (from, drawn) = shown(&mut engine, next);
+        assert_eq!(from, 1, "the upload is of the still as it was");
+        assert_ne!(drawn, rendered);
+    }
+    /// Two dragged frames of one render size at one time but different
+    /// densities (output 256 at half resolution, output 128 at full) take
+    /// different resamplers: the second is drawn for itself, as a cold
+    /// engine draws it, never answered from the first's cached frame.
+    #[test]
+    fn frames_of_one_size_but_another_density_are_not_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = |w, h| Output {
+            width: w,
+            height: h,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let reduced = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 0.5,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(256, 144))
+        };
+        let full = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 1.,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(128, 72))
+        };
+        assert_eq!(reduced.render_size(), full.render_size());
+        assert_ne!(reduced.sampling(), full.sampling());
+        let mut cold = Engine::new(Gpu::new("cache-identity-cold").unwrap()).unwrap();
+        let want = drawn(&mut cold, &scene, full);
+        let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
+        drawn(&mut engine, &scene, reduced);
+        assert_eq!(drawn(&mut engine, &scene, full), want);
     }
 }

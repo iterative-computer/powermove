@@ -350,6 +350,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -761,8 +767,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -1155,6 +1164,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -1566,8 +1581,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -2086,6 +2104,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -2497,8 +2521,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -3135,6 +3162,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -3546,8 +3579,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -4184,6 +4220,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -4595,8 +4637,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -5230,6 +5275,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -5641,8 +5692,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -5988,8 +6042,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "requiredSymbol": "diamond.fill",
                                     },
                                     "style": {
+                                      "background": {
+                                        "token": "colors.selected_fill",
+                                      },
                                       "color": {
-                                        "token": "colors.accent",
+                                        "token": "colors.text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -6421,6 +6478,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -6832,8 +6895,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -7404,6 +7470,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -7815,8 +7887,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -8459,6 +8534,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -8870,8 +8951,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -9603,6 +9687,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -10014,8 +10104,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -10534,6 +10627,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -10945,8 +11044,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -17265,6 +17367,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -17703,8 +17811,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -18251,6 +18362,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -18689,8 +18806,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -19219,6 +19339,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -19630,8 +19756,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -20117,6 +20246,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -20528,8 +20663,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -21076,6 +21214,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -21123,6 +21267,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               },
                               "minWidth": {
                                 "token": "metrics.hit",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
                               },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
@@ -21535,8 +21685,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -22067,6 +22220,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "minWidth": {
                                 "token": "metrics.hit",
                               },
+                              "paddingLeft": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.gap",
+                              },
                               "symbolSize": {
                                 "token": "metrics.symbol_toolbar",
                               },
@@ -22478,8 +22637,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "requiredSymbol": "magnet",
                     },
                     "style": {
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
                       "color": {
-                        "token": "colors.accent",
+                        "token": "colors.text",
                       },
                       "minHeight": {
                         "token": "metrics.hit",
@@ -22595,8 +22757,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "requiredSymbol": "diamond.fill",
                                     },
                                     "style": {
+                                      "background": {
+                                        "token": "colors.selected_fill",
+                                      },
                                       "color": {
-                                        "token": "colors.accent",
+                                        "token": "colors.text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",

@@ -318,6 +318,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -984,6 +985,8 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -1323,6 +1326,8 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -1502,6 +1507,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -2312,6 +2318,8 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -2702,6 +2710,8 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -2881,6 +2891,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -3691,6 +3702,8 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -4081,6 +4094,8 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -4260,6 +4275,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -5067,6 +5083,8 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -5457,6 +5475,8 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -5636,6 +5656,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -6443,6 +6464,8 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -6833,6 +6856,8 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -7012,6 +7037,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -7699,6 +7725,8 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
           "color": {
             "token": "colors.muted",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -7936,6 +7964,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -8720,6 +8749,8 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -9059,6 +9090,8 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -9238,6 +9271,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -10032,6 +10066,8 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -10371,6 +10407,8 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -10550,6 +10588,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -11357,6 +11396,8 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -11699,6 +11740,8 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -11929,6 +11972,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -12500,6 +12544,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -12930,6 +12975,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -13555,6 +13601,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -13866,6 +13913,8 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -14372,6 +14421,8 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -14586,6 +14637,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -14906,6 +14958,8 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -15433,6 +15487,8 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -15647,6 +15703,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -16323,6 +16380,8 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -16537,6 +16596,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -17654,6 +17714,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -17888,6 +17950,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -18097,6 +18161,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -18327,6 +18393,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -18526,6 +18594,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
@@ -18585,6 +18655,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "label": "Search effects",
         "metadata": {
           "placeholder": "Search",
+          "search": true,
         },
         "preventDefault": {
           "keydown": [
@@ -18972,6 +19043,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },

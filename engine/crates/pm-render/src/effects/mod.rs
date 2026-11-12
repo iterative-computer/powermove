@@ -72,6 +72,83 @@ struct Entry {
     /// The last build failed because of the compiler: built again after
     /// its backoff.
     retry: Option<retry::Retry>,
+    /// Its shader addresses physical texels ([`physical_idiom`]).
+    physical: bool,
+}
+
+/// Whether GLSL `source` addresses the physical raster: `texelFetch`,
+/// `texelFetchOffset`, `textureSize` or `gl_FragCoord` outside comments.
+/// Such a shader cannot be given composition pixels in place of the texels
+/// it is drawn on, so its chain draws at the composition's density
+/// (`crate::plan::comp_pass`).
+pub(crate) fn physical_idiom(source: &str) -> bool {
+    let mut code = String::with_capacity(source.len());
+    let mut rest = source;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("//") {
+            rest = r.find('\n').map_or("", |i| &r[i..]);
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.find("*/").map_or("", |i| &r[i + 2..]);
+            code.push(' ');
+        } else {
+            let c = rest.chars().next().unwrap();
+            code.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    // A fetch of the fragment's own texel (`texelFetch(t, ivec2(gl_FragCoord.xy),
+    // 0)`) reads the same pixel at any density: it is not physical addressing.
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut own = 0;
+    let mut at = 0;
+    while let Some(i) = compact[at..].find("texelFetch(") {
+        let start = at + i + "texelFetch(".len();
+        let rest = &compact[start..];
+        let name = rest.find(',').filter(|&n| {
+            n > 0
+                && rest[..n]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if let Some(n) = name
+            && rest[n..].starts_with(",ivec2(gl_FragCoord.xy),0)")
+        {
+            own += 1;
+        }
+        at = start;
+    }
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let count = |word: &str| {
+        code.split(|c: char| !ident(c))
+            .filter(|w| *w == word)
+            .count()
+    };
+    count("texelFetch") > own
+        || count("gl_FragCoord") > own
+        || count("texelFetchOffset") > 0
+        || count("textureSize") > 0
+}
+
+#[cfg(test)]
+mod physical_tests {
+    use super::physical_idiom;
+    #[test]
+    fn physical_addressing_is_found_and_own_pixel_reads_are_not() {
+        assert!(physical_idiom(
+            "o = texelFetch(u_tex, ivec2(v_px) + ivec2(1, 0), 0);"
+        ));
+        assert!(physical_idiom("ivec2 s = textureSize(u_tex, 0);"));
+        assert!(physical_idiom("vec2 uv = gl_FragCoord.xy / u_res;"));
+        assert!(!physical_idiom(
+            "vec4 c = texelFetch( u_tex , ivec2(gl_FragCoord.xy), 0 );"
+        ));
+        assert!(!physical_idiom(
+            "// texelFetch(u_tex, p, 0)\n/* textureSize */ o = texture(u_tex, v_st);"
+        ));
+        assert!(physical_idiom(
+            "vec4 c = texelFetch(u_tex, ivec2(gl_FragCoord.xy), 0); vec4 d = texelFetch(u_tex, ivec2(gl_FragCoord.xy) + 1, 0);"
+        ));
+    }
 }
 
 /// The renderer's definitions and their programs.
@@ -458,6 +535,7 @@ impl Effects {
                 prepared,
                 program: None,
                 retry: None,
+                physical: physical_idiom(&glsl.source),
             },
         );
         error
@@ -1004,7 +1082,7 @@ impl crate::composite::EffectHost for Effects {
             .map(|s| self.source_key(DefinitionKind::Effect, &s.definition))
             .collect();
         Ok(Ok(Some(crate::composite::PreparedEffects {
-            padding: plan::chain_padding(&steps),
+            padding: plan::region_padding(&steps),
             backdrop: steps.iter().any(|s| s.backdrop),
             passes: exec::chain_passes(exec::Chain {
                 inputs: vec![],
@@ -1020,6 +1098,55 @@ impl crate::composite::EffectHost for Effects {
         plan::transition_known(self, ty)
     }
 
+    fn needs_composition_density<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        time: f64,
+        final_output: bool,
+    ) -> pm_eval::JsResult<bool> {
+        use pm_eval::node;
+        let needs = |kind: DefinitionKind, ty: &str| {
+            let Some(def) = self.get(kind, ty) else {
+                return false;
+            };
+            // Owner-bound main definitions scale their own kernels.
+            let owned = kind == DefinitionKind::Effect
+                && self.versioned_builtins
+                && def.glsl.as_ref().is_some_and(|g| {
+                    g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
+                });
+            if owned {
+                return false;
+            }
+            final_output
+                || self
+                    .entries
+                    .get(&(kind, DefinitionId::from(ty)))
+                    .is_some_and(|e| e.physical)
+        };
+        if scope.has_renderable_effects(layer, time)? {
+            for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
+                if node::member(Some(fx), "on").is_some_and(|on| !node::truthy(Some(on))) {
+                    continue;
+                }
+                if let Some(ty) = node::string(node::member(Some(fx), "type"))
+                    && needs(DefinitionKind::Effect, &ty.to_string_lossy())
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        for key in ["transitionIn", "transitionOut"] {
+            if let Some(ty) = node::string(node::member(node::member(Some(layer), key), "type"))
+                && needs(DefinitionKind::Transition, &ty.to_string_lossy())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn layer_definitions(&self) -> Option<&Effects> {
         Some(self)
     }
@@ -1032,7 +1159,10 @@ impl crate::composite::EffectHost for Effects {
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedTransition>, crate::Feature>>
     {
         let step = match plan::transition_at(scope, self, layer, frame.time)? {
-            Ok(Some(step)) => step,
+            Ok(Some(step)) => plan::TransitionStep {
+                density: [frame.scale.0.abs(), frame.scale.1.abs()],
+                ..step
+            },
             Ok(None) => return Ok(Ok(None)),
             Err(f) => return Ok(Err(f)),
         };

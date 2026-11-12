@@ -847,11 +847,15 @@ impl Controller {
         }
     }
     /// Guides first; a huge selection loses its last boxes, never the guides.
+    /// Lines that can't be drawn (a zero-size composition, a transform
+    /// beyond a float) are left out, never unwrapped: this runs on the main
+    /// thread for whatever the document holds.
     fn overlay(&self) -> OverlayGeometry {
-        let mut lines = overlay_lines(self.safe_areas, self.guides);
-        let room = OverlayGeometry::MAX_LINES.saturating_sub(lines.len());
-        lines.extend(self.gizmo_lines.iter().take(room).copied());
-        OverlayGeometry::new(lines).expect("bounded overlay geometry")
+        OverlayGeometry::lossy(
+            overlay_lines(self.safe_areas, self.guides)
+                .into_iter()
+                .chain(self.gizmo_lines.iter().copied()),
+        )
     }
     /// Re-applies output mode, media, Preview Resolution and overlays to
     /// every viewer of this editor (after any viewer is created or an option
@@ -864,8 +868,7 @@ impl Controller {
             (self.viewer.as_ref(), self.overlay()),
             (
                 popout.as_ref(),
-                OverlayGeometry::new(overlay_lines(self.safe_areas, self.guides))
-                    .expect("bounded overlay geometry"),
+                OverlayGeometry::lossy(overlay_lines(self.safe_areas, self.guides)),
             ),
         ];
         for (viewer, geometry) in geometries {

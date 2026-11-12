@@ -301,6 +301,61 @@ fn undo_keeps_the_originals_of_a_layer_it_would_reinsert() {
     assert!(store(&kernel).reachable_assets().contains("original-a"));
 }
 
+/// What the history reaches is asked of every step on every save, and each
+/// step answers from what it found the first time: steps added later are
+/// found too, and steps that leave the history take theirs with them.
+#[test]
+fn the_assets_history_reaches_follow_its_steps_across_saves() {
+    let mut kernel = kernel();
+    let model = |id: &str, original: &str| {
+        let layer = parse(&format!(
+            r#"{{"id":"{id}","type":"shape","name":"M","from":0,"dur":1,"on":true,"p":{{}},"native3dSources":[{{"id":"{original}"}}]}}"#
+        ))
+        .unwrap();
+        let transact = |ops| Call::Transact {
+            label: Some("Edit".into()),
+            body: WriteBody::Ops(ops),
+            expected_revision: None,
+        };
+        (
+            transact(vec![Op::Insert {
+                path: layers_path(),
+                index: 0,
+                value: layer,
+            }]),
+            transact(vec![Op::Delete {
+                path: layers_path(),
+                id: id.into(),
+            }]),
+        )
+    };
+    let reaches = |kernel: &Kernel, id: &str| store(kernel).reachable_assets().contains(id);
+    let (insert, delete) = model("first", "original-a");
+    call(&mut kernel, insert);
+    call(&mut kernel, HistoryCall::Clear);
+    call(&mut kernel, delete);
+    // Asked once (as a save asks): the step that would reinsert it answers.
+    assert!(reaches(&kernel, "original-a") && !reaches(&kernel, "original-b"));
+    let (insert, delete) = model("second", "original-b");
+    call(&mut kernel, insert);
+    call(&mut kernel, delete);
+    assert!(reaches(&kernel, "original-a") && reaches(&kernel, "original-b"));
+    // Undone and redone steps are the same steps.
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(reaches(&kernel, "original-a") && reaches(&kernel, "original-b"));
+    call(&mut kernel, HistoryCall::Redo);
+    call(&mut kernel, HistoryCall::Redo);
+    assert!(reaches(&kernel, "original-a") && reaches(&kernel, "original-b"));
+    // A new step after an undo drops the undone ones, and what only they reached.
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, commands("Add", vec![add_layer("other")]));
+    assert!(reaches(&kernel, "original-a") && !reaches(&kernel, "original-b"));
+    call(&mut kernel, HistoryCall::Clear);
+    assert!(!reaches(&kernel, "original-a"));
+}
+
 #[test]
 fn a_write_outside_history_stays_unsaved_until_a_save_covers_it() {
     let dir = TempDir::new("dirty");
@@ -534,25 +589,36 @@ fn a_dictionary_trimmed_on_open_is_archived() {
         "the oldest step is trimmed"
     );
     call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    // Worked out ahead of the save (as after every open) or by the save
+    // itself: the same judgment.
+    store(&kernel).save_warmup()();
     let path = dir.path("saved.pmv");
     let plan = kernel
-        .prepare_session_save(session, Some(path.clone()), false)
+        .prepare_session_save(session.clone(), Some(path.clone()), false)
         .unwrap();
     kernel.finish_session_save(plan.run()).unwrap();
-    drop(kernel);
-    let file = std::fs::File::open(&path).unwrap();
-    let saved = read_container(
-        &file,
-        ReadOptions {
-            verify_media: false,
-        },
-    )
-    .unwrap()
-    .document;
-    assert!(
-        saved.get("nativeHistoryArchive") == Some(&original),
-        "the trimmed history is archived as the file held it"
-    );
+    let archived = |why: &str| {
+        let file = std::fs::File::open(&path).unwrap();
+        let saved = read_container(
+            &file,
+            ReadOptions {
+                verify_media: false,
+            },
+        )
+        .unwrap()
+        .document;
+        assert!(
+            saved.get("nativeHistoryArchive") == Some(&original),
+            "{why}"
+        );
+    };
+    archived("the trimmed history is archived as the file held it");
+    // A later save judges the same file history the same way (the judgment
+    // is kept, not made again): the archive stays, once.
+    call(&mut kernel, commands("Add", vec![add_layer("d")]));
+    let plan = kernel.prepare_session_save(session, None, false).unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    archived("a second save keeps the archive, once");
 }
 
 /// A large project's history holds this kernel's own operations (an insert

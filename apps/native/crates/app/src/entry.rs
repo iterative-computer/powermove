@@ -15,6 +15,11 @@ use std::{collections::VecDeque, path::PathBuf};
 /// What a new editor window opens instead of restoring its last project.
 pub enum Pending {
     File(PathBuf),
+    /// A project in the library, by id (a copy offered from its file's window).
+    Library(String),
+    /// A project an agent opened while its window showed another: already
+    /// open in the kernel, this window shows it.
+    Session(pm_kernel::session::SessionHandle),
     /// A project the Project Library's worker already opened.
     Adopt {
         reply: Box<ShellReply>,
@@ -210,6 +215,17 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
         .push_back(pending);
     // Not inside the caller's entity update: the factory updates new entities.
     cx.defer(pm_shell::open_editor);
+}
+
+/// A project opened in a window that shows one (from Home, File ▸ Open, a
+/// dropped file, an agent): a window of its own joined to that window's
+/// tabs, as v1 added a tab. The project the window shows stays open and
+/// untouched; nothing is saved or closed without its own question.
+pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
+    cx.default_global::<Entries>()
+        .next_window
+        .push_back(pending);
+    cx.defer(move |cx| pm_shell::open_editor_tab(cx, leader));
 }
 
 fn drain(cx: &mut App) {

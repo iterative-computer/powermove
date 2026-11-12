@@ -479,13 +479,8 @@ pub(super) fn decoded_png(renderer: &mut Renderer, value: &Value, depth: u32, la
             } else {
                 std::array::from_fn(|i| f64::from(p[i]) / alpha)
             };
-            // The established SDR delivery contract maps extended sRGB through
-            // CSS Color 4 for PNG8; PNG16 clips only at integer encoding.
-            let rgb = if sixteen_bit {
-                rgb
-            } else {
-                pm_color::css_srgb(rgb)
-            };
+            // The SDR delivery rule (`pm_color::delivery`): every SDR RGB
+            // output clips each straight channel, 8 and 16 bit alike.
             let expected: [u16; 4] = std::array::from_fn(|i| {
                 let v = if i == 3 { alpha } else { rgb[i] };
                 (v.clamp(0., 1.) * maximum).round_ties_even() as u16

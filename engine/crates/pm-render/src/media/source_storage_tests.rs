@@ -58,7 +58,7 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let mut media = MediaCache::new(&gpu.device);
     let convert = |media: &mut MediaCache, preview: bool| {
-        media.preview_media = preview;
+        media.preview_video = preview;
         media.draw_edge = Some(128);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
@@ -93,6 +93,161 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
         (exact.width(), exact.height(), exact.format())
     );
     assert_eq!(pixels, after);
+}
+
+/// A preview-sized video frame averages detail finer than its pixels: 480
+/// px of 3-px stripes (two white, one black) reduced 16× show a flat grey
+/// (each pixel 10 or 11 sixteenths white), not moire from four source taps.
+#[test]
+fn preview_video_downscale_averages_detail_finer_than_its_pixels() {
+    let gpu = pm_gpu::Gpu::new("preview downscale filter").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/stripes-709-limited.mp4");
+    let mut media = MediaCache::new(&gpu.device);
+    let convert = |media: &mut MediaCache, preview: bool| {
+        media.preview_video = preview;
+        media.draw_edge = Some(30);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .video(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                1,
+                0.0,
+                false,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                pm_time::Rate::FPS_30,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+        media.flush();
+        (target.width(), target.height(), pixels)
+    };
+    let (w, _, exact) = convert(&mut media, false);
+    assert_eq!(w, 480);
+    let reds = |p: &[f32]| p.chunks(4).map(|c| c[0]).collect::<Vec<_>>();
+    let exact = reds(&exact);
+    let (black, white) = exact
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    assert!(white - black > 0.9, "stripes {black}..{white}");
+    let (pw, ph, preview) = convert(&mut media, true);
+    assert_eq!((pw, ph), (30, 30));
+    let preview = reds(&preview);
+    let (lo, hi) = preview
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    // 10/16 to 11/16 white through the transfer: well inside 0.1 of each other.
+    assert!(
+        hi - lo < 0.1 && lo > black + 0.3 && hi < white - 0.1,
+        "preview {lo}..{hi} of stripes {black}..{white}"
+    );
+}
+
+/// A preview-sized video frame is the area average of the exact frame's
+/// working colour, whatever the reading: averaging encoded values and
+/// converting afterwards darkens or shifts footage whose transfer is not the
+/// identity (a linear-light project, PQ, premultiplied alpha with a transfer),
+/// which then changes when playback pauses.
+#[test]
+fn preview_video_reduction_averages_working_colour() {
+    let gpu = pm_gpu::Gpu::new("preview reduction space").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cases = [
+        (
+            root.join("tests/fixtures/video/stripes-709-limited.mp4"),
+            WorkingEncoding::LinearLight,
+            37u32,
+        ),
+        (
+            root.join("tests/fixtures/video/hevc10-2020-pq.mp4"),
+            WorkingEncoding::Standard,
+            37,
+        ),
+        (
+            root.join("../../fixtures/hevc-alpha.mov"),
+            WorkingEncoding::LinearLight,
+            23,
+        ),
+        (
+            root.join("../../fixtures/prores4444-alpha.mov"),
+            WorkingEncoding::LinearLight,
+            23,
+        ),
+    ];
+    for (path, working, edge) in cases {
+        let mut media = MediaCache::new(&gpu.device);
+        let mut convert = |preview: bool| {
+            media.preview_video = preview;
+            media.draw_edge = Some(edge);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let target = media
+                .video(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    1,
+                    0.0,
+                    false,
+                    working,
+                    Precision::Float32,
+                    None,
+                    pm_time::Rate::FPS_30,
+                    false,
+                )
+                .unwrap()
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+            let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+            media.flush();
+            (target.width() as usize, target.height() as usize, pixels)
+        };
+        let (w, h, exact) = convert(false);
+        let (pw, ph, preview) = convert(true);
+        assert!(pw < w && ph < h, "{path:?}: {pw}x{ph} of {w}x{h}");
+        let (sx, sy) = (w as f64 / pw as f64, h as f64 / ph as f64);
+        let mut worst = (0.0f64, 0usize, 0usize);
+        for py in 0..ph {
+            for px in 0..pw {
+                let (x0, x1) = (px as f64 * sx, (px + 1) as f64 * sx);
+                let (y0, y1) = (py as f64 * sy, (py + 1) as f64 * sy);
+                let mut sum = [0.0f64; 4];
+                for y in y0.floor() as usize..(y1.ceil() as usize).min(h) {
+                    let wy = (y as f64 + 1.).min(y1) - (y as f64).max(y0);
+                    for x in x0.floor() as usize..(x1.ceil() as usize).min(w) {
+                        let wt = ((x as f64 + 1.).min(x1) - (x as f64).max(x0)) * wy;
+                        for c in 0..4 {
+                            sum[c] += f64::from(exact[(y * w + x) * 4 + c]) * wt;
+                        }
+                    }
+                }
+                for c in 0..4 {
+                    let want = sum[c] / (sx * sy);
+                    let got = f64::from(preview[(py * pw + px) * 4 + c]);
+                    let d = (got - want).abs() / want.abs().max(1.);
+                    if d > worst.0 {
+                        worst = (d, px, py);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.01,
+            "{path:?}: preview off the exact average by {worst:?}"
+        );
+    }
 }
 
 /// Exercise the production source compute pass with normalized f32 RGB.

@@ -588,12 +588,21 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
-          justifyContent: "end",
+          justifyContent: "space-between",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           paddingRight: token("metrics.inset"),
         }}
       >
+        <text
+          style={{
+            color: token("colors.text"),
+            fontSize: token("typography.title"),
+            fontWeight: token("typography.semibold_weight"),
+          }}
+        >
+          Project
+        </text>
         <div
           style={{
             display: "flex",
@@ -634,7 +643,11 @@ export function ProjectView(props: ProjectViewProps) {
             label="Search media"
             title="Search media"
             value={query}
-            metadata={{ hostValue: hostFilter.current }}
+            metadata={{
+              hostValue: hostFilter.current,
+              placeholder: "Search",
+              search: true,
+            }}
             id="media-search"
             binding={native.searchBinding}
             focusRequest="media-search"

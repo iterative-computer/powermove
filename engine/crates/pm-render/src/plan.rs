@@ -313,6 +313,8 @@ pub struct Build<'r> {
     /// The level is a window onto its composition: the request gave an
     /// origin, which can be `(0, 0)`. Follows `origin` into nested levels.
     windowed: bool,
+    /// See [`BuildOptions::final_output`].
+    pub(crate) final_output: bool,
     /// What every pass over one composition's layers reads of all of them
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
@@ -401,6 +403,10 @@ pub struct BuildOptions {
     /// The top level's output origin
     /// ([`RenderRequest::origin`](crate::RenderRequest::origin)).
     pub origin: Option<(f64, f64)>,
+    /// Final output (exports, captures, render fills: `OutputKind::Final`):
+    /// every level whose effects need the composition's pixel grid draws
+    /// at the composition's density ([`comp_pass`]).
+    pub final_output: bool,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -522,6 +528,7 @@ pub(crate) fn build_reusing<'r>(
                 blur: options.blur,
                 view_override: options3d.view.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
+                final_output: options.final_output,
             },
         );
     }
@@ -549,6 +556,7 @@ pub(crate) fn build_reusing<'r>(
         sampling: options.sampling,
         origin: options.origin.unwrap_or((0.0, 0.0)),
         windowed: options.origin.is_some(),
+        final_output: options.final_output,
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -605,6 +613,78 @@ pub(crate) fn comp_pass<'d>(
         background(scope.comp)
     };
     let view = b.level_view(scope, width, height, scale);
+    // The effect pixel contract: an effect or transition without an owner
+    // binding reads its pixel sizes (`u_texel`, `u_res`, `v_px`,
+    // `texelFetch`) on the grid it is drawn on. At another density than the
+    // composition's (a resized export, a viewer zoom or playback scale) a
+    // level whose chains need the composition's grid (every such chain in
+    // final output; in a viewer frame, one whose shader addresses physical
+    // texels) is drawn whole at the composition's size and density, then
+    // resampled to its output, so an export's look never depends on its size.
+    // A window onto the composition (an origin) keeps its own density.
+    if view.is_none()
+        && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
+        && let Some(host) = b.effects
+    {
+        let mut needs = false;
+        for &layer in &all {
+            match host.needs_composition_density(scope, layer, time, b.final_output) {
+                Ok(true) => {
+                    needs = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(_) => {}
+            }
+        }
+        if needs {
+            let (cw, ch) = scope.comp_size();
+            let side = |c: f64, w: u32, s: f64| {
+                if c.is_finite() && c > 0.0 {
+                    c.round().max(1.0) as u32
+                } else {
+                    ((f64::from(w) / s).round().max(1.0)) as u32
+                }
+            };
+            let (w1, h1) = (
+                side(cw, width, scale.0.abs()),
+                side(ch, height, scale.1.abs()),
+            );
+            let inner = comp_pass(
+                scope,
+                b,
+                time,
+                w1,
+                h1,
+                (1.0, 1.0),
+                transparent,
+                group_parent,
+            );
+            return CompPlan {
+                composition: comp_id.clone(),
+                group: group_parent.is_some(),
+                width,
+                height,
+                background: Background::Transparent,
+                // Resampled as level 2 raster content: the request's
+                // resampler (Lanczos-3 in final output) and exact edges.
+                draws: vec![Draw {
+                    layer: String::new(),
+                    matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
+                    content: Content::Placed(Box::new(Placed {
+                        content: Content::Texture {
+                            source: Source::Comp(Box::new(inner)),
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            alpha: 1.0,
+                        },
+                        plane: None,
+                        level2: Some(b.sampling),
+                    })),
+                }],
+                view,
+            };
+        }
+    }
     let mut plan = CompPlan {
         composition: comp_id.clone(),
         group: group_parent.is_some(),

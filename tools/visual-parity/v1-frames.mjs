@@ -41,6 +41,10 @@ try {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] });
     dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
     dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+    // v1 closes an opened project's reader after 120 s; restoring a large
+    // project's media on a busy machine takes longer ("Unknown project read token").
+    const later = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...rest) => later(fn, ms === 120_000 ? 1_800_000 : ms, ...rest);
   }, copy);
   const page = await app.firstWindow({ timeout: 600_000 });
   page.on('pageerror', (e) => log(`pageerror ${String(e).split('\n')[0]}`));
@@ -49,7 +53,7 @@ try {
   log('app ready; opening project');
   const before = await page.evaluate(() => window.PM.proj?.id);
   await page.evaluate(() => window.PM.openProject());
-  await page.waitForFunction((id) => window.PM.proj?.id !== id, before, { timeout: 300_000 });
+  await page.waitForFunction((id) => window.PM.proj?.id !== id, before, { timeout: 900_000 });
   await page.evaluate(async () => { await window.PM.projectAssetsReady; });
   const pending = await page.evaluate(waitForMedia, 180_000);
   if (pending.length) log(`media still pending: ${pending.join('; ')}`);
@@ -75,6 +79,24 @@ try {
     quiet = next.join() === missing.join() ? quiet + 500 : 0;
     missing = next;
   }
+  // An extension whose import or activate() timed out (10 s each, easily hit
+  // on a busy machine) stays off for the session: load it again, up to three times.
+  const inactive = () => page.evaluate(() => {
+    const loader = window.PM.Kernel.loader, on = new Set(loader.activeIds());
+    return loader.records().filter((r) => r.enabled !== false && !on.has(r.id)).map((r) => r.id).sort();
+  });
+  let off = await inactive();
+  for (let round = 0; off.length && round < 3; round++) {
+    log(`extensions not active, loading again: ${off.join(', ')}`);
+    await page.evaluate(async (ids) => {
+      for (const id of ids) await window.PM.Kernel.loader.reload(id).catch(() => {});
+      await window.PM.Kernel.loader.whenIdle();
+    }, off);
+    off = await inactive();
+  }
+  if (off.length) log(`extensions still not active: ${off.join(', ')}`);
+  info.inactiveExtensions = off;
+  missing = await missingNow();
   if (missing.length) log(`effects without a definition (bypassed): ${missing.join(', ')}`);
   info.missingEffects = missing;
   const times = sampleTimes(info, args);

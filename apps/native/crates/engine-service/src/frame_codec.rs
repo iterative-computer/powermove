@@ -1,17 +1,19 @@
-//! Lossless storage of disk render cache frames (RGBA32F rows, top-down:
-//! an export's working values are finer than half floats).
+//! Lossless storage of disk render cache frames: RGBA16F rows, top-down,
+//! the half floats the viewer's surface holds (playback is the cache's only
+//! reader; an export's 32-bit values took three times the bytes and a
+//! conversion on every read, for precision nothing showed).
 //!
 //! A frame is cut into stripes of [`STRIPE_ROWS`] rows, each coded on its
-//! own so reads decode them in parallel: every channel's 32-bit values
+//! own so reads decode them in parallel: every channel's 16-bit values
 //! become the wrapping difference from the pixel to their left, split into
-//! four byte planes (lowest first), then LZFSE (Apple's Compression
-//! framework). Flat and smoothly varying areas (most of a motion graphics
-//! frame, and every transparent pixel) shrink to a few bytes; the decoded
-//! bytes are exactly the rendered ones.
+//! two byte planes (low first), then LZFSE (Apple's Compression framework).
+//! Flat and smoothly varying areas (most of a motion graphics frame, and
+//! every transparent pixel) shrink to a few bytes; the decoded bytes are
+//! exactly the stored ones.
 
 /// Rows per independently coded stripe.
 const STRIPE_ROWS: usize = 64;
-const MAGIC: &[u8; 4] = b"PMZ3";
+const MAGIC: &[u8; 4] = b"PMZ4";
 /// `COMPRESSION_LZFSE` (`compression.h`).
 const LZFSE: i32 = 0x801;
 /// Stripes coded or decoded at once.
@@ -37,14 +39,14 @@ unsafe extern "C" {
     ) -> usize;
 }
 
-/// Bytes of one value (f32).
-const VALUE: usize = 4;
+/// Bytes of one value (a half float).
+const VALUE: usize = 2;
 
 fn row_bytes(width: u32) -> usize {
     width as usize * 4 * VALUE
 }
 
-/// The coded frame of `rgba` (`width` × `height` RGBA32F, little endian).
+/// The coded frame of `rgba` (`width` × `height` RGBA16F, little endian).
 pub fn encode(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     let row = row_bytes(width);
     assert_eq!(rgba.len(), row * height as usize, "frame size");
@@ -144,6 +146,8 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
             .chunks_mut(per)
             .map(|group| {
                 s.spawn(move || {
+                    // A frame on screen waits for this read.
+                    crate::qos::set_interactive_qos();
                     let mut planes = Vec::new();
                     group.iter_mut().all(|(dst, (coded, packed, raw))| {
                         let planes: &[u8] = if *packed {
@@ -181,17 +185,17 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 /// they are), and its decoded length.
 type Span<'a> = (&'a [u8], bool, usize);
 
-/// `stripe`'s rows as left-difference byte planes, lowest byte first.
+/// `stripe`'s rows as left-difference byte planes, low byte first.
 fn split(stripe: &[u8], row: usize, planes: &mut Vec<u8>) {
     let values = stripe.len() / VALUE;
     planes.clear();
     planes.resize(stripe.len(), 0);
     let mut i = 0;
     for line in stripe.chunks_exact(row) {
-        let mut left = [0u32; 4];
+        let mut left = [0u16; 4];
         for px in line.chunks_exact(4 * VALUE) {
             for (value, left) in px.chunks_exact(VALUE).zip(&mut left) {
-                let v = u32::from_le_bytes(value.try_into().unwrap());
+                let v = u16::from_le_bytes(value.try_into().unwrap());
                 let d = v.wrapping_sub(*left).to_le_bytes();
                 *left = v;
                 for (b, byte) in d.into_iter().enumerate() {
@@ -208,10 +212,10 @@ fn join(planes: &[u8], row: usize, dst: &mut [u8]) {
     let values = dst.len() / VALUE;
     let mut i = 0;
     for line in dst.chunks_exact_mut(row) {
-        let mut left = [0u32; 4];
+        let mut left = [0u16; 4];
         for px in line.chunks_exact_mut(4 * VALUE) {
             for (value, left) in px.chunks_exact_mut(VALUE).zip(&mut left) {
-                let d = u32::from_le_bytes(std::array::from_fn(|b| planes[b * values + i]));
+                let d = u16::from_le_bytes(std::array::from_fn(|b| planes[b * values + i]));
                 let v = left.wrapping_add(d);
                 *left = v;
                 value.copy_from_slice(&v.to_le_bytes());
@@ -241,7 +245,8 @@ mod tests {
                     let n = (seed >> 8) as f32 / (1 << 24) as f32;
                     [n * 4., n, -n * 0.01, 1.]
                 };
-                px.into_iter().flat_map(f32::to_le_bytes)
+                px.into_iter()
+                    .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
             })
             .collect()
     }

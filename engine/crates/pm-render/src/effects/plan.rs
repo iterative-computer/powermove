@@ -55,6 +55,11 @@ pub struct EffectStep {
     /// `viewportPadding` parameter values.
     pub padding: f64,
     pub params: Vec<Param>,
+    /// Output pixels per composition pixel where this step draws. A step
+    /// without an owner binding sees composition pixels (`u_res`,
+    /// `u_texel`, `v_px`), so its pixel-sized parameters draw at the size
+    /// the 1:1 export draws them at any viewer zoom or playback scale.
+    pub density: [f64; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,6 +83,9 @@ pub struct TransitionStep {
     pub edge_in: bool,
     pub progress: f64,
     pub params: Vec<Param>,
+    /// Output pixels per composition pixel where it draws: a transition sees
+    /// composition pixels as an effect does (`EffectStep::density`).
+    pub density: [f64; 2],
 }
 
 /* ── setParam's value conversion ─────────────────────────────────────── */
@@ -221,6 +229,7 @@ pub fn effect_step(
         viewport_safe: def.flags.viewport_safe,
         padding,
         params,
+        density: [1., 1.],
     }
 }
 
@@ -246,6 +255,7 @@ pub fn transition_step(
                 None => param(spec, &default_value(spec)),
             })
             .collect(),
+        density: [1., 1.],
     }
 }
 
@@ -374,6 +384,7 @@ pub(crate) fn effect_steps_raster<'d>(
             values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
         let mut step = effect_step(def, &fx_id, &values);
+        step.density = [scale.0.abs(), scale.1.abs()];
         if raster.is_some() && super::versions::main_definition(&step.definition).is_none() {
             return Ok(Err(Feature::Definition(
                 "Effect has no source processing contract".into(),
@@ -627,6 +638,11 @@ pub(crate) fn effect_steps_raster<'d>(
                 });
             }
         }
+        // Main definitions scale their padding by the density above; any
+        // other step reaches its authored padding in composition pixels.
+        if super::versions::main_definition(&step.definition).is_none() && step.owner.is_none() {
+            step.padding *= step.density[0].max(step.density[1]);
+        }
         steps.push(step);
     }
     Ok(match refused {
@@ -687,9 +703,26 @@ pub fn transition_at<'d>(
 /// its `viewportPadding` values, any other the whole frame; chained reads
 /// add up.
 pub fn chain_padding(steps: &[EffectStep]) -> Padding {
+    padding_with(steps, 0)
+}
+
+/// Beyond its declared spread, each pass of a viewport-safe effect may read
+/// one texel of a grid down to 1/4 resolution: a bilinear tap, an area
+/// downsample or an upsample of an intermediate target. A declared spread
+/// is the kernel's reach; these footprints add up over the passes.
+const PASS_SUPPORT: u32 = 4;
+
+/// The padding a region's pass renders a chain over so the region equals
+/// the whole frame: [`chain_padding`] plus each pass's sampling support.
+pub fn region_padding(steps: &[EffectStep]) -> Padding {
+    padding_with(steps, PASS_SUPPORT)
+}
+
+fn padding_with(steps: &[EffectStep], support: u32) -> Padding {
     steps.iter().fold(Padding::NONE, |acc, step| {
         acc.then(if step.viewport_safe {
-            Padding::Pixels(step.padding.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32)
+            let spread = step.padding.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32;
+            Padding::Pixels(spread.saturating_add(support * u32::from(step.passes.max(1))))
         } else {
             Padding::Full
         })

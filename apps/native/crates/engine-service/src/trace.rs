@@ -32,6 +32,12 @@ pub struct Trace {
     pub cache_hit: bool,
     /// The disk render cache: 0 not looked at, 1 missed, 2 read.
     pub disk: u8,
+    /// Milliseconds this frame waited for the disk reader.
+    pub disk_wait_ms: f64,
+    /// Milliseconds from the worker's start to the engine starting on the
+    /// frame, and uploading a frame read from disk took.
+    pub enter_ms: f64,
+    pub disk_upload_ms: f64,
     pub gpu_ok: bool,
 }
 pub fn now() -> f64 {

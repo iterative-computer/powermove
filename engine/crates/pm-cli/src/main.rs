@@ -76,6 +76,8 @@ const USAGE: &str = "usage:
       --timecode HH:MM:SS:FF  --reel NAME  start timecode (`;` for drop-frame), MOV
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
       --dither on|off  --precision 8|16|32
+      --bands N  render each frame in bands of N 16-row units, as an export
+                 beside a busy viewer does (default: whole frames)
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
       --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
                effects, transitions, and extension layers with (default: the
@@ -258,6 +260,15 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--contributed" => o.contributed = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
+            "--bands" => {
+                let v = value(args, &mut i, a)?;
+                o.bands = Some(
+                    v.parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("bands {v:?} (units of 16 rows)"))?,
+                );
+            }
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {

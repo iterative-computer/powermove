@@ -3,6 +3,8 @@ pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod integration;
 pub mod keyboard;
+#[cfg(target_os = "macos")]
+pub mod kit;
 pub mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -11,6 +13,8 @@ pub mod menu;
 pub mod motion;
 #[cfg(target_os = "macos")]
 mod native;
+#[cfg(target_os = "macos")]
+pub mod native_control;
 #[cfg(target_os = "macos")]
 pub mod scopes;
 pub mod session;
@@ -37,6 +41,6 @@ pub use macos::{
 #[cfg(target_os = "macos")]
 pub use native::{
     Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    document_subtitle, popover_frame, send_menu_command, system_accent, viewer_window,
-    window_backdrop, zoom_limit,
+    document_subtitle, popover_frame, request_close, resize_from_top, send_menu_command,
+    sidebar_frame, system_accent, viewer_window, window_backdrop, zoom_limit,
 };

@@ -57,7 +57,7 @@ mod parser;
 mod string;
 mod value;
 
-pub use deps::{ContextReads, Dependencies, FieldRead, Root, Step};
+pub use deps::{ContextReads, Dependencies, FieldRead, Reach, Root, Step};
 pub use diagnostic::{
     LENGTH_MESSAGE, expression_diagnostic, expression_diagnostic_utf16, expression_names,
 };
@@ -229,6 +229,31 @@ impl Expression {
     /// layer index only then, as `anim.ts` does).
     pub fn needs_idx(&self) -> bool {
         self.needs_idx
+    }
+
+    /// What the program can read of the document ([`Reach`]): every input
+    /// identifier and host call in its code, taken or not. A call's callee
+    /// is syntactic, so no other path reaches the host.
+    pub fn reach(&self) -> Reach {
+        use bytecode::{Call, Input, Op};
+        use value::Helper;
+        let mut reach = Reach {
+            index: self.needs_idx,
+            ..Reach::default()
+        };
+        for op in &self.program.code {
+            match op {
+                Op::Identifier(Input::Layer) => reach.layer = true,
+                Op::Identifier(Input::Comp) => reach.comp = true,
+                Op::Identifier(Input::Index) => reach.index = true,
+                Op::Call(Call::Helper(Helper::Param), _) => reach.params = true,
+                Op::Call(Call::Helper(Helper::Sample | Helper::MotionPath), _) => {
+                    reach.document = true;
+                }
+                _ => {}
+            }
+        }
+        reach
     }
 
     /// Whether a caller needs to prepare the channel string at evaluation.
@@ -442,6 +467,22 @@ pub fn evaluate_channel<H: Host>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reach is what the code can touch on any path, taken or not.
+    #[test]
+    fn reach_names_every_document_input_in_the_code() {
+        let reach = |s: &str| Expression::compile(s, Dialect::Legacy).unwrap().reach();
+        assert_eq!(reach("value + wiggle(2, 10) * t"), Reach::default());
+        assert!(reach("sample('B', 'position.x', 0)").document);
+        assert!(reach("t > 1 ? 0 : motionPath('B', 'position.x', 0.5, 0, 1)").document);
+        assert!(reach("idx * 100").index);
+        assert!(reach("param('speed') * t").params);
+        assert!(reach("comp.layers[0].p.opacity.v").comp);
+        let own = reach("layer.from + t");
+        assert!(own.layer && !own.comp && !own.document && !own.index);
+        // A helper named but never called reads nothing.
+        assert!(!reach("sample ? 1 : 2").document);
+    }
 
     #[test]
     fn needs_idx_is_a_word_match() {

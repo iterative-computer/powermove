@@ -605,6 +605,355 @@ fn regions_equal_the_full_frame() {
     }
 }
 
+/// A contributed glow in the shape of a multi-pass bloom: a 2×2
+/// area-filtered half-resolution tile packed into the input texture, a wide
+/// Gaussian blur read bilinearly from the tile, and a bilinear upsample.
+/// It declares its spread (`viewportPadding: ["radius"]`), which does not
+/// count the half-resolution taps' footprint, and its tiles follow the
+/// input texture, so a band's crop moves its downsample grid.
+const HALO: &str = "#version 300 es
+precision highp float;
+in vec2 v_st;
+uniform sampler2D u_tex;
+uniform sampler2D u_orig;
+uniform vec2 u_texel;
+uniform int u_pass;
+uniform float u_radius;
+out vec4 o;
+void main() {
+  vec2 halfTexel = 0.5 * u_texel;
+  bool tile = v_st.x < 0.5 && v_st.y < 0.5;
+  vec2 logicalUV = v_st / 0.5;
+  if (u_pass == 0) {
+    vec4 sum = vec4(0.0);
+    if (tile) {
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          sum += texture(u_orig, logicalUV + (vec2(float(dx), float(dy)) - 0.5) * u_texel) * 0.25;
+        }
+      }
+    }
+    o = sum;
+  } else if (u_pass < 3) {
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    if (tile) {
+      vec2 axis = u_pass == 1 ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      for (int i = -16; i <= 16; i++) {
+        float t = float(i) / 16.0;
+        float w = exp(-4.5 * t * t);
+        vec2 uv = logicalUV + axis * (u_radius * t) * u_texel;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+          sum += texture(u_tex, clamp(uv * 0.5, halfTexel, vec2(0.5) - halfTexel)) * w;
+        }
+        weights += w;
+      }
+    }
+    o = sum / max(weights, 0.00001);
+  } else {
+    vec4 bloom = texture(u_tex, clamp(v_st * 0.5, halfTexel, vec2(0.5) - halfTexel));
+    o = texture(u_orig, v_st) + bloom * 2.0;
+  }
+}
+";
+
+/// Renders the halo whole and in export bands and rectangles, with its
+/// declared spread `reach` beyond its kernel radius 40, and returns each
+/// rectangle with its count of values whose bits differ from the whole
+/// frame's, and their largest difference.
+fn halo_bands(reach: f64) -> Vec<(Precision, PixelRect, usize, f32)> {
+    let mut halo = raw_effect(
+        "acme.halo",
+        HALO,
+        json!([
+            { "type": "number", "key": "radius", "default": 40, "min": 0, "max": 500, "step": null },
+            { "type": "number", "key": "reach", "default": 40, "min": 0, "max": 500, "step": null }
+        ]),
+        false,
+    );
+    halo.flags.passes = 4;
+    halo.flags.keep_orig = true;
+    halo.flags.viewport_safe = true;
+    halo.flags.viewport_padding = vec!["reach".into()];
+    let mut set = builtin_definitions();
+    set.definitions.push(halo);
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (doc, res) = document(
+        vec![fx(
+            "f1",
+            "acme.halo",
+            json!({ "radius": ch(json!(40)), "reach": ch(json!(reach)) }),
+        )],
+        None,
+    );
+    bands_against_whole(&mut r, &doc, &res, (W, H), false)
+}
+
+/// Each export-like band and rectangle of the frame against the whole
+/// frame, at half and full float precision: the rectangle, its count of
+/// values whose bits differ, and their largest difference in CV.
+fn bands_against_whole(
+    r: &mut Renderer,
+    doc: &pm_model::Document,
+    res: &MapResolver,
+    (w, h): (u32, u32),
+    export: bool,
+) -> Vec<(Precision, PixelRect, usize, f32)> {
+    bands_against_whole_at(r, doc, res, (w, h), 1.0, export)
+}
+
+/// [`bands_against_whole`] of a `w` × `h` composition rendered at
+/// `render_scale` output pixels a composition pixel.
+fn bands_against_whole_at(
+    r: &mut Renderer,
+    doc: &pm_model::Document,
+    res: &MapResolver,
+    composition: (u32, u32),
+    render_scale: f64,
+    export: bool,
+) -> Vec<(Precision, PixelRect, usize, f32)> {
+    let mut out = Vec::new();
+    for precision in [Precision::Float16, Precision::Float32] {
+        let mut whole_req = RenderRequest::at_scale(
+            Size::new(composition.0, composition.1),
+            render_scale,
+            precision,
+        );
+        whole_req.export = export;
+        let (w, h) = (whole_req.output_size.width, whole_req.output_size.height);
+        let px = |v: u32| ((f64::from(v) * f64::from(w) / f64::from(W)).round() as u32).max(1);
+        let whole = render(r, doc, res, 0.5, &whole_req).unwrap();
+        // Export-like bands (an export's 16-row units at full size), and
+        // rectangles away from the frame's edges.
+        let band = if w > W { 16 } else { 23 };
+        let mut rects: Vec<PixelRect> = (0..h)
+            .step_by(band as usize)
+            .map(|y| PixelRect {
+                x: 0,
+                y,
+                width: w,
+                height: band.min(h - y),
+            })
+            .collect();
+        rects.extend(
+            [(101, 37, 150, 100), (60, 70, 41, 33)].map(|(x, y, rw, rh)| PixelRect {
+                x: px(x),
+                y: px(y),
+                width: px(rw),
+                height: px(rh),
+            }),
+        );
+        for rect in rects {
+            let mut req = whole_req.clone();
+            req.region = Some(rect);
+            let part = render(r, doc, res, 0.5, &req).unwrap();
+            let mut differing = 0usize;
+            let mut worst = 0.0f32;
+            for y in 0..rect.height as usize {
+                for x in 0..rect.width as usize {
+                    for c in 0..4 {
+                        let a = part[(y * rect.width as usize + x) * 4 + c];
+                        let b = whole
+                            [((y + rect.y as usize) * w as usize + x + rect.x as usize) * 4 + c];
+                        if a.to_bits() != b.to_bits() {
+                            differing += 1;
+                            worst = worst.max((a - b).abs());
+                        }
+                    }
+                }
+            }
+            out.push((precision, rect, differing, worst * 255.0));
+        }
+    }
+    out
+}
+
+fn assert_bit_equal(results: Vec<(Precision, PixelRect, usize, f32)>) {
+    let bad: Vec<_> = results.into_iter().filter(|r| r.2 > 0).collect();
+    assert!(bad.is_empty(), "values differ (count, max CV): {bad:?}");
+}
+
+/// A band's padded crop lies on the frame's grid: the halo's
+/// half-resolution tiles follow its input texture, so a crop starting on
+/// an odd row or column moves the downsample grid, and an odd-sized crop
+/// ending on a frame edge clamps its tiles half a texel off the whole
+/// frame's. The declared spread here is generous, so only the grid counts.
+#[test]
+fn a_band_of_a_reduced_resolution_effect_keeps_the_frames_grid() {
+    let _gpu = gpu();
+    assert_bit_equal(halo_bands(60.0));
+}
+
+/// A dither hashed from the pixel coordinate and a ramp over the content
+/// coordinate, as the built-in Gradient draws them.
+const HASHED: &str = "#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec2 v_st;
+in vec2 v_px;
+uniform sampler2D u_tex;
+out vec4 o;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+void main() {
+  vec4 c = texture(u_tex, v_st);
+  float t = pow(clamp(dot(v_uv - 0.5, vec2(0.8, -0.6)) + 0.5, 0.0, 1.0), 1.7);
+  o = vec4(vec3(t, hash(v_px), 1.0 - t) * c.a, c.a);
+}
+";
+
+/// A final frame's bands read the pixel and content coordinates the
+/// whole frame reads: a hash of an interpolated coordinate turns the
+/// rounding of a differently sized draw into different pixels.
+#[test]
+fn final_bands_read_the_coordinates_of_the_whole_frame() {
+    let _gpu = gpu();
+    let mut hashed = raw_effect("acme.hashed", HASHED, json!([]), false);
+    hashed.flags.viewport_safe = true;
+    let mut set = builtin_definitions();
+    set.definitions.push(hashed);
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    // A 1920 × 1080 composition, where interpolation rounding shows: a
+    // wide shape in a group at a fractional offset, its gradient dithered.
+    let (w, h) = (W * 6, H * 6);
+    let mut group = layer("g", "group", json!({}), -910.0, -490.1958700034494, 2.0);
+    group["p"]["position.x"] = ch(json!(-910.0));
+    group["p"]["position.y"] = ch(json!(-490.1958700034494));
+    let mut plate = layer(
+        "plate",
+        "shape",
+        json!({ "shape": "rect", "w": 8000, "h": 1081.5, "radius": 0, "stroke": 0, "color": "#FFFFFF",
+                "fill": { "type": "solid", "angle": 0, "stops": [{ "id": "s", "color": "#FFFFFF", "position": 0 }] } }),
+        960.0 + 910.0,
+        540.75 + 490.1958700034494,
+        2.0,
+    );
+    plate["group"] = json!("g");
+    plate["fx"] = json!([
+        fx("f1", "acme.hashed", json!({})),
+        fx(
+            "f2",
+            "gradient",
+            json!({
+                "amount": ch(json!(100)), "angle": ch(json!(90)), "dither": ch(json!(4)), "midpoint": ch(json!(75)),
+                "spread": ch(json!(100)), "startColor": ch(json!("#0A0907")), "endColor": ch(json!("#6C381F"))
+            })
+        )
+    ]);
+    let doc = load(&project(
+        w,
+        h,
+        2.0,
+        solid_fill("#000000"),
+        vec![plate, group],
+    ));
+    assert_bit_equal(bands_against_whole(
+        &mut r,
+        &doc,
+        &MapResolver::default(),
+        (w, h),
+        true,
+    ));
+}
+
+/// A contributed program whose arithmetic follows its input texture: a
+/// ripple over the input's normalized row, as packed tiles and
+/// `u_texel`-scaled taps round on a band-sized input.
+const BAND_RELATIVE: &str = "#version 300 es
+precision highp float;
+in vec2 v_st;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  vec4 c = texture(u_tex, v_st);
+  o = vec4(c.rgb * (0.75 + 0.25 * sin(v_st.y / u_texel.y * 0.7)), c.a);
+}
+";
+
+/// A final frame's bands equal the whole frame whatever an effect
+/// computes from its input's size: in exports and the render cache it
+/// draws over the whole frame (a viewer crop keeps its declared spread).
+#[test]
+fn a_final_band_draws_an_effect_over_the_whole_frame() {
+    let _gpu = gpu();
+    let mut def = raw_effect("acme.band-relative", BAND_RELATIVE, json!([]), false);
+    def.flags.viewport_safe = true;
+    let mut set = builtin_definitions();
+    set.definitions.push(def);
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (doc, res) = document(vec![fx("f1", "acme.band-relative", json!({}))], None);
+    assert_bit_equal(bands_against_whole(&mut r, &doc, &res, (W, H), true));
+}
+
+/// Every built-in effect's bands of a final frame equal the whole frame.
+#[test]
+fn final_bands_of_every_built_in_effect_equal_the_whole_frame() {
+    let _gpu = gpu();
+    let mut r = builtins();
+    let ids: Vec<String> = builtin_definitions()
+        .definitions
+        .iter()
+        .filter(|d| d.kind == DefinitionKind::Effect)
+        .map(|d| d.id.as_str().to_owned())
+        .collect();
+    assert!(ids.len() > 10, "{ids:?}");
+    let mut bad = Vec::new();
+    for id in &ids {
+        let (doc, res) = document(vec![fx("f1", id, json!({}))], None);
+        let differing: Vec<_> = bands_against_whole(&mut r, &doc, &res, (W, H), true)
+            .into_iter()
+            .filter(|b| b.2 > 0)
+            .collect();
+        if !differing.is_empty() {
+            bad.push((id.clone(), differing));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+/// A final frame rendered above or below its composition's size (a 4K
+/// export of a 1080p composition, a half-size one) bands like any other:
+/// effects that read the pixel coordinate (Grain's cells, Gradient's
+/// dither) and ones that reach across rows give a band the whole frame's
+/// bits (a viewer's 2× crop differs from its frame in the dither).
+#[test]
+fn bands_of_a_scaled_frame_equal_the_whole_frame() {
+    let _gpu = gpu();
+    let mut r = builtins();
+    let (doc, res) = document(
+        vec![
+            fx("f1", "blur", json!({ "amount": ch(json!(7)) })),
+            fx("f2", "grain", json!({ "amount": ch(json!(40)) })),
+            fx(
+                "f3",
+                "gradient",
+                json!({ "amount": ch(json!(60)), "dither": ch(json!(4)) }),
+            ),
+        ],
+        None,
+    );
+    for scale in [2.0, 1.5, 0.5] {
+        let bad: Vec<_> = bands_against_whole_at(&mut r, &doc, &res, (W, H), scale, true)
+            .into_iter()
+            .filter(|b| b.2 > 0)
+            .collect();
+        assert!(bad.is_empty(), "at {scale}×: {bad:?}");
+    }
+}
+
+/// A band's padding covers each pass's sampling footprint beyond the
+/// declared spread: the halo declares exactly its kernel radius, and its
+/// half-resolution bilinear taps, downsample and upsample read a few
+/// pixels further.
+#[test]
+fn a_band_covers_the_sampling_beyond_an_effects_declared_spread() {
+    let _gpu = gpu();
+    assert_bit_equal(halo_bands(40.0));
+}
+
 #[test]
 fn effects_on_groups_and_inside_precomps() {
     let _gpu = gpu();
@@ -1156,5 +1505,168 @@ fn builtin_costs_at_uhd() {
                 .measured_ms(DefinitionKind::Effect, id)
                 .unwrap_or(f64::NAN)
         );
+    }
+}
+
+/// An effect's pixel-sized values are composition pixels at any render
+/// scale: `v_px` counts them and `u_texel` is one of them, so a frame drawn
+/// at half scale (a playing viewer, a reduced quality) shows the effect at
+/// the size the 1:1 export does. A full-frame solid paints red from
+/// `v_px.x = 40` and green from `40 × u_texel.x` in its own UV.
+#[test]
+fn effect_pixels_are_composition_pixels_at_any_render_scale() {
+    let _gpu = gpu();
+    const EDGE: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform float u_edge;\nout vec4 o;\nvoid main(){ o = vec4(step(u_edge, v_px.x), step(u_edge * u_texel.x, v_st.x), 0.0, 1.0); }\n";
+    let mut set = builtin_definitions();
+    set.definitions.push(raw_effect(
+        "acme.edge",
+        EDGE,
+        json!([{ "type": "number", "key": "edge", "default": 40, "min": 0, "max": 1000, "step": null }]),
+        false,
+    ));
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (w, h) = (128u32, 64u32);
+    let mut plate = layer(
+        "plate",
+        "solid",
+        json!({ "color": "#000000", "w": w, "h": h }),
+        64.0,
+        32.0,
+        1.0,
+    );
+    plate["fx"] = json!([fx("e", "acme.edge", json!({}))]);
+    let doc = load(&project(w, h, 1.0, solid_fill("#000000"), vec![plate]));
+    let res = MapResolver::default();
+    // The first column at or past half intensity in channel `c` of the middle row.
+    let edge = |px: &[f32], width: u32, c: usize| {
+        let y = (px.len() / 4 / width as usize) / 2;
+        (0..width as usize)
+            .find(|x| px[(y * width as usize + x) * 4 + c] >= 0.5)
+            .map(|x| x as f64)
+    };
+    for scale in [1.0, 0.5] {
+        let size = Size::new((f64::from(w) * scale) as u32, (f64::from(h) * scale) as u32);
+        let req = RenderRequest::at_scale(size, scale, Precision::Float16);
+        let px = render(&mut r, &doc, &res, 0.0, &req).unwrap();
+        for (c, what) in [(0, "v_px"), (1, "u_texel")] {
+            let at = edge(&px, size.width, c).map(|x| x / scale);
+            assert!(
+                at.is_some_and(|x| (x - 40.0).abs() <= 1.0 / scale),
+                "{what} at scale {scale}: edge at composition x {at:?}, not 40"
+            );
+        }
+    }
+}
+
+/// The effect pixel contract in final output: an effect without an owner
+/// binding is drawn on the composition's own pixel grid at any output size,
+/// so a resized export (half or twice the composition) shows the 1:1
+/// export's picture resampled, whatever idiom its shader uses: a radius in
+/// `u_texel`, a physical neighbour step, a half-texel tile clamp, or
+/// `texelFetch` from `gl_FragCoord`. A viewer frame does the same for a
+/// shader that addresses physical texels.
+#[test]
+fn resized_frames_draw_effects_on_the_composition_grid() {
+    let _gpu = gpu();
+    let program = |body: &str| {
+        format!(
+            "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform vec2 u_res;\nout vec4 o;\nvoid main(){{ {body} }}\n"
+        )
+    };
+    let shaders = [
+        (
+            "acme.radius",
+            program("o = texture(u_tex, v_st - vec2(8.0 * u_texel.x, 0.0));"),
+        ),
+        (
+            "acme.neighbours",
+            program(
+                "o = 0.5 * (texture(u_tex, v_st - vec2(u_texel.x, 0.0)) + texture(u_tex, v_st + vec2(u_texel.x, 0.0)));",
+            ),
+        ),
+        (
+            "acme.tile",
+            program(
+                "o = texture(u_tex, vec2(clamp(v_st.x * 0.5, 0.5 * u_texel.x, 0.5 - 0.5 * u_texel.x), v_st.y));",
+            ),
+        ),
+        (
+            "acme.fetch",
+            program(
+                "ivec2 at = clamp(ivec2(gl_FragCoord.xy) - ivec2(4, 0), ivec2(0), textureSize(u_tex, 0) - 1); o = texelFetch(u_tex, at, 0);",
+            ),
+        ),
+    ];
+    let mut set = builtin_definitions();
+    for (id, source) in &shaders {
+        set.definitions
+            .push(raw_effect(id, source, json!([]), false));
+    }
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (w, h) = (64u32, 32u32);
+    let frame = |px: &[f32], width: usize, x: usize, y: usize| px[(y * width + x) * 4];
+    for (id, _) in &shaders {
+        // A white solid from column 20 to 60 over every row (the anchor is its
+        // top-left corner), the effect on it, on black.
+        let mut plate = layer(
+            "plate",
+            "solid",
+            json!({ "color": "#FFFFFF", "w": 40, "h": h }),
+            20.0,
+            0.0,
+            1.0,
+        );
+        plate["fx"] = json!([fx("e", id, json!({}))]);
+        let doc = load(&project(w, h, 1.0, solid_fill("#000000"), vec![plate]));
+        let res = MapResolver::default();
+        let at = |r: &mut Renderer, scale: f64, final_output: bool| {
+            let req = RenderRequest {
+                export: final_output,
+                output_kind: if final_output {
+                    pm_render::OutputKind::Final
+                } else {
+                    pm_render::OutputKind::Preview
+                },
+                ..RenderRequest::at_scale(Size::new(w, h), scale, Precision::Float16)
+            };
+            let width = req.output_size.width as usize;
+            (render(r, &doc, &res, 0.0, &req).unwrap(), width)
+        };
+        let (one, _) = at(&mut r, 1.0, true);
+        // Compare along the middle row, in composition pixels: each output
+        // sample against the 1:1 frame at the same composition position
+        // (linear between its pixels).
+        let compare = |px: &[f32], width: usize, scale: f64, label: &str| {
+            let y = (f64::from(h) * scale / 2.0) as usize;
+            let mut worst = (0.0f32, 0usize);
+            let mut sum = 0.0f32;
+            for x in 0..width {
+                let cx = ((x as f64 + 0.5) / scale - 0.5).clamp(0.0, f64::from(w) - 1.0);
+                let (x0, t) = (cx.floor() as usize, (cx - cx.floor()) as f32);
+                let x1 = (x0 + 1).min(w as usize - 1);
+                let want = frame(&one, w as usize, x0, h as usize / 2) * (1.0 - t)
+                    + frame(&one, w as usize, x1, h as usize / 2) * t;
+                let d = (frame(px, width, x, y) - want).abs();
+                sum += d;
+                if d > worst.0 {
+                    worst = (d, x);
+                }
+            }
+            let mean = sum / width as f32;
+            assert!(
+                mean < 0.03 && worst.0 < 0.55,
+                "{id} {label}: off the 1:1 frame resampled by mean {mean}, worst {worst:?}"
+            );
+        };
+        for scale in [0.5, 2.0] {
+            let (px, width) = at(&mut r, scale, true);
+            compare(&px, width, scale, &format!("export at {scale}x"));
+        }
+        if *id == "acme.fetch" {
+            let (px, width) = at(&mut r, 2.0, false);
+            compare(&px, width, 2.0, "viewer at 2x");
+        }
     }
 }

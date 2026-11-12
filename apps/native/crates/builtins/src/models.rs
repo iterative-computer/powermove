@@ -576,8 +576,15 @@ impl Backend {
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
         let needs_answer = session.needs_answer();
+        // A docked panel fills its dock under the dock's own title; the
+        // popover has a fixed width, its own title and the floating ground.
+        let presentation = if self.native.facts["agentPopover"] == true {
+            "popover"
+        } else {
+            "docked"
+        };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"reason":reason,"presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

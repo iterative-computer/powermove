@@ -130,6 +130,8 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
+    /// The height a sheet's body wants, measured as it is laid out.
+    sheet_fit: Rc<std::cell::Cell<f32>>,
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
     probing: bool,
@@ -195,6 +197,7 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
+            sheet_fit: Default::default(),
             probing: false,
             targets: Default::default(),
             capture: None,
@@ -345,7 +348,12 @@ impl SurfaceView {
                 continue;
             };
             let lease = view.binding.clone();
-            let options = node.props.get("options").cloned().unwrap_or(Value::Null);
+            // A segmented control's choices are its segment children.
+            let options = if view.component == Some(Component::SegmentedControl) {
+                Value::Array(segments(&surface, node).0)
+            } else {
+                node.props.get("options").cloned().unwrap_or(Value::Null)
+            };
             if self.leases.get(&id) != Some(&lease) || self.option_sets.get(&id) != Some(&options) {
                 self.subscriptions.remove(&id);
                 self.fields.remove(&id);
@@ -422,7 +430,12 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         let id = view.id;
-        let value = node.props.get("value").cloned().unwrap_or(Value::Null);
+        let segmented = matches!(kind, crate::v4_control::Kind::Segmented)
+            .then(|| segments(&self.publication.surface, node));
+        let value = match &segmented {
+            Some((_, selected, _)) => json!(selected),
+            None => node.props.get("value").cloned().unwrap_or(Value::Null),
+        };
         // A pop-up may title itself apart from its rows (`Fit (54 %)`).
         let display = node
             .props
@@ -438,13 +451,26 @@ impl SurfaceView {
             {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
-            let options = node
-                .props
-                .get("options")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let options = match &segmented {
+                Some((options, _, _)) => options.as_slice(),
+                None => node
+                    .props
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            };
             control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
+            // A filter the panel's host applied shows even mid-typing.
+            if let Some(revision) = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("hostValue"))
+                .and_then(Value::as_u64)
+            {
+                let text = value.as_str().unwrap_or_default().to_owned();
+                control.update(cx, |v, _| v.host_text(&text, revision));
+            }
             return;
         }
         let label = node
@@ -452,6 +478,12 @@ impl SurfaceView {
             .get("label")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let placeholder = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("placeholder"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let identifier = format!(
             "v4.{}.{}",
             self.publication.panel,
@@ -460,12 +492,15 @@ impl SurfaceView {
                 .and_then(Value::as_str)
                 .unwrap_or(label)
         );
-        let options = node
-            .props
-            .get("options")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let options = match segmented {
+            Some((options, _, _)) => options,
+            None => node
+                .props
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        };
         let button_role = node
             .props
             .get("metadata")
@@ -494,9 +529,14 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    // Bar pop-ups are borderless titles; the rest keep the bezel.
-                    inline: crate::v4_compile::variant(node) == Some("inline")
+                    // Bar pop-ups are borderless titles; the rest keep the
+                    // bezel. `quiet` is the borderless title in the
+                    // secondary ink, for an option bar under a composer.
+                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    quiet: crate::v4_compile::variant(node) == Some("quiet"),
+                    tint: None,
+                    symbol: None,
                 },
                 &tokens,
                 window,
@@ -512,12 +552,62 @@ impl SurfaceView {
                 }
                 if matches!(kind, crate::v4_control::Kind::Push) {
                     v.send(id, "click", EventDetail::default(), cx);
+                } else if matches!(kind, crate::v4_control::Kind::Segmented) {
+                    // Choosing a segment is a press on that segment's node.
+                    let segment = v.publication.surface.node(id).and_then(|node| {
+                        let (_, _, ids) = segments(&v.publication.surface, node);
+                        ids.get(usize::try_from(value.as_i64()?).ok()?).copied()
+                    });
+                    if let Some(segment) = segment {
+                        v.send(segment, "click", EventDetail::default(), cx);
+                    }
+                } else if matches!(kind, crate::v4_control::Kind::Search) {
+                    // The text as it is typed and the keys that leave the
+                    // field, as a text field reports them.
+                    let listens = |event: &str| {
+                        v.publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key(event))
+                    };
+                    if let Some(key) = value.get("key").and_then(Value::as_str) {
+                        if listens("keydown") {
+                            let detail = EventDetail {
+                                key: Some(key.into()),
+                                ..Default::default()
+                            };
+                            v.send(id, "keydown", detail, cx);
+                        }
+                    } else if listens("input") {
+                        let detail = EventDetail {
+                            value: Some(value.clone()),
+                            ..Default::default()
+                        };
+                        v.send(id, "input", detail, cx);
+                    } else {
+                        v.change(id, value.clone(), cx);
+                    }
                 } else {
                     v.change(id, value.clone(), cx);
                 }
             },
         ));
         control.update(cx, |v, _| v.display(display.as_deref()));
+        // A search field starts with its node's text at the host's revision
+        // of it, so only a newer host value replaces what is typed: a first
+        // update that came after the first keystroke emptied the field.
+        if let Some(revision) = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("hostValue"))
+            .and_then(Value::as_u64)
+        {
+            let text = value.as_str().unwrap_or_default().to_owned();
+            control.update(cx, |v, _| v.host_text(&text, revision));
+        }
+        if let Some(placeholder) = placeholder {
+            control.read(cx).placeholder(&placeholder);
+        }
         self.controls.insert(id, control);
     }
     fn mount_field(
@@ -586,6 +676,8 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
+            // A composer's panel draws the surface it is written on.
+            field.set_bare(kind == TextKind::Composer);
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field
@@ -726,6 +818,30 @@ impl SurfaceView {
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
     }
+    /// Development builds: `event` on the node whose semantic id is, or ends
+    /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
+    #[cfg(debug_assertions)]
+    pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
+        // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
+        let (semantic, value) = match semantic.split_once('=') {
+            Some((semantic, value)) => (semantic, serde_json::from_str(value).ok()),
+            None => (semantic, None),
+        };
+        let id = self
+            .prepared
+            .semantics
+            .iter()
+            .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
+            .min_by_key(|(key, _)| key.len())
+            .map(|(_, id)| *id);
+        if let Some(id) = id {
+            let detail = EventDetail {
+                value,
+                ..Default::default()
+            };
+            self.send(id, event, detail, cx);
+        }
+    }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];
@@ -815,6 +931,8 @@ impl SurfaceView {
         if let Some(id) = self.prepared.semantics.get(semantic) {
             if let Some(field) = self.fields.get(id) {
                 field.update(cx, |f, cx| f.begin_editing(cx));
+            } else if let Some(control) = self.controls.get(id) {
+                control.read(cx).focus();
             } else if let Some(focus) = self.focus.get(id) {
                 focus.focus(window, cx);
             }
@@ -1287,7 +1405,16 @@ impl SurfaceView {
             if fill != shrinks {
                 control.update(cx, |c, _| c.fill = shrinks);
             }
-            let slot = if shrinks {
+            if node.style.flex_grow.is_some_and(|g| g > 0.) && !control.read(cx).stretches() {
+                control.update(cx, |c, _| c.stretch());
+            }
+            let slot = if control.read(cx).stretches() {
+                // A segmented control its panel lets grow fills its row.
+                div().w_full()
+            } else if control.read(cx).is_search() {
+                // A search field takes the room its row has.
+                div().flex_1().min_w(px(0.))
+            } else if shrinks {
                 div()
                     .flex_basis(px(width))
                     .flex_shrink(1.)
@@ -1436,8 +1563,104 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let element = element.children(children).children(self.probe(node.id));
+        let mut element = element.children(children).children(self.probe(node.id));
+        if self.fitted_sheet(node, window) {
+            // The sheet is its window's height: its actions stay on the bottom
+            // edge while the body between gives way.
+            element = element.h(window.viewport_size().height);
+        }
+        let in_fitted_sheet = node
+            .parent
+            .and_then(|p| self.prepared.node(p))
+            .is_some_and(|p| self.fitted_sheet(p, window));
+        if node.sheet_body && in_fitted_sheet {
+            return self.sheet_body(element.into_any_element(), id);
+        }
         self.place(element.into_any_element(), node, window, cx)
+    }
+    /// A sheet shown in its own window (Export) is the whole window.
+    fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {
+        node.component == Some(Component::SheetAnchor)
+            && window.viewport_size().width <= px(self.table.tokens.metrics.sheet_width_wide + 1.)
+    }
+    /// An own-window sheet that names its body: the window follows the body's
+    /// height on a spring instead of jumping to it.
+    fn fitted_sheet(&self, node: &NodeView, window: &Window) -> bool {
+        self.own_sheet(node, window)
+            && node
+                .children
+                .iter()
+                .any(|c| self.prepared.node(*c).is_some_and(|c| c.sheet_body))
+    }
+    /// The body of a sheet in its own window. It takes the room the window
+    /// leaves between the title and the actions and clips what does not fit;
+    /// the height it wants sets where the window is heading. The window grows
+    /// and shrinks from its top edge on the layout spring, so nothing inside
+    /// is moved by the animation but the actions riding the bottom edge.
+    fn sheet_body(&self, element: AnyElement, id: Id) -> AnyElement {
+        use pm_design::motion::{Animated, POINT_PRECISION, Preset, Spring};
+        let t = &self.table.tokens;
+        let spring = t.spring(Preset::Layout);
+        // A capped scroll region and the rows that stand over it.
+        let tallest = t.metrics.sheet_body_max + 2. * t.metrics.form_row;
+        let (wanted, values) = (self.sheet_fit.clone(), self.motion.values.clone());
+        let content = div().flex_none().relative().child(element).child(
+            canvas(
+                {
+                    let wanted = wanted.clone();
+                    move |bounds, _, _| wanted.set(f32::from(bounds.size.height))
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .relative()
+            .child(content)
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        if wanted.get() < 1. {
+                            return;
+                        }
+                        let viewport = f32::from(window.viewport_size().height);
+                        let target =
+                            (viewport - f32::from(bounds.size.height) + wanted.get()).round();
+                        let height = match values.borrow_mut().entry(id) {
+                            std::collections::hash_map::Entry::Occupied(mut value) => {
+                                let value = value.get_mut();
+                                if (value.target[0] - target).abs() > 0.5 {
+                                    value.animate_to([target], spring);
+                                    window.request_animation_frame();
+                                }
+                                value.get()
+                            }
+                            // The first fit is where the sheet opens.
+                            std::collections::hash_map::Entry::Vacant(value) => {
+                                value.insert(Animated::new(
+                                    [target],
+                                    Spring::SNAP,
+                                    POINT_PRECISION,
+                                ));
+                                target
+                            }
+                        };
+                        if (height - viewport).abs() > 0.5 {
+                            // The most the sheet grows to: its body's cap.
+                            let fixed = viewport - f32::from(bounds.size.height);
+                            pm_shell::resize_from_top(window, height, fixed + tallest, cx);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
     }
     /// What a disabled text or number field shows: its value as the editor
     /// would (number precision, then the unit).
@@ -1450,17 +1673,20 @@ impl SurfaceView {
         {
             return None;
         }
-        let value = self
-            .publication
-            .surface
-            .node(node.id)?
-            .props
-            .get("value")
-            .filter(|v| !v.is_null())?;
+        let props = &self.publication.surface.node(node.id)?.props;
+        let value = props.get("value").filter(|v| !v.is_null())?;
         let text = match (node.number, value.as_f64()) {
             (Some(number), Some(n)) => number.text(n),
             _ => value_text(value),
         };
+        // An empty one still says what it is for.
+        if text.is_empty() {
+            return props
+                .get("metadata")
+                .and_then(|m| m.get("placeholder"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
         Some(match &node.unit {
             Some(unit) if !text.is_empty() => format!("{text} {unit}"),
             _ => text,
@@ -1485,8 +1711,7 @@ impl SurfaceView {
         let t = &self.table.tokens;
         let origin = self.origin.get();
         // In its own sheet window (Export) the sheet is the whole window.
-        let own_window = node.component == Some(Component::SheetAnchor)
-            && window.viewport_size().width <= px(t.metrics.sheet_width_wide + 1.);
+        let own_window = self.own_sheet(node, window);
         let position = if node.component == Some(Component::SheetAnchor) {
             let width = window.viewport_size().width;
             if own_window {
@@ -1506,15 +1731,16 @@ impl SurfaceView {
         };
         let id = node.id;
         let mut wrapper = div().occlude().child(element);
-        if own_window {
-            // The sheet's window fits its content whenever that changes height.
+        if own_window && !self.fitted_sheet(node, window) {
+            // A sheet with no body of its own fits its window to its content.
             wrapper = wrapper.child(
                 canvas(
-                    |bounds, window, _| {
-                        let size = window.viewport_size();
-                        let laid_out = bounds.size.height > px(1.);
-                        if laid_out && (size.height - bounds.size.height).abs() > px(0.5) {
-                            window.resize(gpui::size(size.width, bounds.size.height));
+                    |bounds, window, cx| {
+                        let height = f32::from(bounds.size.height);
+                        if height > 1.
+                            && (window.viewport_size().height - bounds.size.height).abs() > px(0.5)
+                        {
+                            pm_shell::resize_from_top(window, height, height, cx);
                         }
                     },
                     |_, _, _, _| {},
@@ -1924,7 +2150,7 @@ impl SurfaceView {
             if let Some(unit) = &node.unit {
                 element = element.child(
                     div()
-                        .ml(px(t.metrics.inner_radius))
+                        .ml(px(t.space.hair))
                         .text_color(rgb(t.colors.muted))
                         .child(unit.clone()),
                 );
@@ -2087,13 +2313,44 @@ pub(crate) fn status_announcements(
     *seen = Some(current);
     messages
 }
+/// A segmented control's segments as the native control takes them (a label,
+/// and a symbol where the segment is a glyph), the selected one's index (-1
+/// for none) and the segments' nodes, in order.
+fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Value>, i64, Vec<Id>) {
+    let (mut options, mut selected, mut ids) = (vec![], -1, vec![]);
+    for child in node.children.iter().filter_map(|id| surface.node(*id)) {
+        if Component::of(child) != Some(Component::Segment) {
+            continue;
+        }
+        if child.props.get("aria-checked") == Some(&Value::Bool(true)) {
+            selected = ids.len() as i64;
+        }
+        let label = child.props.get("label").cloned().unwrap_or(Value::Null);
+        options.push(
+            match child.props.get("attr").and_then(|a| a.get("symbol")) {
+                Some(symbol) => json!({"label": label, "symbol": symbol}),
+                None => json!({"label": label}),
+            },
+        );
+        ids.push(child.id);
+    }
+    (options, selected, ids)
+}
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
         Some(Component::PopUpButton) => Some(Kind::Popup),
         Some(Component::Checkbox | Component::Toggle) => Some(Kind::Checkbox),
         Some(Component::Switch) => Some(Kind::Switch),
+        Some(Component::SegmentedControl) => Some(Kind::Segmented),
         Some(Component::PushButton) => Some(Kind::Push),
+        // A text field its panel marks as a search (`metadata.search`).
+        Some(Component::TextField)
+            if node.props.get("metadata").and_then(|m| m.get("search"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::Search)
+        }
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node

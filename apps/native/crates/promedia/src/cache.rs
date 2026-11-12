@@ -50,6 +50,20 @@ pub struct RenderCache {
     root: PathBuf,
     quota: u64,
 }
+/// Whether a [`RenderCache::get`] error says the entry's bytes are wrong (a
+/// truncated, overwritten or otherwise damaged file: it never reads right
+/// again), as opposed to a read that failed and may succeed next time.
+pub fn corrupt(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn damaged(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
 const MAGIC: &[u8; 8] = b"PMFRAME1";
 const HEADER: usize = 48;
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
@@ -69,13 +83,17 @@ impl RenderCache {
     }
     /// Publication is idempotent only for identical bytes. Different bytes for the
     /// same semantic key indicate a caller determinism/key error, never overwrite.
+    /// A damaged entry ([`corrupt`]) is no bytes at all: it is replaced.
     pub fn put(&self, key: &RenderKey, payload: &[u8]) -> io::Result<()> {
         let path = self.path(key)?;
         if path.exists() {
-            if self.get(key)?.as_deref() == Some(payload) {
-                return Ok(());
+            match self.get(key) {
+                Ok(Some(stored)) if stored == payload => return Ok(()),
+                Ok(Some(_)) => return Err(invalid("render key already has different bytes")),
+                Ok(None) => {}
+                Err(e) if corrupt(&e) => self.discard(key)?,
+                Err(e) => return Err(e),
             }
-            return Err(invalid("render key already has different bytes"));
         }
         let size = (payload.len() as u64)
             .checked_add(HEADER as u64)
@@ -102,18 +120,30 @@ impl RenderCache {
         let mut header = [0u8; HEADER];
         f.read_exact(&mut header)?;
         if &header[..8] != MAGIC {
-            return Err(invalid("corrupt cache header"));
+            return Err(damaged("corrupt cache header"));
         }
         let size = u64::from_le_bytes(header[40..48].try_into().expect("fixed header"));
         if size > MAX_ENTRY_BYTES || size.checked_add(HEADER as u64) != Some(f.metadata()?.len()) {
-            return Err(invalid("corrupt cache size or entry exceeds safety bound"));
+            return Err(damaged("corrupt cache size or entry exceeds safety bound"));
         }
         let mut payload = Vec::new();
         f.read_to_end(&mut payload)?;
         if blake3::hash(&payload).as_bytes() != &header[8..40] {
-            return Err(invalid("cache checksum mismatch"));
+            return Err(damaged("cache checksum mismatch"));
         }
         Ok(Some(payload))
+    }
+    /// Removes a damaged frame ([`corrupt`]). Its Keep Rendered mark stays,
+    /// for the frame rendered in its place.
+    pub fn discard(&self, key: &RenderKey) -> io::Result<()> {
+        let path = self.path(key)?;
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+            Ok(_) => regular(&path)?,
+        }
+        fs::remove_file(&path)?;
+        File::open(&self.root)?.sync_all()
     }
     /// Marks a frame as just used: eviction goes least recently used first.
     pub fn touch(&self, key: &RenderKey) -> io::Result<()> {

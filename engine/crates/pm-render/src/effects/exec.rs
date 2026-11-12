@@ -31,6 +31,67 @@ fn full_quad(w: u32, h: u32) -> [f32; 9] {
     [w as f32, 0.0, 0.0, 0.0, h as f32, 0.0, 0.0, 0.0, 1.0]
 }
 
+/// The coordinate uniforms of an effect pass drawing `out` pixels from a
+/// `buffer`-sized input: `u_m`, `u_res`, `u_coordRes`, `u_pxOrigin`,
+/// `u_texel` (with `u_uv` after `u_res`, the order every pass binds them in). A step without an owner binding sees composition pixels at
+/// its density (`EffectStep::density`): `u_res` and `v_px` count them and
+/// `u_texel` is one of them in UV, so a radius, cell or offset in pixels
+/// draws at the 1:1 export's size at any viewer zoom or playback scale.
+/// The clip position (`u_m` against `u_res`) is the same either way. Owner
+/// bound steps (`u_pixelScale`) handle density themselves.
+fn effect_space(
+    step: &EffectStep,
+    out: (u32, u32),
+    buffer: (u32, u32),
+    uv: [f64; 4],
+    origin: [f64; 2],
+    resolution: [f64; 2],
+) -> [(String, Call); 6] {
+    let d = if step.owner.is_none() && step.density.iter().all(|d| d.is_finite() && *d > 0.) {
+        step.density
+    } else {
+        [1., 1.]
+    };
+    let (ow, oh) = (f64::from(out.0) / d[0], f64::from(out.1) / d[1]);
+    [
+        (
+            "u_m".into(),
+            Call::M3([ow as f32, 0.0, 0.0, 0.0, oh as f32, 0.0, 0.0, 0.0, 1.0]),
+        ),
+        ("u_res".into(), f(&[ow, oh])),
+        ("u_uv".into(), f(&uv)),
+        (
+            "u_coordRes".into(),
+            f(&[resolution[0] / d[0], resolution[1] / d[1]]),
+        ),
+        (
+            "u_pxOrigin".into(),
+            f(&[origin[0] / d[0], origin[1] / d[1]]),
+        ),
+        (
+            "u_texel".into(),
+            f(&[d[0] / f64::from(buffer.0), d[1] / f64::from(buffer.1)]),
+        ),
+    ]
+}
+
+/// A transition's `u_m`, `u_res` and `u_texel` for a `w` × `h` stack: in
+/// composition pixels at its density, as an effect's ([`effect_space`]), so
+/// an effect and a transition never disagree on one frame.
+fn transition_space(step: &super::plan::TransitionStep, w: u32, h: u32) -> (Call, Call, Call) {
+    let d = if step.density.iter().all(|d| d.is_finite() && *d > 0.) {
+        step.density
+    } else {
+        [1., 1.]
+    };
+    let (rw, rh) = (f64::from(w) / d[0], f64::from(h) / d[1]);
+    (
+        Call::M3([rw as f32, 0.0, 0.0, 0.0, rh as f32, 0.0, 0.0, 0.0, 1.0]),
+        f(&[rw, rh]),
+        f(&[d[0] / f64::from(w), d[1] / f64::from(h)]),
+    )
+}
+
 /// `effectViewportCoordinates(W, H)`: `u_uv`, `u_pxOrigin`, `u_coordRes`
 /// for a buffer covering `region` of a level of `full` pixels. With a
 /// `view` (an output origin, today's preview viewport) the coordinates are
@@ -482,15 +543,7 @@ impl<'c> Gpu<'c> {
             if step.backdrop {
                 calls.push(("u_backdrop".into(), Call::I(2)));
             }
-            calls.push(("u_m".into(), Call::M3(full_quad(ow, oh))));
-            calls.push(("u_res".into(), f(&[f64::from(ow), f64::from(oh)])));
-            calls.push(("u_uv".into(), f(&uv)));
-            calls.push(("u_coordRes".into(), f(&resolution)));
-            calls.push(("u_pxOrigin".into(), f(&origin)));
-            calls.push((
-                "u_texel".into(),
-                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-            ));
+            calls.extend(effect_space(step, (ow, oh), (w, h), uv, origin, resolution));
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
             if let Some(owner) = &step.owner {
@@ -734,13 +787,10 @@ impl<'c> Gpu<'c> {
         let mut calls: Vec<(String, Call)> = vec![
             ("u_from".into(), Call::I(0)),
             ("u_to".into(), Call::I(1)),
-            ("u_m".into(), Call::M3(full_quad(w, h))),
-            ("u_res".into(), f(&[f64::from(w), f64::from(h)])),
+            ("u_m".into(), transition_space(step, w, h).0),
+            ("u_res".into(), transition_space(step, w, h).1),
             ("u_uv".into(), f(&[0.0, 0.0, 1.0, 1.0])),
-            (
-                "u_texel".into(),
-                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-            ),
+            ("u_texel".into(), transition_space(step, w, h).2),
             ("u_time".into(), f(&[time])),
             ("u_prog".into(), f(&[step.progress])),
         ];
@@ -790,15 +840,7 @@ impl<'c> Gpu<'c> {
                 if step.backdrop {
                     calls.push(("u_backdrop".into(), Call::I(2)));
                 }
-                calls.push(("u_m".into(), Call::M3(full_quad(w, h))));
-                calls.push(("u_res".into(), f(&[f64::from(w), f64::from(h)])));
-                calls.push(("u_uv".into(), f(&uv)));
-                calls.push(("u_coordRes".into(), f(&resolution)));
-                calls.push(("u_pxOrigin".into(), f(&origin)));
-                calls.push((
-                    "u_texel".into(),
-                    f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-                ));
+                calls.extend(effect_space(step, (w, h), (w, h), uv, origin, resolution));
                 calls.push(("u_time".into(), f(&[time])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
                 if let Some(owner) = &step.owner {
@@ -865,13 +907,10 @@ impl<'c> Gpu<'c> {
         let mut calls: Vec<(String, Call)> = vec![
             ("u_from".into(), Call::I(0)),
             ("u_to".into(), Call::I(1)),
-            ("u_m".into(), Call::M3(full_quad(w, h))),
-            ("u_res".into(), f(&[f64::from(w), f64::from(h)])),
+            ("u_m".into(), transition_space(step, w, h).0),
+            ("u_res".into(), transition_space(step, w, h).1),
             ("u_uv".into(), f(&[0.0, 0.0, 1.0, 1.0])),
-            (
-                "u_texel".into(),
-                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-            ),
+            ("u_texel".into(), transition_space(step, w, h).2),
             ("u_time".into(), f(&[time])),
             ("u_prog".into(), f(&[step.progress])),
         ];

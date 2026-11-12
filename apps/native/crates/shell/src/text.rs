@@ -24,6 +24,9 @@ pub struct TextField {
     /// A multiline editor that takes its container's whole height (Shader Lab,
     /// Notes) instead of four rows.
     fill: bool,
+    /// No well of its own: the field sits inside a control that draws one
+    /// (the search field).
+    bare: bool,
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -92,6 +95,7 @@ impl TextField {
             submitted: None,
             host_value: 0,
             fill: false,
+            bare: false,
         }
     }
     /// A multiline editor in `family` (code editors use the mono face) that
@@ -134,6 +138,10 @@ impl TextField {
         self.fill = fill;
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    /// Draw no well: the enclosing control owns the fill, edge and padding.
+    pub fn set_bare(&mut self, bare: bool) {
+        self.bare = bare;
+    }
     pub fn set_unit(&mut self, unit: Option<SharedString>) {
         self.unit = unit;
     }
@@ -201,11 +209,25 @@ impl TextField {
         }
     }
 }
+/// Where a multi-line native editor draws its first glyph, from its own
+/// corner: the text container inset plus the line fragment padding.
+const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
 impl Render for TextField {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing();
+        let (t, bare) = (&self.tokens, self.bare);
+        let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
+        // A well is a soft ink fill with no outline; while it is edited a
+        // neutral ring marks it (never the accent).
+        let ring = BoxShadow {
+            color: crate::kit::ink(t.colors.focus, 1.).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(t.metrics.border),
+            inset: false,
+        };
         div()
             .id("native-text")
             .relative()
@@ -217,25 +239,37 @@ impl Render for TextField {
                     let lines = (self.value.lines().count().max(1) as f32)
                         .min(self.tokens.metrics.composer_max_lines);
                     (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
+                } else if bare {
+                    // One line, so the control around it can centre the text.
+                    (self.tokens.typography.body * 1.35).ceil()
                 } else if self.kind == TextKind::Multiline {
                     self.tokens.metrics.row * 4.
                 } else {
                     self.tokens.metrics.field
                 }))
             })
-            // A well with a unit trades side padding for the value's room.
-            .px(px(if self.unit.is_some() {
-                self.tokens.metrics.inner_radius
+            // Every value starts on one inset down a column; a well with a
+            // unit trades its trailing padding for the value's room.
+            .pl(px(if bare { 0. } else { self.tokens.metrics.gap }))
+            .pr(px(if bare {
+                0.
+            } else if self.unit.is_some() {
+                self.tokens.space.xs
             } else {
                 self.tokens.metrics.gap
             }))
-            .border_1()
-            .border_color(rgb(self.tokens.colors.separator))
-            .rounded(px(self.tokens.metrics.control_radius))
-            .bg(rgb(self.tokens.colors.field))
+            .when(!bare, |d| {
+                d.rounded(px(if single {
+                    t.metrics.inner_radius
+                } else {
+                    t.metrics.control_radius
+                }))
+                .bg(crate::kit::ink(t.colors.text, t.translucency.hover))
+                .when(editing, |d| d.shadow(vec![ring]))
+            })
             .text_color(rgb(self.tokens.colors.text))
             .text_size(px(self.tokens.typography.body))
-            .font_family(".AppleSystemUIFont")
+            .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -249,13 +283,30 @@ impl Render for TextField {
                 d.text_color(rgb(self.tokens.colors.muted))
                     .child(self.placeholder.clone())
             })
+            // A text view has no placeholder of its own: draw it where its
+            // first line starts (the view's container inset and line padding).
+            .when(
+                matches!(self.kind, TextKind::Composer | TextKind::Multiline)
+                    && !self.placeholder.is_empty()
+                    && self.slot.value().is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(MULTILINE_TEXT_ORIGIN.0))
+                            .top(px(MULTILINE_TEXT_ORIGIN.1))
+                            .text_color(rgb(self.tokens.colors.muted))
+                            .child(self.placeholder.clone()),
+                    )
+                },
+            )
             .when(dense && !editing && !self.value.is_empty(), |d| {
                 d.overflow_hidden()
                     .child(div().min_w(px(0.)).truncate().child(self.value.clone()))
                     .children(self.unit.clone().map(|unit| {
                         div()
                             .flex_none()
-                            .ml(px(self.tokens.metrics.inner_radius))
+                            .ml(px(self.tokens.space.hair))
                             .text_color(rgb(self.tokens.colors.muted))
                             .child(unit)
                     }))

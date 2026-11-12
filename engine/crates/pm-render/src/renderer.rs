@@ -295,6 +295,7 @@ fn build_options(
         offline_cards,
         preview: preview_window(comp, request),
         origin: request.origin,
+        final_output: request.output_kind == crate::OutputKind::Final,
     }
 }
 
@@ -1365,10 +1366,12 @@ impl Renderer {
         self.media.image_bytes()
     }
 
-    /// Explicit viewer opt-in; CLI exact/reference and export paths keep
-    /// native source resolution and precision by default.
-    pub fn set_preview_media(&mut self, enabled: bool) {
-        self.media.preview_media = enabled;
+    /// Explicit viewer opt-in, for stills and for video: a copy at the
+    /// view's resolution instead of the source's. CLI exact/reference and
+    /// export paths keep native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, stills: bool, video: bool) {
+        self.media.preview_media = stills;
+        self.media.preview_video = video;
         self.media.draw_edge = None;
     }
 
@@ -1596,7 +1599,7 @@ impl Renderer {
     /// Command buffers own the resources their GPU work still needs.
     pub fn trim_submitted_frame_caches(&mut self) {
         self.vector.trim(self.vector.max_bytes());
-        self.text_gpu.trim(crate::text::gpu::CACHE_BYTES);
+        self.text_gpu.end_frame();
     }
 
     /// A document closed. Release content caches and worker ownership,
@@ -2222,6 +2225,8 @@ impl Renderer {
                 working: color.working,
                 blend_domain: color.blend_domain,
                 export: request.export,
+                final_frame: request.export
+                    || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
                 pyramids: &mut self.pyramids,
@@ -2260,6 +2265,7 @@ impl Renderer {
                     background: plan.background.clone(),
                     plan_size: (plan.width, plan.height),
                     sampling: request.sampling,
+                    final_output: request.output_kind == crate::OutputKind::Final,
                 };
                 crate::frame_prefix::render(
                     &mut exec,
