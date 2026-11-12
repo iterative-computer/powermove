@@ -229,6 +229,9 @@ struct Published {
     canvases: BTreeMap<(u64, String), CanvasFrame>,
     surfaces: Vec<Value>,
     ready: bool,
+    /// Store helpers starting (id, name): their registrations are not
+    /// published yet, so nothing has settled.
+    starting: Vec<(String, String)>,
     /// The realm generation drawing now, 0 with none. Its page is keyed by this.
     view: u64,
     revision: u64,
@@ -711,10 +714,26 @@ impl ExtensionHost {
     /// definition provides yet may still arrive, so it is not "not installed".
     pub fn definitions_settled(&self) -> bool {
         let published = self.shared.published.lock().unwrap();
-        match &published.contributions {
-            Some(contributions) => contributions["settled"] != false,
-            None => published.ready,
-        }
+        published.starting.is_empty()
+            && match &published.contributions {
+                Some(contributions) => contributions["settled"] != false,
+                None => published.ready,
+            }
+    }
+    /// The extensions still loading, as (id, name): the realm's load pass's
+    /// and the Store helpers starting. Empty once settled.
+    pub fn loading(&self) -> Vec<(String, String)> {
+        let published = self.shared.published.lock().unwrap();
+        let realm = published
+            .contributions
+            .as_ref()
+            .and_then(|c| c["loading"].as_array().cloned())
+            .unwrap_or_default();
+        let realm = realm.iter().filter_map(|entry| {
+            let id = entry["id"].as_str()?;
+            Some((id.to_owned(), entry["name"].as_str().unwrap_or(id).to_owned()))
+        });
+        published.starting.iter().cloned().chain(realm).collect()
     }
     /// The realm generation drawing now, 0 with none. A page belongs to one
     /// generation: when this moves, that page is finished.
@@ -1459,7 +1478,8 @@ impl Owner {
         }
         drop(published);
         *self.shared.store.lock().unwrap() = store;
-        self.shared.update(|_| ());
+        // What the helpers registered is published: they have settled.
+        self.shared.update(|p| p.starting.clear());
     }
     fn realm_message(&mut self, envelope: RealmEnvelope) {
         if envelope.project != self.config.project {
@@ -1871,11 +1891,28 @@ impl Owner {
         for store in stop {
             self.stop_store(store);
         }
+        let starting: Vec<(String, String)> = wanted
+            .keys()
+            .filter(|id| !self.stores.iter().any(|store| store.extension.id == **id))
+            .map(|id| (id.clone(), self.name_of(id)))
+            .collect();
+        if !starting.is_empty() {
+            // Cleared by `publish_store`, which every caller runs next.
+            self.shared.update(|p| p.starting = starting);
+        }
         for (id, hash) in wanted {
             if !self.stores.iter().any(|store| store.extension.id == id) {
                 self.start_store(&id, hash);
             }
         }
+    }
+    fn name_of(&self, id: &str) -> String {
+        self.records
+            .iter()
+            .find(|r| r["id"] == id)
+            .and_then(|r| r["manifest"]["name"].as_str())
+            .unwrap_or(id)
+            .to_owned()
     }
     fn start_store(&mut self, id: &str, hash: String) {
         let Some((found, graph)) = self.confined.get(id).cloned() else {
@@ -2833,12 +2870,16 @@ mod tests {
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut partial = false;
+        let mut named = false;
         loop {
+            let loading = fixture.host.loading();
             let settled = fixture.host.definitions_settled();
             match fixture.host.contributions() {
                 Some(c) if has(&c, "slow.tint") && settled => break,
                 Some(c) => {
                     partial |= has(&c, "fast.tint");
+                    // Who is still loading is named while it loads.
+                    named |= loading.iter().any(|(id, _)| id == "b-slow");
                     assert!(!settled, "settled without slow.tint: {}", c["definitions"]);
                 }
                 None => assert!(!settled, "settled before anything activated"),
@@ -2847,6 +2888,67 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert!(partial, "the fast extension's effect was published first");
+        assert!(named, "the slow extension was named as loading");
+        assert!(fixture.host.loading().is_empty());
+    }
+    /// A Store helper's activation is part of the load: until it has
+    /// registered its effect (at boot, or when it is installed later) the
+    /// contributions are not settled.
+    #[test]
+    fn a_store_helper_activation_counts_toward_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let store = |dir: &Path, id: &str| {
+            extension(
+                dir,
+                id,
+                &[
+                    (
+                        "index.ts",
+                        "export default async function(api: any){
+                           await new Promise(r=>setTimeout(r,800));
+                           api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                         }",
+                    ),
+                    (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+                ],
+            )
+        };
+        store(&extensions, "synthetic-store");
+        extension(
+            &extensions,
+            "synthetic-local",
+            &[("index.ts", "export default function(api){api.commands.register({id:'synthetic-local.run',label:'Run',run(){}})}")],
+        );
+        let fixture = Fixture::start(root);
+        let has = |id: &str| {
+            fixture.host.contributions().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let watch = |id: &str| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let settled = fixture.host.definitions_settled();
+                if has(id) && settled {
+                    break;
+                }
+                assert!(!settled, "settled without {id}");
+                assert!(Instant::now() < deadline, "{id} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        watch("synthetic-store.tint");
+        // Installed while the window is open: settled again only once it has
+        // registered.
+        store(&fixture._root.path().join("extensions"), "synthetic-later");
+        fixture.until("the rescan starts it", |host| {
+            assert!(!has("synthetic-later.tint"), "registered while settled");
+            host.loading().iter().any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
+        });
+        watch("synthetic-later.tint");
     }
     /// A project with no extensions has nothing to wait for.
     #[test]

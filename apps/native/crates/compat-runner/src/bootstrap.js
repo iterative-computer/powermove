@@ -1087,6 +1087,8 @@ globalThis.__compat = {
       report: (id, health) => call("extension.health", { id, health }),
       toast: (text, options) => call("ui.toast", { text, options }),
       activating: (id) => call("extension.activating", { id }),
+      // Which extensions are still loading is part of the contributions.
+      progress: () => this.contributionsChanged?.(),
       // v1's loader: each activation reads the values entered for the keys
       // its manifest declares (apiVersion 2+); a key without one is absent.
       vars: (record) => {
@@ -1108,6 +1110,7 @@ globalThis.__compat = {
         this.publishContributions();
       });
     };
+    this.contributionsChanged = changed;
     for (const registry of [
       kernel.commands,
       kernel.panels,
@@ -1307,6 +1310,9 @@ globalThis.__compat = {
       nativeTheme: this.nativeTheme(),
       definitions: this.definitions(),
       settled: this.loading === 0,
+      // The extensions a load pass has yet to activate, named for the
+      // person while frames that may need them wait.
+      loading: this.loading === 0 ? [] : this.stillLoading(),
     };
   },
   /** The active theme as native token patches (translator in this realm). */
@@ -1325,6 +1331,11 @@ globalThis.__compat = {
     return PowermoveCompat.definitionSnapshots(this.realm.kernel, (id, error) =>
       this.errors.push({ id, name: error?.name, message: error?.message }),
     );
+  },
+  stillLoading() {
+    const ids = this.loader?.loading?.() ?? [];
+    const records = new Map((this.loader?.records() ?? []).map((r) => [r.id, r]));
+    return ids.map((id) => ({ id, name: records.get(id)?.manifest?.name ?? id }));
   },
   publishContributions() {
     runtime.engine("contributions.publish", { value: this.contributions() });

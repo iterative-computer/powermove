@@ -134,6 +134,8 @@ export interface LoaderOptions {
   /** The extension on the stack, so a host can name what hung. */
   activating?(id: string | null): void;
   toast?(text: string, options: Data): void;
+  /** A load pass started or one of its extensions finished (or failed). */
+  progress?(): void;
   document?: any;
   vars?(record: Data): Data;
   timeoutMs?: number;
@@ -154,6 +156,8 @@ export function createLoader(options: LoaderOptions) {
   const generations = new Map<string, number>();
   let queue: Promise<unknown> = Promise.resolve();
   let booting: Promise<void> | null = null;
+  /** The running pass's extensions not yet activated or failed, in order. */
+  const loading = new Set<string>();
   /** A new generation is a new module instance, like the reference's cache bust. */
   async function importGraph(record: Data): Promise<Data> {
     const graph = record.graph;
@@ -279,6 +283,8 @@ export function createLoader(options: LoaderOptions) {
     const desired = new Set(plan.order);
     const moved = new Set(changed);
     const panels = kernel.panels.batchChanges();
+    for (const id of plan.order) if (!active.has(id)) loading.add(id);
+    options.progress?.();
     try {
       for (const { id, health: value } of plan.skipped) health(id, value);
       for (const id of [...active.keys()].reverse())
@@ -290,9 +296,15 @@ export function createLoader(options: LoaderOptions) {
         // Each activation is its own task: the watchdog times one extension,
         // not a whole setup of them (and the page gets turns in between).
         await new Promise((resolve) => setTimeout(resolve, 0));
-        await activate(record);
+        try {
+          await activate(record);
+        } finally {
+          loading.delete(id);
+          options.progress?.();
+        }
       }
     } finally {
+      loading.clear();
       panels.dispose();
     }
   }
@@ -364,6 +376,8 @@ export function createLoader(options: LoaderOptions) {
     reportRuntimeError,
     records: () => [...records.values()],
     activeIds: () => [...active.keys()],
+    /** Extensions the running load pass has yet to activate (or fail). */
+    loading: () => [...loading],
     whenIdle: () => queue.then(() => undefined),
     async dispose(): Promise<void> {
       for (const id of [...active.keys()].reverse()) await deactivate(id);
