@@ -291,6 +291,7 @@ impl SceneOutlines {
         self.tick += 1;
         let [a, b, c, d, tx, ty] = item.transform.as_coeffs();
         let Some(scale) = upper_outline_scale([a, b, c, d]) else {
+            pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_UNCACHEABLE, 1);
             return SceneOutline {
                 path: Arc::new(item.device_outline_with(scratch)),
                 transform: Affine::IDENTITY,
@@ -299,14 +300,19 @@ impl SceneOutlines {
         let key = outline_key(item, scale);
         let placement = Affine::new([a / scale, b / scale, c / scale, d / scale, tx, ty]);
         if let Some(entry) = self.entries.get_mut(&key) {
+            pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_HITS, 1);
             entry.used = self.tick;
             return SceneOutline {
                 path: Arc::clone(&entry.path),
                 transform: placement,
             };
         }
+        pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_MISSES, 1);
         let canonical = Arc::new(match self.prepared.remove(&key) {
-            Some(outline) => outline,
+            Some(outline) => {
+                pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_PREPARED, 1);
+                outline
+            }
             None => item.device_outline_at_scale(scale, scratch),
         });
         let bytes = (key.capacity() * size_of::<u64>()
@@ -828,7 +834,17 @@ impl VectorCache {
     /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
         if self.scene_scratch_bytes() > budget {
+            // PM_FIX_KEEP_OUTLINES: the exact outline cache (CPU, bounded by
+            // SceneOutlines::MAX_BYTES, counted in `bytes`) survives a frame's
+            // trim; only a zero budget (idle, close) drops it. Otherwise a
+            // budget below one frame's scratch rebuilds every outline per frame.
+            let keep = budget > 0
+                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") == Some(1);
+            let outlines = keep.then(|| std::mem::take(&mut self.scene_outlines));
             self.clear_scene_scratch();
+            if let Some(outlines) = outlines {
+                self.scene_outlines = outlines;
+            }
         }
         self.evict(
             budget.saturating_sub(self.scene_scratch_bytes()),

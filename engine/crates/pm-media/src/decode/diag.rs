@@ -31,6 +31,10 @@ counters! {
     WORKER_STOPPED = "worker_stopped",
     OPEN_COLD_FRAMES = "open_cold_frames",
     OPEN_COLD_JOBS = "open_cold_jobs",
+    OUTLINE_HITS = "outline_hits",
+    OUTLINE_MISSES = "outline_misses",
+    OUTLINE_UNCACHEABLE = "outline_uncacheable",
+    OUTLINE_PREPARED = "outline_prepared",
 }
 
 pub fn bump(counter: &AtomicU64, by: u64) {

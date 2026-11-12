@@ -1379,7 +1379,15 @@ impl Renderer {
         self.media.trim_frames(bytes);
     }
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
-        self.pool.set_free_budget(bytes);
+        // PM_FIX_POOL_KEEP: between frames, keep up to the pool's default
+        // free budget (a frame's intermediates are taken again next frame);
+        // idle release still trims to zero.
+        let floor = if pm_media::decode::diag::knob("PM_FIX_POOL_KEEP") == Some(1) {
+            pm_gpu::target::TargetPool::FREE_BUDGET
+        } else {
+            0
+        };
+        self.pool.set_free_budget(bytes.max(floor));
         self.pyramids.set_budget(bytes);
         self.binds.set_budget(bytes);
     }

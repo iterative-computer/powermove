@@ -1132,6 +1132,9 @@ pub struct MediaCache {
     frames: BTreeMap<FrameKey, (Target, u64)>,
     frame_epoch: u64,
     frame_seen: BTreeMap<PathBuf, u64>,
+    /// The last presented frame asked of each source while scrubbing
+    /// (PM_FIX_WAIT_STEP).
+    scrub_last: BTreeMap<PathBuf, usize>,
     next_texture_revision: u64,
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
@@ -1193,6 +1196,7 @@ impl MediaCache {
             frames: BTreeMap::new(),
             frame_epoch: 0,
             frame_seen: BTreeMap::new(),
+            scrub_last: BTreeMap::new(),
             next_texture_revision: 0,
             interpretations: BTreeMap::new(),
             deinterlacer: None,
@@ -1711,10 +1715,19 @@ impl MediaCache {
                 }
                 // PM_FIX_SCRUB_WAIT_MS: a drag waits this long for the exact
                 // frame before a stand-in, as playback does.
-                None if self.scrub => match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS") {
-                    Some(ms) if ms > 0 => Want::Playback(std::time::Duration::from_millis(ms)),
-                    _ => Want::Scrub,
-                },
+                None if self.scrub => {
+                    // PM_FIX_WAIT_STEP: wait only for a frame that continues
+                    // the drag's run (one or two frames on); a jump stands in.
+                    let step = self.scrub_last.insert(path.to_path_buf(), n);
+                    let continues = step.is_some_and(|last| n > last && n - last <= 2);
+                    let gated = pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
+                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS") {
+                        Some(ms) if ms > 0 && (!gated || continues) => {
+                            Want::Playback(std::time::Duration::from_millis(ms))
+                        }
+                        _ => Want::Scrub,
+                    }
+                }
                 None => Want::Exact,
             };
             let fetched = self
