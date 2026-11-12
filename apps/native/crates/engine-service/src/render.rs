@@ -161,7 +161,7 @@ impl FrameSpec {
     /// take the final one (Lanczos-3), so footage and precomps don't sharpen
     /// when playback stops. Its cost on a real project's playing frames was
     /// within run-to-run noise.
-    fn sampling(&self) -> pm_render::sampling::Sampling {
+    pub(crate) fn sampling(&self) -> pm_render::sampling::Sampling {
         if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
         } else {
@@ -853,6 +853,8 @@ impl Engine {
             height: size.height,
             crop: output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
@@ -1219,6 +1221,8 @@ impl Engine {
             height: size.height,
             crop: spec.output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         if self.cache.iter().any(|c| c.key == key) {
             return Ok(true);
@@ -2323,5 +2327,124 @@ mod viewer_output_tests {
             shown.iter().all(|c| (*c - 0.214).abs() < 0.03),
             "half white, half black: {shown:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_cache_tests {
+    use super::*;
+    /// A 256 × 256 still of 1-px black and white stripes (a 24-bit BMP).
+    fn stripes(dir: &std::path::Path) -> std::path::PathBuf {
+        let (w, h) = (256u32, 256u32);
+        let row = w * 3;
+        let size = 54 + row * h;
+        let mut b = Vec::with_capacity(size as usize);
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&size.to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&(w as i32).to_le_bytes());
+        b.extend_from_slice(&(h as i32).to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&[0; 24]);
+        for _ in 0..h {
+            for x in 0..w {
+                let v = if x % 2 == 0 { 255 } else { 0 };
+                b.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let path = dir.join("stripes.bmp");
+        std::fs::write(&path, b).unwrap();
+        path
+    }
+    fn scene(path: &std::path::Path) -> Scene {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 64.),
+            ("position.y", 36.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 23.),
+            ("scale.y", 23.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":128,"h":72,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"i","type":"image","name":"stripes","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":256,"h":256}}}}],
+            "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"stripes","w":256,"h":256,"dur":0}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("pic".to_string(), path.to_path_buf())].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the still never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Two dragged frames of one render size at one time but different
+    /// densities (output 256 at half resolution, output 128 at full) take
+    /// different resamplers: the second is drawn for itself, as a cold
+    /// engine draws it, never answered from the first's cached frame.
+    #[test]
+    fn frames_of_one_size_but_another_density_are_not_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = |w, h| Output {
+            width: w,
+            height: h,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let reduced = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 0.5,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(256, 144))
+        };
+        let full = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 1.,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(128, 72))
+        };
+        assert_eq!(reduced.render_size(), full.render_size());
+        assert_ne!(reduced.sampling(), full.sampling());
+        let mut cold = Engine::new(Gpu::new("cache-identity-cold").unwrap()).unwrap();
+        let want = drawn(&mut cold, &scene, full);
+        let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
+        drawn(&mut engine, &scene, reduced);
+        assert_eq!(drawn(&mut engine, &scene, full), want);
     }
 }

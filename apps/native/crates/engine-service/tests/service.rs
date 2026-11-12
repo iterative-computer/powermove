@@ -122,6 +122,8 @@ fn cache_key_includes_every_content_coordinate() {
         height: 100,
         crop: None,
         moment: policy::Moment::Paused,
+        scale: 1f64.to_bits(),
+        sampling: pm_render::sampling::Sampling::Final,
     };
     for other in [
         policy::CacheKey { content: 2, ..k },
@@ -141,6 +143,21 @@ fn cache_key_includes_every_content_coordinate() {
         assert!(!k.same_content(other));
     }
     assert_ne!(k, policy::CacheKey { time: 8, ..k });
+    // Another density or resampler at one render size is another picture.
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            scale: 0.5f64.to_bits(),
+            ..k
+        }
+    );
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            sampling: pm_render::sampling::Sampling::Playback,
+            ..k
+        }
+    );
     // A playing frame is never the exact paused picture of its time.
     assert_ne!(
         k,
