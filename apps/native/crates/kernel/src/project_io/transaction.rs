@@ -232,6 +232,39 @@ fn lines(text: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The length of a record's whole lines: the bytes up to the first line that
+/// is torn or does not carry its own checksum ([`lines`]).
+fn whole_len(text: &[u8]) -> usize {
+    let mut len = 0;
+    for l in text.split_inclusive(|b| *b == b'\n') {
+        let whole = std::str::from_utf8(l)
+            .ok()
+            .and_then(|l| l.strip_suffix('\n')?.split_once(' '))
+            .is_some_and(|(sum, json)| {
+                pm_model::hash::sha256_hex(json.as_bytes())[..16] == *sum && parse(json).is_ok()
+            });
+        if !whole {
+            break;
+        }
+        len += l.len();
+    }
+    len
+}
+
+/// Opens the record at `path` to append to it, first cut back to its last
+/// whole line and synced: a line appended behind a torn one (a crash in the
+/// middle of writing it) would never be read.
+fn append_to(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new().read(true).append(true).open(path)?;
+    let text = fs::read(path)?;
+    let whole = whole_len(&text);
+    if whole < text.len() {
+        file.set_len(whole as u64)?;
+        sync_file(&file)?;
+    }
+    Ok(file)
+}
+
 /// `.<name>.<uuid>.<extension>` beside `destination`, for the save `uuid`.
 fn private_name(destination: &Path, uuid: &str, extension: &str) -> PathBuf {
     let name = destination.file_name().unwrap_or(OsStr::new("project"));
@@ -311,7 +344,8 @@ fn is_kept_name(name: &str, destination: &Path) -> bool {
 impl Record {
     fn read(path: &Path, destination: &Path) -> Option<Record> {
         let (uuid, _) = private_parts(path.file_name()?.to_str()?, destination)?;
-        let steps = lines(&fs::read_to_string(path).ok()?);
+        // A tail torn inside a character is not a whole line either.
+        let steps = lines(&String::from_utf8_lossy(&fs::read(path).ok()?));
         let begin = steps.first()?;
         let text = |key: &str| begin.get(key).and_then(Value::as_str);
         // The record names its own files and no others.
@@ -548,7 +582,7 @@ impl Transaction {
     /// Continues the record of a save that was cut short.
     fn resume(record: &Record, destination: &Path, hooks: &PublishHooks) -> io::Result<Self> {
         Ok(Transaction {
-            file: OpenOptions::new().append(true).open(&record.path)?,
+            file: append_to(&record.path)?,
             record: record.path.clone(),
             destination: destination.to_owned(),
             hooks: hooks.clone(),
@@ -1137,7 +1171,7 @@ pub(super) fn carry_notices(destination: &Path, current: &Transaction, old: &str
         if record.path == current.record || record.notices().is_empty() || !record.knows(old) {
             continue;
         }
-        if let Ok(mut file) = OpenOptions::new().append(true).open(&record.path) {
+        if let Ok(mut file) = append_to(&record.path) {
             let mut members = Map::new();
             members.insert("step", Value::from("settled"));
             members.insert("holds", Value::from(new));
@@ -1192,7 +1226,7 @@ pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
         if seen.is_empty() {
             continue;
         }
-        let Ok(mut file) = OpenOptions::new().append(true).open(&record.path) else {
+        let Ok(mut file) = append_to(&record.path) else {
             continue;
         };
         for (_, path) in &seen {

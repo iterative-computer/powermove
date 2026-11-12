@@ -3209,6 +3209,34 @@ fn an_incomplete_file_at_the_name_never_traps_the_open_when_whole_versions_exist
         let _ = session;
     }
 }
+/// A crash in the middle of writing a record line leaves a torn tail. What
+/// recovery appends after it must still be read: the record is cut back
+/// to its last whole line first. Here the last saved version is put back,
+/// and that is told at the next open.
+#[test]
+fn recovery_after_a_torn_record_line_is_not_lost_behind_it() {
+    let dir = common::TempDir::new("torn-tail");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let native = dir.path("native");
+    assert!(killed_between_renames(&native, &file, false));
+    let record = private_file(&file, ".save");
+    let mut log = fs::OpenOptions::new().append(true).open(&record).unwrap();
+    std::io::Write::write_all(&mut log, br#"0123456789abcdef {"step":"ins"#).unwrap();
+    drop(log);
+    let mut k = kernel(&native);
+    let (ticket, _) = prepare(&mut k, "P", SessionSource::File(file.clone()));
+    assert_eq!(fs::read(&file).unwrap(), original, "put back");
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert!(
+        kept_beside(&mut k, &session)
+            .iter()
+            .any(|(why, _)| why == "restored"),
+        "and told"
+    );
+}
 /// A record is read only if every name in it is a name of its own save
 /// beside the project: a single file name, never a path. A record whose
 /// step names a file elsewhere (a crafted or damaged line that still carries
