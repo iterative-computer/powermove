@@ -389,6 +389,32 @@ define_class!(
                 OPEN_MENU.with(|m| m.borrow_mut().take());
             }
         }
+        /// A project tab in the toolbar: its window comes forward in the group.
+        #[unsafe(method(selectTab:))]
+        fn select_tab(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                unsafe {
+                    let group: *mut AnyObject = msg_send![&*window, tabGroup];
+                    if !group.is_null() {
+                        let _: () = msg_send![group, setSelectedWindow: &*window];
+                    }
+                }
+            }
+        }
+        #[unsafe(method(closeTab:))]
+        fn close_tab(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                window.performClose(None);
+            }
+        }
+        #[unsafe(method(newTab:))]
+        fn new_tab(&self, _: &AnyObject) {
+            self.send(Command { name: "newProject".into(), args: vec![], token: None });
+        }
         #[unsafe(method(joinPendingTab:))]
         fn join_pending_tab(&self, _: Option<&AnyObject>) {
             if let Some((leader, window)) = self.ivars().join.borrow_mut().take() {
@@ -489,83 +515,7 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
     gpui_macos::child_window::present(window, true);
-    // A group of two or more must show its tab bar. AppKit can leave it hidden
-    // (unified-compact toolbars, windows grouped before they were on screen).
-    unsafe {
-        let group: *mut AnyObject = msg_send![&*lead, tabGroup];
-        if !group.is_null() {
-            let visible: bool = msg_send![group, isTabBarVisible];
-            if !visible {
-                let _: () = msg_send![&*lead, toggleTabBar: std::ptr::null::<AnyObject>()];
-            }
-        }
-    }
-    for w in lead.tabbedWindows().map(|t| t.to_vec()).unwrap_or_default() {
-        reveal_tab_bar(&w);
-    }
     true
-}
-/// GPUI-CE hides AppKit's tab bar (Zed draws its own): its
-/// `addTitlebarAccessoryViewController:` override hides the accessory and
-/// sets its height to 0, so a grouped window showed no tabs (shell 2's open
-/// item). Powermove uses the native tab bar: un-hide it and give it back its
-/// height, then let AppKit lay the titlebar out again.
-pub fn reveal_tab_bar(window: &NSWindow) -> bool {
-    let mut revealed = false;
-    for vc in window.titlebarAccessoryViewControllers().to_vec() {
-        let view = vc.view();
-        let subviews = view.subviews().to_vec();
-        let is_tab_bar = subviews
-            .iter()
-            .any(|s| s.class().name().to_string_lossy().contains("NSTabBar"));
-        if !is_tab_bar {
-            continue;
-        }
-        view.setHidden(false);
-        let mut f = view.frame();
-        f.size.height = TAB_BAR_HEIGHT;
-        view.setFrame(f);
-        // AppKit's own layout: a 28 pt bar 8 pt above the accessory's bottom edge.
-        for bar in subviews
-            .iter()
-            .filter(|s| s.class().name().to_string_lossy().contains("NSTabBar"))
-        {
-            bar.setFrame(NSRect::new(
-                NSPoint::new(0., TAB_BAR_INSET),
-                NSSize::new(f.size.width, TAB_BAR_HEIGHT - TAB_BAR_INSET),
-            ));
-        }
-        // AppKit sized the titlebar from the hidden 0 pt accessory; re-adding
-        // it through NSWindow's own implementation (not GPUI's override) makes
-        // the titlebar grow to fit the bar.
-        if let Some(index) = window
-            .titlebarAccessoryViewControllers()
-            .to_vec()
-            .iter()
-            .position(|c| Retained::as_ptr(c) == Retained::as_ptr(&vc))
-        {
-            window.removeTitlebarAccessoryViewControllerAtIndex(index as isize);
-            unsafe {
-                let _: () = msg_send![super(window, NSWindow::class()), addTitlebarAccessoryViewController: &*vc];
-            }
-        }
-        revealed = true;
-    }
-    if revealed {
-        relayout_titlebar(window);
-    }
-    revealed
-}
-/// AppKit's tab bar accessory height (28 pt bar + 8 pt inset) on macOS 26–27.
-const TAB_BAR_HEIGHT: f64 = 36.;
-const TAB_BAR_INSET: f64 = 8.;
-/// A 1 pt frame round trip makes AppKit lay the titlebar out again.
-fn relayout_titlebar(window: &NSWindow) {
-    let f = window.frame();
-    let mut taller = f;
-    taller.size.height += 1.;
-    window.setFrame_display(taller, false);
-    window.setFrame_display(f, true);
 }
 /// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`
 /// (objc2's `Sel` has no `RefEncode`, so `*mut Sel` cannot be declared directly).
@@ -718,20 +668,24 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("star", "Star", "star"),
 ];
 const SHAPE_SEGMENT: isize = 5;
-const TOOLBAR: [&str; 7] = [
-    "home",
-    "toggleSidebar",
-    "title",
-    "tools",
-    "agent",
-    "export",
-    "toggleInspector",
-];
+const TOOLBAR: [&str; 5] = ["home", "title", "tools", "agent", "export"];
+/// One open project in the toolbar's tab strip.
+#[derive(Clone, Debug, PartialEq)]
+struct Tab {
+    window: isize,
+    title: String,
+    edited: bool,
+    selected: bool,
+}
+/// Widest a project tab grows; its title truncates in the middle.
+const TAB_MAX: f64 = 168.;
+const TAB_MIN: f64 = 64.;
 struct ToolbarState {
     target: Retained<Target>,
     tokens: Tokens,
-    title: Retained<NSTextField>,
-    subtitle: Retained<NSTextField>,
+    /// The project tabs (the window's tab group), in the leading area.
+    tabs: Retained<NSView>,
+    tabs_width: Retained<NSLayoutConstraint>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -763,8 +717,8 @@ define_class!(
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let mut v: Vec<_> = TOOLBAR.iter().map(|s| NSString::from_str(s)).collect();
     let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
-    v.insert(3, NSString::from_str(&f.to_string()));
-    v.insert(5, NSString::from_str(&f.to_string()));
+    v.insert(2, NSString::from_str(&f.to_string()));
+    v.insert(4, NSString::from_str(&f.to_string()));
     NSArray::from_retained_slice(&v)
 }
 fn symbol(s: &str, label: &str) -> Retained<NSImage> {
@@ -774,15 +728,33 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
     )
     .expect("SF Symbol")
 }
+/// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
+/// in one weight, whichever control hosts it.
+fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
+    let image = symbol(s, label);
+    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
+        t.metrics.symbol_toolbar as f64,
+        unsafe { objc2_app_kit::NSFontWeightRegular },
+    );
+    image.imageWithSymbolConfiguration(&config).unwrap_or(image)
+}
 impl ToolbarDelegate {
     fn new(mtm: MainThreadMarker, target: Retained<Target>, tokens: Tokens) -> Retained<Self> {
         unsafe {
             msg_send![
-                super(Self::alloc(mtm).set_ivars(ToolbarState {
-                    target,
-                    title: NSTextField::labelWithString(&NSString::from_str("Untitled"), mtm),
-                    subtitle: NSTextField::labelWithString(&NSString::from_str(""), mtm),
-                    tokens,
+                super(Self::alloc(mtm).set_ivars({
+                    let tabs = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+                    let tabs_width = tabs.widthAnchor().constraintEqualToConstant(TAB_MIN);
+                    tabs_width.setActive(true);
+                    tabs.heightAnchor()
+                        .constraintEqualToConstant(tokens.metrics.control as f64)
+                        .setActive(true);
+                    ToolbarState {
+                        target,
+                        tabs,
+                        tabs_width,
+                        tokens,
+                    }
                 })),
                 init
             ]
@@ -795,7 +767,10 @@ impl ToolbarDelegate {
         let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), id);
         let name = id.to_string();
         if name == "tools" {
-            let images: Vec<_> = TOOLS.iter().map(|(_, s, l)| symbol(s, l)).collect();
+            let images: Vec<_> = TOOLS
+                .iter()
+                .map(|(_, s, l)| toolbar_symbol(s, l, t))
+                .collect();
             let control = unsafe {
                 NSSegmentedControl::segmentedControlWithImages_trackingMode_target_action(
                     &NSArray::from_retained_slice(&images),
@@ -844,59 +819,29 @@ impl ToolbarDelegate {
             return Some(item);
         }
         if name == "title" {
-            let (title, subtitle) = (&self.ivars().title, &self.ivars().subtitle);
-            title.setFont(Some(&NSFont::systemFontOfSize_weight(
-                t.typography.title as f64,
-                unsafe { NSFontWeightSemibold },
-            )));
-            title.setTextColor(Some(&native_color(t.colors.text)));
-            title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            subtitle.setFont(Some(&NSFont::systemFontOfSize(t.typography.minimum as f64)));
-            subtitle.setTextColor(Some(&native_color(t.colors.muted)));
-            let view = NSView::initWithFrame(
-                NSView::alloc(mtm),
-                NSRect::new(
-                    NSPoint::ZERO,
-                    NSSize::new(
-                        t.metrics.toolbar_title_width as f64,
-                        t.metrics.control as f64,
-                    ),
-                ),
-            );
-            view.addSubview(title);
-            view.addSubview(subtitle);
-            layout_title(title, subtitle, t);
-            view.widthAnchor()
-                .constraintEqualToConstant(t.metrics.toolbar_title_width as f64)
-                .setActive(true);
-            view.heightAnchor()
-                .constraintEqualToConstant(t.metrics.control as f64)
-                .setActive(true);
-            item.setView(Some(&view));
-            item.setBordered(false);
-            item.setLabel(&NSString::from_str("Document"));
+            // The open projects, as v1 had them in its title bar.
+            item.setView(Some(&self.ivars().tabs));
+            item.setLabel(&NSString::from_str("Projects"));
             return Some(item);
         }
         let (sym, label) = match name.as_str() {
             "home" => ("house", "Projects"),
-            "toggleSidebar" => ("sidebar.leading", "Sidebar"),
             "agent" => ("sparkles", "Agent"),
             "export" => ("square.and.arrow.up", "Export"),
-            "toggleInspector" => ("sidebar.trailing", "Inspector"),
             _ => return None,
         };
         let b = unsafe {
             if name == "export" {
                 NSButton::buttonWithTitle_image_target_action(
                     &NSString::from_str(label),
-                    &symbol(sym, label),
+                    &toolbar_symbol(sym, label, t),
                     Some(target),
                     Some(sel!(act:)),
                     mtm,
                 )
             } else {
                 NSButton::buttonWithImage_target_action(
-                    &symbol(sym, label),
+                    &toolbar_symbol(sym, label, t),
                     Some(target),
                     Some(sel!(act:)),
                     mtm,
@@ -907,7 +852,7 @@ impl ToolbarDelegate {
         b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
         if name == "home" {
             // v1's home tab at the leading edge of the titlebar (`.project-home`).
-            item.setImage(Some(&symbol(sym, label)));
+            item.setImage(Some(&toolbar_symbol(sym, label, t)));
             unsafe {
                 item.setTarget(Some(target));
                 item.setAction(Some(sel!(act:)));
@@ -916,19 +861,6 @@ impl ToolbarDelegate {
             item.setBordered(true);
             item.setLabel(&NSString::from_str(label));
             item.setToolTip(Some(&NSString::from_str(label)));
-            return Some(item);
-        }
-        if name == "toggleSidebar" || name == "toggleInspector" {
-            // Apple's sidebar toggles: a plain toolbar item, never a filled tint.
-            item.setImage(Some(&symbol(sym, label)));
-            unsafe {
-                item.setTarget(Some(target));
-                item.setAction(Some(sel!(act:)));
-            }
-            item.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
-            item.setBordered(true);
-            item.setLabel(&NSString::from_str(label));
-            item.setToolTip(Some(&NSString::from_str(&format!("Hide {label}"))));
             return Some(item);
         }
         b.setToolTip(Some(&NSString::from_str(label)));
@@ -957,31 +889,6 @@ impl ToolbarDelegate {
     }
 }
 
-/// Title alone is centred vertically in the toolbar item; with a subtitle
-/// (`Edited`, `Saving…`) the two lines stack around the centre.
-fn layout_title(title: &NSTextField, subtitle: &NSTextField, t: &Tokens) {
-    let m = t.metrics;
-    let (w, h, line) = (
-        m.toolbar_title_width as f64,
-        m.control as f64,
-        m.toolbar_title_line as f64,
-    );
-    let has_subtitle = !subtitle.stringValue().to_string().is_empty();
-    subtitle.setHidden(!has_subtitle);
-    let title_h = title.fittingSize().height.max(1.);
-    if has_subtitle {
-        title.setFrame(NSRect::new(
-            NSPoint::new(0., line),
-            NSSize::new(w, h - line),
-        ));
-        subtitle.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(w, line)));
-    } else {
-        title.setFrame(NSRect::new(
-            NSPoint::new(0., ((h - title_h) / 2.).floor()),
-            NSSize::new(w, title_h),
-        ));
-    }
-}
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
 /// `Edited` when there are unsaved changes, else nothing.
 pub fn document_subtitle(edited: bool, saving: bool) -> &'static str {
@@ -1101,10 +1008,16 @@ pub struct Host {
     /// The open Workspace Definition sheet, kept alive while it shows.
     definition: RefCell<Option<Retained<DefinitionTarget>>>,
     /// Title and subtitle of the toolbar's document item.
-    title: Retained<NSTextField>,
-    subtitle: Retained<NSTextField>,
+    /// The document's name and state line (`document_subtitle`).
+    document: RefCell<(String, String)>,
+    /// The toolbar's project tabs, their width, and what they last showed.
+    tabs: Retained<NSView>,
+    tabs_width: Retained<NSLayoutConstraint>,
+    tabs_shown: RefCell<Vec<Tab>>,
     /// Home shows over the docks (`set_home`).
     home: Cell<bool>,
+    /// Home's sidebar material, under the GPUI view while Home shows.
+    sidebar: RefCell<Option<Retained<NSView>>>,
 }
 /// Static palette rows: every menu command (including display-only menus and
 /// tools) plus workspace presets. Dynamic rows are added when it opens.
@@ -1197,7 +1110,9 @@ impl Host {
             NSString::from_str("tools"),
         ]));
         window.setToolbar(Some(&toolbar));
-        window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
+        // The regular unified bar at the system's own height, spacing and
+        // control size; nothing is hand-packed.
+        window.setToolbarStyle(NSWindowToolbarStyle::Unified);
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         let viewer = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
@@ -1237,9 +1152,9 @@ impl Host {
                 .collect(),
             tx.clone(),
         );
-        let (title, subtitle) = (
-            delegate.ivars().title.clone(),
-            delegate.ivars().subtitle.clone(),
+        let (tabs, tabs_width) = (
+            delegate.ivars().tabs.clone(),
+            delegate.ivars().tabs_width.clone(),
         );
         let host = Rc::new(RefCell::new(Self {
             window,
@@ -1278,9 +1193,12 @@ impl Host {
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             definition: RefCell::new(None),
-            title,
-            subtitle,
+            document: RefCell::new(("Untitled".into(), String::new())),
+            tabs,
+            tabs_width,
+            tabs_shown: RefCell::default(),
             home: Cell::new(false),
+            sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
         let native_rects = host.borrow().native_panels.clone();
@@ -1668,9 +1586,143 @@ impl Host {
             objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()))
         });
         self.window.setRepresentedURL(url.as_deref());
-        self.title.setStringValue(&NSString::from_str(title));
-        self.subtitle.setStringValue(&NSString::from_str(subtitle));
-        layout_title(&self.title, &self.subtitle, &self.tokens);
+        *self.document.borrow_mut() = (title.into(), subtitle.into());
+        self.sync_tabs();
+    }
+    /// The toolbar's tabs are the windows of this window's tab group (a lone
+    /// window is one tab), then New Project. AppKit's own tab bar stays
+    /// hidden; the group remains the model, so a tab is selected, closed and
+    /// moved to its own window exactly as before. Rebuilt only when the
+    /// group, a title, an edited state or the selection changes.
+    pub fn sync_tabs(&self) {
+        let own = self.window.windowNumber();
+        let group = self
+            .window
+            .tabbedWindows()
+            .map(|t| t.to_vec())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| vec![self.window.clone()]);
+        let selected = unsafe {
+            let tab_group: *mut AnyObject = msg_send![&*self.window, tabGroup];
+            let window: *mut NSWindow = if tab_group.is_null() {
+                std::ptr::null_mut()
+            } else {
+                msg_send![tab_group, selectedWindow]
+            };
+            window.as_ref().map_or(own, |w| w.windowNumber())
+        };
+        let tabs: Vec<Tab> = group
+            .iter()
+            .map(|w| Tab {
+                window: w.windowNumber(),
+                title: w.title().to_string(),
+                edited: w.isDocumentEdited(),
+                selected: if group.len() == 1 {
+                    true
+                } else {
+                    w.windowNumber() == selected
+                },
+            })
+            .collect();
+        if *self.tabs_shown.borrow() == tabs {
+            return;
+        }
+        let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
+        for view in self.tabs.subviews().to_vec() {
+            view.removeFromSuperview();
+        }
+        let height = t.metrics.control as f64;
+        // Tabs share what half the window leaves; titles truncate in the middle.
+        let room = (self.window.frame().size.width / 2. - 160.).max(TAB_MIN);
+        let widest = (room / tabs.len() as f64).clamp(TAB_MIN, TAB_MAX);
+        let glyph = |name: &str, label: &str, points: f64| {
+            let config =
+                NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
+                    NSFontWeightMedium
+                });
+            let image = symbol(name, label);
+            image.imageWithSymbolConfiguration(&config).unwrap_or(image)
+        };
+        let mut x = 0.;
+        for tab in &tabs {
+            let title = if tab.edited {
+                format!("{} •", tab.title)
+            } else {
+                tab.title.clone()
+            };
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(&title),
+                    Some(target),
+                    Some(sel!(selectTab:)),
+                    mtm,
+                )
+            };
+            // The system's toolbar bezel: the selected tab keeps it, the
+            // others show it under the pointer.
+            button.setBezelStyle(NSBezelStyle::Toolbar);
+            button.setButtonType(NSButtonType::PushOnPushOff);
+            button.setState(if tab.selected {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+            button.setShowsBorderOnlyWhileMouseInside(!tab.selected);
+            button.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+            button.setFont(Some(&NSFont::systemFontOfSize_weight(
+                t.typography.title as f64,
+                unsafe {
+                    if tab.selected {
+                        NSFontWeightMedium
+                    } else {
+                        NSFontWeightRegular
+                    }
+                },
+            )));
+            button.setTag(tab.window);
+            button.setToolTip(Some(&NSString::from_str(&tab.title)));
+            button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab")));
+            let width = (button.fittingSize().width + 8.).clamp(TAB_MIN, widest);
+            button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)));
+            self.tabs.addSubview(&button);
+            x += width;
+            if tab.selected {
+                let close = unsafe {
+                    NSButton::buttonWithImage_target_action(
+                        &glyph("xmark", "Close Project", 9.),
+                        Some(target),
+                        Some(sel!(closeTab:)),
+                        mtm,
+                    )
+                };
+                close.setBordered(false);
+                close.setTag(tab.window);
+                close.setToolTip(Some(&NSString::from_str("Close Project")));
+                close.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(20., height)));
+                self.tabs.addSubview(&close);
+                x += 20.;
+            }
+            x += 2.;
+        }
+        let add = unsafe {
+            NSButton::buttonWithImage_target_action(
+                &glyph("plus", "New Project", 12.),
+                Some(target),
+                Some(sel!(newTab:)),
+                mtm,
+            )
+        };
+        add.setBezelStyle(NSBezelStyle::Toolbar);
+        add.setShowsBorderOnlyWhileMouseInside(true);
+        add.setToolTip(Some(&NSString::from_str("New Project")));
+        add.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.newProject")));
+        add.setFrame(NSRect::new(
+            NSPoint::new(x + 2., 0.),
+            NSSize::new(height, height),
+        ));
+        self.tabs.addSubview(&add);
+        self.tabs_width.setConstant(x + 2. + height);
+        *self.tabs_shown.borrow_mut() = tabs;
     }
     /// Home over the window: the Home item reads selected, and the
     /// document's own controls (tools, sidebars, Export, the title) step
@@ -1680,25 +1732,99 @@ impl Host {
             return;
         }
         self.home.set(home);
+        self.sync_sidebar();
+        self.sync_tabs();
         let id = NSString::from_str("home");
         self._toolbar
             .setSelectedItemIdentifier(home.then_some(&*id));
         for item in self._toolbar.items().to_vec() {
             let name = item.itemIdentifier().to_string();
-            if matches!(
-                name.as_str(),
-                "toggleSidebar" | "title" | "tools" | "export" | "toggleInspector"
-            ) {
+            // The tabs stay, as in v1's title bar on Home.
+            if matches!(name.as_str(), "tools" | "export") {
                 item.setHidden(home);
             }
         }
     }
+    /// Home's sidebar is real system material in a column under the GPUI
+    /// view, which leaves that column unpainted: liquid glass on macOS 26 and
+    /// later, the sidebar visual effect before, the solid window colour under
+    /// Reduce Transparency. The glass carries a light tint of the window
+    /// colour (`translucency.glass_tint`), so labels drawn on it keep their
+    /// contrast whatever is behind the window.
+    fn sync_sidebar(&self) {
+        let mut slot = self.sidebar.borrow_mut();
+        if !self.home.get() {
+            if let Some(view) = slot.take() {
+                view.removeFromSuperview();
+            }
+            return;
+        }
+        if slot.is_some() {
+            return;
+        }
+        let t = &self.tokens;
+        let frame = NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(t.metrics.sidebar as f64, self.content.bounds().size.height),
+        );
+        let view = material(self.window.mtm(), frame, t, Surface::Sidebar);
+        if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
+            glass.setCornerRadius(0.);
+            glass.setStyle(NSGlassEffectViewStyle::Clear);
+            glass.setTintColor(Some(
+                &native_color(t.colors.window)
+                    .colorWithAlphaComponent(t.translucency.glass_tint as f64),
+            ));
+        } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
+            effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+            effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
+            solid.setCornerRadius(0.);
+            solid.setBorderWidth(0.);
+            solid.setFillColor(&native_color(t.colors.window));
+        }
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+        self.content.addSubview_positioned_relativeTo(
+            &view,
+            NSWindowOrderingMode::Below,
+            Some(&self.gpui),
+        );
+        *slot = Some(view);
+    }
+    /// Development builds: the window's whole AppKit view tree (class, frame,
+    /// hidden), from the theme frame down, so a review can show which system
+    /// materials and controls really exist without activating the window.
+    #[cfg(debug_assertions)]
+    pub fn view_tree(&self) -> String {
+        fn walk(view: &NSView, depth: usize, out: &mut String) {
+            let f = view.frame();
+            out.push_str(&format!(
+                "{}{} [{:.0},{:.0} {:.0}x{:.0}]{}\n",
+                "  ".repeat(depth),
+                view.class().name().to_string_lossy(),
+                f.origin.x,
+                f.origin.y,
+                f.size.width,
+                f.size.height,
+                if view.isHidden() { " hidden" } else { "" },
+            ));
+            for child in view.subviews().to_vec() {
+                walk(&child, depth + 1, out);
+            }
+        }
+        let mut out = String::new();
+        if let Some(root) = self
+            .window
+            .contentView()
+            .and_then(|c| unsafe { c.superview() })
+        {
+            walk(&root, 0, &mut out);
+        }
+        out
+    }
     /// Current toolbar title and subtitle (tests, accessibility checks).
     pub fn document_title(&self) -> (String, String) {
-        (
-            self.title.stringValue().to_string(),
-            self.subtitle.stringValue().to_string(),
-        )
+        self.document.borrow().clone()
     }
     pub fn update_tokens(&mut self, t: Tokens) {
         appearance(&self.window, &t);
@@ -1712,11 +1838,12 @@ impl Host {
         ] {
             popup.borrow_mut().update_tokens(&t, surface);
         }
-        self.title.setTextColor(Some(&native_color(t.colors.text)));
-        self.subtitle
-            .setTextColor(Some(&native_color(t.colors.muted)));
-        layout_title(&self.title, &self.subtitle, &t);
         self.tokens = t;
+        // The sidebar material follows the appearance and transparency setting.
+        if let Some(view) = self.sidebar.borrow_mut().take() {
+            view.removeFromSuperview();
+        }
+        self.sync_sidebar();
     }
     pub fn replayed(&mut self, token: u64) {
         let effects = self.resolver.replayed(token);
@@ -1946,6 +2073,7 @@ impl Host {
     }
     /// Publishes the window's shell state to menus/palette and syncs toolbar toggles.
     pub fn publish_menu_state(&self, state: &MenuState) {
+        self.sync_tabs();
         if self.menu_state.borrow().as_ref() == Some(state) {
             return;
         }
@@ -1953,17 +2081,6 @@ impl Host {
             m.borrow_mut()
                 .insert(self.window.windowNumber(), state.clone())
         });
-        for item in self._toolbar.items().to_vec() {
-            let id = item.itemIdentifier().to_string();
-            let on = match id.as_str() {
-                "toggleSidebar" => state.sidebar,
-                "toggleInspector" => state.inspector,
-                _ => continue,
-            };
-            let label = item.label().to_string();
-            let tip = format!("{} {label}", if on { "Hide" } else { "Show" });
-            item.setToolTip(Some(&NSString::from_str(&tip)));
-        }
         self.enable_tools(&state.disabled);
         *self.menu_state.borrow_mut() = Some(state.clone());
     }

@@ -151,7 +151,9 @@ pub enum Mastering {
 impl Mastering {
     pub fn params(self) -> anyhow::Result<[f32; 4]> {
         let (mode, source, target) = match self {
-            Self::LinearP3 | Self::Edr => return Ok([0.; 4]),
+            // The shader clips the SDR view to the SDR delivery's range.
+            Self::LinearP3 => return Ok([3., 0., 0., 0.]),
+            Self::Edr => return Ok([0.; 4]),
             Self::Pq {
                 source_peak,
                 target_peak,

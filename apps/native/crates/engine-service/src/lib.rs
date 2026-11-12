@@ -159,6 +159,35 @@ pub struct MediaCatalog {
     /// viewer draws nothing for them until they land, never Media Offline.
     pub resolving: std::collections::BTreeSet<String>,
 }
+/// The files a viewer reads in `mode`: while playing and dragging, and
+/// when paused. A paused frame shows the composition as an export draws
+/// it, so Automatic's HD proxies (a playback convenience for large
+/// sources) stand in only while playing or dragging; the proxies a person
+/// chose (Proxy Preferred, Proxy Only) stay in every moment.
+fn viewer_media(
+    media: &MediaCatalog,
+    mode: MediaMode,
+) -> (
+    Arc<pm_export::render::MediaPaths>,
+    Arc<pm_export::render::MediaPaths>,
+) {
+    let paths = |m: &MediaCatalog| {
+        Arc::new(pm_export::render::MediaPaths {
+            paths: m.viewer_paths(mode),
+            resolving: m.resolving.clone(),
+        })
+    };
+    let moving = paths(media);
+    let paused = if mode == MediaMode::Automatic && !media.automatic_proxies.is_empty() {
+        paths(&MediaCatalog {
+            automatic_proxies: Default::default(),
+            ..media.clone()
+        })
+    } else {
+        moving.clone()
+    };
+    (moving, paused)
+}
 /// What the viewer plays for each clip (View › Media). Exports read
 /// originals whatever this says; only an explicit draft export uses proxies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -394,6 +423,8 @@ struct View {
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
+    /// What a paused frame reads: `paths` without Automatic's HD proxies.
+    paused_paths: Arc<pm_export::render::MediaPaths>,
 }
 impl View {
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
@@ -570,10 +601,7 @@ impl Viewer {
             .views
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
-        v.paths = Arc::new(pm_export::render::MediaPaths {
-            paths: media.viewer_paths(v.media_mode),
-            resolving: media.resolving.clone(),
-        });
+        (v.paths, v.paused_paths) = viewer_media(&media, v.media_mode);
         v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
         v.content = content;
@@ -595,10 +623,7 @@ impl Viewer {
             return Ok(());
         }
         v.media_mode = mode;
-        v.paths = Arc::new(pm_export::render::MediaPaths {
-            paths: v.config.media.viewer_paths(mode),
-            resolving: v.config.media.resolving.clone(),
-        });
+        (v.paths, v.paused_paths) = viewer_media(&v.config.media, mode);
         v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
         v.stamp.sequence += 1;
@@ -1076,10 +1101,7 @@ impl EngineService {
             revision: config.snapshot.revision,
             sequence: 1,
         };
-        let paths = Arc::new(pm_export::render::MediaPaths {
-            paths: config.media.viewer_paths(MediaMode::default()),
-            resolving: config.media.resolving.clone(),
-        });
+        let (paths, paused_paths) = viewer_media(&config.media, MediaMode::default());
         let proxied = config.media.proxied(MediaMode::default());
         state.views.insert(
             id,
@@ -1118,6 +1140,7 @@ impl EngineService {
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
+                paused_paths,
             },
         );
         // After the new view is in: the document they share stays open.
@@ -2154,17 +2177,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 continue;
             }
             v.dirty = false;
-            let scene = Scene {
-                doc: v.config.snapshot.document.clone(),
-                comp: v.config.composition.clone(),
-                media: if capture {
-                    Arc::new(v.config.media.export_paths(false))
-                } else {
-                    v.paths.clone()
-                },
-                content: v.content,
-            };
-            cursor = id;
             let moment = if playing {
                 Moment::Playing
             } else if r.scrub {
@@ -2172,6 +2184,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Moment::Paused
             };
+            let scene = Scene {
+                doc: v.config.snapshot.document.clone(),
+                comp: v.config.composition.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else if moment == Moment::Paused {
+                    v.paused_paths.clone()
+                } else {
+                    v.paths.clone()
+                },
+                content: v.content,
+            };
+            cursor = id;
             let budget = frame.max(interval);
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             let refining = r.full_for == Some(v.stamp);
@@ -3708,6 +3733,112 @@ mod worker_tests {
         assert_eq!(fill(3840, 2160), 2.);
         let bytes = 3841. * 2161. * 8.;
         assert!(bytes <= render::PAUSED_FULL_BYTES as f64);
+    }
+
+    /// Automatic's HD proxy plays a large clip, but a paused frame reads
+    /// its original, as an export does; a proxy chosen in View › Media
+    /// stays when paused.
+    #[test]
+    fn an_automatic_proxy_stands_in_only_while_playing() {
+        let fixture = |name: &str| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../engine/fixtures")
+                .join(name)
+        };
+        let (original, proxy) = (fixture("h264-aac.mp4"), fixture("hevc.mp4"));
+        let project = pm_model::json::parse(
+            r##"{"id":"P","name":"P","compId":"C","compName":"C","w":160,"h":90,"fps":30,"dur":3,"bg":"#000000",
+            "layers":[{"id":"v","type":"video","name":"large clip","from":0,"dur":3,"on":true,"solo":false,"mblur":false,
+              "p":{"position.x":{"v":80,"kf":[],"expr":null},"position.y":{"v":45,"kf":[],"expr":null},"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},
+              "fx":[],"masks":[],"d":{"asset":"large-clip","trim":0,"speed":1,"w":160,"h":90}}],
+            "comps":{},"assets":{"large-clip":{"id":"large-clip","type":"video","name":"large clip","w":160,"h":90,"dur":3}},
+            "markers":[],"work":[0,3],"params":{}}"##,
+        )
+        .unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 97,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let mut media = MediaCatalog::default();
+        media
+            .originals
+            .insert("large-clip".into(), original.clone());
+        media.proxies.insert("large-clip".into(), proxy.clone());
+        media.automatic_proxies.insert("large-clip".into());
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("automatic-proxy-test").unwrap()).unwrap();
+        let v = service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot,
+                media,
+                output: Output {
+                    width: 160,
+                    height: 90,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: Some(3 * pm_protocol::common::TICKS_PER_SECOND),
+                audio: false,
+            })
+            .unwrap();
+        // The clip's file in this test's viewer requests of `moment`.
+        let read = |moment: Moment| {
+            crate::render::MEDIA_SAMPLED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(exact, m, _)| !exact && *m == moment)
+                .filter_map(|(_, _, paths)| paths.paths.get("large-clip").cloned())
+                .filter(|p| *p == original || *p == proxy)
+                .collect::<Vec<_>>()
+        };
+        wait_for(&v, "a paused frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Paused)
+        });
+        assert_eq!(v.status().proxied, 1, "Automatic plays the proxy");
+        let paused = read(Moment::Paused);
+        assert!(
+            !paused.is_empty() && paused.iter().all(|p| *p == original),
+            "{paused:?}"
+        );
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "a playing frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        let playing = read(Moment::Playing);
+        assert!(
+            !playing.is_empty() && playing.iter().all(|p| *p == proxy),
+            "{playing:?}"
+        );
+        v.command(TransportCommand::Pause).unwrap();
+        // A proxy a person chose stays when paused.
+        v.media_mode(MediaMode::ProxyOnly).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame in Proxy Only", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        assert_eq!(read(Moment::Paused).last(), Some(&proxy));
+        v.retire();
     }
 
     /// A capture taken during a reduced drag (explicit Half quality, a

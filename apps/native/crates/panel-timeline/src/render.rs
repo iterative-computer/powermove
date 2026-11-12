@@ -894,7 +894,7 @@ impl Scene {
         match &row.content {
             RowContent::Layer { clip, summary } => {
                 if let Some(clip) = clip {
-                    paint_clip(clip, y, h, v, t, ops);
+                    paint_clip(clip, y, h, v, self.label_step(v).0, t, ops);
                 }
                 // Summary marks only while the layer is collapsed: open, its
                 // property rows show the keys themselves.
@@ -904,7 +904,7 @@ impl Scene {
                     .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
                 if !open {
                     let ink = clip.as_ref().map_or(c.text, |clip| {
-                        t.clip_material(clip.label.color(t)).foreground
+                        t.strip(clip.label.color(t), strip_state(clip)).foreground
                     });
                     paint_keys(
                         &row.id,
@@ -922,8 +922,9 @@ impl Scene {
                 let last = clips.partition_point(|clip| {
                     clip.from <= v.scroll_time + (v.width - v.layer_column) / v.pps
                 });
+                let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    paint_clip(clip, y, h, v, t, ops);
+                    paint_clip(clip, y, h, v, grid, t, ops);
                 }
             }
             RowContent::Property { state, keys } => {
@@ -971,6 +972,20 @@ impl Scene {
             }
         }
     }
+    /// Seconds between ruler labels: the first nice step at least 60 pt
+    /// apart, counting frames once a frame is 40 pt wide (then `true`).
+    fn label_step(&self, v: Viewport) -> (f64, bool) {
+        let frames = v.pps / self.fps >= 40.;
+        let step = if frames {
+            (60. / (v.pps / self.fps)).ceil() / self.fps
+        } else {
+            [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
+                .into_iter()
+                .find(|s| s * v.pps >= 60.)
+                .unwrap_or(3600.)
+        };
+        (step, frames)
+    }
     fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
         let (m, c) = (t.metrics, &t.colors);
         let h = m.ruler as f64;
@@ -1004,60 +1019,23 @@ impl Scene {
                 }
             }
         }
-        // Ticks are `text` ink at low alpha, so they sit in the material like
-        // the panel hairlines; Increase Contrast makes them solid.
-        let (tick, major) = if t.accessibility.increase_contrast {
-            ((c.separator, 1.), (c.secondary, 1.))
+        // Each label stands over a small dot, with a faint line down the
+        // tracks; no tick marks. Increase Contrast makes the dot solid.
+        let major = if t.accessibility.increase_contrast {
+            (c.secondary, 1.)
         } else {
-            (
-                (c.text, t.translucency.tick_minor as f64),
-                (c.text, t.translucency.tick_major as f64),
-            )
+            (c.text, t.translucency.tick_major as f64)
         };
-        // Labels at the first nice step at least 60 pt apart (frames once a
-        // frame is 40 pt wide); minor ticks split each labelled step in four,
-        // or into frames when the labels count frames.
-        let frames = v.pps / self.fps >= 40.;
-        let label_step = if frames {
-            (60. / (v.pps / self.fps)).ceil() / self.fps
-        } else {
-            [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
-                .into_iter()
-                .find(|s| s * v.pps >= 60.)
-                .unwrap_or(3600.)
-        };
-        let step = if frames {
-            1. / self.fps
-        } else {
-            label_step / 4.
-        };
+        let (label_step, frames) = self.label_step(v);
         let right = v.scroll_time + (v.width - v.layer_column) / v.pps;
-        if step * v.pps >= 6. {
-            let mut i = (v.scroll_time / step).ceil().max(0.) as u64;
-            while (i as f64) * step <= right && ops.len() < 10_000 {
-                let x = v.x(i as f64 * step);
-                let mut o = Op::new(
-                    format!("minor:{i}"),
-                    "rect",
-                    Rect::new(x, h - 3., m.border as f64, 3.),
-                    tick.0,
-                );
-                o.opacity = tick.1;
-                ops.push(o);
-                let Some(next) = i.checked_add(1) else {
-                    break;
-                };
-                i = next;
-            }
-        }
         let mut i = (v.scroll_time / label_step).ceil().max(0.) as u64;
         while i as f64 * label_step <= right && ops.len() < 10_000 {
             let time = i as f64 * label_step;
             let x = v.x(time);
             let mut o = Op::new(
                 format!("major:{i}"),
-                "rect",
-                Rect::new(x, h - 6., m.border as f64, 6.),
+                "circle",
+                Rect::new(x - 1.5, h - 7., 3., 3.),
                 major.0,
             );
             o.opacity = major.1;
@@ -1181,19 +1159,37 @@ fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
 const OFFLINE_ADVANCE: f64 = 3.6;
 /// Width of the "Missing effect" badge, in `minimum` ems.
 const MISSING_EFFECT_ADVANCE: f64 = 6.6;
-fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
+/// The strip state a clip draws in: a hidden layer is disabled, selection is
+/// the bright rim, and the clip whose edge is under the pointer is hovered
+/// (it also shows the trim grip). A surface that drags a clip paints it with
+/// `StripState::Dragging` itself.
+fn strip_state(c: &Clip) -> pm_design::StripState {
+    use pm_design::StripState;
+    if c.hidden {
+        StripState::Disabled
+    } else if c.selected {
+        StripState::Selected
+    } else if c.trim.is_some() {
+        StripState::Hover
+    } else {
+        StripState::Rest
+    }
+}
+fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops: &mut Vec<Op>) {
     let m = t.metrics;
     let colors = &t.colors;
-    // Clips fill their row with a hairline breath between neighbours (v1).
+    // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
+    let gap = t.strip_gap() as f64;
     let Some(r) = span(
-        v.x(c.from),
-        v.x(c.from + c.duration),
-        y + m.border as f64,
-        h - 2. * m.border as f64,
+        v.x(c.from) + gap / 2.,
+        v.x(c.from + c.duration) - gap / 2.,
+        y + gap,
+        h - 2. * gap,
         v,
     ) else {
         return;
     };
+    let radius = t.strip_radius(r.height as f32) as f64;
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
     let offline = c.media == Media::Offline;
@@ -1202,22 +1198,35 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     } else {
         c.label.color(t)
     };
-    // The tactile chip (pm-design `clip_material`): gradient body, top
-    // highlight, a seam one shade under the body, a soft drop shadow. A hidden
-    // layer's clip draws at half strength.
-    let material = t.clip_material(fill);
-    let strength = if c.hidden { 0.5 } else { 1. };
+    // The strip (pm-design `strip`): a slab of tinted glass in the layer's
+    // hue, a rim of light inside its edge, no outline. Its state carries
+    // selection, the hovered edge and a hidden layer.
+    let material = t.strip(fill, strip_state(c));
+    let strength = 1.;
+    let grid_from = if grid > 0. {
+        let time = v.scroll_time + (r.x - v.layer_column) / v.pps;
+        v.x((time / grid).ceil() * grid)
+    } else {
+        0.
+    };
     let mut o = Op::new(format!("clip:{}", c.id), "clip", r, fill);
-    o.radius = m.clip_radius as f64;
-    o.opacity = strength;
+    o.radius = radius;
+    o.opacity = material.opacity as f64;
     o.detail = json!({
         "from":c.from,"duration":c.duration,
         "cursor":if c.locked {"notAllowed"}else{"openHand"},
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
+        "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
-        "highlight":material.highlight.0,"highlightAlpha":material.highlight.1,
-        "seam":material.seam,"seamWidth":m.border,
+        "glow":material.glow.0,"glowAlpha":material.glow.1,
+        // The ruler's grid reads through the body: its first line inside
+        // the strip and the distance between lines, in points.
+        "grid":material.grid.0,"gridAlpha":material.grid.1,
+        "gridFrom":grid_from,"gridStep":grid * v.pps,
+        "rim":material.rim.0,"rimAlpha":material.rim.1,
+        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":m.border,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
+        "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
     ops.push(o);
     if offline {
@@ -1228,12 +1237,15 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             colors.danger,
         );
         o.opacity = t.translucency.offline_hatch as f64 * strength;
-        o.radius = m.clip_radius as f64;
+        o.radius = radius;
         o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
         ops.push(o);
     }
     // "Offline" leads in `danger`; the name follows in the clip's foreground.
-    let lead = (m.inset - m.inner_radius) as f64;
+    // The name starts clear of the trim grip that stands inside a hovered
+    // strip's edge.
+    let grip = t.trim_grip();
+    let lead = (grip.inset + grip.width + t.space.xs) as f64;
     let offline_w = if offline {
         let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
         let mut o = Op::new(
@@ -1283,7 +1295,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
                 (r.height - 4. * m.border as f64).max(0.),
             );
             let mut o = Op::new(cue_op(&c.id, &cue.id), "rect", chip, material.primary);
-            o.radius = (m.clip_radius as f64 - m.border as f64).max(0.);
+            o.radius = (radius - 2. * m.border as f64).max(0.);
             o.opacity = 0.35 * strength;
             o.detail = json!({"from":cue.start,"to":cue.end,"text":cue.text});
             ops.push(o);
@@ -1374,26 +1386,26 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}. The layer draws without it.")});
         ops.push(o);
     }
-    // Selection: an accent ring inside the clip's edge, so a selected clip
-    // never grows into its neighbours (v1's inset ring).
-    if c.selected {
-        let mut o = Op::new(format!("clip-ring:{}", c.id), "ring", r, colors.accent);
-        o.stroke = 2. * m.border as f64;
-        o.radius = m.clip_radius as f64;
-        ops.push(o);
-    }
+    // Selection is the strip's own white rim (drawn with the body), so a
+    // selected clip never grows into its neighbours and never turns accent.
+    // The trim grip: a short pill inside the edge under the pointer.
     if let Some(edge) = c.trim {
+        let grip = t.trim_grip();
+        let (w, inset) = (grip.width as f64, grip.inset as f64);
         let x = match edge {
-            Edge::In => v.x(c.from),
-            Edge::Out => v.x(c.from + c.duration) - 2.,
+            Edge::In => r.x + inset,
+            Edge::Out => r.x + r.width - inset - w,
         };
-        if x >= v.layer_column && x + 2. <= v.width && !c.locked {
-            ops.push(Op::new(
+        let height = (r.height * grip.height as f64).round();
+        if x >= v.layer_column && x + w <= v.width && r.width > 3. * inset && !c.locked {
+            let mut o = Op::new(
                 format!("trim:{}", c.id),
                 "rect",
-                Rect::new(x, r.y, 2., r.height),
-                colors.text,
-            ));
+                Rect::new(x, r.y + (r.height - height) / 2., w, height),
+                grip.color,
+            );
+            o.radius = w / 2.;
+            ops.push(o);
         }
     }
 }
@@ -1649,24 +1661,29 @@ impl Frame {
         if x < v.layer_column || x > v.width {
             return Ok(vec![]);
         }
+        // pm-design `playhead`: a hairline with a round head resting in the
+        // ruler; it passes over everything.
+        let p = t.playhead();
+        let (line, d) = (p.line as f64, p.head as f64);
+        let top = (t.metrics.ruler as f64 - d - 3.).max(0.);
         let mut head = Op::new(
             "playhead-head",
             "ph-head",
-            Rect::new(x - 5.5, 0., 11., t.metrics.ruler as f64 - 4.),
-            t.colors.accent,
+            Rect::new(x - d / 2., top, d, d),
+            p.color,
         );
-        head.detail = json!({"topRadius":3.,"bottomRadius":6.});
+        head.detail = json!({"topRadius":d / 2.,"bottomRadius":d / 2.});
         Ok(vec![
             Op::new(
                 "playhead-line",
                 "rect",
                 Rect::new(
-                    x - t.metrics.playhead as f64 / 2.,
-                    t.metrics.ruler as f64 - 4.,
-                    t.metrics.playhead as f64,
-                    (v.height - t.metrics.ruler as f64 + 4.).max(0.),
+                    x - line / 2.,
+                    top + d / 2.,
+                    line,
+                    (v.height - top - d / 2.).max(0.),
                 ),
-                t.colors.accent,
+                p.color,
             ),
             head,
         ])
@@ -1705,14 +1722,12 @@ impl Frame {
     /// One accessible element per painted clip, in paint order: its name and
     /// times, whether it is selected, and its visible body within the tracks.
     pub fn clip_nodes(&self) -> Vec<ClipNode> {
-        // One pass indexes each clip's name and selection ring.
+        // One pass indexes each clip's name; the strip itself says whether
+        // it is selected.
         let mut names = HashMap::new();
-        let mut rings = std::collections::HashSet::new();
         for o in &self.ops {
             if let Some(id) = o.id.strip_prefix("clip-content:") {
                 names.insert(id, o.text.as_deref().unwrap_or_default());
-            } else if let Some(id) = o.id.strip_prefix("clip-ring:") {
-                rings.insert(id);
             }
         }
         self.ops
@@ -1734,7 +1749,7 @@ impl Frame {
                     name: names.get(id).copied().unwrap_or_default().to_owned(),
                     from: o.detail["from"].as_f64().unwrap_or(0.),
                     duration: o.detail["duration"].as_f64().unwrap_or(0.),
-                    selected: rings.contains(id),
+                    selected: o.detail["selected"] == true,
                     bounds,
                 })
             })

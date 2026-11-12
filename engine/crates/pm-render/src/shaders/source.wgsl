@@ -235,6 +235,24 @@ fn bt2020_cl_rgb(ycc: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, bt2020_cl_encode(g), b);
 }
 
+// One source pixel in the source's own RGB(A) encoding: YCbCr through its
+// matrix, normalized integer codes restored.
+fn decoded(p: vec2<u32>) -> vec4<f32> {
+    let v = textureLoad(luma, vec2<i32>(p), 0);
+    if (P.a.x == 1u) {
+        let cbcr = chroma_sample(p.x, p.y);
+        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
+        if (P.hdr.y == 1.0) { return vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
+        let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
+        return vec4<f32>(m * ycc, v.a);
+    }
+    if (P.a.x == 2u && P.m0.x != 0.0) {
+        return vec4<f32>((round(v.rgb * P.m0.x) - vec3<f32>(P.m0.y)) / P.m0.z,
+            round(v.a * P.m0.x) / P.m0.w);
+    }
+    return v;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(out);
@@ -243,38 +261,49 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let xy = vec2<i32>(id.xy);
     let input_dims = textureDimensions(luma);
-    // Keep the exact path's original arithmetic. Preview conversion alone
-    // supplies a smaller destination and samples at its pixel centres.
-    let source = (vec2<f32>(id.xy) + vec2<f32>(0.5)) * vec2<f32>(input_dims) / vec2<f32>(dims) - vec2<f32>(0.5);
-    let base = vec2<i32>(floor(source));
-    let hi = vec2<i32>(input_dims) - vec2<i32>(1);
-    let a = clamp(base, vec2<i32>(0), hi);
-    let b = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi);
-    let c = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi);
-    let d = clamp(base + vec2<i32>(1), vec2<i32>(0), hi);
-    let t = fract(source);
-    var v = textureLoad(luma, vec2<i32>(id.xy), 0);
-    if (any(input_dims != dims)) {
-        v = mix(mix(textureLoad(luma, a, 0), textureLoad(luma, b, 0), t.x),
-                mix(textureLoad(luma, c, 0), textureLoad(luma, d, 0), t.x), t.y);
-    }
     var stored: vec4<f32>;
-    if (P.a.x == 1u) {
-        var cbcr = chroma_sample(id.x, id.y);
-        if (any(input_dims != dims)) {
-            cbcr = mix(mix(chroma_sample(u32(a.x), u32(a.y)), chroma_sample(u32(b.x), u32(b.y)), t.x),
-                       mix(chroma_sample(u32(c.x), u32(c.y)), chroma_sample(u32(d.x), u32(d.y)), t.x), t.y);
+    if (all(input_dims == dims)) {
+        // The exact path: the source pixel itself.
+        stored = decoded(id.xy);
+    } else if (all(input_dims >= dims)) {
+        // A preview destination smaller than the source: the area average of
+        // the source pixels under each destination pixel (partial pixels at
+        // the footprint's edges weighted by their overlap), so detail finer
+        // than the destination averages out instead of aliasing into moire.
+        // Straight alpha averages colour weighted by coverage.
+        let scale = vec2<f32>(input_dims) / vec2<f32>(dims);
+        let lo = vec2<f32>(id.xy) * scale;
+        let hi = lo + scale;
+        let p0 = vec2<u32>(floor(lo));
+        let p1 = min(vec2<u32>(ceil(hi)) - vec2<u32>(1u), input_dims - vec2<u32>(1u));
+        var sum = vec4<f32>(0.0);
+        for (var y = p0.y; y <= p1.y; y++) {
+            let wy = min(f32(y + 1u), hi.y) - max(f32(y), lo.y);
+            for (var x = p0.x; x <= p1.x; x++) {
+                let wt = (min(f32(x + 1u), hi.x) - max(f32(x), lo.x)) * wy;
+                let s = decoded(vec2<u32>(x, y));
+                if (P.a.w == 1u) { sum += vec4<f32>(s.rgb * s.a, s.a) * wt; }
+                else { sum += s * wt; }
+            }
         }
-        let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
-        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
-        if (P.hdr.y == 1.0) { stored = vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
-        else { stored = vec4<f32>(m * ycc, v.a); }
+        let avg = sum / (scale.x * scale.y);
+        if (P.a.w == 1u) {
+            stored = vec4<f32>(select(vec3<f32>(0.0), avg.rgb / avg.a, avg.a > 0.0), avg.a);
+        } else {
+            stored = avg;
+        }
     } else {
-        stored = v;
-        if (P.a.x == 2u && P.m0.x != 0.0) {
-            stored = vec4<f32>((round(v.rgb * P.m0.x) - vec3<f32>(P.m0.y)) / P.m0.z,
-                round(v.a * P.m0.x) / P.m0.w);
-        }
+        // A side larger than the source (preview sizing never upscales):
+        // bilinear at the destination's pixel centres.
+        let source = (vec2<f32>(id.xy) + vec2<f32>(0.5)) * vec2<f32>(input_dims) / vec2<f32>(dims) - vec2<f32>(0.5);
+        let hi = vec2<i32>(input_dims) - vec2<i32>(1);
+        let base = vec2<i32>(floor(source));
+        let a = vec2<u32>(clamp(base, vec2<i32>(0), hi));
+        let b = vec2<u32>(clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi));
+        let c = vec2<u32>(clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi));
+        let d = vec2<u32>(clamp(base + vec2<i32>(1), vec2<i32>(0), hi));
+        let t = fract(source);
+        stored = mix(mix(decoded(a), decoded(b), t.x), mix(decoded(c), decoded(d), t.x), t.y);
     }
     var w: vec4<f32>;
     switch P.a.w {

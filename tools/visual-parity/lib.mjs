@@ -10,6 +10,7 @@ export function parseArgs(argv) {
     if (value === undefined) throw new Error(`--${key} needs a value`);
     if (key === 'times') out.times = value.split(',').filter(Boolean);
     else if (key === 'step') out.step = Number(value);
+    else if (key === 'until') out.until = Number(value);
     else out[key] = value;
   }
   for (const need of ['project', 'out']) if (!out[need]) throw new Error(`--${need} is required`);
@@ -22,11 +23,12 @@ export function parseTime(text, fps) {
   return m ? Number(m[1]) + Number(m[2]) / fps : Number(text);
 }
 
-/** Every `step` seconds from 0, the last frame, and the named times; sorted, unique. */
+/** Every `step` seconds from 0, the last frame (or `until`), and the named times; sorted, unique. */
 export function sampleTimes(info, args) {
   const round = (t) => Math.round(t * 1e6) / 1e6;
   const set = new Set();
-  const last = Math.max(0, info.dur - 1 / info.fps);
+  const end = Math.min(info.dur, args.until ?? info.dur);
+  const last = Math.max(0, end - 1 / info.fps);
   if (args.step > 0) {
     for (let t = 0; t < last; t += args.step) set.add(round(t));
     set.add(round(last));

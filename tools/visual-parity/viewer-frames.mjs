@@ -2,16 +2,18 @@
 // sees paused in the running lane app at each sample time.
 //
 //   node tools/visual-parity/viewer-frames.mjs --pid <lane app pid> --window <window id>
-//        --rect x,y,w,h --out <dir>
+//        --rect x,y,w,h --out <dir> [--times 2,8,13.458 | --frames 72,426] [--dir v2viewer]
 //
 // Seeks through the timeline's Current time field with the cua-driver CLI
 // (background input, no focus change), waits until the viewer stops changing, and crops
 // the viewer canvas (`--rect`, in the window screenshot's pixels) from a
 // native-resolution window screenshot into <out>/v2viewer/<time>.png. Times
-// come from <out>/v1/manifest.json. The viewer shows the frame at its zoom,
+// come from <out>/v1/manifest.json (or v2/ without v1), all of them or the
+// samples nearest `--times` (seconds), or exactly `--frames` (indices at the
+// project rate), into <out>/<--dir>. The viewer shows the frame at its zoom,
 // so this column is for looking, not for pixel statistics.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { timeName } from './lib.mjs';
 
@@ -21,10 +23,15 @@ for (let i = 0; i < argv.length; i += 2) opt[argv[i].replace(/^--/, '')] = argv[
 const cua = path.join(process.env.HOME, '.local/bin/cua-driver');
 const pid = Number(opt.pid), window = Number(opt.window);
 const [x, y, w, h] = opt.rect.split(',').map(Number);
-const out = path.resolve(opt.out, 'v2viewer');
+const out = path.resolve(opt.out, opt.dir ?? 'v2viewer');
 mkdirSync(out, { recursive: true });
-const v1 = JSON.parse(readFileSync(path.resolve(opt.out, 'v1/manifest.json'), 'utf8'));
-const fps = v1.project.fps;
+const base = JSON.parse(readFileSync(['v1', 'v2'].map((d) => path.resolve(opt.out, d, 'manifest.json')).find(existsSync), 'utf8'));
+const fps = base.project.fps;
+const wanted = opt.frames
+  ? opt.frames.split(',').map(Number).map((f) => ({ time: f / fps }))
+  : opt.times
+    ? opt.times.split(',').map(Number).map((t) => base.samples.reduce((a, b) => (Math.abs(b.time - t) < Math.abs(a.time - t) ? b : a)))
+    : base.samples;
 const session = `parity-${process.pid}`;
 const call = (tool, args) => JSON.parse(execFileSync(cua, ['call', tool, JSON.stringify({ pid, window_id: window, session, ...args })], { encoding: 'utf8', maxBuffer: 64 << 20 }));
 const steps = (list) => {
@@ -36,10 +43,15 @@ const field = (role) => {
   const m = new RegExp(`\\[(\\d+)\\] ${role} "Current time"(?: = "([^"]*)")?`).exec(t.tree_markdown);
   return m ? { token: `${t.snapshot_id}:${m[1]}`, value: m[2] ?? '' } : null;
 };
-// The time button reads "13 seconds, 11 frames" (total seconds).
+// The time button reads "13 seconds, 11 frames" (total seconds; the
+// wording of the units is not relied on).
 const spoken = (t) => {
-  const f = Math.round(t * fps), s = Math.floor(f / fps), ff = f - s * fps;
-  return `${s} second${s === 1 ? "" : "s"}, ${ff} frame${ff === 1 ? "" : "s"}`;
+  const f = Math.round(t * fps), s = Math.floor(f / fps);
+  return `${s}:${f - s * fps}`;
+};
+const reads = (value) => {
+  const m = /(\d+) seconds?, (\d+) frames?$/.exec(value);
+  return m ? `${Number(m[1])}:${Number(m[2])}` : null;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const timecode = (t) => {
@@ -51,7 +63,7 @@ execFileSync(cua, ['call', 'start_session', JSON.stringify({ session })]);
 const samples = [];
 const shot = path.join(out, '.window.png');
 let before = null;
-for (const s of v1.samples) {
+for (const s of wanted) {
   const button = field('AXButton');
   if (button) steps([{ tool: 'click', args: { element_token: button.token } }]);
   const text = field('AXTextField');
@@ -61,7 +73,7 @@ for (const s of v1.samples) {
   // The playhead is there once the time button reads the target.
   for (let tries = 0; ; tries++) {
     const now = field('AXButton');
-    if (now && (now.value === spoken(s.time) || now.value.endsWith(`, ${spoken(s.time)}`))) break;
+    if (now && reads(now.value) === spoken(s.time)) break;
     if (tries > 40) throw new Error(`the playhead did not reach ${timecode(s.time)} (reads ${now?.value})`);
     await sleep(250);
   }
