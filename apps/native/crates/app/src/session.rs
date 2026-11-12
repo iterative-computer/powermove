@@ -1897,10 +1897,13 @@ impl Controller {
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 let close = v.close_after_save.take();
+                // A save that kept another version beside the file has
+                // something to say first: the window stays.
                 let saved = matches!(
                     &result,
                     Some(Ok(ShellReply::Saved {
                         recovery_copy: None,
+                        displaced: None,
                         ..
                     }))
                 );
@@ -1908,6 +1911,7 @@ impl Controller {
                     Some(Ok(ShellReply::Saved {
                         session,
                         recovery_copy,
+                        displaced,
                     })) => {
                         v.session = Some(session);
                         if as_path.is_some() {
@@ -1918,6 +1922,9 @@ impl Controller {
                             "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
                         v.load_recent(cx);
+                        if let Some(kept) = displaced {
+                            v.other_version_kept(kept, cx);
+                        }
                     }
                     other => v.save_failed(&crate::lifecycle::reason(other), cx),
                 }
@@ -1941,6 +1948,34 @@ impl Controller {
             .and_then(crate::node_string)
             .unwrap_or("Untitled")
             .to_owned()
+    }
+    /// The save went through, and a version that arrived meanwhile was kept
+    /// beside the file: a sheet that names it, a way to it, an Error Log row.
+    fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, other_version_kept};
+        let name = self.project_name();
+        let file_name = |path: &std::path::Path| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let file = self.path.as_deref().map(file_name).unwrap_or_default();
+        self.message = format!("“{name}” was saved. Another version of its file was kept.");
+        self.errors.borrow_mut().push(
+            "Save",
+            &format!(
+                "While “{name}” was being saved, another version of its file arrived. It was kept at {}",
+                kept.display()
+            ),
+        );
+        let answer =
+            other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
+        cx.spawn(async move |_, _| {
+            if answer.recv().await.ok().flatten() == Some(Action::ShowInFinder) {
+                platform::reveal(&kept);
+            }
+        })
+        .detach();
     }
     /// A save that did not happen is a sheet in plain words (S5): Save As
     /// and Show in Finder are one press away, and the kernel's own account

@@ -241,6 +241,10 @@ pub struct SaveReceipt {
     pub reused_media_bytes: u64,
     /// The replaced version's backup, when a [`BackupPolicy`] was given.
     pub backup: Option<PathBuf>,
+    /// Another version found at the destination in the exchange (it arrived
+    /// after the last check, or cannot be read), kept beside the project
+    /// under this name. The person must be told.
+    pub displaced: Option<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -890,8 +894,11 @@ impl SavePlan {
             (Some(policy), Some(_)) => Some(durable::backup(policy, dest)?),
             _ => None,
         };
-        if let Err(e) = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks) {
-            if let (Some(path), Some(prev)) = (&backup, previous) {
+        let published = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks);
+        if published.is_err()
+            && let (Some(path), Some(prev)) = (&backup, previous)
+        {
+            {
                 let still_old = FileVersion::read(dest)
                     .ok()
                     .flatten()
@@ -905,8 +912,8 @@ impl SavePlan {
                     let _ = fs::rename(path, recovery);
                 }
             }
-            return Err(e);
         }
+        let published = published?;
         if let Some(policy) = &self.options.backups {
             let _ = durable::retain(policy, backup.as_deref());
         }
@@ -958,6 +965,7 @@ impl SavePlan {
             media: table,
             reused_media_bytes,
             backup,
+            displaced: published.displaced,
             ticket: self.ticket.clone(),
         })
     }

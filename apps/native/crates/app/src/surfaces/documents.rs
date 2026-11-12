@@ -169,6 +169,21 @@ pub fn save_failed(name: &str, failure: WriteFailure, file_exists: bool) -> Aler
         buttons,
     )
 }
+/// A save that went through while another version of the file arrived (a
+/// sync app, another computer): both are on disk, and the person is told
+/// which is which and where the other one is.
+pub fn other_version_kept(name: &str, file: &str, kept: &str) -> Alert<Action> {
+    Alert::new(
+        format!("“{name}” was saved, and another version of its file was kept."),
+        format!(
+            "While Powermove was saving, something else (a sync app or another computer) put a different version of “{file}” in its place. Your save is in “{file}”. The other version is next to it as “{kept}”. Nothing was lost; open the other version to see what it holds."
+        ),
+        vec![
+            Button::new("Show in Finder", Action::ShowInFinder).default(),
+            Button::new("OK", Action::Ok).cancel(),
+        ],
+    )
+}
 /// An edit that is applied but could not be written to the recovery data:
 /// the one moment unsaved work is not protected.
 pub fn not_protected(name: &str, failure: WriteFailure) -> Alert<Action> {
@@ -210,6 +225,28 @@ pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<
 #[cfg(test)]
 mod write_failure_tests {
     use super::*;
+
+    #[test]
+    fn a_version_kept_beside_a_save_is_named_with_a_way_to_it() {
+        let alert = other_version_kept(
+            "cut",
+            "cut.pmv",
+            "cut (other version 2026-11-12 14.03.22).pmv",
+        );
+        assert_eq!(
+            alert.message,
+            "“cut” was saved, and another version of its file was kept."
+        );
+        assert!(alert.informative.contains("Your save is in “cut.pmv”."));
+        assert!(
+            alert
+                .informative
+                .contains("next to it as “cut (other version 2026-11-12 14.03.22).pmv”")
+        );
+        assert_eq!(alert.labels(), ["Show in Finder", "OK"]);
+        assert!(alert.buttons[0].default);
+        assert!(!alert.informative.contains('/'), "names, never paths");
+    }
 
     #[test]
     fn a_failed_write_is_said_in_plain_words_whatever_the_kernel_reported() {

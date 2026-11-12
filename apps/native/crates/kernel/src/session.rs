@@ -246,6 +246,9 @@ pub enum ShellReply {
     Saved {
         session: SessionHandle,
         recovery_copy: Option<String>,
+        /// Another version of the file arrived while it was being saved:
+        /// the save is published and that version is kept beside it here.
+        displaced: Option<PathBuf>,
     },
     Closed {
         recovery_copy: Option<String>,
@@ -799,6 +802,7 @@ impl Kernel {
             .take()
             .unwrap();
         let receipt = result.map_err(failure)?;
+        let displaced = receipt.displaced.clone();
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
         self.refuse_faulted(&session.project)?;
@@ -829,6 +833,7 @@ impl Kernel {
         Ok(ShellReply::Saved {
             session,
             recovery_copy: None,
+            displaced,
         })
     }
     fn duplicate_slot(
@@ -1743,6 +1748,7 @@ impl Kernel {
             new_lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
         }
         let mut recovery_copy = None;
+        let mut displaced = None;
         let file_path = save_as.as_ref().map(|(path, _)| path.clone()).or_else(|| {
             match &self.sessions[id].destination {
                 Destination::File(path) => Some(path.clone()),
@@ -1767,9 +1773,10 @@ impl Kernel {
                 self.mark_save_point(id, &plan.document, plan.revision)?;
             }
             let p = self.project_mut(id).unwrap();
-            let result = plan
-                .and_then(|plan| plan.run())
-                .and_then(|receipt| p.store_mut().finish_save(receipt));
+            let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
+                displaced = receipt.displaced.clone();
+                p.store_mut().finish_save(receipt)
+            });
             if result.is_ok() {
                 self.save_published(id);
             }
@@ -1801,6 +1808,7 @@ impl Kernel {
         Ok(ShellReply::Saved {
             session: handle.clone(),
             recovery_copy,
+            displaced,
         })
     }
     fn save_library_slot(

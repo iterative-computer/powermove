@@ -337,6 +337,7 @@ impl Host {
             ShellReply::Saved {
                 session,
                 recovery_copy: None,
+                ..
             } => {
                 let p = self
                     .kernel

@@ -498,9 +498,14 @@ mod sys {
     }
 }
 
+/// Something a test does to the destination at a point of a publication,
+/// as a sync client or another machine would.
+#[doc(hidden)]
+pub type PublishHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
 /// Test hooks on publication.
 #[doc(hidden)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct PublishHooks {
     /// The volume has no atomic exchange (exFAT, HFS+, most network shares).
     pub no_exchange: bool,
@@ -509,6 +514,22 @@ pub struct PublishHooks {
     pub exchange_renames: bool,
     /// The volume has neither an exclusive rename nor hard links (exFAT).
     pub no_exclusive: bool,
+    /// Called with the destination after its last check, right before the
+    /// staged file is exchanged with it.
+    pub before_exchange: Option<PublishHook>,
+    /// Called with the destination right after the exchange.
+    pub after_exchange: Option<PublishHook>,
+}
+impl std::fmt::Debug for PublishHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishHooks")
+            .field("no_exchange", &self.no_exchange)
+            .field("exchange_renames", &self.exchange_renames)
+            .field("no_exclusive", &self.no_exclusive)
+            .field("before_exchange", &self.before_exchange.is_some())
+            .field("after_exchange", &self.after_exchange.is_some())
+            .finish()
+    }
 }
 
 /// `swapFiles`: `Ok(true)` when exchanged, `Ok(false)` when the volume or
@@ -726,46 +747,108 @@ pub enum Publish {
     Replace(FileVersion),
 }
 
-/// Renames the staged file to `<temp>.conflict.pmv` so neither version is
-/// lost, and returns the error naming it (`preserveConflict`).
-fn preserve_conflict(temp: TempFile, destination: &Path, message: &str) -> ProjectIoError {
-    let mut recovery = temp.path.clone().into_os_string();
-    recovery.push(".conflict.pmv");
-    let recovery = PathBuf::from(recovery);
-    let kept = temp.keep();
-    match fs::rename(&kept, &recovery) {
-        Ok(()) => {
-            let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
-            ProjectIoError::Conflict {
-                message: message.to_owned(),
-                recovery_path: recovery,
-            }
-        }
-        Err(_) => ProjectIoError::Conflict {
-            message: format!("{message} Recovery finalization failed."),
-            recovery_path: kept,
-        },
+/// `2026-11-12 14.03.22`, local time (a file name the person reads).
+fn local_stamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[cfg(unix)]
+    {
+        let seconds = now as libc::time_t;
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+        // SAFETY: a valid time and output storage; zeroed is a valid `tm`
+        // should the call fail.
+        let tm = unsafe {
+            libc::localtime_r(&seconds, tm.as_mut_ptr());
+            tm.assume_init()
+        };
+        format!(
+            "{:04}-{:02}-{:02} {:02}.{:02}.{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
     }
+    #[cfg(not(unix))]
+    backup_stamp(now as i64 * 1000)
+}
+
+/// Keeps the file an exchange displaced when it is not the version the save
+/// was allowed to replace: renamed, never over anything, to
+/// `<name> (other version <date time>).<ext>` beside the project, where the
+/// person finds it. Where that cannot be done it keeps a hidden name no
+/// sweep removes (`<staging name>.conflict.pmv`). Returns where it is.
+fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> PathBuf {
+    let held = temp.keep();
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let stem = destination
+        .file_stem()
+        .unwrap_or("project".as_ref())
+        .to_string_lossy();
+    let stamp = local_stamp();
+    for n in 1..=50 {
+        let mut name = format!("{stem} (other version {stamp}");
+        if n > 1 {
+            name.push_str(&format!(" {n}"));
+        }
+        name.push(')');
+        if let Some(extension) = destination.extension() {
+            name.push('.');
+            name.push_str(&extension.to_string_lossy());
+        }
+        let to = dir.join(name);
+        match install_exclusive(&held, &to, hooks) {
+            Ok(true) => return to,
+            Err(ProjectIoError::DestinationExists(_)) => continue,
+            _ => break,
+        }
+    }
+    let mut hidden = held.clone().into_os_string();
+    hidden.push(".conflict.pmv");
+    let hidden = PathBuf::from(hidden);
+    match fs::rename(&held, &hidden) {
+        Ok(()) => hidden,
+        Err(_) => held,
+    }
+}
+
+/// What a publication left on disk besides the published file.
+#[derive(Debug, Default)]
+pub(crate) struct Published {
+    /// The exchange found another version at the destination (it arrived
+    /// after the last check, or cannot be read). Ours is published; that
+    /// version is kept here, beside it.
+    pub displaced: Option<PathBuf>,
 }
 
 /// `publishFile`: atomically publishes `temp` (already flushed) at
 /// `destination`, whose content hash will be `new_hash`. On `Err` the
 /// destination holds what it held before, except for
 /// [`ProjectIoError::Finalize`] (our file is in place but the directory sync
-/// failed) and [`ProjectIoError::Conflict`] (both versions kept).
+/// failed) and [`ProjectIoError::Conflict`] (something else replaced our
+/// file right after it was published; both other versions are kept).
 ///
 /// An existing file is replaced only by the atomic exchange, which takes
 /// whatever is at the path at that instant and hands it back to be judged.
 /// Where the volume has none (see [`exchanges`]), nothing is replaced
 /// ([`ProjectIoError::NoSafeReplace`]): checking the file and then renaming
 /// over it would destroy a version that arrived in between, unread.
+///
+/// The exchange is never undone. When the file it hands back is not the
+/// version this save could replace, that file is kept beside the project
+/// ([`Published::displaced`]) and ours stays published: no call puts a file
+/// back only if the path still holds ours, so a put-back that lost that race
+/// would displace a third version, unread, from the place it arrived at.
 pub(crate) fn publish(
     temp: TempFile,
     destination: &Path,
     mode: &Publish,
     new_hash: &str,
     hooks: &PublishHooks,
-) -> Result<(), ProjectIoError> {
+) -> Result<Published, ProjectIoError> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let expected = match mode {
         Publish::CreateNew => None,
@@ -773,56 +856,52 @@ pub(crate) fn publish(
     };
     check_version(destination, expected, false)?;
     let incoming = lstat_file(&temp.path)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+    let mut published = Published::default();
     match expected {
         Some(expected) => {
-            if exchanges(destination, hooks)? && swap_files(&temp.path, destination, hooks)? {
-                // `temp.path` now names the displaced file. Verify it is the
-                // version we were allowed to replace.
-                let displaced = FileVersion::read(&temp.path).ok().flatten();
-                let ok = displaced.as_ref().is_some_and(|d| {
+            if !exchanges(destination, hooks)? {
+                return Err(ProjectIoError::NoSafeReplace);
+            }
+            if let Some(hook) = &hooks.before_exchange {
+                hook(destination);
+            }
+            if !swap_files(&temp.path, destination, hooks)? {
+                return Err(ProjectIoError::NoSafeReplace);
+            }
+            if let Some(hook) = &hooks.after_exchange {
+                hook(destination);
+            }
+            // `temp.path` now names the displaced file: the version we were
+            // allowed to replace (removed when `temp` drops), or one to keep.
+            let replaced = FileVersion::read(&temp.path)
+                .ok()
+                .flatten()
+                .is_some_and(|d| {
                     d.hash == expected.hash
                         && d.stat.same_identity(&expected.stat)
                         && d.stat.same_permissions(&expected.stat)
                 });
-                if !ok {
-                    if displaced.is_none() {
-                        return Err(preserve_conflict(
-                            temp,
-                            destination,
-                            "Could not verify the displaced project.",
-                        ));
-                    }
-                    // Only roll back our own published bytes.
-                    let current = FileVersion::read(destination).ok().flatten();
-                    let ours = current
-                        .as_ref()
-                        .is_some_and(|c| c.hash == new_hash && c.stat.same_identity(&incoming));
-                    if ours && swap_files(&temp.path, destination, hooks).unwrap_or(false) {
-                        let rolled = FileVersion::read(&temp.path).ok().flatten();
-                        if rolled
-                            .as_ref()
-                            .is_none_or(|r| r.hash != new_hash || !r.stat.same_identity(&incoming))
-                        {
-                            return Err(preserve_conflict(
-                                temp,
-                                destination,
-                                "The project changed during saving. The original was restored.",
-                            ));
-                        }
-                        let _ = sync_directory(dir);
-                        return Err(ProjectIoError::ChangedOnDisk);
-                    }
-                    return Err(preserve_conflict(
-                        temp,
-                        destination,
-                        "The project changed during saving.",
-                    ));
-                }
-                // Published. `temp` (the displaced old version) is removed on
-                // drop.
+            if replaced {
                 drop(temp);
             } else {
-                return Err(ProjectIoError::NoSafeReplace);
+                published.displaced = Some(keep_displaced(temp, destination, hooks));
+            }
+            // The path must still hold the file just published.
+            if !lstat_file(destination)
+                .ok()
+                .flatten()
+                .is_some_and(|now| now.same_identity(&incoming))
+            {
+                let _ = sync_directory(dir);
+                return Err(match published.displaced {
+                    Some(recovery_path) => ProjectIoError::Conflict {
+                        message: "The project file was replaced by something else while it was \
+                                  being saved."
+                            .into(),
+                        recovery_path,
+                    },
+                    None => ProjectIoError::ChangedOnDisk,
+                });
             }
         }
         None => {
@@ -852,7 +931,8 @@ pub(crate) fn publish(
             }
         }
     }
-    sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))
+    sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
+    Ok(published)
 }
 
 // ── version backups (`ProjectFiles.backup` / `retain`) ─────────────────────

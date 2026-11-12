@@ -877,6 +877,176 @@ fn a_save_never_trusts_an_exchange_that_only_renames() {
         .collect();
     assert!(left.is_empty(), "no staging file is left: {left:?}");
 }
+/// Puts `bytes` at `path` the way a sync client lands a version: written
+/// beside it, then renamed over it.
+fn land(path: &Path, bytes: &[u8]) {
+    let staged = path.with_extension("landing");
+    fs::write(&staged, bytes).unwrap();
+    fs::rename(&staged, path).unwrap();
+}
+fn visible_siblings(file: &Path) -> Vec<std::path::PathBuf> {
+    let mut found: Vec<_> = fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p != file && p.extension().is_some_and(|e| e == "pmv"))
+        .filter(|p| !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+        .collect();
+    found.sort();
+    found
+}
+/// Another version lands at the project's path after the save's last check
+/// and before the exchange. The exchange hands it back; it is not the
+/// version the save could replace. It is kept beside the project under a
+/// plain name the save reports, the save itself stands, and the session
+/// carries on saving normally.
+#[test]
+fn a_version_that_arrives_during_a_save_is_kept_beside_the_project() {
+    let dir = common::TempDir::new("exchange-b");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let ShellReply::Saved {
+        displaced: Some(kept),
+        ..
+    } = k
+        .finish_session_save(plan.run())
+        .expect("the save is published")
+    else {
+        panic!("the save says another version was kept")
+    };
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(fs::read(&kept).unwrap(), b"version B");
+    assert_eq!(
+        visible_siblings(&file),
+        std::slice::from_ref(&kept),
+        "beside the project"
+    );
+    assert!(
+        kept.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("cut (other version "),
+        "{kept:?}"
+    );
+    // Nothing is stuck: the next save is an ordinary one.
+    k.set_publish_hooks(Default::default());
+    rename_comp(&mut k, "P", "Two");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    assert!(matches!(
+        k.finish_session_save(plan.run()).unwrap(),
+        ShellReply::Saved {
+            displaced: None,
+            ..
+        }
+    ));
+    assert_eq!(saved_name(&file).as_deref(), Some("Two"));
+    assert_eq!(fs::read(&kept).unwrap(), b"version B");
+}
+/// Version B lands before the exchange and version C right after it. The
+/// save never puts B back: nothing can put a file back only if the path
+/// still holds ours, and a put-back that lost that race took C, unread, from
+/// the path it arrived at. C stays where it landed, B is kept beside it
+/// under the name the failed save reports, and the work is still open.
+#[test]
+fn a_second_version_arriving_after_the_exchange_is_never_displaced() {
+    let dir = common::TempDir::new("exchange-b-c");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+        after_exchange: Some(std::sync::Arc::new(|path| land(path, b"version C"))),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let failed = k
+        .finish_session_save(plan.run())
+        .expect_err("our file is no longer at the path");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"version C",
+        "C is where it landed"
+    );
+    let kept = visible_siblings(&file);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), b"version B");
+    assert!(
+        failed.to_string().contains(&*kept[0].to_string_lossy()),
+        "the failure names where B is: {failed}"
+    );
+    // The work is still open and Save As writes it.
+    k.set_publish_hooks(Default::default());
+    let rescued = dir.path("job/mine.pmv");
+    let plan = k
+        .prepare_session_save(session.clone(), Some(rescued.clone()), false)
+        .unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    assert_eq!(saved_name(&rescued).as_deref(), Some("One"));
+    assert_eq!(fs::read(&file).unwrap(), b"version C");
+}
+/// The file the exchange hands back cannot be read (a placeholder a sync
+/// client has not downloaded, a failing disk): it cannot be judged, so it is
+/// kept, beside the project under a plain name the save reports, never
+/// under a hidden one with the save reported as failed.
+#[test]
+fn a_displaced_file_that_cannot_be_read_is_kept_beside_the_project() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("exchange-unreadable");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_exchange: Some(std::sync::Arc::new(|path| {
+            let staged = path.with_extension("landing");
+            fs::write(&staged, b"cannot be read").unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o000)).unwrap();
+            fs::rename(&staged, path).unwrap();
+        })),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let ShellReply::Saved {
+        displaced: Some(kept),
+        ..
+    } = k
+        .finish_session_save(plan.run())
+        .expect("the save is published")
+    else {
+        panic!("the save says another version was kept")
+    };
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(visible_siblings(&file), std::slice::from_ref(&kept));
+    let meta = fs::metadata(&kept).unwrap();
+    assert_eq!(
+        (meta.len(), meta.permissions().mode() & 0o777),
+        (14, 0),
+        "the file itself, as it arrived"
+    );
+    fs::set_permissions(&kept, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read(&kept).unwrap(), b"cannot be read");
+}
 /// A disk with neither an exclusive rename nor hard links (exFAT) had no way
 /// at all to create a project file: the first Save and every Save As failed
 /// with "Operation not supported", and with Save refused there too the work
