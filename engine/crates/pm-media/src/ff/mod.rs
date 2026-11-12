@@ -208,6 +208,13 @@ impl Input {
         (s >= 0).then_some(s as usize)
     }
 
+    /// The best video stream that is a picture to play, not cover art.
+    pub fn picture(&self) -> Option<usize> {
+        self.best_video().filter(|&v| unsafe {
+            (*self.st(v)).disposition & ff::AV_DISPOSITION_ATTACHED_PIC as i32 == 0
+        })
+    }
+
     pub fn best_audio(&self) -> Option<usize> {
         let s = unsafe {
             ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0)
@@ -287,6 +294,74 @@ impl Input {
         self.with_first_packet(i, |p| unsafe { (*p).duration })
             .ok()
             .filter(|&d| d > 0)
+    }
+
+    /// Where each of `streams` ends, in its own timebase: the latest
+    /// `pts + duration` of its packets (`None`: no packet of it). Reads from
+    /// the last few seconds of the file, then from further back, until every
+    /// stream has shown a packet after the read position or the read began at
+    /// the start: a stream's last packet is then the last one read. For
+    /// containers that state no length per stream (Matroska).
+    pub(crate) fn stream_ends(&self, streams: &[usize]) -> Result<Vec<Option<i64>>> {
+        let (start, end) = unsafe { ((*self.fmt).start_time, (*self.fmt).duration) };
+        let start = if start == ff::AV_NOPTS_VALUE {
+            0
+        } else {
+            start
+        };
+        let mut back = 2 * ff::AV_TIME_BASE as i64;
+        loop {
+            let late = end != ff::AV_NOPTS_VALUE && end > back;
+            let ends = self.read_ends(streams, start + if late { end - back } else { 0 })?;
+            if !late || ends.iter().all(Option::is_some) {
+                return Ok(ends);
+            }
+            back = back.saturating_mul(4);
+        }
+    }
+
+    /// The latest packet end of each of `streams` read from `from`
+    /// (microseconds) to the end of the file.
+    fn read_ends(&self, streams: &[usize], from: i64) -> Result<Vec<Option<i64>>> {
+        let mut ends = vec![None; streams.len()];
+        unsafe {
+            check(
+                ff::av_seek_frame(self.fmt, -1, from, ff::AVSEEK_FLAG_BACKWARD as c_int),
+                "seek for stream ends",
+            )?;
+            let mut pkt = ff::av_packet_alloc();
+            let result = loop {
+                let r = ff::av_read_frame(self.fmt, pkt);
+                if r == ff::AVERROR_EOF {
+                    break Ok(());
+                }
+                if r < 0 {
+                    break Err(MediaError::Ffmpeg {
+                        what: "read for stream ends".into(),
+                        code: r,
+                        message: err_str(r),
+                    });
+                }
+                let at = streams
+                    .iter()
+                    .position(|&s| s == (*pkt).stream_index as usize);
+                let time = if (*pkt).pts != ff::AV_NOPTS_VALUE {
+                    (*pkt).pts
+                } else {
+                    (*pkt).dts
+                };
+                if let Some(at) = at
+                    && time != ff::AV_NOPTS_VALUE
+                {
+                    let packet_end = time + (*pkt).duration.max(0);
+                    ends[at] = Some(ends[at].map_or(packet_end, |e: i64| e.max(packet_end)));
+                }
+                ff::av_packet_unref(pkt);
+            };
+            ff::av_packet_free(&mut pkt);
+            result?;
+        }
+        Ok(ends)
     }
 
     fn with_first_packet<R>(

@@ -93,6 +93,9 @@ pub struct Interpretation {
     /// Crop to the file's clean aperture (`clap`). The default is the full
     /// encoded frame, as today's viewer shows it.
     pub clean_aperture: Option<bool>,
+    /// Which reading of the file's timestamps the asset's stored times
+    /// address: the asset's own `timing` member, not part of `interpret`.
+    pub clip: crate::clip::ClipTiming,
 }
 
 /// A member of `interpret` that cannot be used.
@@ -393,6 +396,9 @@ pub struct VideoReading {
     pub tone_map: Option<ToneMap>,
     /// The color description the source pass reads with.
     pub color: ColorDescription,
+    /// The asset's reading of the file's timestamps.
+    #[serde(skip)]
+    pub clip: crate::clip::ClipTiming,
 }
 
 fn rate_field<S: serde::Serializer>(f: &Field<Rate>, s: S) -> Result<S::Ok, S::Error> {
@@ -584,6 +590,7 @@ pub fn resolve_video(v: &VideoProbe, interp: &Interpretation) -> VideoReading {
         rotation: v.rotation.unwrap_or(0.0),
         hdr: c.hdr,
         color,
+        clip: interp.clip,
     }
 }
 

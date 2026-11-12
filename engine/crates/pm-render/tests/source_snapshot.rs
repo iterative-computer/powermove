@@ -68,7 +68,12 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let mut renderer = Renderer::headless().unwrap();
     let (size, bytes, tags) = renderer
-        .source_video_planes(&fixture, Ticks::ZERO, false)
+        .source_video_planes(
+            &fixture,
+            Ticks::ZERO,
+            pm_media::clip::ClipTiming::Presentation,
+            false,
+        )
         .unwrap()
         .expect("coded planes");
     assert_eq!((size.width, size.height), (160, 90));
@@ -85,9 +90,14 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     // A stream larger than the planes budget is resampled by the engine
     // instead; it is refused before the sink sees any bytes.
     let oversized = renderer
-        .source_video_planes_with::<()>(&fixture, Ticks::ZERO, false, 160 * 90 - 1, |_, _| {
-            panic!("an oversized stream must not be packed")
-        })
+        .source_video_planes_with::<()>(
+            &fixture,
+            Ticks::ZERO,
+            pm_media::clip::ClipTiming::Presentation,
+            false,
+            160 * 90 - 1,
+            |_, _| panic!("an oversized stream must not be packed"),
+        )
         .unwrap();
     assert!(oversized.is_none());
     // A still cannot silently become a P3/Canvas RGBA compositor payload.
@@ -96,7 +106,12 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     std::fs::write(&still, include_bytes!("../../../fixtures/still-red.png")).unwrap();
     assert!(
         renderer
-            .source_video_planes(&still, Ticks::ZERO, false)
+            .source_video_planes(
+                &still,
+                Ticks::ZERO,
+                pm_media::clip::ClipTiming::Presentation,
+                false
+            )
             .is_err()
     );
 }
@@ -108,7 +123,12 @@ fn original_prores_uses_native_conversion_when_the_presenter_cannot_import_it() 
     let mut renderer = Renderer::headless().unwrap();
     assert!(
         renderer
-            .source_video_planes(&fixture, Ticks::ZERO, false)
+            .source_video_planes(
+                &fixture,
+                Ticks::ZERO,
+                pm_media::clip::ClipTiming::Presentation,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -198,7 +218,12 @@ fn original_rotated_anamorphic_video_has_the_same_geometry_in_monitor_and_filmst
     let mut renderer = Renderer::headless().unwrap();
     assert!(
         renderer
-            .source_video_planes(&rotated, Ticks::ZERO, false)
+            .source_video_planes(
+                &rotated,
+                Ticks::ZERO,
+                pm_media::clip::ClipTiming::Presentation,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -382,7 +407,12 @@ fn source_interlaced_field_times_follow_file_and_explicit_interpretation() {
     let mut renderer = Renderer::headless().unwrap();
     assert!(
         renderer
-            .source_video_planes(&video, Ticks::ZERO, false)
+            .source_video_planes(
+                &video,
+                Ticks::ZERO,
+                pm_media::clip::ClipTiming::Presentation,
+                false
+            )
             .unwrap()
             .is_none()
     );
@@ -938,7 +968,12 @@ fn untagged_vp9_rendition_uses_native_composition_colour() {
         let time =
             Ticks::new((seconds * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap();
         let (_, planes, _) = renderer
-            .source_video_planes(&proxy, time, false)
+            .source_video_planes(
+                &proxy,
+                time,
+                pm_media::clip::ClipTiming::Presentation,
+                false,
+            )
             .unwrap()
             .expect("coded planes");
         let luma = planes[0];
