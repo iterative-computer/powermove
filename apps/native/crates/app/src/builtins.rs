@@ -399,7 +399,10 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx)})
+            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            // The Agent panel is a popover while its own window is open, a docked panel otherwise.
+            "agentPopover":self.builtins.opening_windows.contains("agent")
+                || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -777,7 +780,13 @@ impl Controller {
         let parent = (kind != WindowKind::Normal).then(|| window.window_handle());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
+        // The panel's first publication in this window already knows where it is shown.
+        let facts = self.facts(cx);
         cx.spawn(async move |this, cx| {
+            let told = runtime.clone();
+            cx.background_executor()
+                .spawn(async move { told.update_facts(facts) })
+                .await;
             if let Ok(ticket) = runtime.show(&id) {
                 let _ = ticket.await;
             }
@@ -1148,6 +1157,7 @@ impl Controller {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
+                    self.update_builtins(cx);
                     gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }

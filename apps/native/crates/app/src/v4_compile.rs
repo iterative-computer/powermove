@@ -887,6 +887,13 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
                     e.flex_col()
                 };
             }
+            "flexWrap" => {
+                e = if s == Some("wrap") {
+                    e.flex_wrap()
+                } else {
+                    e.flex_nowrap()
+                };
+            }
             "alignItems" => {
                 e = match s {
                     Some("center") => e.items_center(),

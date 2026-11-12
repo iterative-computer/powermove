@@ -44,6 +44,9 @@ pub(crate) struct PrefixKey {
     pub plan_size: (u32, u32),
     /// A preview (playback-resampled) frame's pixels never seed a final one.
     pub sampling: crate::sampling::Sampling,
+    /// Final output plans levels at the composition's density where their
+    /// effects need it.
+    pub final_output: bool,
 }
 
 /// A copy of the target after the first draws of a frame, with those draws

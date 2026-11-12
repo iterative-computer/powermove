@@ -21,6 +21,7 @@ pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
+pm-color = { path = "../../../../engine/crates/pm-color" }
 pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["system"] }
 pm-media = { path = "../../../../engine/crates/pm-media" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
@@ -54,5 +55,4 @@ pm-perf = { path = "../../../../engine/crates/pm-perf" }
 pm-audio = { path = "../../../../engine/crates/pm-audio", features = ["test-hooks"] }
 # Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
 pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
-pm-color = { path = "../../../../engine/crates/pm-color" }
 tempfile = "3"

@@ -153,6 +153,103 @@ fn preview_video_downscale_averages_detail_finer_than_its_pixels() {
     );
 }
 
+/// A preview-sized video frame is the area average of the exact frame's
+/// working colour, whatever the reading: averaging encoded values and
+/// converting afterwards darkens or shifts footage whose transfer is not the
+/// identity (a linear-light project, PQ, premultiplied alpha with a transfer),
+/// which then changes when playback pauses.
+#[test]
+fn preview_video_reduction_averages_working_colour() {
+    let gpu = pm_gpu::Gpu::new("preview reduction space").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cases = [
+        (
+            root.join("tests/fixtures/video/stripes-709-limited.mp4"),
+            WorkingEncoding::LinearLight,
+            37u32,
+        ),
+        (
+            root.join("tests/fixtures/video/hevc10-2020-pq.mp4"),
+            WorkingEncoding::Standard,
+            37,
+        ),
+        (
+            root.join("../../fixtures/hevc-alpha.mov"),
+            WorkingEncoding::LinearLight,
+            23,
+        ),
+        (
+            root.join("../../fixtures/prores4444-alpha.mov"),
+            WorkingEncoding::LinearLight,
+            23,
+        ),
+    ];
+    for (path, working, edge) in cases {
+        let mut media = MediaCache::new(&gpu.device);
+        let mut convert = |preview: bool| {
+            media.preview_video = preview;
+            media.draw_edge = Some(edge);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let target = media
+                .video(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    1,
+                    0.0,
+                    false,
+                    working,
+                    Precision::Float32,
+                    None,
+                    pm_time::Rate::FPS_30,
+                    false,
+                )
+                .unwrap()
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+            let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+            media.flush();
+            (target.width() as usize, target.height() as usize, pixels)
+        };
+        let (w, h, exact) = convert(false);
+        let (pw, ph, preview) = convert(true);
+        assert!(pw < w && ph < h, "{path:?}: {pw}x{ph} of {w}x{h}");
+        let (sx, sy) = (w as f64 / pw as f64, h as f64 / ph as f64);
+        let mut worst = (0.0f64, 0usize, 0usize);
+        for py in 0..ph {
+            for px in 0..pw {
+                let (x0, x1) = (px as f64 * sx, (px + 1) as f64 * sx);
+                let (y0, y1) = (py as f64 * sy, (py + 1) as f64 * sy);
+                let mut sum = [0.0f64; 4];
+                for y in y0.floor() as usize..(y1.ceil() as usize).min(h) {
+                    let wy = (y as f64 + 1.).min(y1) - (y as f64).max(y0);
+                    for x in x0.floor() as usize..(x1.ceil() as usize).min(w) {
+                        let wt = ((x as f64 + 1.).min(x1) - (x as f64).max(x0)) * wy;
+                        for c in 0..4 {
+                            sum[c] += f64::from(exact[(y * w + x) * 4 + c]) * wt;
+                        }
+                    }
+                }
+                for c in 0..4 {
+                    let want = sum[c] / (sx * sy);
+                    let got = f64::from(preview[(py * pw + px) * 4 + c]);
+                    let d = (got - want).abs() / want.abs().max(1.);
+                    if d > worst.0 {
+                        worst = (d, px, py);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.01,
+            "{path:?}: preview off the exact average by {worst:?}"
+        );
+    }
+}
+
 /// Exercise the production source compute pass with normalized f32 RGB.
 /// Keeping the input at f32 makes an accidental half-float conversion
 /// before RGBA8 storage observable independently of a video decoder.

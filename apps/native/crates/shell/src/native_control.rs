@@ -232,7 +232,18 @@ impl NativeControl {
                             )
                         }) {
                         Some(image) => {
+                            // A glyph segment: the panel's symbol size in a
+                            // segment a row high wide, never scaled to fit.
+                            let config =
+                                NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                                    t.metrics.symbol_panel as f64,
+                                    unsafe { NSFontWeightRegular },
+                                );
+                            let image =
+                                image.imageWithSymbolConfiguration(&config).unwrap_or(image);
                             v.setImage_forSegment(Some(&image), i as isize);
+                            v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
+                            v.setWidth_forSegment((t.metrics.row + t.space.xs) as f64, i as isize);
                             v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
                         }
                         None => v.setLabel_forSegment(&NSString::from_str(title), i as isize),

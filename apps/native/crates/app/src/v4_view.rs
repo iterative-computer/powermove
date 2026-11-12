@@ -345,7 +345,12 @@ impl SurfaceView {
                 continue;
             };
             let lease = view.binding.clone();
-            let options = node.props.get("options").cloned().unwrap_or(Value::Null);
+            // A segmented control's choices are its segment children.
+            let options = if view.component == Some(Component::SegmentedControl) {
+                Value::Array(segments(&surface, node).0)
+            } else {
+                node.props.get("options").cloned().unwrap_or(Value::Null)
+            };
             if self.leases.get(&id) != Some(&lease) || self.option_sets.get(&id) != Some(&options) {
                 self.subscriptions.remove(&id);
                 self.fields.remove(&id);
@@ -422,7 +427,12 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         let id = view.id;
-        let value = node.props.get("value").cloned().unwrap_or(Value::Null);
+        let segmented = matches!(kind, crate::v4_control::Kind::Segmented)
+            .then(|| segments(&self.publication.surface, node));
+        let value = match &segmented {
+            Some((_, selected, _)) => json!(selected),
+            None => node.props.get("value").cloned().unwrap_or(Value::Null),
+        };
         // A pop-up may title itself apart from its rows (`Fit (54 %)`).
         let display = node
             .props
@@ -438,12 +448,15 @@ impl SurfaceView {
             {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
-            let options = node
-                .props
-                .get("options")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let options = match &segmented {
+                Some((options, _, _)) => options.as_slice(),
+                None => node
+                    .props
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            };
             control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
             return;
         }
@@ -460,12 +473,15 @@ impl SurfaceView {
                 .and_then(Value::as_str)
                 .unwrap_or(label)
         );
-        let options = node
-            .props
-            .get("options")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let options = match segmented {
+            Some((options, _, _)) => options,
+            None => node
+                .props
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        };
         let button_role = node
             .props
             .get("metadata")
@@ -514,6 +530,15 @@ impl SurfaceView {
                 }
                 if matches!(kind, crate::v4_control::Kind::Push) {
                     v.send(id, "click", EventDetail::default(), cx);
+                } else if matches!(kind, crate::v4_control::Kind::Segmented) {
+                    // Choosing a segment is a press on that segment's node.
+                    let segment = v.publication.surface.node(id).and_then(|node| {
+                        let (_, _, ids) = segments(&v.publication.surface, node);
+                        ids.get(usize::try_from(value.as_i64()?).ok()?).copied()
+                    });
+                    if let Some(segment) = segment {
+                        v.send(segment, "click", EventDetail::default(), cx);
+                    }
                 } else {
                     v.change(id, value.clone(), cx);
                 }
@@ -588,6 +613,8 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
+            // A composer's panel draws the surface it is written on.
+            field.set_bare(kind == TextKind::Composer);
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field
@@ -1452,17 +1479,20 @@ impl SurfaceView {
         {
             return None;
         }
-        let value = self
-            .publication
-            .surface
-            .node(node.id)?
-            .props
-            .get("value")
-            .filter(|v| !v.is_null())?;
+        let props = &self.publication.surface.node(node.id)?.props;
+        let value = props.get("value").filter(|v| !v.is_null())?;
         let text = match (node.number, value.as_f64()) {
             (Some(number), Some(n)) => number.text(n),
             _ => value_text(value),
         };
+        // An empty one still says what it is for.
+        if text.is_empty() {
+            return props
+                .get("metadata")
+                .and_then(|m| m.get("placeholder"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
         Some(match &node.unit {
             Some(unit) if !text.is_empty() => format!("{text} {unit}"),
             _ => text,
@@ -2089,12 +2119,36 @@ pub(crate) fn status_announcements(
     *seen = Some(current);
     messages
 }
+/// A segmented control's segments as the native control takes them (a label,
+/// and a symbol where the segment is a glyph), the selected one's index (-1
+/// for none) and the segments' nodes, in order.
+fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Value>, i64, Vec<Id>) {
+    let (mut options, mut selected, mut ids) = (vec![], -1, vec![]);
+    for child in node.children.iter().filter_map(|id| surface.node(*id)) {
+        if Component::of(child) != Some(Component::Segment) {
+            continue;
+        }
+        if child.props.get("aria-checked") == Some(&Value::Bool(true)) {
+            selected = ids.len() as i64;
+        }
+        let label = child.props.get("label").cloned().unwrap_or(Value::Null);
+        options.push(
+            match child.props.get("attr").and_then(|a| a.get("symbol")) {
+                Some(symbol) => json!({"label": label, "symbol": symbol}),
+                None => json!({"label": label}),
+            },
+        );
+        ids.push(child.id);
+    }
+    (options, selected, ids)
+}
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
         Some(Component::PopUpButton) => Some(Kind::Popup),
         Some(Component::Checkbox | Component::Toggle) => Some(Kind::Checkbox),
         Some(Component::Switch) => Some(Kind::Switch),
+        Some(Component::SegmentedControl) => Some(Kind::Segmented),
         Some(Component::PushButton) => Some(Kind::Push),
         Some(Component::ToolbarItem)
             if panel == "export"

@@ -589,6 +589,9 @@ fn a_dictionary_trimmed_on_open_is_archived() {
         "the oldest step is trimmed"
     );
     call(&mut kernel, commands("Add", vec![add_layer("c")]));
+    // Worked out ahead of the save (as after every open) or by the save
+    // itself: the same judgment.
+    store(&kernel).save_warmup()();
     let path = dir.path("saved.pmv");
     let plan = kernel
         .prepare_session_save(session.clone(), Some(path.clone()), false)

@@ -892,3 +892,112 @@ fn offline_audible_media_is_what_the_export_would_hear() {
         ["Camera A", "tone", "voice"]
     );
 }
+
+/// Every SDR output delivers one picture of light out of range: colours past
+/// white ((1.6, 0.5, 0.2), (1.5, 0.1, 0.1), and twice white) read
+/// back from 8 and 16-bit PNG, H.264 and ProRes 422 (decoded to RGB as a
+/// player shows them) as the shared delivery rule (`pm_color::delivery`)
+/// clips them, channel by channel.
+#[test]
+fn sdr_outputs_deliver_one_picture_of_light_out_of_range() {
+    let colors = [[0.8, 0.25, 0.1], [0.75, 0.05, 0.05], [1.0, 1.0, 1.0]];
+    // Each colour twice, the upper one added: twice the encoded colour.
+    let layers = colors
+        .iter()
+        .enumerate()
+        .flat_map(|(i, c)| [(i, c, true), (i, c, false)])
+        .map(|(i, c, add)| {
+            let hex = format!(
+                "#{:02X}{:02X}{:02X}",
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8
+            );
+            let mut l = layer(
+                &format!("p{i}{}", if add { "a" } else { "b" }),
+                "solid",
+                json!({ "color": hex, "w": 32, "h": 32 }),
+                32.0 * i as f64,
+                0.0,
+                1.0,
+            );
+            if add {
+                l["blend"] = json!("add");
+            }
+            l
+        })
+        .collect();
+    let doc = project(96, 32, 1.0, solid_fill("#000000"), layers);
+    // Encoded 8-bit hex of each colour, doubled, then the delivery rule.
+    let want: Vec<[f64; 3]> = colors
+        .iter()
+        .map(|c| {
+            let over = c.map(|v| ((v * 255.0f64).floor() / 255.0) * 2.0);
+            pm_color::delivery::sdr(over)
+        })
+        .collect();
+    let dir = scratch("sdr-delivery");
+    let mut renderer = Renderer::headless().unwrap();
+    assert!(
+        renderer
+            .set_definitions(&pm_render::builtin_definitions())
+            .unwrap()
+            .is_empty()
+    );
+    let cases: Vec<(&str, ExportFormat, f64)> = vec![
+        (
+            "png8",
+            ExportFormat::PngStill { sixteen_bit: false },
+            1.5 / 255.0,
+        ),
+        ("png16", ExportFormat::PngStill { sixteen_bit: true }, 0.002),
+        ("h264", ExportFormat::H264, 0.04),
+        (
+            "prores",
+            ExportFormat::ProRes {
+                profile: WireProRes::Standard,
+            },
+            0.01,
+        ),
+    ];
+    for (name, format, tolerance) in cases {
+        let mut s = settings(format, WireAlpha::None, 1.0);
+        s.size = Size::new(96, 32);
+        let ext = if format.is_image() {
+            "png"
+        } else if matches!(format, ExportFormat::H264) {
+            "mp4"
+        } else {
+            "mov"
+        };
+        let path = dir.join(format!("{name}.{ext}"));
+        let delivered = export_to(
+            &mut renderer,
+            &job(&doc, MediaPaths::default(), s, path.clone()),
+        );
+        let input = if format.is_image() {
+            pm_export::png::read(&delivered.path, true)
+                .unwrap()
+                .1
+                .unwrap()
+        } else {
+            pm_export::mac::reader::decode_frame(
+                &delivered.path,
+                0,
+                pm_export::timescale::video_timing(pm_time::Rate::FPS_30).unwrap(),
+                InputFormat::Rgba16,
+            )
+            .unwrap()
+        };
+        for (i, want) in want.iter().enumerate() {
+            let got = pm_export::convert::sample_ycbcra(&input, 32 * i + 8, 8);
+            for c in 0..3 {
+                assert!(
+                    (got[c] - want[c]).abs() <= tolerance,
+                    "{name} patch {i}: {got:?} vs {want:?}"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

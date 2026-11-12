@@ -253,6 +253,30 @@ fn decoded(p: vec2<u32>) -> vec4<f32> {
     return v;
 }
 
+// One source sample as premultiplied working colour (the transfer, primaries,
+// alpha and matte interpretation of the reading).
+fn working(stored: vec4<f32>) -> vec4<f32> {
+    switch P.a.w {
+        case 0u: {
+            return vec4<f32>(to_working(stored.rgb), 1.0);
+        }
+        case 1u: {
+            return vec4<f32>(to_working(stored.rgb) * stored.a, stored.a);
+        }
+        case 2u: {
+            return stored;
+        }
+        case 3u: {
+            return transform_premultiplied(stored);
+        }
+        default: {
+            let removed = vec4<f32>(stored.rgb - (1.0 - stored.a) * P.matte.rgb, stored.a);
+            let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
+            return select(transform_premultiplied(removed), removed, identity);
+        }
+    }
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(out);
@@ -261,16 +285,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let xy = vec2<i32>(id.xy);
     let input_dims = textureDimensions(luma);
-    var stored: vec4<f32>;
+    var w: vec4<f32>;
     if (all(input_dims == dims)) {
         // The exact path: the source pixel itself.
-        stored = decoded(id.xy);
+        w = working(decoded(id.xy));
     } else if (all(input_dims >= dims)) {
         // A preview destination smaller than the source: the area average of
         // the source pixels under each destination pixel (partial pixels at
         // the footprint's edges weighted by their overlap), so detail finer
         // than the destination averages out instead of aliasing into moire.
-        // Straight alpha averages colour weighted by coverage.
+        // Each sample is averaged as premultiplied working colour, as the
+        // exact frame's own filtering later averages it.
         let scale = vec2<f32>(input_dims) / vec2<f32>(dims);
         let lo = vec2<f32>(id.xy) * scale;
         let hi = lo + scale;
@@ -281,17 +306,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let wy = min(f32(y + 1u), hi.y) - max(f32(y), lo.y);
             for (var x = p0.x; x <= p1.x; x++) {
                 let wt = (min(f32(x + 1u), hi.x) - max(f32(x), lo.x)) * wy;
-                let s = decoded(vec2<u32>(x, y));
-                if (P.a.w == 1u) { sum += vec4<f32>(s.rgb * s.a, s.a) * wt; }
-                else { sum += s * wt; }
+                sum += working(decoded(vec2<u32>(x, y))) * wt;
             }
         }
-        let avg = sum / (scale.x * scale.y);
-        if (P.a.w == 1u) {
-            stored = vec4<f32>(select(vec3<f32>(0.0), avg.rgb / avg.a, avg.a > 0.0), avg.a);
-        } else {
-            stored = avg;
-        }
+        w = sum / (scale.x * scale.y);
     } else {
         // A side larger than the source (preview sizing never upscales):
         // bilinear at the destination's pixel centres.
@@ -303,27 +321,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let c = vec2<u32>(clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi));
         let d = vec2<u32>(clamp(base + vec2<i32>(1), vec2<i32>(0), hi));
         let t = fract(source);
-        stored = mix(mix(decoded(a), decoded(b), t.x), mix(decoded(c), decoded(d), t.x), t.y);
-    }
-    var w: vec4<f32>;
-    switch P.a.w {
-        case 0u: {
-            w = vec4<f32>(to_working(stored.rgb), 1.0);
-        }
-        case 1u: {
-            w = vec4<f32>(to_working(stored.rgb) * stored.a, stored.a);
-        }
-        case 2u: {
-            w = stored;
-        }
-        case 3u: {
-            w = transform_premultiplied(stored);
-        }
-        default: {
-            let removed = vec4<f32>(stored.rgb - (1.0 - stored.a) * P.matte.rgb, stored.a);
-            let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
-            w = select(transform_premultiplied(removed), removed, identity);
-        }
+        w = mix(mix(working(decoded(a)), working(decoded(b)), t.x),
+                mix(working(decoded(c)), working(decoded(d)), t.x), t.y);
     }
     if (P.c.z == 1u) {
         w = vec4<f32>(quantizeToF16(w.r), quantizeToF16(w.g), quantizeToF16(w.b), quantizeToF16(w.a));

@@ -706,6 +706,9 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("star", "Star", "star"),
 ];
 const SHAPE_SEGMENT: isize = 5;
+/// A tool segment's width, and the room AppKit's menu indicator takes in one.
+const TOOL_SEGMENT: f64 = 34.;
+const TOOL_MENU_INDICATOR: f64 = 12.;
 const TOOLBAR: [&str; 7] = [
     "home",
     "title",
@@ -1178,6 +1181,7 @@ struct ToolbarState {
     /// The project tabs (the window's tab group), in the leading area.
     tabs: Retained<NSView>,
     tabs_width: Retained<NSLayoutConstraint>,
+    home: Retained<NSButton>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -1194,11 +1198,6 @@ define_class!(
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
             toolbar_ids()
-        }
-        /// Home is the toolbar's one selectable item: selected while it shows.
-        #[unsafe(method_id(toolbarSelectableItemIdentifiers:))]
-        fn selectable(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
-            NSArray::from_retained_slice(&[NSString::from_str("home")])
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
@@ -1247,10 +1246,25 @@ impl ToolbarDelegate {
                     tabs.heightAnchor()
                         .constraintEqualToConstant(tokens.metrics.control as f64)
                         .setActive(true);
+                    // Home is a toolbar toggle button: while Home shows, its
+                    // on state is the one AppKit draws for the selected tab
+                    // and the selected tool beside it.
+                    let home = NSButton::buttonWithImage_target_action(
+                        &toolbar_symbol("house", "Projects", &tokens),
+                        Some(&target),
+                        Some(sel!(act:)),
+                        mtm,
+                    );
+                    home.setBezelStyle(NSBezelStyle::Toolbar);
+                    home.setButtonType(NSButtonType::PushOnPushOff);
+                    home.setTag(TOOLBAR.iter().position(|n| *n == "home").unwrap() as isize);
+                    home.setToolTip(Some(&NSString::from_str("Projects")));
+                    home.setAccessibilityLabel(Some(&NSString::from_str("Projects")));
                     ToolbarState {
                         target,
                         tabs,
                         tabs_width,
+                        home,
                         tokens,
                     }
                 })),
@@ -1279,7 +1293,16 @@ impl ToolbarDelegate {
                 )
             };
             for i in 0..TOOLS.len() {
-                control.setWidth_forSegment(34., i as isize);
+                // The Shape segment also holds a menu indicator: it is wider
+                // by the indicator, so its glyph is drawn at the size of its
+                // neighbours instead of being scaled down to make room.
+                let width = if i as isize == SHAPE_SEGMENT {
+                    TOOL_SEGMENT + TOOL_MENU_INDICATOR
+                } else {
+                    TOOL_SEGMENT
+                };
+                control.setWidth_forSegment(width, i as isize);
+                control.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
             }
             control.setSelectedSegment(0);
             control.setAccessibilityLabel(Some(&NSString::from_str("Tools")));
@@ -1319,6 +1342,11 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
         }
+        if name == "home" {
+            item.setView(Some(&self.ivars().home));
+            item.setLabel(&NSString::from_str("Projects"));
+            return Some(item);
+        }
         if name == "title" {
             // The open projects, as v1 had them in its title bar.
             item.setView(Some(&self.ivars().tabs));
@@ -1330,7 +1358,6 @@ impl ToolbarDelegate {
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
         let (sym, label) = match name.as_str() {
-            "home" => ("house", "Projects"),
             "agent" => ("sparkles", "Agent"),
             "export" => ("square.and.arrow.up", "Export"),
             "panelLibrary" => ("square.grid.2x2", "Panels"),
@@ -2293,15 +2320,23 @@ impl Host {
     /// document's own controls (tools, sidebars, Export, the title) step
     /// aside, as v1's titlebar hides Export and the panel library on Home.
     pub fn set_home(&self, home: bool) {
+        // A press flips the button by itself; what it shows is always what
+        // the window shows.
+        let state = if home {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        };
+        let button = &self._delegate.ivars().home;
+        if button.state() != state {
+            button.setState(state);
+        }
         if self.home.get() == home {
             return;
         }
         self.home.set(home);
         self.sync_sidebar();
         self.sync_tabs();
-        let id = NSString::from_str("home");
-        self._toolbar
-            .setSelectedItemIdentifier(home.then_some(&*id));
         for item in self._toolbar.items().to_vec() {
             let name = item.itemIdentifier().to_string();
             // The tabs stay, as in v1's title bar on Home.
@@ -2426,7 +2461,16 @@ impl Host {
                 walk(&child, depth + 1, out);
             }
         }
-        let mut out = String::new();
+        // Who has the keyboard comes first: a text view that took it would
+        // swallow the editor's shortcuts.
+        let mut out = format!(
+            "first responder: {}\n",
+            self.window.firstResponder().map_or("none".into(), |r| r
+                .class()
+                .name()
+                .to_string_lossy()
+                .into_owned())
+        );
         if let Some(root) = self
             .window
             .contentView()
