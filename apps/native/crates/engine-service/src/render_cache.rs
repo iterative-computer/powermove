@@ -1862,10 +1862,17 @@ fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
-/// another renderer), taken once.
+/// another renderer), taken once. A development build takes
+/// `PM_RENDER_CACHE_RENDERER` instead when set, so a rebuild that did not
+/// change drawing keeps a long fill (measurement runs; never a release).
 fn renderer_identity() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
+        if cfg!(debug_assertions)
+            && let Ok(pinned) = std::env::var("PM_RENDER_CACHE_RENDERER")
+        {
+            return format!("pinned {pinned}");
+        }
         let digest = std::env::current_exe()
             .ok()
             .and_then(|exe| std::fs::read(exe).ok())
