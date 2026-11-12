@@ -635,6 +635,17 @@ impl Editor {
         // Development builds: `--open reviewViews` with `--save-dir` writes
         // the window's AppKit view tree there.
         #[cfg(debug_assertions)]
+        if let Some((action, index)) = cmd
+            .name
+            .strip_prefix("reviewTab:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let (Some(host), Ok(index)) = (&self.host, index.parse()) {
+                host.borrow().review_tab(action, index);
+            }
+            return;
+        }
+        #[cfg(debug_assertions)]
         if cmd.name == "reviewViews" {
             if let (Some(host), Ok(dir)) = (&self.host, std::env::var("PM_NATIVE_REVIEW_SAVE_DIR"))
             {

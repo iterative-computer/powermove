@@ -411,6 +411,42 @@ define_class!(
                 window.performClose(None);
             }
         }
+        #[unsafe(method(closeOtherTabs:))]
+        fn close_other_tabs(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                for other in tab_windows(&window) {
+                    if other.windowNumber() != number {
+                        other.performClose(None);
+                    }
+                }
+            }
+        }
+        #[unsafe(method(moveTabLeft:))]
+        fn move_tab_left(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                move_tab(&window, -1);
+            }
+        }
+        #[unsafe(method(moveTabRight:))]
+        fn move_tab_right(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                move_tab(&window, 1);
+            }
+        }
+        #[unsafe(method(moveTabOut:))]
+        fn move_tab_out(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                window.moveTabToNewWindow(None);
+            }
+        }
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _: &AnyObject) {
             self.send(Command { name: "newProject".into(), args: vec![], token: None });
@@ -668,7 +704,15 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("star", "Star", "star"),
 ];
 const SHAPE_SEGMENT: isize = 5;
-const TOOLBAR: [&str; 5] = ["home", "title", "tools", "agent", "export"];
+const TOOLBAR: [&str; 7] = [
+    "home",
+    "title",
+    "tools",
+    "agent",
+    "export",
+    "panelLibrary",
+    "settings",
+];
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -676,6 +720,103 @@ struct Tab {
     title: String,
     edited: bool,
     selected: bool,
+}
+struct TabIvars {
+    close: Retained<NSButton>,
+    edited: bool,
+}
+define_class!(
+    /// One project tab in the toolbar: its title button with the close
+    /// button in the leading slot. The close button shows under the pointer;
+    /// an edited project shows a dot there instead, as the system's tabs do.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMShellTab"]
+    #[ivars = TabIvars]
+    struct TabView;
+    impl TabView {
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), updateTrackingAreas];
+            }
+            for area in self.trackingAreas().to_vec() {
+                self.removeTrackingArea(&area);
+            }
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    <NSTrackingArea as objc2::AllocAnyThread>::alloc(),
+                    self.bounds(),
+                    NSTrackingAreaOptions::MouseEnteredAndExited
+                        | NSTrackingAreaOptions::ActiveAlways
+                        | NSTrackingAreaOptions::InVisibleRect,
+                    Some(self),
+                    None,
+                )
+            };
+            self.addTrackingArea(&area);
+        }
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _: &NSEvent) {
+            self.hover(true);
+        }
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _: &NSEvent) {
+            self.hover(false);
+        }
+    }
+);
+impl TabView {
+    fn hover(&self, hovered: bool) {
+        let TabIvars { close, edited } = self.ivars();
+        let (name, points) = if hovered || !edited {
+            ("xmark", 9.)
+        } else {
+            ("circle.fill", 6.)
+        };
+        let config =
+            NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
+                NSFontWeightSemibold
+            });
+        let image = symbol(name, "Close Project");
+        close.setImage(Some(
+            &image.imageWithSymbolConfiguration(&config).unwrap_or(image),
+        ));
+        close.setHidden(!hovered && !edited);
+    }
+}
+/// The windows of `window`'s tab group, in tab order (itself when alone).
+fn tab_windows(window: &NSWindow) -> Vec<Retained<NSWindow>> {
+    window
+        .tabbedWindows()
+        .map(|t| t.to_vec())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            vec![unsafe { Retained::retain(window as *const _ as *mut NSWindow).unwrap() }]
+        })
+}
+/// Moves `window` `by` places along its tab group and keeps it selected.
+fn move_tab(window: &NSWindow, by: isize) {
+    let windows = tab_windows(window);
+    let Some(at) = windows
+        .iter()
+        .position(|w| w.windowNumber() == window.windowNumber())
+    else {
+        return;
+    };
+    let to = at as isize + by;
+    if to < 0 || to >= windows.len() as isize {
+        return;
+    }
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if group.is_null() {
+            return;
+        }
+        let _: () = msg_send![group, removeWindow: window];
+        let _: () = msg_send![group, insertWindow: window, atIndex: to];
+        let _: () = msg_send![group, setSelectedWindow: window];
+    }
 }
 /// Widest a project tab grows; its title truncates in the middle.
 const TAB_MAX: f64 = 168.;
@@ -717,8 +858,14 @@ define_class!(
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let mut v: Vec<_> = TOOLBAR.iter().map(|s| NSString::from_str(s)).collect();
     let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
+    // Home and the tabs lead; the tools are the centred item between two
+    // flexible spaces; Export, a space, then Panels and Settings trail.
     v.insert(2, NSString::from_str(&f.to_string()));
     v.insert(4, NSString::from_str(&f.to_string()));
+    v.insert(
+        7,
+        NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
+    );
     NSArray::from_retained_slice(&v)
 }
 fn symbol(s: &str, label: &str) -> Retained<NSImage> {
@@ -780,6 +927,9 @@ impl ToolbarDelegate {
                     mtm,
                 )
             };
+            for i in 0..TOOLS.len() {
+                control.setWidth_forSegment(34., i as isize);
+            }
             control.setSelectedSegment(0);
             control.setAccessibilityLabel(Some(&NSString::from_str("Tools")));
             control.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tools")));
@@ -824,67 +974,32 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Projects"));
             return Some(item);
         }
+        // Every other item is a plain bordered toolbar item (an image, or an
+        // image and title for Export): the system draws its glass, spaces
+        // it and sizes it. Export is the bar's one prominent item, tinted
+        // with the accent.
         let (sym, label) = match name.as_str() {
             "home" => ("house", "Projects"),
             "agent" => ("sparkles", "Agent"),
             "export" => ("square.and.arrow.up", "Export"),
+            "panelLibrary" => ("square.grid.2x2", "Panels"),
+            "settings" => ("gearshape", "Settings"),
             _ => return None,
         };
-        let b = unsafe {
-            if name == "export" {
-                NSButton::buttonWithTitle_image_target_action(
-                    &NSString::from_str(label),
-                    &toolbar_symbol(sym, label, t),
-                    Some(target),
-                    Some(sel!(act:)),
-                    mtm,
-                )
-            } else {
-                NSButton::buttonWithImage_target_action(
-                    &toolbar_symbol(sym, label, t),
-                    Some(target),
-                    Some(sel!(act:)),
-                    mtm,
-                )
-            }
-        };
-        b.setAccessibilityIdentifier(Some(&NSString::from_str(&format!("shell.toolbar.{name}"))));
-        b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
-        if name == "home" {
-            // v1's home tab at the leading edge of the titlebar (`.project-home`).
-            item.setImage(Some(&toolbar_symbol(sym, label, t)));
-            unsafe {
-                item.setTarget(Some(target));
-                item.setAction(Some(sel!(act:)));
-            }
-            item.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
-            item.setBordered(true);
-            item.setLabel(&NSString::from_str(label));
-            item.setToolTip(Some(&NSString::from_str(label)));
-            return Some(item);
+        item.setImage(Some(&toolbar_symbol(sym, label, t)));
+        unsafe {
+            item.setTarget(Some(target));
+            item.setAction(Some(sel!(act:)));
         }
-        b.setToolTip(Some(&NSString::from_str(label)));
-        b.setAccessibilityLabel(Some(&NSString::from_str(label)));
-        b.setBezelStyle(
-            if t.material(
-                Surface::Toolbar,
-                objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some(),
-            ) == Material::Glass
-            {
-                NSBezelStyle::Glass
-            } else {
-                NSBezelStyle::Push
-            },
-        );
-        if name == "export" {
-            if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some() {
-                b.setTintProminence(NSTintProminence::Primary);
-            }
-            b.setBezelColor(Some(&native_color(t.colors.accent)));
-            b.setContentTintColor(Some(&native_color(t.colors.selected_text)));
-        }
-        item.setView(Some(&b));
+        item.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
+        item.setBordered(true);
         item.setLabel(&NSString::from_str(label));
+        item.setToolTip(Some(&NSString::from_str(label)));
+        if name == "export" {
+            item.setTitle(&NSString::from_str(label));
+            item.setStyle(NSToolbarItemStyle::Prominent);
+            item.setBackgroundTintColor(Some(&native_color(t.colors.accent)));
+        }
         Some(item)
     }
 }
@@ -1596,12 +1711,7 @@ impl Host {
     /// group, a title, an edited state or the selection changes.
     pub fn sync_tabs(&self) {
         let own = self.window.windowNumber();
-        let group = self
-            .window
-            .tabbedWindows()
-            .map(|t| t.to_vec())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| vec![self.window.clone()]);
+        let group = tab_windows(&self.window);
         let selected = unsafe {
             let tab_group: *mut AnyObject = msg_send![&*self.window, tabGroup];
             let window: *mut NSWindow = if tab_group.is_null() {
@@ -1643,23 +1753,47 @@ impl Host {
             let image = symbol(name, label);
             image.imageWithSymbolConfiguration(&config).unwrap_or(image)
         };
-        let mut x = 0.;
-        for tab in &tabs {
-            let title = if tab.edited {
-                format!("{} •", tab.title)
-            } else {
-                tab.title.clone()
+        // With more projects than fit at the narrowest width, the strip
+        // shows as many as fit (the selected one among them) and a pull-down
+        // lists them all.
+        let fits = ((room / TAB_MIN).floor() as usize).max(1);
+        let mut shown: Vec<&Tab> = tabs.iter().take(fits).collect();
+        if let Some(selected) = tabs.iter().find(|t| t.selected)
+            && !shown.iter().any(|t| t.window == selected.window)
+            && let Some(last) = shown.last_mut()
+        {
+            *last = selected;
+        }
+        let item = |title: &str, action: objc2::runtime::Sel, tag: isize| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(""),
+                )
             };
+            unsafe { item.setTarget(Some(target)) };
+            item.setTag(tag);
+            item
+        };
+        let blank = NSImage::initWithSize(
+            <NSImage as objc2::AllocAnyThread>::alloc(),
+            NSSize::new(10., 10.),
+        );
+        let mut x = 0.;
+        for tab in shown {
             let button = unsafe {
                 NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(&title),
+                    &NSString::from_str(&tab.title),
                     Some(target),
                     Some(sel!(selectTab:)),
                     mtm,
                 )
             };
             // The system's toolbar bezel: the selected tab keeps it, the
-            // others show it under the pointer.
+            // others show it under the pointer. A blank leading image keeps
+            // the close button's slot inside the bezel.
             button.setBezelStyle(NSBezelStyle::Toolbar);
             button.setButtonType(NSButtonType::PushOnPushOff);
             button.setState(if tab.selected {
@@ -1668,6 +1802,8 @@ impl Host {
                 NSControlStateValueOff
             });
             button.setShowsBorderOnlyWhileMouseInside(!tab.selected);
+            button.setImage(Some(&blank));
+            button.setImagePosition(NSCellImagePosition::ImageLeading);
             button.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
             button.setFont(Some(&NSFont::systemFontOfSize_weight(
                 t.typography.title as f64,
@@ -1682,27 +1818,76 @@ impl Host {
             button.setTag(tab.window);
             button.setToolTip(Some(&NSString::from_str(&tab.title)));
             button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab")));
+            // Right-click: the tab's own menu (reorder, detach, close).
+            let menu = NSMenu::new(mtm);
+            menu.addItem(&item("Close Tab", sel!(closeTab:), tab.window));
+            menu.addItem(&item("Close Other Tabs", sel!(closeOtherTabs:), tab.window));
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            menu.addItem(&item("Move Tab Left", sel!(moveTabLeft:), tab.window));
+            menu.addItem(&item("Move Tab Right", sel!(moveTabRight:), tab.window));
+            menu.addItem(&item(
+                "Move Tab to New Window",
+                sel!(moveTabOut:),
+                tab.window,
+            ));
+            unsafe { button.setMenu(Some(&menu)) };
             let width = (button.fittingSize().width + 8.).clamp(TAB_MIN, widest);
-            button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)));
-            self.tabs.addSubview(&button);
-            x += width;
-            if tab.selected {
-                let close = unsafe {
-                    NSButton::buttonWithImage_target_action(
-                        &glyph("xmark", "Close Project", 9.),
-                        Some(target),
-                        Some(sel!(closeTab:)),
-                        mtm,
-                    )
-                };
-                close.setBordered(false);
-                close.setTag(tab.window);
-                close.setToolTip(Some(&NSString::from_str("Close Project")));
-                close.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(20., height)));
-                self.tabs.addSubview(&close);
-                x += 20.;
+            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+            let close = unsafe {
+                NSButton::buttonWithImage_target_action(
+                    &glyph("xmark", "Close Project", 9.),
+                    Some(target),
+                    Some(sel!(closeTab:)),
+                    mtm,
+                )
+            };
+            close.setBordered(false);
+            close.setTag(tab.window);
+            close.setToolTip(Some(&NSString::from_str("Close Project")));
+            close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab.close")));
+            close.setFrame(NSRect::new(
+                NSPoint::new(6., (height - 16.) / 2.),
+                NSSize::new(16., 16.),
+            ));
+            let view: Retained<TabView> = unsafe {
+                msg_send![
+                    super(TabView::alloc(mtm).set_ivars(TabIvars {
+                        close: close.clone(),
+                        edited: tab.edited,
+                    })),
+                    initWithFrame: NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height))
+                ]
+            };
+            view.addSubview(&button);
+            view.addSubview(&close);
+            view.hover(false);
+            self.tabs.addSubview(&view);
+            x += width + 2.;
+        }
+        if tabs.len() > fits {
+            let more = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::new(NSPoint::new(x, 0.), NSSize::new(34., height)),
+                true,
+            );
+            more.setBezelStyle(NSBezelStyle::Toolbar);
+            more.setShowsBorderOnlyWhileMouseInside(true);
+            more.addItemWithTitle(&NSString::from_str(""));
+            if let Some(menu) = more.menu() {
+                for tab in &tabs {
+                    let row = item(&tab.title, sel!(selectTab:), tab.window);
+                    row.setState(if tab.selected {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                    menu.addItem(&row);
+                }
             }
-            x += 2.;
+            more.setToolTip(Some(&NSString::from_str("All Projects")));
+            more.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tabs.all")));
+            self.tabs.addSubview(&more);
+            x += 36.;
         }
         let add = unsafe {
             NSButton::buttonWithImage_target_action(
@@ -1740,7 +1925,7 @@ impl Host {
         for item in self._toolbar.items().to_vec() {
             let name = item.itemIdentifier().to_string();
             // The tabs stay, as in v1's title bar on Home.
-            if matches!(name.as_str(), "tools" | "export") {
+            if matches!(name.as_str(), "tools" | "export" | "panelLibrary") {
                 item.setHidden(home);
             }
         }
@@ -1790,6 +1975,46 @@ impl Host {
             Some(&self.gpui),
         );
         *slot = Some(view);
+    }
+    /// Development builds: a tab action by index, through the same code the
+    /// tab's buttons and menu run (`--open reviewTab:close:1`).
+    #[cfg(debug_assertions)]
+    pub fn review_tab(&self, action: &str, index: usize) {
+        let windows = tab_windows(&self.window);
+        let Some(window) = windows.get(index) else {
+            return;
+        };
+        match action {
+            "select" => unsafe {
+                let group: *mut AnyObject = msg_send![&**window, tabGroup];
+                if !group.is_null() {
+                    let _: () = msg_send![group, setSelectedWindow: &**window];
+                }
+            },
+            "close" => window.performClose(None),
+            "left" => move_tab(window, -1),
+            "right" => move_tab(window, 1),
+            "out" => window.moveTabToNewWindow(None),
+            // Every other editor window joins this one's group again, as
+            // dragging its tab back in (or Window ▸ Merge All Windows) does.
+            "merge" => {
+                let app = NSApplication::sharedApplication(self.window.mtm());
+                let own = self.window.tabbingIdentifier();
+                for other in app.windows().to_vec() {
+                    if other.windowNumber() != self.window.windowNumber()
+                        && other.tabbingIdentifier() == own
+                        && other.isVisible()
+                        && !windows
+                            .iter()
+                            .any(|w| w.windowNumber() == other.windowNumber())
+                    {
+                        self.window
+                            .addTabbedWindow_ordered(&other, NSWindowOrderingMode::Above);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     /// Development builds: the window's whole AppKit view tree (class, frame,
     /// hidden), from the theme frame down, so a review can show which system

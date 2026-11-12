@@ -40,6 +40,9 @@ pub struct Strip {
     pub rim: (u32, f32),
     /// The ring along the top edge and round the top corners: brighter.
     pub rim_top: (u32, f32),
+    /// Width of the ring in points: 1, or 2 on a selected strip so it reads
+    /// at a glance in a dense timeline.
+    pub rim_width: f32,
     /// The ruler's grid where it passes through the body, as (colour, alpha).
     pub grid: (u32, f32),
     /// Drop shadow under a dragged strip as (colour, alpha, y, blur); alpha 0 = none.
@@ -102,6 +105,7 @@ impl Tokens {
                 glow: (0, 0.),
                 rim: (0xffffff, if selected { 1. } else { 0.6 }),
                 rim_top: (0xffffff, if selected { 1. } else { 0.6 }),
+                rim_width: if selected { 2. } else { 1. },
                 grid: (0xffffff, 0.),
                 shadow: (0, 0., 0., 0.),
                 foreground: 0xffffff,
@@ -124,28 +128,46 @@ impl Tokens {
             StripState::Disabled => (light, 0.1, 0.2),
         };
         let disabled = state == StripState::Disabled;
+        let selected = state == StripState::Selected;
+        // A selected strip is a step brighter as well as white-rimmed.
+        let (top, bottom) = if selected {
+            (top + 0.03, bottom + 0.02)
+        } else {
+            (top, bottom)
+        };
+        let body = oklch(bottom, chroma * 0.92, hue);
+        let opacity_now = match state {
+            StripState::Dragging if dark => opacity - 0.06,
+            StripState::Disabled => faded,
+            _ => opacity,
+        };
+        // Labels are the palest tint of the strip's own hue that still holds
+        // 4.5:1 on the body as it lands on the canvas: as much hue as the
+        // contrast floor allows, per colour.
+        let landed = mix(self.colors.panel, body, opacity_now);
+        let foreground = (0..=14)
+            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.45, hue))
+            .find(|label| crate::color::contrast(*label, landed) >= 4.6)
+            .unwrap_or(0xffffff);
         Strip {
             // More chroma at the top, where the slab is deepest.
             top: oklch(top, chroma, hue),
-            bottom: oklch(bottom, chroma * 0.92, hue),
-            opacity: match state {
-                StripState::Dragging if dark => opacity - 0.06,
-                StripState::Disabled => faded,
-                _ => opacity,
-            },
+            bottom: body,
+            opacity: opacity_now,
             glow: (
                 oklch(0.82, chroma * 0.8, hue),
                 if disabled { 0. } else { 0.16 },
             ),
             rim: (rim, side),
             rim_top: (rim, edge),
+            rim_width: if selected { 2. } else { 1. },
             grid: (light, if disabled { 0.05 } else { 0.13 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, if dark { 0.45 } else { 0.22 }, 6., 16.)
             } else {
                 (0, 0., 0., 0.)
             },
-            foreground: oklch(0.96, chroma * 0.22, hue),
+            foreground,
             primary: oklch(0.8, chroma * 0.62, hue),
         }
     }

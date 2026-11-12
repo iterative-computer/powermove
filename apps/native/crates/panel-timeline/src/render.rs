@@ -1224,7 +1224,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
         "grid":material.grid.0,"gridAlpha":material.grid.1,
         "gridFrom":grid_from,"gridStep":grid * v.pps,
         "rim":material.rim.0,"rimAlpha":material.rim.1,
-        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":m.border,
+        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":material.rim_width,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
