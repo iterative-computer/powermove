@@ -221,6 +221,8 @@ share their parts, in AppKit (`native::Popup`) and drawn (`Kit::menu`):
 - Corners are concentric: the palette is 16 with rows 6 inside it (row corner
   10), a menu is 12 with rows 4 inside (row corner 8).
 - It opens on the enter spring and closes on the exit fade.
+- A list longer than the palette fades out at the bottom edge, so a row is
+  never cut there, and scrolls a fade's length past its last row.
 
 Every drawn control: arrow cursor, hover wash, pressed fill, neutral
 keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
@@ -248,7 +250,9 @@ controls are for forms: Settings, sheets, panel option rows).
   alone (32 square, no fill at rest, its name and shortcut in the tooltip)
   and New Project, the header's one raised action: the system's glass
   button (a plus and its name), the same glass as the toolbar's Export.
-  ⌘F puts the keyboard in the search; typing filters.
+  ⌘F puts the keyboard in the search; typing filters; Escape clears the
+  search and leaves the field in one step
+  (`TextField::set_escape_cancels`).
 - An open choice, kept in code until it is made (`PM_NATIVE_HOME_GLASS`):
   `glyph` shows New Project as its plus alone; `all` also stands the search
   field and the view switch in glass capsules (`ControlSpec.glass` on a
@@ -262,8 +266,11 @@ controls are for forms: Settings, sheets, panel option rows).
   concentric (page 16, frame 20, continuous), in one shape for every card.
   The poster fills the page when it has the page's shape and stands whole on
   the viewer's ground otherwise; a project with no poster yet is an empty
-  page that says its size. Under the pointer the frame deepens a step;
-  selected, it carries a ring of ink inside its edge. The name and one line
+  page that says its size. Under the pointer the frame deepens a step and
+  a round "more" button stands at the page's top trailing corner, on a
+  scrim so it reads over any poster: it opens our menu with the row's
+  actions (a right-click keeps the system's menu). Selected, the frame
+  carries a ring of ink inside its edge. The name and one line
   of facts stand under the card on the page's edge, with a small dot when
   the project is open (the accent for this window's).
 - Cards are 240 wide when four or more fit, and one to three wider ones on

@@ -1056,6 +1056,14 @@ impl TabView {
         }
     }
 }
+/// A colour as a stop of a gradient mask (a `CGColor` in an array).
+fn mask_stop(color: &NSColor) -> Retained<AnyObject> {
+    let color = color.CGColor();
+    unsafe { Retained::retain((&*color as *const _ as *mut AnyObject).cast()).unwrap() }
+}
+/// How much of a popup's list fades out at its bottom edge while more rows
+/// lie below.
+const POPUP_FADE: f64 = 20.;
 /// Whether `view` draws in a dark appearance.
 fn dark_appearance(view: &NSView) -> bool {
     let list = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
@@ -2678,11 +2686,10 @@ impl Host {
             // Its end fades out under the close button: a mask, so the
             // title never moves.
             let fade = CAGradientLayer::new();
-            let stop = |color: Retained<NSColor>| -> Retained<AnyObject> {
-                let color = color.CGColor();
-                unsafe { Retained::retain((&*color as *const _ as *mut AnyObject).cast()).unwrap() }
-            };
-            let (ink, clear) = (stop(NSColor::blackColor()), stop(NSColor::clearColor()));
+            let (ink, clear) = (
+                mask_stop(&NSColor::blackColor()),
+                mask_stop(&NSColor::clearColor()),
+            );
             unsafe {
                 fade.setColors(Some(&NSArray::from_retained_slice(&[
                     ink.clone(),
@@ -3596,8 +3603,16 @@ impl Host {
                 // the keyboard back. Any other field just gives it back.
                 let search = unsafe {
                     let delegate: *mut AnyObject = msg_send![&*editor, delegate];
-                    !delegate.is_null()
-                        && msg_send![delegate, isKindOfClass: NSSearchField::class()]
+                    let is = |class: &objc2::runtime::AnyClass| -> bool {
+                        !delegate.is_null() && msg_send![delegate, isKindOfClass: class]
+                    };
+                    // One of our own fields that asked for Escape to cancel
+                    // (a drawn search pill) hears it the same way.
+                    is(NSSearchField::class())
+                        || (is(NSControl::class()) && {
+                            let tag: isize = msg_send![delegate, tag];
+                            tag == gpui_macos::native_text::ESCAPE_CANCELS
+                        })
                 };
                 if search {
                     unsafe {
@@ -4609,8 +4624,36 @@ impl Popup {
             NSPoint::new(0., inset),
             NSSize::new(width, shown),
         ));
-        self.list
-            .setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, y)));
+        // More rows than fit: the list fades out at the bottom edge, so a
+        // row is never cut there, and scrolls a fade's length past its end,
+        // so the last row comes clear of it.
+        let more = y > shown + 0.5;
+        self.list.setFrame(NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(width, if more { y + POPUP_FADE } else { y }),
+        ));
+        self.scroll.setWantsLayer(true);
+        if let Some(layer) = self.scroll.layer() {
+            let fade = more.then(|| {
+                let fade = CAGradientLayer::new();
+                unsafe {
+                    fade.setColors(Some(&NSArray::from_retained_slice(&[
+                        mask_stop(&NSColor::clearColor()),
+                        mask_stop(&NSColor::blackColor()),
+                    ])));
+                }
+                fade.setLocations(Some(&NSArray::from_retained_slice(&[
+                    NSNumber::new_f64(0.),
+                    NSNumber::new_f64(POPUP_FADE / shown),
+                ])));
+                // The scroll view's layer is flipped: its bottom edge is 1.
+                fade.setStartPoint(NSPoint::new(0.5, 1.));
+                fade.setEndPoint(NSPoint::new(0.5, 0.));
+                fade.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, shown)));
+                fade
+            });
+            unsafe { layer.setMask(fade.as_deref().map(|f| &**f)) };
+        }
         self.list.scrollPoint(NSPoint::ZERO);
         self.light(false);
     }
