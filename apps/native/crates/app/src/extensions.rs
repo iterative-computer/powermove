@@ -698,6 +698,10 @@ impl Controller {
                 let url = request["url"].as_str().unwrap_or_default().to_owned();
                 self.download_for_extension(token, url, cx);
             }
+            Some("mediaFile") => {
+                let asset = request["asset"].as_str().unwrap_or_default();
+                self.media_file_for_extension(token, asset, cx);
+            }
             Some("pick") => {
                 let accept = request["accept"].as_str().unwrap_or_default().to_owned();
                 self.pick_for_extension(token, &accept, request["multiple"] == true, cx);

@@ -2794,37 +2794,6 @@ mod tests {
         }
         assert_eq!(fixture.name(), "Synthetic extension check");
     }
-    #[test]
-    fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
-        let root = tempfile::tempdir().unwrap();
-        extension(
-            &root.path().join("extensions"),
-            "synthetic-effect",
-            &[(
-                "index.ts",
-                "export default function(api){api.effects.register({id:'synthetic.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:2,def:1},{k:'color',label:'Color',type:'color',def:'#ff0000'}],frag:'o = src(v_uv) * u_amount;'})}",
-            )],
-        );
-        let fixture = Fixture::start(root);
-        fixture.until("activation", |host| host.is_ready());
-        let state = fixture.kernel.state();
-        let provider = state.provider("effects", "synthetic.tint").unwrap();
-        assert_eq!(
-            provider.definition.get("label").unwrap().as_str(),
-            Some("Tint")
-        );
-        let contributions = fixture.host.contributions().unwrap();
-        let definition: pm_protocol::definitions::DefinitionSnapshot =
-            serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
-        let glsl = definition.glsl.unwrap();
-        assert!(glsl.source.starts_with("#version 300 es"));
-        assert!(glsl.source.contains("uniform float u_amount;"));
-        assert!(glsl.source.contains("uniform vec3 u_color;"));
-        assert_eq!(
-            glsl.source.lines().nth(glsl.body_line_offset as usize),
-            Some("o = src(v_uv) * u_amount;")
-        );
-    }
     /// While a load pass runs, a definition the project uses may still arrive:
     /// the published contributions say so until every extension has registered
     /// what it registers (or failed), so nothing calls it not installed.
@@ -2887,6 +2856,37 @@ mod tests {
         let fixture = Fixture::start(root);
         fixture.until("an empty boot settles", |host| host.definitions_settled());
         assert!(fixture.host.contributions().is_none());
+    }
+    #[test]
+    fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'synthetic.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:2,def:1},{k:'color',label:'Color',type:'color',def:'#ff0000'}],frag:'o = src(v_uv) * u_amount;'})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let state = fixture.kernel.state();
+        let provider = state.provider("effects", "synthetic.tint").unwrap();
+        assert_eq!(
+            provider.definition.get("label").unwrap().as_str(),
+            Some("Tint")
+        );
+        let contributions = fixture.host.contributions().unwrap();
+        let definition: pm_protocol::definitions::DefinitionSnapshot =
+            serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
+        let glsl = definition.glsl.unwrap();
+        assert!(glsl.source.starts_with("#version 300 es"));
+        assert!(glsl.source.contains("uniform float u_amount;"));
+        assert!(glsl.source.contains("uniform vec3 u_color;"));
+        assert_eq!(
+            glsl.source.lines().nth(glsl.body_line_offset as usize),
+            Some("o = src(v_uv) * u_amount;")
+        );
     }
     /// v1's `api.vars`: an extension reads the values entered for the keys its
     /// manifest declares, delivered per activation; an undeclared key, an empty
@@ -4068,5 +4068,120 @@ mod tests {
         );
         fixture.host.set_viewport(1200., 700., 2.);
         fixture.until("resize", has("synthetic-size.resized-1200"));
+    }
+    /// The raw `PM` a v1–3 extension reaches through `api.host.pm` has every
+    /// member the shipped app (v1.2.0) assigned to it, except the reviewed list
+    /// of the app's own machinery it lacks.
+    #[test]
+    fn the_realm_pm_has_the_shipped_app_pm_roster() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "roster",
+            &[(
+                "index.ts",
+                "export default function(api){const pm=api.host.pm;const keys=[];for(const k in pm)keys.push(k);for(let o=pm;o&&o!==Object.prototype;o=Object.getPrototypeOf(o))keys.push(...Object.getOwnPropertyNames(o));api.storage.set('keys',[...new Set(keys)])}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let storage = crate::adapter::storage_of(&fixture.kernel);
+        let keys: BTreeSet<String> = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".keys") {
+                        Some(v.clone())
+                    } else {
+                        v.get("keys").cloned()
+                    }
+                })
+            })
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| panic!("no roster: {storage} {:?}", fixture.host.records()));
+        let shipped = include_str!("../tests/fixtures/v1-pm-roster.txt");
+        // The shipped app's own machinery (its WebGL renderer, DOM chrome,
+        // agent harness, project file I/O): no sample extension reaches them.
+        let not_in_realm: BTreeSet<&str> = include_str!("../tests/fixtures/v1-pm-not-in-realm.txt")
+            .lines()
+            .collect();
+        let missing: Vec<&str> = shipped
+            .lines()
+            .filter(|m| !m.is_empty() && !keys.contains(*m) && !not_in_realm.contains(m))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "missing from the realm's PM: {missing:?}"
+        );
+        // A member the realm gains leaves the list.
+        let gained: Vec<&&str> = not_in_realm.iter().filter(|m| keys.contains(**m)).collect();
+        assert!(
+            gained.is_empty(),
+            "now in the realm, drop from the list: {gained:?}"
+        );
+    }
+    /// The raw members a real extension used to cut a layer out of a clip:
+    /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
+    /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
+    #[test]
+    fn media_store_reads_an_assets_file_and_add_layer_inserts_a_layer() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default async function(api){const PM=api.host.pm;\
+                 PM.Edit.mutate('Add',()=>{PM.addLayer({...PM.proj.layers[0]??{},id:'added',name:'Added'},0)});\
+                 const blob=await PM.MediaStore.get({id:'clip'});const none=await PM.MediaStore.get({id:'gone'});\
+                 let refused='';try{PM.MediaStore.put('x',blob)}catch(e){refused=String(e.message)}\
+                 api.storage.set('read',{size:blob?.size??-1,text:blob?await blob.text():'',none,refused})}",
+            )],
+        );
+        let file = root.path().join("clip.bin");
+        fs::write(&file, b"clip bytes").unwrap();
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut answered = 0;
+        while answered < 2 {
+            for request in fixture.host.take_requests() {
+                if request["kind"] != "mediaFile" {
+                    continue;
+                }
+                let token = request["token"].as_u64().unwrap();
+                let answer = if request["asset"] == "clip" {
+                    let held = crate::files::hold_picked(file.clone());
+                    json!({"token":held.to_string(),"name":"clip.bin","type":"","size":10,"lastModified":0})
+                } else {
+                    Value::Null
+                };
+                fixture.host.answer(token, answer);
+                answered += 1;
+            }
+            assert!(Instant::now() < deadline, "{:?}", fixture.host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.until("read", |_| {
+            crate::adapter::storage_of(&fixture.kernel)
+                .to_string()
+                .contains("refused")
+        });
+        let storage = crate::adapter::storage_of(&fixture.kernel).to_string();
+        assert!(
+            storage.contains(r#""size":10"#) && storage.contains("clip bytes"),
+            "{storage}"
+        );
+        assert!(storage.contains(r#""none":null"#), "{storage}");
+        assert!(
+            storage.contains("PM.MediaStore.put is not available"),
+            "{storage}"
+        );
+        let published = fixture.kernel.published("window").unwrap();
+        let layers = published.snapshot.layers(None);
+        assert_eq!(
+            layers.first().map(|l| l.id.as_str()),
+            Some("added"),
+            "{layers:?}"
+        );
     }
 }

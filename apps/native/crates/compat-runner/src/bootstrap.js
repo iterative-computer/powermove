@@ -146,6 +146,8 @@ globalThis.__compat = {
         kind: reply.kind,
         size: file.size,
       };
+    // `PM.MediaStore.get`: the asset's file, held on disk like a picked one.
+    this.mediaFile = (asset) => ask({ kind: "mediaFile", asset });
     this.assets = {
       get: (id) => this.realm.PM.proj.assets?.[id],
       import: async (file, options = {}) => {
@@ -684,6 +686,31 @@ globalThis.__compat = {
     };
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
+    // v1's model members that extensions reach raw (`api.host.pm`), as main.
+    this.realm.PM.addLayer = (layer, at) => {
+      const PM = this.realm.PM;
+      PM.proj.layers.splice(at == null ? 0 : at, 0, layer);
+      PM.ProjectIndex?.invalidate();
+      PM.bus.emit("layers");
+      return layer;
+    };
+    // v1's media store, read side: an asset's bytes as a Blob (the file behind
+    // it on disk, read when asked), or null when it has none. The native app
+    // keeps media itself, so writing to it throws by name.
+    const storeOnly = (member) => () => {
+      throw new Error(`PM.MediaStore.${member} is not available in this version of Powermove`);
+    };
+    this.realm.PM.MediaStore = {
+      get: async (asset) => {
+        const id = typeof asset === "string" ? asset : asset?.id;
+        if (!id) return null;
+        const file = await this.mediaFile(String(id));
+        return file?.token ? runtime.hostFile(file) : null;
+      },
+      put: storeOnly("put"),
+      getForSave: storeOnly("getForSave"),
+      remove: storeOnly("remove"),
+    };
     // Built-in services v1 registered for extensions: `tool` (the shell's tool)
     // and `viewer` (its navigation and its stage, a page element over the
     // native viewer that the shell keeps on it).
