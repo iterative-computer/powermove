@@ -464,16 +464,20 @@ impl Kit {
                     .child(hint.to_string())
             }))
     }
-    /// A switch (Settings and sheets only): a neutral track whose knob slides
-    /// on the layout spring. On is `text` ink, never the accent.
+    /// The drawn switch, for places a real view per control cannot work (a
+    /// long scrolling list). Everywhere else host the real `NSSwitch`
+    /// (`native_control::Kind::Switch`). It keeps the system switch's shape on
+    /// macOS 26 (54×28 at regular size: a wide capsule knob in a capsule
+    /// track) at the small size, and its knob slides on the layout spring.
     pub fn switch(&self, id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         let (t, id) = (&self.t, id.into());
         let c = &t.colors;
         let k = key(&id);
-        let (w, h, pad) = (30., 18., 2.);
+        let (w, h, pad) = (36., 19., 2.);
         let at = animate(&self.values, k, f32::from(on), t.spring(Preset::Layout)).clamp(-0.1, 1.1);
         let values = self.values.clone();
-        let knob = h - 2. * pad;
+        // The system knob is a capsule about 0.6 of the track wide.
+        let (knob, knob_w) = (h - 2. * pad, (w * 0.6).round());
         self.focusable(
             div()
                 .id(id)
@@ -493,8 +497,9 @@ impl Kit {
                     div()
                         .absolute()
                         .top(px(pad))
-                        .left(px(pad + at * (w - knob - 2. * pad)))
-                        .size(px(knob))
+                        .left(px(pad + at * (w - knob_w - 2. * pad)))
+                        .w(px(knob_w))
+                        .h(px(knob))
                         .rounded_full()
                         .bg(rgb(if on { c.panel } else { 0xffffff }))
                         .shadow(vec![BoxShadow {

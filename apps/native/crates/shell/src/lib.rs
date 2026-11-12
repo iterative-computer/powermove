@@ -14,6 +14,8 @@ pub mod motion;
 #[cfg(target_os = "macos")]
 mod native;
 #[cfg(target_os = "macos")]
+pub mod native_control;
+#[cfg(target_os = "macos")]
 pub mod scopes;
 pub mod session;
 #[cfg(target_os = "macos")]

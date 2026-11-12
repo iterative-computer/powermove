@@ -20,8 +20,33 @@ use pm_design::{Elevation, Text, Tokens, motion::Preset};
 use pm_kernel::{KernelHandle, session::ShellReply};
 use pm_shell::{
     kit::{self, Button, Item, Kit, Recipes, ink},
+    native_control::{ControlSpec, Kind, NativeControl},
     symbol::Weight,
 };
+use serde_json::{Value, json};
+
+/// The header's real AppKit controls: the layout segmented control, the sort
+/// pop-up, Open… and the tinted New Project button. They exist in an AppKit
+/// window; a headless window draws the kit's equivalents.
+struct HeaderControls {
+    layout: Entity<NativeControl>,
+    sort: Entity<NativeControl>,
+    open: Entity<NativeControl>,
+    new: Entity<NativeControl>,
+    /// What the layout and sort controls last showed.
+    shown: (Layout, Sort),
+}
+fn sort_options() -> Vec<Value> {
+    [Sort::Recent, Sort::Name]
+        .map(|sort| json!({"label": sort.label(), "v": sort.key()}))
+        .to_vec()
+}
+fn layout_options() -> Vec<Value> {
+    vec![
+        json!({"symbol": "square.grid.2x2", "label": "Grid view"}),
+        json!({"symbol": "list.bullet", "label": "List view"}),
+    ]
+}
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
 /// A menu opened from one of Home's buttons (ours, never NSMenu).
@@ -59,6 +84,10 @@ pub struct ProjectLibrary {
     /// Decoded thumbnails by project id, with the length of the source they
     /// were read from (a new save replaces it).
     thumbs: HashMap<String, (usize, Option<Arc<Image>>)>,
+    native: Option<HeaderControls>,
+    /// Development builds: the gallery's real controls.
+    #[cfg(debug_assertions)]
+    gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
@@ -135,6 +164,9 @@ impl ProjectLibrary {
             sheet: Rc::default(),
             motion: Default::default(),
             thumbs: HashMap::new(),
+            native: None,
+            #[cfg(debug_assertions)]
+            gallery_native: Vec::new(),
             menu: None,
             anchors: Rc::default(),
             grid: (0, 0),
@@ -949,6 +981,89 @@ impl Render for ProjectLibrary {
             .detach();
             self.search = Some(search);
         }
+        let (layout, sort) = (self.layout, self.controller.query.sort);
+        if self.native.is_none() && pm_shell::text::available(window) {
+            let mut make = |kind, label: &str, value: Value, options: Vec<Value>, primary: bool| {
+                let tokens = t.clone();
+                cx.new(|cx| {
+                    NativeControl::new(
+                        ControlSpec {
+                            kind,
+                            label,
+                            identifier: &format!("home.{}", label.to_lowercase().replace(' ', "-")),
+                            value: &value,
+                            options,
+                            disabled: false,
+                            default: false,
+                            destructive: false,
+                            inline: false,
+                            tint: primary.then_some(tokens.colors.accent),
+                            symbol: primary.then_some("plus"),
+                        },
+                        &tokens,
+                        window,
+                        cx,
+                    )
+                })
+            };
+            let controls = HeaderControls {
+                layout: make(
+                    Kind::Segmented,
+                    "Project layout",
+                    json!(usize::from(layout == Layout::List)),
+                    layout_options(),
+                    false,
+                ),
+                sort: make(
+                    Kind::Popup,
+                    "Sort projects",
+                    json!(sort.key()),
+                    sort_options(),
+                    false,
+                ),
+                open: make(Kind::Push, "Open…", Value::Null, vec![], false),
+                new: make(Kind::Push, "New Project", Value::Null, vec![], true),
+                shown: (layout, sort),
+            };
+            cx.subscribe(&controls.layout, |v: &mut Self, _, value: &Value, cx| {
+                let layout = if value.as_i64() == Some(1) {
+                    Layout::List
+                } else {
+                    Layout::Grid
+                };
+                v.set_layout(layout, cx);
+            })
+            .detach();
+            cx.subscribe(&controls.sort, |v: &mut Self, _, value: &Value, cx| {
+                v.set_sort(Sort::from_key(value.as_str().unwrap_or_default()), cx);
+            })
+            .detach();
+            cx.subscribe(&controls.open, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("open"), cx)
+            })
+            .detach();
+            cx.subscribe(&controls.new, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("newProject"), cx)
+            })
+            .detach();
+            self.native = Some(controls);
+        }
+        // A change made elsewhere (the keyboard, a restored setting) shows in
+        // the real controls.
+        if let Some(native) = self.native.as_mut().filter(|n| n.shown != (layout, sort)) {
+            native.shown = (layout, sort);
+            native.layout.update(cx, |c, cx| {
+                c.update(
+                    &json!(usize::from(layout == Layout::List)),
+                    &layout_options(),
+                    false,
+                    cx,
+                )
+            });
+            native.sort.update(cx, |c, cx| {
+                c.update(&json!(sort.key()), &sort_options(), false, cx)
+            });
+        }
         let section = self.controller.query.section;
         let live = self
             .controller
@@ -1059,101 +1174,115 @@ impl Render for ProjectLibrary {
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
         let this = cx.entity().downgrade();
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(t.space.md))
-            .px(px(MARGIN))
-            .pt(px(t.space.xxl + t.space.xs))
-            .pb(px(t.space.xl + t.space.xs))
-            .child(
-                div()
-                    .id("home-heading")
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .items_baseline()
-                    .gap(px(t.space.lg))
-                    .role(Role::Heading)
-                    .aria_label(format!("{}, {count}", section.title()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_role(&t, Text::Display)
-                            .child(section.title()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_role(&t, Text::Caption)
-                            .font_features(kit::tabular())
-                            .text_color(rgb(c.muted))
-                            .child(count),
-                    )
-                    // A real project can take seconds to read: say so here
-                    // until it shows in the window.
-                    .children(opening.map(|name| {
-                        div()
-                            .id("home-status")
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_role(&t, Text::Caption)
-                            .text_color(rgb(c.secondary))
-                            .role(Role::Status)
-                            .aria_label(name.clone())
-                            .child(name)
-                    })),
-            )
-            .child(
-                kit.segmented(
-                    "home-layout",
-                    &[
-                        Item::Symbol("square.grid.2x2", "Grid view"),
-                        Item::Symbol("list.bullet", "List view"),
-                    ],
-                    usize::from(self.layout == Layout::List),
-                    false,
-                    move |index, _, cx| {
-                        let layout = if index == 0 {
-                            Layout::Grid
-                        } else {
-                            Layout::List
-                        };
-                        let _ = this.update(cx, |v, cx| v.set_layout(layout, cx));
-                    },
+        let header =
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(t.space.md))
+                .px(px(MARGIN))
+                .pt(px(t.space.xxl + t.space.xs))
+                .pb(px(t.space.xl + t.space.xs))
+                .child(
+                    div()
+                        .id("home-heading")
+                        .flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .items_baseline()
+                        .gap(px(t.space.lg))
+                        .role(Role::Heading)
+                        .aria_label(format!("{}, {count}", section.title()))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_role(&t, Text::Display)
+                                .child(section.title()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_role(&t, Text::Caption)
+                                .font_features(kit::tabular())
+                                .text_color(rgb(c.muted))
+                                .child(count),
+                        )
+                        // A real project can take seconds to read: say so here
+                        // until it shows in the window.
+                        .children(opening.map(|name| {
+                            div()
+                                .id("home-status")
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_role(&t, Text::Caption)
+                                .text_color(rgb(c.secondary))
+                                .role(Role::Status)
+                                .aria_label(name.clone())
+                                .child(name)
+                        })),
                 )
-                .aria_label("Project layout"),
-            )
-            .child(
-                kit.button(
-                    "home-sort",
-                    sort.label(),
-                    Button::Quiet,
-                    None,
-                    Some("chevron.down"),
-                )
-                .debug_selector(|| "home-sort".into())
-                .aria_label(format!("Sort projects: {}", sort.label()))
-                .child(anchor(Menu::Sort))
-                .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
-            )
-            .child(
-                kit.button("home-open", "Open…", Button::Neutral, None, None)
-                    .debug_selector(|| "home-open".into())
-                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("open"), cx))),
-            )
-            .child(
-                kit.button(
-                    "home-new",
-                    "New Project",
-                    Button::Primary,
-                    Some("plus"),
-                    None,
-                )
-                .debug_selector(|| "home-new".into())
-                .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("newProject"), cx))),
-            );
+                .map(|header| match &self.native {
+                    // Real AppKit controls: the system draws, tracks and focuses them.
+                    Some(native) => header
+                        .child(native.layout.clone())
+                        .child(native.sort.clone())
+                        .child(native.open.clone())
+                        .child(native.new.clone()),
+                    None => header
+                        .child(
+                            kit.segmented(
+                                "home-layout",
+                                &[
+                                    Item::Symbol("square.grid.2x2", "Grid view"),
+                                    Item::Symbol("list.bullet", "List view"),
+                                ],
+                                usize::from(self.layout == Layout::List),
+                                false,
+                                move |index, _, cx| {
+                                    let layout = if index == 0 {
+                                        Layout::Grid
+                                    } else {
+                                        Layout::List
+                                    };
+                                    let _ = this.update(cx, |v, cx| v.set_layout(layout, cx));
+                                },
+                            )
+                            .aria_label("Project layout"),
+                        )
+                        .child(
+                            kit.button(
+                                "home-sort",
+                                sort.label(),
+                                Button::Quiet,
+                                None,
+                                Some("chevron.down"),
+                            )
+                            .debug_selector(|| "home-sort".into())
+                            .aria_label(format!("Sort projects: {}", sort.label()))
+                            .child(anchor(Menu::Sort))
+                            .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
+                        )
+                        .child(
+                            kit.button("home-open", "Open…", Button::Neutral, None, None)
+                                .debug_selector(|| "home-open".into())
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    (v.sink)(Outbound::Command("open"), cx)
+                                })),
+                        )
+                        .child(
+                            kit.button(
+                                "home-new",
+                                "New Project",
+                                Button::Primary,
+                                Some("plus"),
+                                None,
+                            )
+                            .debug_selector(|| "home-new".into())
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                (v.sink)(Outbound::Command("newProject"), cx)
+                            })),
+                        ),
+                });
         // Body: cards or rows; an empty section says so with v1's copy.
         let width = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap
             + 2. * (CARD_PAD - MARGIN))
@@ -1288,7 +1417,61 @@ impl Render for ProjectLibrary {
         };
         #[cfg(debug_assertions)]
         let body = if kit::GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
-            self.gallery(&kit)
+            if self.gallery_native.is_empty() && pm_shell::text::available(window) {
+                let specs: [(Kind, &str, Value, Vec<Value>, Option<u32>); 9] = [
+                    (Kind::Switch, "Switch off", json!(false), vec![], None),
+                    (Kind::Switch, "Switch on", json!(true), vec![], None),
+                    (Kind::Checkbox, "Checkbox", json!(true), vec![], None),
+                    (Kind::Radio, "Radio", json!(true), vec![], None),
+                    (Kind::Slider, "Slider", json!(0.35), vec![], None),
+                    (
+                        Kind::Segmented,
+                        "Timeline mode",
+                        json!(0),
+                        vec![json!("Layers"), json!("Tracks")],
+                        None,
+                    ),
+                    (
+                        Kind::Popup,
+                        "Appearance",
+                        json!("Dark"),
+                        vec![json!("System"), json!("Light"), json!("Dark")],
+                        None,
+                    ),
+                    (Kind::Push, "Open…", Value::Null, vec![], None),
+                    (
+                        Kind::Push,
+                        "New Project",
+                        Value::Null,
+                        vec![],
+                        Some(t.colors.accent),
+                    ),
+                ];
+                for (kind, label, value, options, tint) in specs {
+                    let tokens = t.clone();
+                    self.gallery_native.push(cx.new(|cx| {
+                        NativeControl::new(
+                            ControlSpec {
+                                kind,
+                                label,
+                                identifier: "home.gallery",
+                                value: &value,
+                                options,
+                                disabled: false,
+                                default: false,
+                                destructive: false,
+                                inline: false,
+                                tint,
+                                symbol: None,
+                            },
+                            &tokens,
+                            window,
+                            cx,
+                        )
+                    }));
+                }
+            }
+            self.gallery(&kit, cx)
         } else {
             body
         };
@@ -1328,7 +1511,7 @@ impl Render for ProjectLibrary {
 /// screen in either appearance without a pointer.
 #[cfg(debug_assertions)]
 impl ProjectLibrary {
-    fn gallery(&self, kit: &Kit) -> AnyElement {
+    fn gallery(&self, kit: &Kit, cx: &App) -> AnyElement {
         use pm_design::StripState;
         let t = &kit.t;
         let c = &t.colors;
@@ -1464,6 +1647,18 @@ impl ProjectLibrary {
             .flex_wrap()
             .items_start()
             .gap(px(t.space.section))
+            .child(
+                section("Real AppKit controls (hosted; the system draws them)")
+                    .w(px(560.))
+                    .child(line().gap(px(t.space.lg)).children(self.gallery_native.iter().cloned()))
+                    .children(self.gallery_native.first().map(|switch| {
+                        let (w, h) = (switch.read(cx).width(), switch.read(cx).height());
+                        div()
+                            .text_role(t, Text::Caption)
+                            .text_color(rgb(c.faint))
+                            .child(format!("NSSwitch at regular size is {w}×{h} pt"))
+                    })),
+            )
             .child(
                 section("Buttons: rest, then disabled")
                     .child(buttons(false))
