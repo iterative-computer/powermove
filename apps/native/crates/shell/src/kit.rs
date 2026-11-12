@@ -158,6 +158,16 @@ impl Kit {
             })
             .on_hover(move |hovered, _, cx| hover(key, *hovered, cx))
     }
+    /// How far the hover on `key` has come: 0 at rest, 1 under the pointer,
+    /// on the wash's springs (fast in, slow out).
+    pub fn hovered(&self, key: u64) -> f32 {
+        self.washes.get(&key).copied().unwrap_or(0.)
+    }
+    /// Follows the pointer over `d` for `hovered`, drawing nothing itself.
+    pub fn track_hover(&self, d: Stateful<Div>, key: u64) -> Stateful<Div> {
+        let hover = self.hover.clone();
+        d.on_hover(move |hovered, _, cx| hover(key, *hovered, cx))
+    }
     /// The neutral keyboard focus ring, outside the control.
     fn focusable(&self, d: Stateful<Div>) -> Stateful<Div> {
         let (color, width, _) = self.t.focus_ring();

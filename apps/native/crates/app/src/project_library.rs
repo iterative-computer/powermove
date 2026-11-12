@@ -118,6 +118,8 @@ pub struct ProjectLibrary {
     pub active: Option<String>,
     /// Cards per grid row at the last layout, for arrow keys.
     columns: usize,
+    /// The card the pointer is pressing (it sits back down at once).
+    pressed: Option<String>,
     /// A failure Home reports in its header (the editor's status line is
     /// hidden under Home), until the next action.
     notice: Option<String>,
@@ -193,6 +195,7 @@ impl ProjectLibrary {
             search: None,
             active: None,
             columns: 1,
+            pressed: None,
             notice: None,
             kernel,
         }
@@ -559,9 +562,11 @@ const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
 /// Space either side of Home's sheet content: the title, the controls and
 /// the thumbnails share this one left edge.
 const MARGIN: f32 = 32.;
-/// Padding inside a card (its hover and selection surface) around the
-/// thumbnail; the thumbnail's corner is the card's minus this.
-const CARD_PAD: f32 = 6.;
+/// The header's one search field: a share of the sheet, within these.
+const SEARCH_MIN: f32 = 220.;
+const SEARCH_MAX: f32 = 440.;
+/// How far a card rises under the pointer.
+const CARD_LIFT: f32 = 2.;
 impl ProjectLibrary {
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
         &mut self.motion
@@ -931,10 +936,12 @@ impl ProjectLibrary {
             }
         }
     }
-    /// Name with v1's tag, over the facts line.
+    /// Under the poster: the name, with a small mark when the project is
+    /// open (the accent when it is this window's), over one line of facts.
     fn caption(&self, kit: &Kit, row: &Row, facts: &str) -> Div {
         let t = &kit.t;
         let c = &t.colors;
+        let active = self.active.as_deref() == Some(row.id.as_str());
         div()
             .flex()
             .flex_col()
@@ -942,7 +949,7 @@ impl ProjectLibrary {
             .child(
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_center()
                     .gap(px(t.space.sm))
                     .child(
                         div()
@@ -952,12 +959,16 @@ impl ProjectLibrary {
                             .text_color(rgb(c.text))
                             .child(row.name.clone()),
                     )
-                    .children(self.tag(row).map(|tag| {
+                    .children(self.tag(row).map(|_| {
                         div()
                             .flex_none()
-                            .text_role(t, Text::Caption)
-                            .text_color(rgb(c.muted))
-                            .child(tag)
+                            .size(px(t.space.sm))
+                            .rounded_full()
+                            .bg(if active {
+                                rgb(c.accent)
+                            } else {
+                                ink(c.text, t.translucency.faint)
+                            })
                     })),
             )
             .child(
@@ -969,6 +980,12 @@ impl ProjectLibrary {
                     .child(facts.to_string()),
             )
     }
+    /// A project is its poster: the frame in the composition's own shape,
+    /// as large as its place in the grid allows, with a continuous corner, a
+    /// hairline and a soft shadow, and the name and facts under it. Under the
+    /// pointer it rises and its edge brightens; pressed, it sits back down.
+    /// A project with no poster yet is a quiet ground of the same shape that
+    /// says its size.
     fn card(
         &mut self,
         kit: &Kit,
@@ -978,6 +995,8 @@ impl ProjectLibrary {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = &kit.t;
+        let c = &t.colors;
+        let dark = t.scheme == pm_design::Scheme::Dark;
         let selected = self.controller.selected.as_ref() == Some(&row.id);
         let facts = row.facts(now);
         let thumbnail = self.thumbnail(row, cx);
@@ -986,18 +1005,84 @@ impl ProjectLibrary {
             1.,
             Some(Preset::Show),
         );
+        let hover = kit::key(&format!("card-{}", row.id));
+        let pressed = self.pressed.as_deref() == Some(row.id.as_str());
+        let lift = if pressed { 0. } else { kit.hovered(hover) };
         let radius = t.radius.xl;
-        let frame = self.frame(
-            kit,
-            thumbnail,
-            row.dimensions(),
-            t.radius.nested(radius, CARD_PAD),
-            fade,
-            (
-                width - 2. * CARD_PAD,
-                ((width - 2. * CARD_PAD) * 9. / 16.).round(),
-            ),
-        );
+        let place = (width, (width * 9. / 16.).round());
+        let (w, h) = row.dimensions().unwrap_or((16, 9));
+        let aspect = (w.max(1) as f32 / h.max(1) as f32).clamp(0.4, 3.);
+        let (poster_width, poster_height) = if aspect >= place.0 / place.1 {
+            (place.0, (place.0 / aspect).round())
+        } else {
+            ((place.1 * aspect).round(), place.1)
+        };
+        let edge = if dark { 0xffffff } else { 0x000000 };
+        let ring = |spread: f32, color: gpui::Background| BoxShadow {
+            color,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(spread),
+            inset: false,
+        };
+        let mut shadows = vec![BoxShadow {
+            color: ink(0x000000, (if dark { 0.3 } else { 0.1 }) * (1. + lift)).into(),
+            offset: point(px(0.), px(1. + 5. * lift)),
+            blur_radius: px(3. + 13. * lift),
+            spread_radius: px(0.),
+            inset: false,
+        }];
+        if selected {
+            // Selection is neutral: a ring of ink, clear of the poster.
+            shadows.push(ring(2., rgb(c.panel).into()));
+            shadows.push(ring(4., ink(c.text, 0.72).into()));
+        }
+        let poster = div()
+            .relative()
+            .top(px(-CARD_LIFT * lift))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(poster_width))
+            .h(px(poster_height))
+            .rounded(px(radius))
+            .shadow(shadows)
+            .map(|poster| match thumbnail {
+                Some(image) => poster.bg(rgb(c.viewer)).child(
+                    img(ImageSource::Image(image))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .rounded(px(radius))
+                        .opacity(fade.clamp(0., 1.)),
+                ),
+                None => poster
+                    .bg(rgb(pm_design::color::mix(
+                        c.panel,
+                        c.text,
+                        t.translucency.hover,
+                    )))
+                    .child(
+                        div()
+                            .text_role(t, Text::Caption)
+                            .font_features(kit::tabular())
+                            .text_color(ink(c.text, t.translucency.faint))
+                            .children(row.dimensions().map(|(w, h)| format!("{w} × {h}"))),
+                    ),
+            })
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(radius))
+                    .shadow(vec![BoxShadow {
+                        color: ink(edge, 0.1 + 0.1 * lift).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(0.5),
+                        inset: true,
+                    }]),
+            );
         let card = div()
             .id(SharedString::from(format!("project-{}", row.id)))
             .debug_selector(|| format!("project-{}", row.id))
@@ -1005,25 +1090,47 @@ impl ProjectLibrary {
             .flex_col()
             .w(px(width))
             .h(px(height))
-            .p(px(CARD_PAD))
             .gap(px(t.space.md))
-            .rounded(px(radius))
-            .when(selected, |d| {
-                d.bg(ink(t.colors.text, t.translucency.selected))
-            })
             .role(Role::ListItem)
             .aria_selected(selected)
             .aria_label(match self.tag(row) {
                 Some(tag) => format!("{}, {tag}, {facts}", row.name),
                 None => format!("{}, {facts}", row.name),
             })
-            .child(frame)
-            .child(self.caption(kit, row, &facts).px(px(t.space.hair)));
-        let card = if selected {
-            card
-        } else {
-            kit.wash(card, kit::key(&format!("card-{}", row.id)), radius)
-        };
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_end()
+                    .justify_center()
+                    .w(px(place.0))
+                    .h(px(place.1))
+                    .child(poster),
+            )
+            .child(self.caption(kit, row, &facts).px(px(t.space.xs)))
+            .on_mouse_down(MouseButton::Left, {
+                let id = row.id.clone();
+                cx.listener(move |v, _, _, cx| {
+                    v.pressed = Some(id.clone());
+                    cx.notify();
+                })
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| {
+                    v.pressed = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| {
+                    if v.pressed.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            );
+        let card = kit.track_hover(card, hover);
         self.interactive(card, &row.id, cx)
     }
     fn list_row(
@@ -1117,7 +1224,7 @@ impl Render for ProjectLibrary {
                         destructive: false,
                         inline: false,
                         tint: None,
-                        symbol: None,
+                        symbol: Some("⌘F"),
                     },
                     &tokens,
                     window,
@@ -1150,7 +1257,8 @@ impl Render for ProjectLibrary {
                             disabled: false,
                             default: false,
                             destructive: false,
-                            inline: false,
+                            // Sort is a quiet pop-up beside the layout toggle.
+                            inline: matches!(kind, Kind::Popup),
                             tint: primary.then_some(tokens.colors.accent),
                             symbol: primary.then_some("plus"),
                         },
@@ -1230,8 +1338,8 @@ impl Render for ProjectLibrary {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        // Sidebar (v1): search, Recents and Trash with counts, Store, then the
-        // account at the foot. It sits on the window's own material.
+        // Sidebar (v1): Recents and Trash with counts, Store, then the
+        // account at the foot. Navigation only, on the window's own material.
         let account = crate::cloud::fact(cx);
         let identity = account
             .get("identity")
@@ -1258,14 +1366,10 @@ impl Render for ProjectLibrary {
             .w(px(m.sidebar))
             .h_full()
             .px(px(m.dock_gap))
+            .pt(px(t.space.sm))
             .pb(px(m.dock_gap))
             .role(Role::Group)
             .aria_label("Home")
-            .child(match &self.search {
-                Some(search) => div().mb(px(t.space.md)).child(search.clone()),
-                // No AppKit view (tests): the drawn well.
-                None => kit.search(None, Some("⌘F")).mb(px(t.space.md)),
-            })
             .child(
                 self.nav_row(
                     &kit,
@@ -1315,8 +1419,10 @@ impl Render for ProjectLibrary {
                         cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("cloudSignIn"), cx)),
                     ),
             });
-        // Title row (v1's header): the section and its count, then grid/list,
-        // sort, Open… and the one accent action.
+        // The sheet's header. First row: the section's title, the one wide
+        // search in the middle of the sheet, then Open… and the one accent
+        // action. Second row: the count, and the quiet sort and layout
+        // controls. Everything stands on the sheet's two margins.
         let shown = self.controller.rows.len();
         let count = format!(
             "{shown} {}",
@@ -1329,94 +1435,41 @@ impl Render for ProjectLibrary {
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
         let this = cx.entity().downgrade();
-        let header =
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(t.space.md))
-                .px(px(MARGIN))
-                .pt(px(t.space.xxl + t.space.xs))
-                .pb(px(t.space.xl + t.space.xs))
-                .child(
+        let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
+        let search_width = (sheet * 0.36).clamp(SEARCH_MIN, SEARCH_MAX);
+        let side = || div().flex().flex_1().min_w(px(0.)).items_center();
+        let title_row = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(t.space.xl))
+            .child(
+                side().child(
                     div()
                         .id("home-heading")
-                        .flex()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .items_baseline()
-                        .gap(px(t.space.lg))
+                        .flex_none()
                         .role(Role::Heading)
                         .aria_label(format!("{}, {count}", section.title()))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_role(&t, Text::Display)
-                                .child(section.title()),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_role(&t, Text::Caption)
-                                .font_features(kit::tabular())
-                                .text_color(rgb(c.muted))
-                                .child(count),
-                        )
-                        // A real project can take seconds to read: say so here
-                        // until it shows in the window.
-                        .children(opening.map(|name| {
-                            div()
-                                .id("home-status")
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_role(&t, Text::Caption)
-                                .text_color(rgb(c.secondary))
-                                .role(Role::Status)
-                                .aria_label(name.clone())
-                                .child(name)
-                        })),
-                )
-                .map(|header| match &self.native {
-                    // Real AppKit controls: the system draws, tracks and focuses them.
-                    Some(native) => header
-                        .child(native.layout.clone())
-                        .child(native.sort.clone())
-                        .child(native.open.clone())
-                        .child(native.new.clone()),
-                    None => header
-                        .child(
-                            kit.segmented(
-                                "home-layout",
-                                &[
-                                    Item::Symbol("square.grid.2x2", "Grid view"),
-                                    Item::Symbol("list.bullet", "List view"),
-                                ],
-                                usize::from(self.layout == Layout::List),
-                                false,
-                                move |index, _, cx| {
-                                    let layout = if index == 0 {
-                                        Layout::Grid
-                                    } else {
-                                        Layout::List
-                                    };
-                                    let _ = this.update(cx, |v, cx| v.set_layout(layout, cx));
-                                },
-                            )
-                            .aria_label("Project layout"),
-                        )
-                        .child(
-                            kit.button(
-                                "home-sort",
-                                sort.label(),
-                                Button::Quiet,
-                                None,
-                                Some("chevron.down"),
-                            )
-                            .debug_selector(|| "home-sort".into())
-                            .aria_label(format!("Sort projects: {}", sort.label()))
-                            .child(anchor(Menu::Sort))
-                            .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
-                        )
+                        .text_role(&t, Text::Display)
+                        .child(section.title()),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(search_width))
+                    .child(match &self.search {
+                        Some(search) => search.clone().into_any_element(),
+                        // No AppKit view (tests): the drawn well.
+                        None => kit.search(None, Some("⌘F")).into_any_element(),
+                    }),
+            )
+            .child(side().justify_end().gap(px(t.space.md)).map(|actions| {
+                match &self.native {
+                    // Real AppKit controls: the system draws, tracks and
+                    // focuses them.
+                    Some(native) => actions.child(native.open.clone()).child(native.new.clone()),
+                    None => actions
                         .child(
                             kit.button("home-open", "Open…", Button::Neutral, None, None)
                                 .debug_selector(|| "home-open".into())
@@ -1437,26 +1490,96 @@ impl Render for ProjectLibrary {
                                 (v.sink)(Outbound::Command("newProject"), cx)
                             })),
                         ),
-                });
+                }
+            }));
+        let controls_row = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(t.space.md))
+            .h(px(m.control))
+            .child(
+                div()
+                    .flex_none()
+                    .text_role(&t, Text::Body)
+                    .font_features(kit::tabular())
+                    .text_color(rgb(c.muted))
+                    .child(count),
+            )
+            // A real project can take seconds to read: say so here until it
+            // shows in the window.
+            .children(opening.map(|name| {
+                div()
+                    .id("home-status")
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_role(&t, Text::Body)
+                    .text_color(rgb(c.secondary))
+                    .role(Role::Status)
+                    .aria_label(name.clone())
+                    .child(name)
+            }))
+            .child(div().flex_1())
+            .map(|row| match &self.native {
+                Some(native) => row.child(native.sort.clone()).child(native.layout.clone()),
+                None => row
+                    .child(
+                        kit.button(
+                            "home-sort",
+                            sort.label(),
+                            Button::Quiet,
+                            None,
+                            Some("chevron.down"),
+                        )
+                        .debug_selector(|| "home-sort".into())
+                        .aria_label(format!("Sort projects: {}", sort.label()))
+                        .child(anchor(Menu::Sort))
+                        .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
+                    )
+                    .child(
+                        kit.segmented(
+                            "home-layout",
+                            &[
+                                Item::Symbol("square.grid.2x2", "Grid view"),
+                                Item::Symbol("list.bullet", "List view"),
+                            ],
+                            usize::from(self.layout == Layout::List),
+                            false,
+                            move |index, _, cx| {
+                                let layout = if index == 0 {
+                                    Layout::Grid
+                                } else {
+                                    Layout::List
+                                };
+                                let _ = this.update(cx, |v, cx| v.set_layout(layout, cx));
+                            },
+                        )
+                        .aria_label("Project layout"),
+                    ),
+            });
+        let header = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(t.space.lg))
+            .px(px(MARGIN))
+            .pt(px(t.space.xl))
+            .pb(px(t.space.md))
+            .child(title_row)
+            .child(controls_row);
         // Body: cards or rows; an empty section says so with v1's copy.
-        let width = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap
-            + 2. * (CARD_PAD - MARGIN))
-            .max(0.);
+        let width = (sheet - 2. * MARGIN).max(0.);
         // Large previews with room between them: three across at the
         // default window size.
         let column_gap = t.space.xl;
-        let least = m.thumbnail_min * 2.5 + 2. * CARD_PAD;
+        let least = m.thumbnail_min * 2.5;
         self.columns = (((width + column_gap) / (least + column_gap)).floor() as usize).max(1);
         let card_width =
             ((width - column_gap * (self.columns - 1) as f32) / self.columns as f32).floor();
         let text = t.text(Text::Title).size * t.text(Text::Title).leading
             + t.text(Text::Caption).size * t.text(Text::Caption).leading;
-        let card_height = (2. * CARD_PAD
-            + ((card_width - 2. * CARD_PAD) * 9. / 16.).round()
-            + t.space.md
-            + text.ceil()
-            + t.space.xs)
-            .round();
+        let card_height =
+            ((card_width * 9. / 16.).round() + t.space.md + text.ceil() + t.space.xs).round();
         let centred = || {
             div()
                 .flex_1()
@@ -1472,17 +1595,16 @@ impl Render for ProjectLibrary {
             // the projects arrive.
             Content::Loading => div()
                 .flex_1()
-                .px(px(MARGIN - CARD_PAD))
+                .px(px(MARGIN))
+                .pt(px(t.space.sm))
                 .flex()
                 .gap(px(column_gap))
                 .children((0..self.columns.min(4)).map(|_| {
-                    div().w(px(card_width)).p(px(CARD_PAD)).child(
-                        div()
-                            .w_full()
-                            .h(px(((card_width - 2. * CARD_PAD) * 9. / 16.).round()))
-                            .rounded(px(t.radius.nested(t.radius.xl, CARD_PAD)))
-                            .bg(ink(c.text, t.translucency.hover)),
-                    )
+                    div()
+                        .w(px(card_width))
+                        .h(px((card_width * 9. / 16.).round()))
+                        .rounded(px(t.radius.xl))
+                        .bg(ink(c.text, t.translucency.hover))
                 }))
                 .with_animation(
                     "home-loading",
@@ -1522,7 +1644,9 @@ impl Render for ProjectLibrary {
                     .id("home-projects")
                     .flex_1()
                     .overflow_y_scroll()
-                    .px(px(MARGIN - CARD_PAD))
+                    .px(px(MARGIN))
+                    // Room for a card to lift under the pointer.
+                    .pt(px(t.space.sm))
                     .pb(px(t.space.xxl))
                     .role(Role::List)
                     .aria_label(section.title());
@@ -1533,7 +1657,7 @@ impl Render for ProjectLibrary {
                         let layout = (self.columns, card_width as u32);
                         let slide = (self.grid == layout).then_some(Preset::Layout);
                         self.grid = layout;
-                        let row_gap = t.space.lg;
+                        let row_gap = t.space.xl;
                         let lines = rows.len().div_ceil(self.columns);
                         let mut grid = div()
                             .relative()

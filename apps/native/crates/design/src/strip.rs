@@ -50,7 +50,9 @@ pub struct Strip {
     /// canvas keeps a band of its own colour outside the white ring, which
     /// would otherwise vanish into the canvas.
     pub rim_inset: f32,
-    /// The ruler's grid where it passes through the body, as (colour, alpha).
+    /// The ruler's grid where it passes through the body, as (colour, alpha
+    /// at the strip's top edge): a top-lit line that fades to nothing
+    /// `GRID_FADE` of the way down.
     pub grid: (u32, f32),
     /// Drop shadow under a dragged strip as (colour, alpha, y, blur); alpha 0 = none.
     pub shadow: (u32, f32, f32, f32),
@@ -86,6 +88,10 @@ pub struct TrimGrip {
 /// the lower half begins (both as a share of the strip's height).
 const LABEL_FOOT: f32 = 0.78;
 pub const GLOW_FROM: f32 = 0.6;
+/// The most light the foot of a strip gathers (the glow's alpha at its bottom edge).
+const GLOW_MOST: f32 = 0.46;
+/// How far down a strip the ruler's grid line reaches before it has faded out.
+pub const GRID_FADE: f32 = 0.55;
 
 impl Tokens {
     /// Corner of a strip `height` points tall: about a quarter of its height.
@@ -154,7 +160,6 @@ impl Tokens {
         // The light gathers below the name, so the foot can be luminous
         // while the band a name stands on stays deep.
         let glow = oklch(0.84, chroma * 0.8, hue);
-        let glow_alpha = if disabled { 0. } else { 0.34 };
         let opacity_now = match state {
             StripState::Dragging if dark => opacity - 0.06,
             StripState::Disabled => faded,
@@ -165,14 +170,31 @@ impl Tokens {
         // contrast floor allows, per colour. A name stands on the deeper
         // upper band, so the floor is held at its foot (`LABEL_FOOT` of the
         // way down), where the body under it is lightest.
-        let under_label = mix(
-            mix(deep, body, LABEL_FOOT),
-            glow,
-            glow_alpha * ((LABEL_FOOT - GLOW_FROM) / (1. - GLOW_FROM)).max(0.),
-        );
+        let under = |glow_alpha: f32| {
+            mix(
+                mix(deep, body, LABEL_FOOT),
+                glow,
+                glow_alpha * ((LABEL_FOOT - GLOW_FROM) / (1. - GLOW_FROM)).max(0.),
+            )
+        };
+        // The foot is as luminous as the hue allows: the glow steps down
+        // from `GLOW_MOST` until a label can still hold its contrast on the
+        // body under a name (a pale layer colour takes less).
+        let glow_alpha = if disabled {
+            0.
+        } else {
+            (0..=12)
+                .map(|step| GLOW_MOST - step as f32 * 0.02)
+                .find(|alpha| {
+                    let landed = mix(self.colors.panel, under(*alpha), opacity_now);
+                    crate::color::contrast(0xffffff, landed) >= 4.6
+                })
+                .unwrap_or(GLOW_MOST - 0.24)
+        };
+        let under_label = under(glow_alpha);
         let landed = mix(self.colors.panel, under_label, opacity_now);
         let foreground = (0..=14)
-            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.45, hue))
+            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.7, hue))
             .find(|label| crate::color::contrast(*label, landed) >= 4.6)
             .unwrap_or(0xffffff);
         Strip {
@@ -186,7 +208,7 @@ impl Tokens {
             rim_top: (rim, edge),
             rim_width: if selected { 2. } else { 1. },
             rim_inset: if selected && !dark { 2. } else { 0. },
-            grid: (light, if disabled { 0.05 } else { 0.13 }),
+            grid: (light, if disabled { 0.1 } else { 0.34 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, if dark { 0.45 } else { 0.22 }, 6., 16.)
             } else {

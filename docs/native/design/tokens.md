@@ -194,7 +194,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.faint` | Third text step, as `text` ink | 0.42 | 0.36 | 0.42 | 0.36 |
-| `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.3 | 0.5 | 0.3 | 0.5 |
+| `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.6 | 0.9 | 0.6 | 0.9 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |
@@ -205,5 +205,5 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `translucency.selected` | Neutral on state of a tab or segment, as `text` ink | 0.07 | 0.1 | 0.12 | 0.16 |
 | `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
-| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |
+| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.9 | 0.62 | 0.9 |
 <!-- tokens:end -->

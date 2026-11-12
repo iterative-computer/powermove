@@ -2481,12 +2481,18 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 let (left, right) = (area.origin.x + radius, area.right() - radius);
                 while x < right {
                     if x > left {
+                        // A highlight lit from the strip's top edge, gone
+                        // by the middle of its height.
                         window.paint_quad(
                             PaintQuad::new(Bounds::new(
                                 point(x, area.origin.y + rim),
-                                size(rim, area.size.height - rim * 2.),
+                                size(px(1.), (area.size.height - rim * 2.) * pm_design::GRID_FADE),
                             ))
-                            .background(tint(hex("grid"), grid)),
+                            .background(linear_gradient(
+                                180.,
+                                linear_color_stop(tint(hex("grid"), grid), 0.),
+                                linear_color_stop(tint(hex("grid"), 0.), 1.),
+                            )),
                         );
                     }
                     x += px(step);
