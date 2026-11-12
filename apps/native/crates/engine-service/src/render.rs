@@ -147,6 +147,11 @@ impl FrameSpec {
             .lock()
             .unwrap()
             .push((self.exact, self.moment, self.scale, request.sampling));
+        #[cfg(test)]
+        MEDIA_SAMPLED
+            .lock()
+            .unwrap()
+            .push((self.exact, self.moment, scene.media.clone()));
         Ok(request)
     }
 
@@ -1353,6 +1358,11 @@ impl Engine {
 #[cfg(test)]
 pub(crate) static SAMPLED: std::sync::Mutex<
     Vec<(bool, Moment, f64, pm_render::sampling::Sampling)>,
+> = std::sync::Mutex::new(Vec::new());
+/// Every viewer request's (exact, moment, media files), for tests.
+#[cfg(test)]
+pub(crate) static MEDIA_SAMPLED: std::sync::Mutex<
+    Vec<(bool, Moment, Arc<pm_export::render::MediaPaths>)>,
 > = std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
