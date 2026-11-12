@@ -1261,23 +1261,27 @@ impl Kernel {
                         }
                     }
                 }
-                if decision != OpenDecision::Writable {
-                    // The copy made the last time this file could not open in
-                    // place holds the person's work since: the same file
-                    // opens that copy again, never a second one.
-                    if let Some(copy) = self.copy_of(&path) {
-                        return self.reopen_copy(id, copy, decision, mode);
-                    }
-                    // The copy's entry names the file it stands in for and
-                    // why, so the file finds it again and its window can say
-                    // what it is.
-                    if let (OpenDecision::AsCopy(reason), Value::Object(m)) = (&decision, &mut meta)
-                    {
-                        m.insert("copyOf", copy_record(&path, reason));
-                    }
+                // The copy made the last time this file could not open in
+                // place holds the person's work since: the same file opens
+                // that copy again, never a second one. A different file at
+                // that name (replaced, or a link pointed elsewhere) is not
+                // that copy's file: it gets a copy of its own below.
+                if decision != OpenDecision::Writable
+                    && let Some(copy) = self.copy_of(&path)
+                {
+                    return self.reopen_copy(id, copy, decision, mode);
                 }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+                // The copy's entry names the file it stands in for (where it
+                // was and which file it was), and why, so that file finds it
+                // again and its window can say what it is.
+                if let (OpenDecision::AsCopy(reason), Value::Object(m)) = (&decision, &mut meta) {
+                    m.insert(
+                        "copyOf",
+                        copy_record(&path, reason, opened.file.version.as_deref()),
+                    );
+                }
                 // Recovery follows the file, not its path: unsaved work left
                 // in the journal of the name or place it had before comes
                 // along, with where the person left off in it.
@@ -1946,17 +1950,56 @@ impl Kernel {
     }
 }
 
-/// What a copy's entry records about the file it stands in for (`copyOf`).
-fn copy_record(path: &std::path::Path, reason: &CopyReason) -> Value {
+/// What a copy's entry records about the file it stands in for (`copyOf`):
+/// where it was, why it opened as a copy, and which file it was (`source`:
+/// its content hash, and the stat that says without reading it that it is
+/// still that file).
+fn copy_record(
+    path: &std::path::Path,
+    reason: &CopyReason,
+    source: Option<&crate::project_io::FileVersion>,
+) -> Value {
     let mut m = Map::new();
     m.insert("path", Value::from(path.to_string_lossy().into_owned()));
     m.insert("reason", Value::from(format!("{reason:?}")));
+    if let Some(version) = source {
+        let mut s = Map::new();
+        // Text: these do not fit a JSON number.
+        s.insert("dev", Value::from(version.stat.dev.to_string()));
+        s.insert("ino", Value::from(version.stat.ino.to_string()));
+        s.insert("size", Value::from(version.stat.size.to_string()));
+        s.insert("mtime", Value::from(version.stat.mtime_ns.to_string()));
+        s.insert("hash", Value::from(version.hash.clone()));
+        m.insert("source", Value::Object(s));
+    }
     Value::Object(m)
+}
+/// Whether the file at `path` now is the one a copy was made from: the same
+/// file untouched (device, inode, size and modification time), or a file
+/// with exactly its content (a sync client rewrites a file under a new
+/// inode). A copy that did not record its source is never assumed to match.
+fn is_copy_source(record: &Value, path: &std::path::Path) -> bool {
+    let Some(source) = record.get("source") else {
+        return false;
+    };
+    let text = |key: &str| source.get(key).and_then(Value::as_str);
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let now = crate::project_io::durable_stat_of(&meta);
+    let untouched = text("dev") == Some(&now.dev.to_string())
+        && text("ino") == Some(&now.ino.to_string())
+        && text("size") == Some(&now.size.to_string())
+        && text("mtime") == Some(&now.mtime_ns.to_string());
+    untouched
+        || text("hash")
+            .is_some_and(|hash| crate::project_io::hash_file(path).is_ok_and(|now| now == hash))
 }
 
 impl Kernel {
-    /// The library copy made when `path` could not be opened in place, if
-    /// the library still has it (the newest, were there several).
+    /// The library copy made of the file now at `path` when it could not be
+    /// opened in place, if the library still has it (the newest, were there
+    /// several). A copy made of another file that had this name is not it.
     fn copy_of(&self, path: &std::path::Path) -> Option<String> {
         let store = self.library.as_ref()?.store();
         let same = |recorded: &str| {
@@ -1973,7 +2016,10 @@ impl Kernel {
                 .read(&format!("projectMeta.{id}"))
                 .ok()
                 .flatten()
-                .and_then(|meta| meta.get("copyOf")?.get("path")?.as_str().map(&same))
+                .and_then(|meta| {
+                    let record = meta.get("copyOf")?;
+                    Some(same(record.get("path")?.as_str()?) && is_copy_source(record, path))
+                })
                 .unwrap_or(false)
         })
     }
@@ -1983,11 +2029,31 @@ impl Kernel {
     /// recording it, known by their name ("<project name> — Native"). The
     /// copies are never touched. Each is reported once per file: the file's
     /// entry remembers the ones reported (`copiesOffered`).
+    ///
+    /// For a session that is itself a copy of a file, the other copies
+    /// recorded for that file's name: they were made of another file that
+    /// had the name (it was replaced, or a link was pointed elsewhere), so
+    /// this open did not take them for its own. They are reported the same
+    /// way, marked `different`.
     fn unoffered_copies(&mut self, id: &str) -> Vec<Value> {
-        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
+        let Some(session) = self.sessions.get(id) else {
             return Vec::new();
         };
-        let (path, Some(store)) = (path.clone(), self.library.as_ref().map(|w| w.store())) else {
+        let (path, own_copy) = match &session.destination {
+            Destination::File(path) => (path.clone(), None),
+            Destination::Library(slot) => {
+                let Some(of) = session
+                    .meta
+                    .get("copyOf")
+                    .and_then(|c| c.get("path"))
+                    .and_then(Value::as_str)
+                else {
+                    return Vec::new();
+                };
+                (PathBuf::from(of), Some(slot.clone()))
+            }
+        };
+        let Some(store) = self.library.as_ref().map(|w| w.store()) else {
             return Vec::new();
         };
         let name = self
@@ -2010,7 +2076,7 @@ impl Kernel {
             .unwrap_or_default();
         let mut found = Vec::new();
         for row in store.projects().unwrap_or_default() {
-            if row.id == id || offered.contains(&row.id) {
+            if row.id == id || own_copy.as_ref() == Some(&row.id) || offered.contains(&row.id) {
                 continue;
             }
             let meta = store
@@ -2031,7 +2097,8 @@ impl Kernel {
                 // An earlier build's copy: a `copy` slot with no file of
                 // its own, under the name copies are given.
                 None => {
-                    row.id.starts_with("copy")
+                    own_copy.is_none()
+                        && row.id.starts_with("copy")
                         && meta.as_ref().is_none_or(|m| m.get("file").is_none())
                         && name.as_deref() == Some(row.name.as_str())
                 }
@@ -2042,6 +2109,12 @@ impl Kernel {
                 m.insert("name", Value::from(row.name.clone()));
                 if let Some(at) = row.at {
                     m.insert("at", Value::from(at));
+                }
+                if let Some(file) = path.file_name() {
+                    m.insert("file", Value::from(file.to_string_lossy().into_owned()));
+                }
+                if own_copy.is_some() {
+                    m.insert("different", Value::from(true));
                 }
                 found.push(Value::Object(m));
             }

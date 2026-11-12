@@ -591,6 +591,110 @@ fn copy_slot(k: &Kernel) -> String {
         other => panic!("{other:?}"),
     }
 }
+fn copies_of(k: &mut Kernel, session: &SessionHandle) -> Vec<Value> {
+    match k.shell(ShellCall::CopiesOf(session.clone())).unwrap() {
+        ShellReply::Copies(rows) => rows,
+        _ => panic!(),
+    }
+}
+/// A copy belongs to the file it was made from, not to the name that file
+/// had. Read-only file A opens as a copy and is edited there; then another
+/// file B is put at A's name. Opening B shows B, as a copy of its own, and
+/// says once that an earlier copy exists for that name. A's copy keeps A's
+/// work, and A back at the name opens it again.
+#[test]
+fn a_different_file_at_a_copied_files_name_gets_a_copy_of_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("copy-identity");
+    let file = dir.path("cut.pmv");
+    let put = |bytes: &str| {
+        let _ = fs::remove_file(&file);
+        fs::write(&file, bytes).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+    };
+    let other = PROJECT.replace("Fixture", "Another");
+    put(PROJECT);
+    let mut k = kernel(&dir.path("native"));
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::AsCopy(CopyReason::ReadOnly));
+    let first = copy_slot(&k);
+    edit(&mut k, "P", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+
+    put(&other);
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::AsCopy(CopyReason::ReadOnly));
+    let store = k.project("P").unwrap().store();
+    assert_eq!(
+        common::opacity_of(store, "layer0"),
+        Some(100.0),
+        "the file that is there now opened, not the copy of the one before"
+    );
+    let second = copy_slot(&k);
+    assert_ne!(second, first, "a copy of its own");
+    let rows = copies_of(&mut k, &session);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].get("id").and_then(Value::as_str), Some(&*first));
+    assert_eq!(rows[0].get("different"), Some(&Value::from(true)));
+    assert_eq!(rows[0].get("file").and_then(Value::as_str), Some("cut.pmv"));
+    assert!(copies_of(&mut k, &session).is_empty(), "said once");
+    edit(&mut k, "P", 70.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    // Each file opens its own copy from then on.
+    let (session, _) = open_file(&mut k, &file);
+    assert_eq!(copy_slot(&k), second);
+    assert_eq!(
+        common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+        Some(70.0)
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    put(PROJECT);
+    let (session, _) = open_file(&mut k, &file);
+    assert_eq!(copy_slot(&k), first);
+    assert_eq!(
+        common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+        Some(20.0),
+        "the first file's work is still in its copy"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+}
+/// The same for a link: the name is a symbolic link to a read-only file, and
+/// the link is pointed at another file. The copy made through the link was
+/// of the first file; the second opens on its own.
+#[test]
+fn a_link_pointed_at_another_file_does_not_open_the_first_files_copy() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = common::TempDir::new("copy-link");
+    fs::create_dir_all(dir.path("store")).unwrap();
+    let (a, b) = (dir.path("store/a.pmv"), dir.path("store/b.pmv"));
+    fs::write(&a, PROJECT).unwrap();
+    fs::write(&b, PROJECT.replace("Fixture", "Another")).unwrap();
+    for file in [&a, &b] {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let link = dir.path("cut.pmv");
+    symlink(&a, &link).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, decision) = open_file(&mut k, &link);
+    assert_eq!(decision, OpenDecision::AsCopy(CopyReason::ReadOnly));
+    let first = copy_slot(&k);
+    edit(&mut k, "P", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    fs::remove_file(&link).unwrap();
+    symlink(&b, &link).unwrap();
+    let (session, _) = open_file(&mut k, &link);
+    assert_ne!(copy_slot(&k), first);
+    assert_eq!(
+        common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+        Some(100.0)
+    );
+    assert_eq!(copies_of(&mut k, &session).len(), 1);
+    k.shell(ShellCall::Close(session)).unwrap();
+    for file in [&a, &b] {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
 /// A file that opens as a copy because the original app is running opens
 /// that same copy every time, like any other copy: the copy is this
 /// library's own project, and what kept the file from opening in place is

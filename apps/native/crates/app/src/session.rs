@@ -259,6 +259,28 @@ fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<b
         ],
     )
 }
+/// Said when a file opened as a new copy although the library holds a copy
+/// made under its name: that copy was made of another file (this one
+/// replaced it, or changed somewhere else since), so it was not opened in
+/// its place. `true` opens the earlier copy.
+fn earlier_copy_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let which = match copies {
+        [one] => format!("“{one}”"),
+        [first, rest @ ..] => format!("“{first}” and {} more", rest.len()),
+        [] => String::new(),
+    };
+    Alert::new(
+        format!("“{file}” isn’t the file your earlier copy was made from."),
+        format!(
+            "A file with this name opened as a copy before, and your changes to it are in your projects: {which}. The file here now is a different one (it was replaced, or changed somewhere else), so it opened as a new copy of its own. The earlier copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Keep This One", false).default().cancel(),
+            Button::new("Open the Earlier Copy", true),
+        ],
+    )
+}
 
 pub struct Bridge(pub Entity<Controller>);
 impl pm_shell::integration::Integration for Bridge {
@@ -1455,13 +1477,10 @@ impl Controller {
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
-                        let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
                         v.load_recent(cx);
-                        if in_place {
-                            v.offer_stranded_copies(cx);
-                        }
+                        v.offer_stranded_copies(cx);
                     }
                     // Already open in a window: that window comes forward.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
@@ -1494,7 +1513,9 @@ impl Controller {
     }
     /// A file that opened in place: if the library holds copies with work
     /// for it that the person hasn't been told about, say so once and offer
-    /// the newest (it opens as a tab; the file stays open here).
+    /// the newest (it opens as a tab; the file stays open here). A file that
+    /// opened as a new copy because an earlier copy under its name was made
+    /// of another file is told about that earlier copy the same way.
     fn offer_stranded_copies(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
@@ -1511,13 +1532,27 @@ impl Controller {
             let Some(newest) = rows.first().and_then(|r| field(r, "id")) else {
                 return;
             };
+            let different = rows.iter().any(|r| r.get("different").is_some());
+            let named = rows.first().and_then(|r| field(r, "file"));
             let Ok(answer) = this.update(cx, |v, _| {
-                let file = v
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
+                let file = named
+                    .or_else(|| {
+                        v.path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
                     .unwrap_or_default();
+                if different {
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!(
+                            "“{file}” isn’t the file an earlier copy was made from. That copy is still in your projects: “{}”.",
+                            names.join("”, “")
+                        ),
+                    );
+                    return earlier_copy_alert(&file, &names).sheet(&v.host.borrow().window);
+                }
                 v.errors.borrow_mut().push(
                     "Project",
                     &format!(
@@ -2609,6 +2644,17 @@ mod save_note_tests {
         assert!(alert.informative.contains("“cut — Native”"));
         let two = stranded_copies_alert("cut.pmv", &["a".to_owned(), "b".to_owned()]);
         assert!(two.message.contains("copies of") && two.informative.contains("“a” and 1 more"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_different_file_under_a_copied_name_is_told_about_the_earlier_copy() {
+        let alert = earlier_copy_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(alert.labels(), ["Keep This One", "Open the Earlier Copy"]);
+        // The file just opened stays unless the person asks for the other.
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.message.contains("“cut.pmv” isn’t the file"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        assert!(alert.informative.contains("stays in your projects"));
     }
     #[::core::prelude::v1::test]
     fn a_composition_is_laid_out_at_a_positive_size_whatever_is_stored() {
