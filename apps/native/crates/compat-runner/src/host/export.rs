@@ -131,6 +131,7 @@ pub(super) struct Start {
     pub(super) viewport: Option<(f32, f32, f32)>,
     pub(super) text: Option<CanvasText>,
     pub(super) rasters: Option<RasterHooks>,
+    pub(super) vars: Option<crate::VarsSource>,
     pub(super) kernel: KernelHandle,
     pub(super) shared: Arc<Shared>,
     /// Set when the window's extensions stop.
@@ -140,6 +141,7 @@ pub(super) struct Start {
 struct Events {
     inbox: Sender<RunInput>,
     shared: Arc<Shared>,
+    vars: Option<crate::VarsSource>,
     measuring: Mutex<Measures>,
     /// The page has answered once; a missed first read waits no more.
     reading: AtomicBool,
@@ -151,6 +153,10 @@ struct Events {
     layout_failed: AtomicBool,
 }
 impl RealmEvents for Arc<Events> {
+    /// The same values the window's realm activated with.
+    fn vars(&self, id: &str, keys: &[String]) -> Value {
+        super::vars_of(self.vars.as_ref(), id, keys)
+    }
     fn health(&self, id: &str, health: &Value) {
         if matches!(
             health["state"].as_str(),
@@ -246,6 +252,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
     let events = Arc::new(Events {
         inbox,
         shared: start.shared.clone(),
+        vars: start.vars.clone(),
         measuring: Mutex::new(Measures {
             waiting: None,
             early: VecDeque::new(),

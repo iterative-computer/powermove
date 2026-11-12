@@ -51,6 +51,10 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn canvases_ready(&self) {}
     fn ready(&self) {}
     fn activating(&self, _id: Option<&str>) {}
+    /// The values for one activation's declared `vars` (none without a source).
+    fn vars(&self, _id: &str, _keys: &[String]) -> Value {
+        json!({})
+    }
     /// A task has run past the watchdog's limit; the user decides (D11).
     fn unresponsive(&self, _execution: u64) {}
     /// A synchronous layout read of measure `request` (already sent with the
@@ -1659,6 +1663,17 @@ impl EngineProxy for NativeHost {
                     Error::Host("The effect clipboard belongs to the window's panels".into())
                 })?;
                 return hook(input["op"].as_str().unwrap_or_default()).map_err(Error::Host);
+            }
+            "extension.vars" => {
+                let keys: Vec<String> = input["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|key| key.as_str().map(str::to_owned))
+                    .collect();
+                return Ok(self
+                    .events
+                    .vars(input["id"].as_str().unwrap_or_default(), &keys));
             }
             "extension.health" => {
                 self.events

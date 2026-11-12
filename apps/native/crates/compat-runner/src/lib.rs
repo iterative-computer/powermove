@@ -250,6 +250,11 @@ pub fn code_identity(records: &Value) -> u64 {
 /// The window's side of the app's effect clipboard (v1's inspector service):
 /// `copy` the effects selected in Effect Controls (`{copied}`), `paste` them
 /// onto the selected layers (`{pasted}`, or `{empty}` / `{reason}`), `clear`.
+/// The values a person entered for an extension's declared `vars` (v1's
+/// `api.vars`), read per activation: extension id and declared keys in, the
+/// declared keys that have a value out. Never published or logged.
+pub type VarsSource =
+    Arc<dyn Fn(&str, &[String]) -> std::collections::BTreeMap<String, String> + Send + Sync>;
 pub type EffectsHook = Arc<dyn Fn(&str) -> std::result::Result<Value, String> + Send + Sync>;
 /// Where a window's realm finds its [`EffectsHook`], set once the window's
 /// panels run (they start after its extensions).

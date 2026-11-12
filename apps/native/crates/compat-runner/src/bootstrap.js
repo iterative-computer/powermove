@@ -1060,6 +1060,14 @@ globalThis.__compat = {
       report: (id, health) => call("extension.health", { id, health }),
       toast: (text, options) => call("ui.toast", { text, options }),
       activating: (id) => call("extension.activating", { id }),
+      // v1's loader: each activation reads the values entered for the keys
+      // its manifest declares (apiVersion 2+); a key without one is absent.
+      vars: (record) => {
+        const keys = (record.manifest?.vars ?? [])
+          .map((decl) => decl?.key)
+          .filter((key) => typeof key === "string");
+        return keys.length ? call("extension.vars", { id: record.id, keys }) : {};
+      },
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;

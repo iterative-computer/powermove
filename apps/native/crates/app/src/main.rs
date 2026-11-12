@@ -26,6 +26,7 @@ mod entry;
 mod error_log;
 mod export_coordinator;
 mod extension_authoring;
+mod extension_vars;
 mod extensions;
 mod figma_paste;
 mod first_run;

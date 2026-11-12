@@ -158,6 +158,8 @@ pub struct HostConfig {
     pub frames: Option<crate::FrameRenderer>,
     /// The app's base rasters and override answers (`render.raster`).
     pub rasters: Option<crate::RasterHooks>,
+    /// Values for extensions' declared `vars`.
+    pub vars: Option<crate::VarsSource>,
 }
 
 enum Input {
@@ -294,6 +296,7 @@ fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
 struct Events {
     shared: Arc<Shared>,
     kernel: KernelHandle,
+    vars: Option<crate::VarsSource>,
     writer: Writer,
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
@@ -305,7 +308,22 @@ struct Events {
     dom_pending: AtomicBool,
     canvas_pending: AtomicBool,
 }
+/// The declared keys that have a value, as the shipped loader delivered them.
+pub(crate) fn vars_of(source: Option<&crate::VarsSource>, id: &str, keys: &[String]) -> Value {
+    let Some(source) = source.filter(|_| !keys.is_empty()) else {
+        return json!({});
+    };
+    let values: serde_json::Map<String, Value> = source(id, keys)
+        .into_iter()
+        .filter(|(key, value)| keys.contains(key) && !value.is_empty())
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    Value::Object(values)
+}
 impl RealmEvents for Arc<Events> {
+    fn vars(&self, id: &str, keys: &[String]) -> Value {
+        vars_of(self.vars.as_ref(), id, keys)
+    }
     fn health(&self, id: &str, health: &Value) {
         let _ = self
             .inbox
@@ -1209,6 +1227,7 @@ impl Owner {
                     viewport: self.viewport,
                     text: self.config.text.as_ref().map(|text| text()),
                     rasters: self.config.rasters.clone(),
+                    vars: self.config.vars.clone(),
                     kernel: self.config.kernel.clone(),
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
@@ -1873,6 +1892,16 @@ impl Owner {
             pending: Mutex::default(),
             refused: AtomicBool::new(false),
         });
+        // As the shipped app's sandbox init: the values for its declared keys.
+        let keys: Vec<String> = found
+            .manifest
+            .as_ref()
+            .ok()
+            .and_then(|manifest| manifest["vars"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|decl| decl["key"].as_str().map(str::to_owned))
+            .collect();
         let started = StoreExtension::start(
             Arc::new(self.config.kernel.clone()),
             &self.config.project,
@@ -1881,6 +1910,7 @@ impl Owner {
             &graph,
             owner,
             views.clone(),
+            vars_of(self.config.vars.as_ref(), id, &keys),
         );
         match started {
             Ok(extension) => {
@@ -1954,6 +1984,7 @@ impl Owner {
         let events = Arc::new(Events {
             shared: self.shared.clone(),
             kernel: self.config.kernel.clone(),
+            vars: self.config.vars.clone(),
             writer: self.writer,
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
@@ -2293,6 +2324,7 @@ mod tests {
                 text: None,
                 frames,
                 rasters,
+                vars: None,
                 wake: Arc::new(|| ()),
             });
             Self {
@@ -2474,6 +2506,7 @@ mod tests {
             wake: Arc::new(|| ()),
             frames: None,
             rasters: None,
+            vars: None,
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while !later.is_ready() || later.contributions().is_none() {
@@ -2854,6 +2887,91 @@ mod tests {
         let fixture = Fixture::start(root);
         fixture.until("an empty boot settles", |host| host.definitions_settled());
         assert!(fixture.host.contributions().is_none());
+    }
+    /// v1's `api.vars`: an extension reads the values entered for the keys its
+    /// manifest declares, delivered per activation; an undeclared key, an empty
+    /// value or another extension's value never reaches it.
+    #[test]
+    fn declared_vars_reach_api_vars_and_nothing_else_does() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("extensions").join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true},{"key":"MODEL","label":"Model"},{"key":"EMPTY","label":"Empty"}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("index.ts"),
+            "export default function(api){api.storage.set('seen',{key:api.vars.get('API_KEY'),model:api.vars.get('MODEL'),keys:api.vars.keys(),other:api.vars.has('OTHER'),empty:api.vars.has('EMPTY')})}",
+        )
+        .unwrap();
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![root.path().join("extensions")],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(Arc::new(move |id: &str, keys: &[String]| {
+                seen.lock().unwrap().push((id.to_owned(), keys.to_vec()));
+                [
+                    ("API_KEY", "sk-synthetic"),
+                    ("MODEL", "m-1"),
+                    ("EMPTY", ""),
+                    ("OTHER", "x"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.is_ready() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        let storage = crate::adapter::storage_of(&kernel);
+        let stored = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".seen") {
+                        Some(v.clone())
+                    } else {
+                        v.get("seen").cloned()
+                    }
+                })
+            })
+            .unwrap_or_else(|| panic!("no storage: {storage}"));
+        assert_eq!(
+            stored,
+            json!({"key":"sk-synthetic","model":"m-1","keys":["API_KEY","MODEL"],"other":false,"empty":false})
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![(
+                "needs-key".to_owned(),
+                vec!["API_KEY".to_owned(), "MODEL".to_owned(), "EMPTY".to_owned()]
+            )]
+        );
+        drop(host);
+        drop(actor);
     }
     #[test]
     fn a_store_install_runs_confined_and_contributes_like_a_local_one() {

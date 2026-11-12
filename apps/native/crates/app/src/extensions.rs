@@ -414,6 +414,17 @@ impl Controller {
             wake: Arc::new(move || {
                 let _ = wake_tx.try_send(());
             }),
+            vars: Some({
+                let profile = self.profile.clone();
+                Arc::new(move |id: &str, keys: &[String]| {
+                    let items = |service: &str, account: &str| {
+                        crate::cloud::keychain::read(service, account)
+                            .ok()
+                            .flatten()
+                    };
+                    crate::extension_vars::values(&profile, id, keys, &items)
+                })
+            }),
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
