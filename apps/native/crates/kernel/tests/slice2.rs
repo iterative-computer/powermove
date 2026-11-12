@@ -1076,7 +1076,7 @@ fn a_save_stands_on_a_share_that_renumbers_a_file_when_it_is_renamed() {
                 .expect("the file moved aside");
             renumber(&aside);
         })),
-        after_exchange: Some(std::sync::Arc::new(|path| renumber(path))),
+        after_exchange: Some(std::sync::Arc::new(renumber)),
         ..Default::default()
     });
     let (session, _) = open_file(&mut k, &file);
@@ -1724,6 +1724,26 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
         let native = dir.path("native-crash");
         let killed = if killed_between_renames(&native, &crashed, true) {
             assert!(!crashed.exists(), "{volume}: killed with the name empty");
+            let mut k = kernel(&native);
+            // A share's lock is believed for 30 seconds after its owner
+            // ended: until then the open is refused in plain words, and
+            // nothing is moved.
+            let early = k.shell(ShellCall::PrepareOpen {
+                id: "P".into(),
+                source: SessionSource::File(crashed.clone()),
+                electron_profile: None,
+            });
+            if let Err(refused) = &early {
+                assert!(
+                    refused.to_string().contains("Try opening it again"),
+                    "{volume}: {refused}"
+                );
+                assert!(!crashed.exists(), "{volume}");
+                eprintln!("{volume}: reopen within 30 s refused in plain words; waiting");
+                std::thread::sleep(Duration::from_secs(31));
+            }
+            drop(early);
+            drop(k);
             let mut k = kernel(&native);
             let (ticket, recovery) = prepare(&mut k, "P", SessionSource::File(crashed.clone()));
             assert!(

@@ -562,7 +562,11 @@ pub fn sync_file(file: &File) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// `syncDirectory`: makes a rename/link durable.
+/// `syncDirectory`: makes a rename/link durable. A volume that has no
+/// folder sync to ask for (a network share answers "Operation not
+/// supported") is not a failed save: the file's own bytes were synced, and
+/// when the rename is durable is the server's to decide. The plain sync is
+/// still asked for.
 pub fn sync_directory(dir: &Path) -> Result<(), ProjectIoError> {
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -570,7 +574,41 @@ pub fn sync_directory(dir: &Path) -> Result<(), ProjectIoError> {
         dir
     };
     let handle = File::open(dir).map_err(|e| io_err(dir, e))?;
-    handle.sync_all().map_err(|e| io_err(dir, e))
+    match handle.sync_all() {
+        Err(e) if !folder_sync_unsupported(&e) => Err(io_err(dir, e)),
+        Err(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                // SAFETY: a live descriptor; the result is not relied on.
+                unsafe { libc::fsync(handle.as_raw_fd()) };
+            }
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
+/// ENOTSUP, or EINVAL from a descriptor that cannot be synced.
+fn folder_sync_unsupported(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(45) | Some(22))
+}
+
+#[cfg(test)]
+mod sync_tests {
+    #[test]
+    fn a_folder_that_cannot_be_synced_is_not_an_error_and_a_real_failure_is() {
+        use std::io::Error;
+        assert!(super::folder_sync_unsupported(&Error::from_raw_os_error(
+            45
+        )));
+        assert!(!super::folder_sync_unsupported(&Error::from_raw_os_error(
+            5
+        )));
+        assert!(!super::folder_sync_unsupported(&Error::from_raw_os_error(
+            28
+        )));
+    }
 }
 
 #[cfg(target_os = "macos")]

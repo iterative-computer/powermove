@@ -1401,6 +1401,21 @@ impl Kernel {
                 {
                     return self.reopen_copy(id, copy, decision, mode);
                 }
+                // Its name holds nothing and its last saved version waits
+                // beside it, but the lock is not ours: another computer is
+                // between the two renames of a save, or its owner ended there
+                // moments ago (a share's lock is believed for 30 seconds).
+                // Nothing is moved without the lock.
+                if decision != OpenDecision::Writable
+                    && !path.is_file()
+                    && project_io::left_aside(&path)
+                {
+                    return Err(failure(
+                        "This project was being saved a moment ago, here or on another computer, \
+                         and that save did not finish. Its last saved version is safe next to \
+                         it. Try opening it again in a minute.",
+                    ));
+                }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
                 // The copy's entry names the file it stands in for (where it
