@@ -115,6 +115,12 @@ impl Source {
             .length
             .map(|n| (n as i64).saturating_add(self.lead).max(0) as u64)
     }
+    /// [`Self::length`] in seconds of clip time: where a clip of this
+    /// source runs out of sound, and where its fade out ends.
+    pub fn end_seconds(&self) -> Option<f64> {
+        self.length()
+            .map(|n| n as f64 / f64::from(self.sample_rate()))
+    }
     /// Packets its decoder has sent to the codec (diagnostics: what the
     /// blocks decoded so far cost).
     pub fn packets_decoded(&self) -> u64 {

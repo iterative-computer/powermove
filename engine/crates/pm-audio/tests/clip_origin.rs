@@ -261,3 +261,62 @@ fn streams_of_a_file_without_a_picture_keep_their_offsets() {
         assert_eq!(heard(&out), [30_000], "one stream{timing}");
     }
 }
+
+/// A fade out on a retimed clip ends where the clip's sound ends on the
+/// clip's own timeline, wherever the container starts the soundtrack: a
+/// late soundtrack is not silenced early, and one that leads the picture
+/// is not cut off at full fade.
+#[test]
+fn a_retimed_fade_out_ends_where_the_sound_ends() {
+    let dir = temp_dir("clip-origin-fade");
+    let wav = dir.join("tone.wav");
+    write_wav(&wav, SR, &[tone(SR, 1.0, 1000.0, 0.5)]);
+    let pcm_mov: &[&str] = &["-c:v", "mpeg4", "-q:v", "4", "-c:a", "pcm_s16le"];
+    // (file, picture start, sound start, where the sound starts on the clip)
+    for (name, picture_at, sound_at, lead) in [
+        ("late-sound.mov", 0.0, 0.25, 0.25),
+        // The picture a frame late is the origin: the sound leads it.
+        ("early-sound.mov", 0.04, 0.0, -0.04),
+    ] {
+        let path = dir.join(name);
+        clip(&path, &wav, picture_at, sound_at, pcm_mov);
+        let a = layer(
+            "A",
+            "audio",
+            0.0,
+            2.0,
+            r#"{"asset":"v","gain":1,"trim":0,"speed":2,"pitch":"follow","fadeIn":0,"fadeOut":0.2}"#,
+            "",
+        );
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":2,"layers":[{a}],"comps":{{}},"assets":{{"v":{{"id":"v","kind":"video","timing":2}}}},"params":{{}}}}"#
+        );
+        let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+        let rig = Rig::new(&[("v", &path)]);
+        // The clip's second of sound at double speed ends here.
+        let end = (lead + 1.0) / 2.0;
+        // An export's blocks and a device callback's.
+        for block in [4096, 128] {
+            let mut mixer = rig.mixer(doc.clone(), "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, SR as i64, block);
+            let level = |at: f64| {
+                let from = (at * SR as f64) as usize;
+                out[0][from..from + 96]
+                    .iter()
+                    .fold(0f32, |peak, x| peak.max(x.abs()))
+            };
+            for before in [0.15, 0.1, 0.05, 0.02] {
+                let expected = 0.5 * (before / 0.2f32).min(1.0);
+                let heard = level(end - f64::from(before));
+                assert!(
+                    (heard - expected).abs() < 0.03,
+                    "{name}, block {block}: {heard} at {before} s before the end, {expected} expected"
+                );
+            }
+            assert!(
+                level(end + 0.01) < 0.01,
+                "{name}, block {block}: sound after the end"
+            );
+        }
+    }
+}

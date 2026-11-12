@@ -942,7 +942,7 @@ impl StaticMap {
         out.source_time = source_time;
         out.local = local;
         out.audible = duration;
-        if let Some(len) = plan.source.info.duration() {
+        if let Some(len) = plan.source.end_seconds() {
             let speed = self.levels.last().unwrap().2;
             if speed.is_finite() && speed > 0.0 {
                 let speed = speed * self.conform;
@@ -1058,7 +1058,7 @@ impl VoicePlan {
             };
             // Where the source runs out, for linear maps: the clip stops there
             // and the fade out ends there (`audibleDuration`).
-            if let Some(len) = self.source.info.duration() {
+            if let Some(len) = self.source.end_seconds() {
                 let speed = match self.offset {
                     Some(_) => Some(1.0),
                     None => static_number(node::member(node::member(Some(layer), "d"), "speed"))
