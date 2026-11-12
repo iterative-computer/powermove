@@ -94,9 +94,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
                                 sh.start = le32(&b[28..]);
                             }
                             b"indx" => {
-                                let mut b = vec![0u8; s.size as usize];
-                                f.read_exact_at(&mut b, s.data)?;
-                                sh.super_index = Some(b);
+                                sh.super_index = Some(super::read_declared(&f, s.data, s.size)?);
                             }
                             _ => {}
                         }
@@ -141,8 +139,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             };
             let ix_off = le64(entry);
             let ix = read_chunk(&f, ix_off)?;
-            let mut b = vec![0u8; ix.size as usize];
-            f.read_exact_at(&mut b, ix.data)?;
+            let b = super::read_declared(&f, ix.data, ix.size)?;
             if b.len() < 24 || b[3] != 1 {
                 return Err(MediaError::invalid("bad OpenDML standard index"));
             }
@@ -161,8 +158,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         source = "OpenDML";
     } else if let Some(ix) = idx1 {
         let movi = movi.ok_or_else(|| MediaError::invalid("AVI without a movi list"))?;
-        let mut b = vec![0u8; ix.size as usize];
-        f.read_exact_at(&mut b, ix.data)?;
+        let b = super::read_declared(&f, ix.data, ix.size)?;
         let raw: Vec<(&[u8], u32, u64, u32)> = b
             .chunks_exact(16)
             .map(|e| (&e[..4], le32(&e[4..]), le32(&e[8..]) as u64, le32(&e[12..])))
@@ -229,6 +225,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         samples,
         frames,
         config: CodecConfig::default(),
+        edits: Default::default(),
         nal_codec: None,
         stats: IndexStats {
             detail: Some(format!("{source} index, stream {number}")),

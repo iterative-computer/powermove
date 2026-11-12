@@ -3,6 +3,7 @@
 //! value, its automatic value, and where that came from (the file, a
 //! section 9 default rule, or the override).
 
+use crate::clip::ClipTiming;
 use crate::error::{MediaError, Result};
 use crate::image::{self, ImageFormat};
 use crate::interpret::{Field, Interpretation, Origin, resolve_video};
@@ -11,7 +12,7 @@ use crate::probe::color::HdrFormat;
 use crate::probe::{FieldOrder, MediaProbe, StreamKind, VideoProbe};
 use pm_protocol::color::{AlphaMode, Subsampling};
 use pm_protocol::media::{
-    AudioFacts, FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind,
+    AudioFacts, AudioStreamFacts, FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -115,8 +116,18 @@ fn is_still(path: &Path) -> Result<bool> {
 }
 
 /// The facts of a file, read with `interpret` (an asset's `interpret`
-/// member as JSON text).
+/// member as JSON text), its lengths measured by its presentation.
 pub fn media_facts(path: &Path, interpret: Option<&str>) -> Result<MediaFacts> {
+    media_facts_as(path, interpret, ClipTiming::Presentation)
+}
+
+/// [`media_facts`] with the lengths (`duration`, `audio_duration`) an
+/// asset with `timing` reads: a relinked asset keeps its own reading.
+pub fn media_facts_as(
+    path: &Path,
+    interpret: Option<&str>,
+    timing: ClipTiming,
+) -> Result<MediaFacts> {
     let (interp, issues) = parse_interpret(interpret);
     if is_still(path)? && image::animation(path).ok().flatten().is_none() {
         return still_facts(path, &interp, issues);
@@ -124,8 +135,8 @@ pub fn media_facts(path: &Path, interpret: Option<&str>) -> Result<MediaFacts> {
     let probed = crate::probe::probe(path)?;
     let p = &probed.probe;
     match &p.video {
-        Some(v) => Ok(video_facts(p, v, &interp, issues)),
-        None if p.audio_stream.is_some() => Ok(audio_facts(p, issues)),
+        Some(v) => Ok(video_facts(p, v, &interp, issues, timing)),
+        None if p.audio_stream.is_some() => Ok(audio_facts(p, issues, timing)),
         None => Err(MediaError::invalid("no video, image, or audio stream")),
     }
 }
@@ -140,6 +151,118 @@ fn audio_metadata(p: &MediaProbe) -> Option<AudioFacts> {
         sample_rate: audio.sample_rate.try_into().ok().filter(|r| *r > 0)?,
         channels: audio.channels.try_into().ok().filter(|c| *c > 0)?,
     })
+}
+
+/// Where the selected audio stream ends on the clip's timeline under
+/// `timing`, in seconds: its own length, from its own first timestamp
+/// measured from the start of the file's presentation
+/// ([`crate::clip::Span`]), or from 0 as the earlier app read it.
+pub fn audio_duration(p: &MediaProbe, timing: ClipTiming) -> Option<f64> {
+    let stream = p.audio_stream.and_then(|i| p.streams.get(i))?;
+    stream.audio.as_ref()?;
+    let unit = stream.timebase[0] as f64 / stream.timebase[1] as f64;
+    let start = stream.start_pts.unwrap_or(0) as f64 * unit;
+    // Unknown when neither the container nor the stream's packets say
+    // (the probe measures Matroska's from its packets): never the file's
+    // length, which a longer picture sets.
+    let length = stream.duration_pts? as f64 * unit;
+    Some(match timing {
+        ClipTiming::Legacy => length.max(0.0),
+        ClipTiming::Presentation => {
+            let origin = crate::clip::Span::of(p).origin.seconds();
+            (start - origin + length).max(0.0)
+        }
+    })
+}
+
+/// Every audio stream of the file that can be described, in file order.
+pub fn audio_streams(p: &MediaProbe) -> Vec<AudioStreamFacts> {
+    p.streams
+        .iter()
+        .filter_map(|stream| {
+            let audio = stream.audio.as_ref()?;
+            Some(AudioStreamFacts {
+                index: stream.index.try_into().ok()?,
+                sample_rate: audio.sample_rate.try_into().ok().filter(|r| *r > 0)?,
+                channels: audio.channels.try_into().ok().filter(|c| *c > 0)?,
+            })
+        })
+        .collect()
+}
+
+/// The asset's `audioStreams` member for a file's audio streams: every
+/// stream listed and on, when the file has more than one (camera and
+/// recorder tracks); `None` for a file with one stream or none, whose asset
+/// plays its one stream without a list.
+pub fn asset_audio_streams(streams: &[AudioStreamFacts]) -> Option<serde_json::Value> {
+    (streams.len() > 1).then(|| {
+        streams
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "index": s.index,
+                    "channels": s.channels,
+                    "sampleRate": s.sample_rate,
+                    "on": true,
+                })
+            })
+            .collect()
+    })
+}
+
+/// The `audioStreams` member an asset keeps when its file is replaced, from
+/// the member it had (`old`), the new file's streams and whether the new
+/// bytes are the old ones (`same`; `None` when that cannot be told).
+///
+/// Relinking to the same file changes nothing audible: the member, or its
+/// absence, stays exactly as it was. An older asset without a list keeps
+/// playing its one stream unless the new footage is known to differ, which
+/// then plays as a fresh import of it would. A list is reconciled to the new
+/// file: a stream with the same index and channel count keeps its on/off,
+/// any other stream takes the new file's default (on), and nothing listed
+/// names a stream the new file lacks. A file with one stream needs a list
+/// only to keep that stream switched off.
+pub fn relinked_audio_streams(
+    old: Option<&serde_json::Value>,
+    streams: &[AudioStreamFacts],
+    same: Option<bool>,
+) -> Option<serde_json::Value> {
+    if same == Some(true) {
+        return old.cloned();
+    }
+    let Some(old) = old else {
+        return match same {
+            Some(false) => asset_audio_streams(streams),
+            _ => None,
+        };
+    };
+    let kept = |s: &AudioStreamFacts| -> Option<bool> {
+        old.as_array()?
+            .iter()
+            .find(|e| {
+                e["index"].as_u64() == Some(u64::from(s.index))
+                    && e["channels"].as_u64() == Some(u64::from(s.channels))
+            })
+            .map(|e| e["on"] != serde_json::Value::Bool(false))
+    };
+    let entry = |s: &AudioStreamFacts, on: bool| {
+        serde_json::json!({
+            "index": s.index,
+            "channels": s.channels,
+            "sampleRate": s.sample_rate,
+            "on": on,
+        })
+    };
+    match streams {
+        [] => None,
+        [one] => (kept(one) == Some(false)).then(|| serde_json::json!([entry(one, false)])),
+        _ => Some(
+            streams
+                .iter()
+                .map(|s| entry(s, kept(s).unwrap_or(true)))
+                .collect(),
+        ),
+    }
 }
 
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
@@ -194,6 +317,7 @@ fn video_facts(
     v: &VideoProbe,
     interp: &Interpretation,
     issues: Vec<String>,
+    timing: ClipTiming,
 ) -> MediaFacts {
     let r = resolve_video(v, interp);
     let c = &v.color;
@@ -237,9 +361,7 @@ fn video_facts(
         ));
     }
     facts.push(line("Frames", v.frames.to_string()));
-    if let Some(d) = p.duration_us {
-        facts.push(line("Duration", clock(d as f64 / 1e6)));
-    }
+    facts.push(line("Duration", clock(v.duration())));
     identity_lines(p, &mut facts);
     if let Some(h) = &c.hdr {
         facts.push(line(
@@ -317,7 +439,7 @@ fn video_facts(
     let (w, h) = r.display_size((v.width, v.height));
     let duration = match r.conformed() {
         Some(rate) => Some(v.frames as f64 * rate.den() as f64 / rate.num() as f64),
-        None => p.duration_us.map(|d| d as f64 / 1e6),
+        None => p.duration_as(timing),
     };
     MediaFacts {
         kind: MediaKind::Video,
@@ -327,6 +449,8 @@ fn video_facts(
         issues,
         display_size: Some([w, h]),
         duration,
+        audio_duration: audio_duration(p, timing),
+        audio_streams: audio_streams(p),
     }
 }
 
@@ -399,14 +523,17 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
         issues,
         display_size: Some([w, h]),
         duration: None,
+        audio_duration: None,
+        audio_streams: vec![],
     })
 }
 
-fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
+fn audio_facts(p: &MediaProbe, issues: Vec<String>, timing: ClipTiming) -> MediaFacts {
     let mut facts = vec![line("Format", p.container.clone())];
     audio_lines(p, &mut facts);
-    if let Some(d) = p.duration_us {
-        facts.push(line("Duration", clock(d as f64 / 1e6)));
+    let duration = p.duration_as(timing);
+    if let Some(d) = duration {
+        facts.push(line("Duration", clock(d)));
     }
     let streams = p
         .streams
@@ -424,7 +551,9 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
         settings: vec![],
         issues,
         display_size: None,
-        duration: p.duration_us.map(|d| d as f64 / 1e6),
+        duration,
+        audio_duration: audio_duration(p, timing),
+        audio_streams: audio_streams(p),
     }
 }
 
@@ -471,7 +600,7 @@ mod tests {
             sampled_fingerprint: "fixture".into(),
         };
         assert_eq!(
-            audio_facts(&p, vec![]).audio,
+            audio_facts(&p, vec![], ClipTiming::Presentation).audio,
             Some(AudioFacts {
                 sample_rate: 48000,
                 channels: 6
@@ -479,7 +608,13 @@ mod tests {
         );
         p.streams[0].audio.as_mut().unwrap().channel_layout =
             Some("custom FL+FR+TFL+TFR+LFE+BC".into());
-        assert_eq!(audio_facts(&p, vec![]).audio.unwrap().channels, 6);
+        assert_eq!(
+            audio_facts(&p, vec![], ClipTiming::Presentation)
+                .audio
+                .unwrap()
+                .channels,
+            6
+        );
     }
 
     #[test]

@@ -1,12 +1,11 @@
 //! Probe (section 13 "Probe and index"): streams, timecode, reel, UMID or
 //! content identifier, pixel aspect, clean aperture; color; the frame index;
 //! timing (edit lists, composition offsets, start offsets, priming); the
-//! nominal rate; decode cost, poster, and filmstrip seed. Waveform peaks are
-//! in [`peaks`]; the content hash in [`crate::hash`].
+//! nominal rate; decode cost, poster, and filmstrip seed. The content hash
+//! is in [`crate::hash`]; waveforms are the mix's (`pm_audio::waveform`).
 
 pub mod cache;
 pub mod color;
-pub mod peaks;
 pub mod timing;
 
 use crate::decode::{Backend, backends};
@@ -14,7 +13,7 @@ use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input};
 use crate::index::{self, FrameIndex, IndexSource};
 use crate::sys::ffmpeg as ff;
-use crate::time::{NominalRate, nominal_rate};
+use crate::time::{NominalRate, declared_rate, nominal_rate};
 use color::{ColorInfo, SideData};
 use pm_protocol::color::AlphaMode;
 use pm_time::{Rate, TimecodeFormat};
@@ -141,6 +140,16 @@ pub struct VideoProbe {
     pub min_frame_duration: i64,
     pub max_frame_duration: i64,
     pub frames: usize,
+    /// The picture's presentation, in `timebase` units (seconds per unit as
+    /// [num, den]): the first presented frame starts at `start_pts` and the
+    /// last one ends at `end_pts`.
+    pub timebase: [i64; 2],
+    pub start_pts: i64,
+    pub end_pts: i64,
+    /// How much earlier than their timestamps the earlier app showed the
+    /// frames ([`crate::clip::LegacyMap`]): a sample straddling the start
+    /// of the first media edit moves the rest up to the edit's start.
+    pub head_gap: i64,
     pub index: IndexSummary,
     pub decode: DecodeCost,
     /// Presented frame for the poster: the first sync frame at or after 10%.
@@ -207,6 +216,69 @@ pub struct MediaProbe {
     pub content_identifier: Option<String>,
     pub creation_time: Option<String>,
     pub sampled_fingerprint: String,
+}
+
+impl VideoProbe {
+    /// Seconds from the first presented frame's start to the last one's end.
+    pub fn duration(&self) -> f64 {
+        (self.end_pts - self.start_pts) as f64 * self.timebase[0] as f64 / self.timebase[1] as f64
+    }
+}
+
+impl MediaProbe {
+    /// How long the file plays, in seconds, read by its presentation
+    /// ([`crate::clip::Span`]): from its origin to the latest end of any
+    /// stream.
+    pub fn duration(&self) -> Option<f64> {
+        self.duration_as(crate::clip::ClipTiming::Presentation)
+    }
+
+    /// How long a clip of this file is under an asset's `timing`: to the
+    /// latest end of any stream as that reading places it. A file that
+    /// states no stream ends lasts as long as its container says.
+    pub fn duration_as(&self, timing: crate::clip::ClipTiming) -> Option<f64> {
+        let measured = match timing {
+            crate::clip::ClipTiming::Presentation => crate::clip::Span::of(self).duration(),
+            crate::clip::ClipTiming::Legacy => {
+                crate::clip::Span::legacy_end(self).map(|end| end.seconds().max(0.0))
+            }
+        };
+        measured.or_else(|| self.duration_us.map(|d| d as f64 / 1e6))
+    }
+}
+
+/// FFmpeg's still-image demuxers (`png_pipe`, `jpeg_pipe`, `image2`, ...):
+/// such a file is one picture read by the still path, never a one-frame
+/// movie.
+pub(crate) fn still_container(name: &str) -> bool {
+    name.split(',')
+        .any(|n| n == "image2" || n.ends_with("_pipe"))
+}
+
+/// The clip origin of a file read by its presentation
+/// ([`crate::clip::Span`]): a container timestamp and its unit in seconds.
+/// A file with a picture answers from the frame index the picture is
+/// decoded by (prepared once and shared with the first [`MediaSource`]
+/// where the container allows), so sound placed against it stays with the
+/// picture.
+///
+/// [`MediaSource`]: crate::decode::service::MediaSource
+pub fn clip_origin(path: &Path) -> Result<(i64, pm_time::Rational)> {
+    let of = |probe: &MediaProbe| -> Result<(i64, pm_time::Rational)> {
+        let origin = crate::clip::Span::of(probe).origin;
+        let unit = pm_time::Rational::new(origin.timebase[0], origin.timebase[1])?;
+        Ok((origin.pts, unit))
+    };
+    if let Some(prepared) = cache::lookup(path)? {
+        return of(&prepared.probe);
+    }
+    if Input::open(path)?.picture().is_some() {
+        cache::prewarm(path)?;
+        if let Some(prepared) = cache::lookup(path)? {
+            return of(&prepared.probe);
+        }
+    }
+    of(&probe(path)?.probe)
 }
 
 /// Everything probe learns, plus the video index (kept for decoding).
@@ -315,6 +387,30 @@ pub(crate) fn probe_with_input(path: &Path) -> Result<(Probed, Input)> {
     probe_with_input_fingerprint(path, size, || crate::hash::sampled_fingerprint(path))
 }
 
+/// An audio stream whose container states no length of its own (Matroska
+/// keeps only the file's) is as long as its packets reach: never the
+/// file's length, which a longer picture sets. Left unknown when the
+/// packets cannot be read.
+fn measure_unstated_audio_lengths(input: &Input, streams: &mut [StreamProbe]) {
+    let unstated: Vec<usize> = streams
+        .iter()
+        .filter(|s| s.kind == StreamKind::Audio && s.audio.is_some() && s.duration_pts.is_none())
+        .map(|s| s.index)
+        .collect();
+    if unstated.is_empty() {
+        return;
+    }
+    let Ok(ends) = input.stream_ends(&unstated) else {
+        return;
+    };
+    for (index, end) in unstated.into_iter().zip(ends) {
+        let stream = &mut streams[index];
+        stream.duration_pts = end
+            .map(|end| end - stream.start_pts.unwrap_or(0))
+            .filter(|&d| d > 0);
+    }
+}
+
 fn probe_with_input_fingerprint(
     path: &Path,
     size: u64,
@@ -325,10 +421,11 @@ fn probe_with_input_fingerprint(
     let TimingProbe {
         duration_us,
         start_us,
-        streams,
+        mut streams,
         video_stream,
         audio_stream,
     } = input_timing(path, &input, &container);
+    measure_unstated_audio_lengths(&input, &mut streams);
     let (video, index) = match video_stream {
         Some(v) => {
             let (p, idx) = video_probe(path, &input, v)?;
@@ -471,7 +568,31 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
     }
 
     let pts = idx.presented_pts();
-    let nominal = nominal_rate(&pts, idx.timebase);
+    // One frame has no spacing to measure: the frame rate the container
+    // declares for the stream states it, or the frame's own duration. A
+    // transport stream stamps a lone packet with a one-tick duration, so a
+    // rate no camera or encoder produces is not taken from either.
+    let nominal = nominal_rate(&pts, idx.timebase).or_else(|| {
+        let [frame] = idx.frames.as_slice() else {
+            return None;
+        };
+        if still_container(&input.format_name()) {
+            return None;
+        }
+        let plausible = |n: &NominalRate| n.rate.num() <= 1000 * n.rate.den();
+        // The average rate, then the base rate the codec's timing states.
+        let (average, base) =
+            unsafe { ((*input.st(v)).avg_frame_rate, (*input.st(v)).r_frame_rate) };
+        [average, base]
+            .into_iter()
+            .filter(|r| r.num > 0 && r.den > 0)
+            .filter_map(|r| pm_time::Rational::new(r.den as i64, r.num as i64).ok())
+            .filter_map(|unit| declared_rate(1, unit))
+            .find(plausible)
+            .or_else(|| {
+                declared_rate(idx.samples[frame.sample].duration, idx.timebase).filter(plausible)
+            })
+    });
     let durations: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
     let (min_d, max_d) = (
         durations.iter().copied().min().unwrap_or(0),
@@ -531,6 +652,10 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
             min_frame_duration: min_d,
             max_frame_duration: max_d,
             frames: presented,
+            timebase: [idx.timebase.num(), idx.timebase.den()],
+            start_pts: idx.origin_pts(),
+            end_pts: idx.end_pts(),
+            head_gap: idx.edits.head_gap,
             index: summary,
             decode,
             poster_frame,

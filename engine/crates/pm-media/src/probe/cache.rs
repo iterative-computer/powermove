@@ -102,6 +102,12 @@ fn self_contained(path: &Path) -> Result<bool> {
         "mp4" | "m4v" | "mov" | "m4a" => n >= 8 && &header[4..8] == b"ftyp",
         "mkv" | "webm" => n >= 4 && header[..4] == [0x1a, 0x45, 0xdf, 0xa3],
         "avi" => n >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"AVI ",
+        // Transport streams (188-byte packets, or 192 with a 4-byte
+        // timecode prefix), program streams and FLV: scanned packet by
+        // packet, so the picture and the sound must share one scan.
+        "ts" | "mts" | "m2ts" | "m2t" => n >= 5 && (header[0] == 0x47 || header[4] == 0x47),
+        "vob" | "mpg" | "mpeg" => n >= 4 && header[..4] == [0, 0, 1, 0xba],
+        "flv" => n >= 3 && &header[..3] == b"FLV",
         _ => false,
     })
 }

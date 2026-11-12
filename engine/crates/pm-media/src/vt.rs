@@ -815,6 +815,16 @@ impl VtDecoder {
     }
 }
 
+impl VtDecoder {
+    /// Invalidates the session the way a GPU reset or a sleep and wake
+    /// does: every later sample fails with `kVTInvalidSessionErr`. For
+    /// tests of recovery.
+    #[doc(hidden)]
+    pub fn invalidate(&mut self) {
+        unsafe { VTDecompressionSessionInvalidate(self.session) };
+    }
+}
+
 impl Drop for VtDecoder {
     fn drop(&mut self) {
         unsafe {
