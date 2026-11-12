@@ -738,3 +738,60 @@ fn source_views_show_the_frame_the_timeline_shows() {
         }
     }
 }
+
+/// An older clip is as long as the frames its source times reach: a
+/// picture 0.4 s into its file ends 1.2 s in for an older asset (frames at
+/// their own timestamps) and 0.8 s in for a new one. The source, the
+/// import's facts and the preview reader agree, and a layer as long as the
+/// clip reaches its last frame.
+#[test]
+fn a_clip_is_as_long_as_its_asset_reads_it() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-legacy-length-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let plain: &[&str] = &["-c:v", "mpeg4", "-q:v", "2", "-g", "6", "-bf", "0"];
+    let base = dir.0.join("zero.mp4");
+    steps_clip(&base, plain, &[]);
+    retime_track(
+        &base,
+        &dir.0.join("empty-edit.mp4"),
+        &[(-1, 400, 1), (0, 800, 1)],
+        0,
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    for (name, older, versioned) in [("zero.mp4", 0.8, 0.8), ("empty-edit.mp4", 1.2, 0.8)] {
+        let path = dir.0.join(name);
+        let source = pm_media::decode::service::MediaSource::open(&path).unwrap();
+        for (timing, seconds) in [(None, older), (VERSIONED, versioned)] {
+            let clip = pm_media::clip::ClipTiming::of_asset(timing.map(|t| t as f64));
+            let lengths = [
+                source.duration_as(clip) as f64 / pm_time::TICKS_PER_SECOND as f64,
+                pm_media::facts::media_facts_as(&path, None, clip)
+                    .unwrap()
+                    .duration
+                    .unwrap(),
+                pm_media::preview::PreviewReader::open(&path)
+                    .unwrap()
+                    .with_timing(clip)
+                    .duration()
+                    .unwrap(),
+            ];
+            for length in lengths {
+                assert!(
+                    (length - seconds).abs() < 1e-6,
+                    "{name}, timing {timing:?}: {lengths:?}"
+                );
+            }
+            let mut value = document(0.0, 1.0, timing);
+            value["layers"][0]["dur"] = json!(seconds);
+            value["dur"] = json!(seconds);
+            let frames = (seconds * f64::from(FPS)).round() as usize;
+            let last = (frames - 1) as f64 / f64::from(FPS);
+            assert_eq!(
+                timeline_frame(&mut renderer, &load(&value), &path, last),
+                Some(FRAMES - 1),
+                "{name}, timing {timing:?}: the last frame of the layer"
+            );
+        }
+    }
+}

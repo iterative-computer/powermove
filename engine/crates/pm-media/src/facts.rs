@@ -3,6 +3,7 @@
 //! value, its automatic value, and where that came from (the file, a
 //! section 9 default rule, or the override).
 
+use crate::clip::ClipTiming;
 use crate::error::{MediaError, Result};
 use crate::image::{self, ImageFormat};
 use crate::interpret::{Field, Interpretation, Origin, resolve_video};
@@ -115,8 +116,18 @@ fn is_still(path: &Path) -> Result<bool> {
 }
 
 /// The facts of a file, read with `interpret` (an asset's `interpret`
-/// member as JSON text).
+/// member as JSON text), its lengths measured by its presentation.
 pub fn media_facts(path: &Path, interpret: Option<&str>) -> Result<MediaFacts> {
+    media_facts_as(path, interpret, ClipTiming::Presentation)
+}
+
+/// [`media_facts`] with the lengths (`duration`, `audio_duration`) an
+/// asset with `timing` reads: a relinked asset keeps its own reading.
+pub fn media_facts_as(
+    path: &Path,
+    interpret: Option<&str>,
+    timing: ClipTiming,
+) -> Result<MediaFacts> {
     let (interp, issues) = parse_interpret(interpret);
     if is_still(path)? && image::animation(path).ok().flatten().is_none() {
         return still_facts(path, &interp, issues);
@@ -124,8 +135,8 @@ pub fn media_facts(path: &Path, interpret: Option<&str>) -> Result<MediaFacts> {
     let probed = crate::probe::probe(path)?;
     let p = &probed.probe;
     match &p.video {
-        Some(v) => Ok(video_facts(p, v, &interp, issues)),
-        None if p.audio_stream.is_some() => Ok(audio_facts(p, issues)),
+        Some(v) => Ok(video_facts(p, v, &interp, issues, timing)),
+        None if p.audio_stream.is_some() => Ok(audio_facts(p, issues, timing)),
         None => Err(MediaError::invalid("no video, image, or audio stream")),
     }
 }
@@ -142,10 +153,11 @@ fn audio_metadata(p: &MediaProbe) -> Option<AudioFacts> {
     })
 }
 
-/// Where the selected audio stream ends on the clip's timeline, in seconds:
-/// its own length from its own first timestamp, measured from the start of
-/// the file's presentation ([`crate::clip::Span`]).
-fn audio_duration(p: &MediaProbe) -> Option<f64> {
+/// Where the selected audio stream ends on the clip's timeline under
+/// `timing`, in seconds: its own length, from its own first timestamp
+/// measured from the start of the file's presentation
+/// ([`crate::clip::Span`]), or from 0 as the earlier app read it.
+pub fn audio_duration(p: &MediaProbe, timing: ClipTiming) -> Option<f64> {
     let stream = p.audio_stream.and_then(|i| p.streams.get(i))?;
     stream.audio.as_ref()?;
     let unit = stream.timebase[0] as f64 / stream.timebase[1] as f64;
@@ -159,8 +171,13 @@ fn audio_duration(p: &MediaProbe) -> Option<f64> {
             p.duration_us? as f64 / 1e6 - (start - container_start)
         }
     };
-    let origin = crate::clip::Span::of(p).origin.seconds();
-    Some((start - origin + length).max(0.0))
+    Some(match timing {
+        ClipTiming::Legacy => length.max(0.0),
+        ClipTiming::Presentation => {
+            let origin = crate::clip::Span::of(p).origin.seconds();
+            (start - origin + length).max(0.0)
+        }
+    })
 }
 
 /// Every audio stream of the file that can be described, in file order.
@@ -305,6 +322,7 @@ fn video_facts(
     v: &VideoProbe,
     interp: &Interpretation,
     issues: Vec<String>,
+    timing: ClipTiming,
 ) -> MediaFacts {
     let r = resolve_video(v, interp);
     let c = &v.color;
@@ -426,7 +444,7 @@ fn video_facts(
     let (w, h) = r.display_size((v.width, v.height));
     let duration = match r.conformed() {
         Some(rate) => Some(v.frames as f64 * rate.den() as f64 / rate.num() as f64),
-        None => p.duration(),
+        None => p.duration_as(timing),
     };
     MediaFacts {
         kind: MediaKind::Video,
@@ -436,7 +454,7 @@ fn video_facts(
         issues,
         display_size: Some([w, h]),
         duration,
-        audio_duration: audio_duration(p),
+        audio_duration: audio_duration(p, timing),
         audio_streams: audio_streams(p),
     }
 }
@@ -515,11 +533,12 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
     })
 }
 
-fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
+fn audio_facts(p: &MediaProbe, issues: Vec<String>, timing: ClipTiming) -> MediaFacts {
     let mut facts = vec![line("Format", p.container.clone())];
     audio_lines(p, &mut facts);
-    if let Some(d) = p.duration_us {
-        facts.push(line("Duration", clock(d as f64 / 1e6)));
+    let duration = p.duration_as(timing);
+    if let Some(d) = duration {
+        facts.push(line("Duration", clock(d)));
     }
     let streams = p
         .streams
@@ -537,8 +556,8 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
         settings: vec![],
         issues,
         display_size: None,
-        duration: p.duration_us.map(|d| d as f64 / 1e6),
-        audio_duration: audio_duration(p),
+        duration,
+        audio_duration: audio_duration(p, timing),
         audio_streams: audio_streams(p),
     }
 }
@@ -586,7 +605,7 @@ mod tests {
             sampled_fingerprint: "fixture".into(),
         };
         assert_eq!(
-            audio_facts(&p, vec![]).audio,
+            audio_facts(&p, vec![], ClipTiming::Presentation).audio,
             Some(AudioFacts {
                 sample_rate: 48000,
                 channels: 6
@@ -594,7 +613,13 @@ mod tests {
         );
         p.streams[0].audio.as_mut().unwrap().channel_layout =
             Some("custom FL+FR+TFL+TFR+LFE+BC".into());
-        assert_eq!(audio_facts(&p, vec![]).audio.unwrap().channels, 6);
+        assert_eq!(
+            audio_facts(&p, vec![], ClipTiming::Presentation)
+                .audio
+                .unwrap()
+                .channels,
+            6
+        );
     }
 
     #[test]

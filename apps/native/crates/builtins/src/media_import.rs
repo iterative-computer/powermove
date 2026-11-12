@@ -125,13 +125,15 @@ pub fn expand(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// `assetIdentity`: what the Project panel and layers read from an asset,
-/// and the file's audio streams.
+/// and the file's audio streams. Lengths are measured as an asset with
+/// `timing` reads the file.
 fn metadata(
     path: &Path,
     kind: &str,
     size: u64,
+    timing: pm_media::clip::ClipTiming,
 ) -> Result<(Value, Vec<pm_protocol::media::AudioStreamFacts>), String> {
-    let facts = pm_media::facts::media_facts(path, None).map_err(|e| e.to_string())?;
+    let facts = pm_media::facts::media_facts_as(path, None, timing).map_err(|e| e.to_string())?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -168,6 +170,11 @@ fn metadata(
         asset["format"] = json!(extension(path));
     }
     Ok((crate::data::model(&asset)?, facts.audio_streams))
+}
+
+/// How an asset record reads its file's times (its `timing` member).
+pub fn asset_timing(record: Option<&serde_json::Value>) -> pm_media::clip::ClipTiming {
+    pm_media::clip::ClipTiming::of_asset(record.and_then(|r| r["timing"].as_f64()))
 }
 
 /// A relinked asset's `audioStreams`: the old member reconciled with the new
@@ -390,7 +397,8 @@ impl Builtins {
             None => expand(request.paths),
         };
         // A relink retains the old bytes and reads which of the old file's
-        // audio streams were heard.
+        // audio streams were heard and how the asset reads its file's times.
+        let mut timing = pm_media::clip::ClipTiming::Presentation;
         let (previous, old_streams) = match &request.replace {
             Some(id) => {
                 let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
@@ -399,11 +407,13 @@ impl Builtins {
                     .map(|entry| archive.retain_entry(&entry))
                     .transpose()
                     .map_err(|e| e.to_string())?;
-                let streams = published
+                let record = published
                     .snapshot
                     .root()
-                    .and_then(|root| root.get("assets")?.get(id)?.get("audioStreams"))
-                    .map(|streams| crate::data::wire(&streams.to_value()));
+                    .and_then(|root| root.get("assets")?.get(id))
+                    .map(|record| crate::data::wire(&record.to_value()));
+                timing = asset_timing(record.as_ref());
+                let streams = record.and_then(|record| record.get("audioStreams").cloned());
                 (previous, streams)
             }
             None => (None, None),
@@ -437,7 +447,7 @@ impl Builtins {
                         vec![],
                     ),
                     None => {
-                        let (asset, streams) = metadata(&path, kind, size)?;
+                        let (asset, streams) = metadata(&path, kind, size, timing)?;
                         (crate::data::wire(&asset), streams)
                     }
                 };
@@ -1162,6 +1172,101 @@ mod tests {
         std::fs::copy(&recorder, &copy).unwrap();
         relink("muted", &copy);
         assert_eq!(heard(&f, "muted"), [0]);
+    }
+
+    /// A relink records the clip's lengths as the asset reads its file: an
+    /// older asset's frames sit at their own timestamps and its sound starts
+    /// at the program's first sample; a new one reads the presentation.
+    #[test]
+    fn a_relink_measures_the_clip_as_its_asset_reads_it() {
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,"bg":"#000000","comps":{},"layers":[],"assets":{
+                "older":{"id":"older","name":"Older.mp4","kind":"video","dur":1},
+                "new":{"id":"new","name":"New.mp4","kind":"video","dur":1,"timing":2}}}"##,
+        );
+        let run = |args: &[&str], name: &str| {
+            let path = f.root.join(name);
+            let status = std::process::Command::new(ffmpeg())
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(args)
+                .args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            path
+        };
+        let picture = [
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=25:duration=0.8",
+        ];
+        // Twenty frames, the first 0.4 s into the file.
+        let late_picture = run(
+            &[&picture[..], &["-output_ts_offset", "0.4"]].concat(),
+            "late picture.mp4",
+        );
+        // A second of picture from zero and a second of sound from 0.25 s.
+        let late_sound = run(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=25:duration=1",
+                "-itsoffset",
+                "0.25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=r=48000:d=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+            ],
+            "late sound.mov",
+        );
+        let lengths = |asset: &str| {
+            let published = f.actor.handle().published("p").unwrap();
+            let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+            let record = &root["assets"][asset];
+            (
+                record["dur"].as_f64().unwrap(),
+                record["audioDur"].as_f64().unwrap(),
+            )
+        };
+        let relink = |asset: &str, path: &Path| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path.to_owned()],
+                        replace: Some(asset.into()),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        let close =
+            |(a, b): (f64, f64), (c, d): (f64, f64)| (a - c).abs() < 1e-3 && (b - d).abs() < 1e-3;
+        for (path, older, new) in [
+            (&late_picture, (1.2, 0.), (0.8, 0.)),
+            (&late_sound, (1.0, 1.0), (1.25, 1.25)),
+        ] {
+            relink("older", path);
+            relink("new", path);
+            assert!(
+                close(lengths("older"), older),
+                "{path:?}: {:?}",
+                lengths("older")
+            );
+            assert!(close(lengths("new"), new), "{path:?}: {:?}", lengths("new"));
+        }
     }
 
     #[test]

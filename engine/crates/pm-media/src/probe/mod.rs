@@ -147,6 +147,10 @@ pub struct VideoProbe {
     pub timebase: [i64; 2],
     pub start_pts: i64,
     pub end_pts: i64,
+    /// How much earlier than their timestamps the earlier app showed the
+    /// frames ([`crate::clip::LegacyMap`]): a sample straddling the start
+    /// of the first media edit moves the rest up to the edit's start.
+    pub head_gap: i64,
     pub index: IndexSummary,
     pub decode: DecodeCost,
     /// Presented frame for the poster: the first sync frame at or after 10%.
@@ -223,14 +227,24 @@ impl VideoProbe {
 }
 
 impl MediaProbe {
-    /// How long the file plays, in seconds: its presentation
-    /// ([`crate::clip::Span`]) when it has a picture, from its origin to
-    /// the latest end of any stream; otherwise the container's duration.
+    /// How long the file plays, in seconds, read by its presentation
+    /// ([`crate::clip::Span`]): from its origin to the latest end of any
+    /// stream.
     pub fn duration(&self) -> Option<f64> {
-        match &self.video {
-            Some(_) => crate::clip::Span::of(self).duration(),
-            None => self.duration_us.map(|d| d as f64 / 1e6),
-        }
+        self.duration_as(crate::clip::ClipTiming::Presentation)
+    }
+
+    /// How long a clip of this file is under an asset's `timing`: to the
+    /// latest end of any stream as that reading places it. A file that
+    /// states no stream ends lasts as long as its container says.
+    pub fn duration_as(&self, timing: crate::clip::ClipTiming) -> Option<f64> {
+        let measured = match timing {
+            crate::clip::ClipTiming::Presentation => crate::clip::Span::of(self).duration(),
+            crate::clip::ClipTiming::Legacy => {
+                crate::clip::Span::legacy_end(self).map(|end| end.seconds().max(0.0))
+            }
+        };
+        measured.or_else(|| self.duration_us.map(|d| d as f64 / 1e6))
     }
 }
 
@@ -617,6 +631,7 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
             timebase: [idx.timebase.num(), idx.timebase.den()],
             start_pts: idx.origin_pts(),
             end_pts: idx.end_pts(),
+            head_gap: idx.edits.head_gap,
             index: summary,
             decode,
             poster_frame,

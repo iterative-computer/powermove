@@ -640,9 +640,15 @@ impl MediaImporter for EngineJobs {
         let height = video.map(|video| f64::from(video.height));
         // The clip's own length (first frame start to last frame end), as
         // the Project panel's import records it.
+        // A relinked asset keeps reading its file's times as it did, so its
+        // lengths are measured that way.
+        let timing = match &request.replace {
+            Some(asset) => pm_builtins::media_import::asset_timing(project["assets"].get(asset)),
+            None => pm_media::clip::ClipTiming::Presentation,
+        };
         let duration = probe
             .as_ref()
-            .and_then(pm_media::probe::MediaProbe::duration)
+            .and_then(|probe| probe.duration_as(timing))
             .filter(|_| kind != "image");
         let has_audio = probe
             .as_ref()
@@ -702,6 +708,14 @@ impl MediaImporter for EngineJobs {
         let mut metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        if kind == "video" {
+            metadata["audioDur"] = json!(
+                probe
+                    .as_ref()
+                    .and_then(|probe| pm_media::facts::audio_duration(probe, timing))
+                    .unwrap_or(0.)
+            );
+        }
         // Every audio stream of a multi-track file is listed and heard, as
         // when a person imports it; a relink keeps what was heard.
         let streams = probe
@@ -1216,17 +1230,20 @@ mod relink_tests {
     const RATE: usize = 48_000;
     const CLICKS: [usize; 3] = [4_800, 24_000, 14_400];
 
-    /// A one-second clip with a picture and one mono PCM stream per click.
-    fn clip(root: &Path, name: &str, clicks: &[usize]) -> PathBuf {
-        let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+    fn ffmpeg_path() -> PathBuf {
+        std::env::var_os("PM_FFMPEG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 PathBuf::from(std::env::var("HOME").unwrap())
                     .join("Library/Caches/powermove-engine/ffmpeg/out")
             })
-            .join("bin/ffmpeg");
+            .join("bin/ffmpeg")
+    }
+
+    /// A one-second clip with a picture and one mono PCM stream per click.
+    fn clip(root: &Path, name: &str, clicks: &[usize]) -> PathBuf {
         let path = root.join(name);
-        let mut command = std::process::Command::new(ffmpeg);
+        let mut command = std::process::Command::new(ffmpeg_path());
         command.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"]);
         command.args(["-i", "testsrc2=size=64x64:rate=25:duration=1"]);
         for at in clicks {
@@ -1317,7 +1334,8 @@ mod relink_tests {
                 "muted":{"id":"muted","name":"Muted.mov","kind":"video","dur":1,
                     "audioStreams":[entry(1, true), entry(2, false)]},
                 "first_off":{"id":"first_off","name":"First off.mov","kind":"video","dur":1,
-                    "audioStreams":[entry(1, false), entry(2, true)]}}});
+                    "audioStreams":[entry(1, false), entry(2, true)]},
+                "late":{"id":"late","name":"Late.mp4","kind":"video","dur":1}}});
         kernel
             .shell(ShellCall::Open {
                 id: "p".into(),
@@ -1334,6 +1352,7 @@ mod relink_tests {
             root.clone(),
             OverrideWindows::default(),
         );
+        let ffmpeg = ffmpeg_path();
         let recorder = clip(&root, "recorder.mov", &CLICKS[..2]);
         let mono = clip(&root, "mono.mov", &CLICKS[2..]);
         let relink = |asset: &str, path: &Path| {
@@ -1365,5 +1384,26 @@ mod relink_tests {
             root_of(&kernel).1["assets"]["first_off"]["audioStreams"],
             json!([entry(1, false)])
         );
+        // An older asset measures its clip as it reads it: twenty frames
+        // 0.4 s into the file end 1.2 s in.
+        let late = root.join("late.mp4");
+        let status = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .args([
+                "-i",
+                "testsrc2=size=64x64:rate=25:duration=0.8",
+                "-c:v",
+                "mpeg4",
+            ])
+            .args(["-output_ts_offset", "0.4"])
+            .arg(&late)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        relink("late", &late);
+        let dur = root_of(&kernel).1["assets"]["late"]["dur"]
+            .as_f64()
+            .unwrap();
+        assert!((dur - 1.2).abs() < 1e-3, "{dur}");
     }
 }

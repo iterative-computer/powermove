@@ -47,6 +47,8 @@ pub struct MediaSource {
     pub origin_pts: i64,
     /// Where the presentation ends on the clip's timeline, in ticks.
     end: Tick,
+    /// Where the clip ends as an older asset reads the file, in ticks.
+    legacy_end: Tick,
     /// The same frames as older projects address them
     /// ([`ClipTiming::Legacy`]).
     pub legacy: LegacyMap,
@@ -120,6 +122,11 @@ impl MediaSource {
             None => crate::time::ticks_of(index.end_pts() - origin_pts, index.timebase),
         };
         let legacy = LegacyMap::of(&index);
+        let legacy_end = match Span::legacy_end(&probe) {
+            Some(end) => crate::time::ticks_of(end.in_units(index.timebase), index.timebase),
+            None => crate::time::ticks_of(index.end_pts() - index.edits.head_gap, index.timebase),
+        }
+        .max(0);
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
@@ -131,6 +138,7 @@ impl MediaSource {
             pts,
             origin_pts,
             end,
+            legacy_end,
             legacy,
             index,
             probe,
@@ -179,6 +187,16 @@ impl MediaSource {
     /// presentation to the latest end of any of its streams.
     pub fn duration(&self) -> Tick {
         self.end
+    }
+
+    /// The clip's length in ticks as an asset with `timing` reads the file
+    /// ([`crate::clip::Span::legacy_end`] for older assets), so the last
+    /// frame its source times reach is inside it.
+    pub fn duration_as(&self, timing: ClipTiming) -> Tick {
+        match timing {
+            ClipTiming::Legacy => self.legacy_end,
+            ClipTiming::Presentation => self.end,
+        }
     }
 
     pub fn path(&self) -> &Path {

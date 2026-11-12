@@ -180,6 +180,40 @@ impl Span {
         Span { origin, end }
     }
 
+    /// Where a clip read as [`ClipTiming::Legacy`] ends, from source time
+    /// 0: the latest of the picture's end at its own timestamps (less the
+    /// legacy head gap) and the end of every audio stream's program, which
+    /// that reading starts at 0.
+    pub fn legacy_end(probe: &MediaProbe) -> Option<Stamp> {
+        let picture = probe.video.as_ref().map(|v| Stamp {
+            pts: v.end_pts - v.head_gap,
+            timebase: v.timebase,
+        });
+        let sound = probe
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Audio && s.audio.is_some())
+            .filter_map(|s| match s.duration_pts {
+                Some(d) => Some(Stamp {
+                    pts: d,
+                    timebase: s.timebase,
+                }),
+                // Matroska states no stream lengths: from the stream's own
+                // start to the container's end.
+                None => {
+                    let start =
+                        s.start_pts.unwrap_or(0) as i128 * s.timebase[0] as i128 * 1_000_000
+                            / (s.timebase[1] as i128).max(1);
+                    let end = (probe.start_us.unwrap_or(0) + probe.duration_us?) as i128;
+                    Some(Stamp {
+                        pts: (end - start) as i64,
+                        timebase: [1, 1_000_000],
+                    })
+                }
+            });
+        picture.into_iter().chain(sound).max_by(Stamp::order)
+    }
+
     /// The clip's length in seconds, when the file says where it ends.
     pub fn duration(&self) -> Option<f64> {
         self.end

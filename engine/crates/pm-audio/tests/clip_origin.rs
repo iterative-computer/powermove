@@ -320,3 +320,46 @@ fn a_retimed_fade_out_ends_where_the_sound_ends() {
         }
     }
 }
+
+/// A clip without a picture is as long as its sound, as each reading
+/// places it: the length an import records ends at the last sample the mix
+/// plays, for two streams starting 1 and 1.25 s into the file.
+#[test]
+fn a_clip_without_a_picture_is_as_long_as_its_sound() {
+    let dir = temp_dir("clip-origin-audio-length");
+    let wav = dir.join("tone.wav");
+    write_wav(&wav, SR, &[tone(SR, 1.0, 1000.0, 0.5)]);
+    let file = dir.join("two.mov");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-itsoffset", "1", "-i"])
+        .arg(&wav)
+        .args(["-itsoffset", "1.25", "-i"])
+        .arg(&wav)
+        .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let streams = r#""audioStreams":[{"index":0,"channels":1,"sampleRate":48000,"on":true},{"index":1,"channels":1,"sampleRate":48000,"on":true}]"#;
+    for (timing, member) in [
+        (pm_media::clip::ClipTiming::Presentation, r#","timing":2"#),
+        (pm_media::clip::ClipTiming::Legacy, ""),
+    ] {
+        let a = audio("A", "v", 0.0, 3.0, "", "");
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":3,"layers":[{a}],"comps":{{}},"assets":{{"v":{{"id":"v","kind":"audio"{member},{streams}}}}},"params":{{}}}}"#
+        );
+        let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+        let rig = Rig::new(&[("v", &file)]);
+        let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        let out = rig.render(&mut mixer, 0, 3 * SR as i64, 4096).remove(0);
+        let last = out.iter().rposition(|v| v.abs() > 1e-3).unwrap() + 1;
+        let facts = pm_media::facts::media_facts_as(&file, None, timing).unwrap();
+        let length = facts.duration.unwrap() * f64::from(SR);
+        assert!(
+            (length - last as f64).abs() <= 48.0,
+            "{timing:?}: imported as {length} samples, the mix plays {last}"
+        );
+    }
+}

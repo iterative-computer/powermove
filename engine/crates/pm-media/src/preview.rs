@@ -177,7 +177,7 @@ impl PreviewReader {
             Source::Animation(t) => t.duration(),
             Source::Sequence { sequence, fps } => sequence.frames.len() as f64 / fps,
             Source::Video { source, .. } => {
-                source.duration() as f64 / pm_time::TICKS_PER_SECOND as f64
+                source.duration_as(self.timing) as f64 / pm_time::TICKS_PER_SECOND as f64
             }
         })
     }
