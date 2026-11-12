@@ -1,7 +1,7 @@
 import {describe,expect,it} from 'vitest';
 import * as THREE from 'three';
 import {orbitAround,dollyAt,cursorPivot,getNavigationVariant,setNavigationVariant,orbitView,panView,dollyView,frameView,frameComposition} from './navigation';
-import {viewportPose,viewportCamera,getViewportMode,setViewportMode,applyViewportPose} from './viewport';
+import {viewportPose,viewportCamera,getViewportMode,setViewportMode,applyViewportPose,resetViewport} from './viewport';
 import {compositionRuntime} from './service';
 import {editScene} from './operations';
 import {makePM} from '../../legacy/__tests__/make-pm';
@@ -88,6 +88,30 @@ describe('3D viewport navigation',()=>{
     expect(JSON.stringify(PM.proj.layers)).toBe(snapshot);expect(PM.hist.list()).toHaveLength(steps);
     setViewportMode(PM,'camera');expect(viewportCamera(PM,world.camera)).toBe(world.camera);
     PM.proj=PM.mkProject();expect(getViewportMode(PM)).toBe('camera');
+  });
+  it('resets Free View to the current shot or default camera without changing the document',()=>{
+    for(const withCamera of [false,true]){
+      const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
+      PM.proj=PM.mkProject();PM.time=0;
+      PM.layerDefinition=(id:string)=>Object.values(LAYER3D_DEFINITIONS).includes(id as any)?{id,label:'3D',version:1,params:[],defaults:{},renderer:{kind:'layer3d'}}:null;
+      if(withCamera){
+        expect(editScene(PM,{operation:'add_camera',id:'shot',camera:{p:{x:0,y:1,z:6,targetX:2}}}).ok).toBe(true);
+        expect(PM.Edit.apply({type:'replace_keyframes',target:'shot',path:'position.x',keyframes:[{time:0,value:0},{time:2,value:4}]}).ok).toBe(true);
+        PM.L('shot').lock=true;
+      }
+      const start=viewportPose(PM);
+      applyViewportPose(PM,{...orbitView(start,70,40),zoom:2});
+      PM.time=2;
+      const world=compositionRuntime(PM),snapshot=JSON.stringify(PM.proj),history=PM.hist.list().length;
+      resetViewport(PM);
+      const reset=viewportCamera(PM,world.camera);
+      expect(getViewportMode(PM)).toBe('editor');expect(reset).not.toBe(world.camera);
+      expect(reset.position.toArray()).toEqual(world.camera.position.toArray());
+      expect(reset.quaternion.toArray()).toEqual(world.camera.quaternion.toArray());
+      expect(reset.zoom).toBe(world.camera.zoom);
+      if(withCamera)expect(viewportPose(PM).target.x).toBe(2);
+      expect(JSON.stringify(PM.proj)).toBe(snapshot);expect(PM.hist.list()).toHaveLength(history);
+    }
   });
   it('keeps editor orbit independent of animated shot cameras and resumes it per composition',()=>{
     const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');

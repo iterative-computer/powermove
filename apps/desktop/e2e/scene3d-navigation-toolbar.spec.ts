@@ -31,6 +31,10 @@ test('AE navigation toolbar variants, shortcuts, cancellation and render isolati
   await page.keyboard.press('c');await expect(toolbar.locator('[data-navigation="orbit"]')).toHaveAttribute('aria-pressed','true');
   await page.keyboard.press('v');await expect(toolbar.locator('[data-tool="select"]')).toHaveAttribute('aria-pressed','true');
   await expect(toolbar.locator('[data-navigation="orbit"]')).toHaveAttribute('aria-pressed','false');
+  await page.getByRole('combobox',{name:'3D navigation',exact:true}).click();
+  await page.getByRole('option',{name:'Reset Free View',exact:true}).click();
+  expect(await hash()).toBe(original);
+  expect(await page.evaluate(()=>(window as any).PM.Kernel.api('camera-toolbar-test').scene3d.getView())).toBe('editor');
   const after=await page.evaluate(()=>{
     const PM=(window as any).PM;return {layers:JSON.stringify(PM.proj.layers),history:PM.hist.list().length,pixels:[...PM.GL.renderToPixels(0,80,45,{transparent:true,mblur:false})]};
   });expect(after).toEqual(before);

@@ -18,9 +18,11 @@
     {id:'editor',label:'Free View',title:'Free View — Look around the 3D scene without moving the camera. Middle-drag or Option-drag to orbit; your render doesn’t change'},
   ];
   const viewOptions=[{v:'select',label:'Select'},{v:'orbit',label:'Orbit'},{v:'pan',label:'Pan'},{v:'dolly',label:'Dolly'},
-    {v:'frame-selection',label:'Frame Selection'},{v:'frame-all',label:'Frame All'}];
+    {v:'frame-selection',label:'Frame Selection'},{v:'frame-all',label:'Frame All'},
+    {v:'reset-view',label:'Reset Free View'}];
   /* Camera tools use the selected view. Framing stays a Free View action. */
   const navigate=(next:unknown)=>{
+    if(next==='reset-view'){api.scene3d.resetView();return false;}
     if(next==='frame-selection'||next==='frame-all'){api.scene3d.setView('editor');api.scene3d.frame(next==='frame-selection');return false;}
     return true;
   };

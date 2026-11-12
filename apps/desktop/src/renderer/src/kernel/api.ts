@@ -433,6 +433,8 @@ export interface Scene3DAPI {
   pickPart(layerId:string,x:number,y:number):string|null;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
+  /** Restore Free View to the current active camera, without editing the shot. */
+  resetView():void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
