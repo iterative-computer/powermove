@@ -47,6 +47,7 @@ pub enum TextEvent {
     /// Canvas only: an editing chord the host handles (`commit`, `bold`,
     /// `italic`, `larger`, `smaller`, `larger10`, `smaller10`, `alignLeft`,
     /// `alignCenter`, `alignRight`, `up`, `down`, `shiftUp`, `shiftDown`).
+    /// A plain multiline field sends `tab` / `backtab`: focus moves on.
     Key(&'static str),
     /// Canvas only: the editor lost first responder.
     Blurred,
@@ -85,6 +86,10 @@ struct State {
     scroll: Option<Retained<NSScrollView>>,
     gpui: Retained<NSView>,
     editing: Cell<bool>,
+    /// A multiline field that keeps Tab as a character (a code editor).
+    /// Otherwise Tab and Shift-Tab commit and move focus on, as in an
+    /// inspector (Option-Tab still types a tab).
+    tab_inserts: Cell<bool>,
     focus_pending: Cell<bool>,
     original: RefCell<String>,
     events: RefCell<Vec<TextEvent>>,
@@ -342,6 +347,23 @@ impl TextDelegate {
             s.emit(TextEvent::Submitted(s.editor.value()));
             return true;
         }
+        if self.ivars().kind == TextKind::Multiline
+            && !self.ivars().tab_inserts.get()
+            && (command == objc2::sel!(insertTab:) || command == objc2::sel!(insertBacktab:))
+        {
+            // Commit, give focus back to GPUI, and let the host move it to
+            // the next (or previous) control.
+            self.ivars().finish(false);
+            if let Some(w) = view.window() {
+                w.makeFirstResponder(Some(&self.ivars().gpui));
+            }
+            self.ivars().emit(TextEvent::Key(if command == objc2::sel!(insertTab:) {
+                "tab"
+            } else {
+                "backtab"
+            }));
+            return true;
+        }
         if command == objc2::sel!(cancelOperation:) && self.ivars().kind.dense() {
             self.ivars().finish(true);
             if let Some(w) = view.window() {
@@ -359,6 +381,10 @@ pub struct NativeTextSlot {
     _delegate: Retained<TextDelegate>,
 }
 impl NativeTextSlot {
+    /// Keep Tab as a typed character (a code editor) instead of moving focus.
+    pub fn set_tab_inserts(&self, inserts: bool) {
+        self.state.tab_inserts.set(inserts);
+    }
     pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
         let mut canvas = None;
@@ -471,6 +497,7 @@ impl NativeTextSlot {
             scroll,
             gpui: unsafe { Retained::retain(gpui as *const NSView as *mut NSView).unwrap() },
             editing: Cell::new(false),
+            tab_inserts: Cell::new(false),
             focus_pending: Cell::new(false),
             original: RefCell::new(initial.into()),
             events: RefCell::new(Vec::new()),

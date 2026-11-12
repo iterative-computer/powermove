@@ -202,6 +202,8 @@ impl EngineJobs {
         destination: PathBuf,
         look: bool,
         preview: bool,
+        studio_quality: Option<serde_json::Value>,
+        studio_render_scale:Option<f32>,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -222,6 +224,8 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
+        request.studio_quality = studio_quality;
+        request.studio_render_scale=studio_render_scale;
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -321,7 +325,15 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let handle = match self.start(&published, settings, destination, false, false) {
+        let handle = match self.start(
+            &published,
+            settings,
+            destination,
+            false,
+            false,
+            request.options.studio_quality.clone(),
+            request.options.studio_render_scale,
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -494,6 +506,33 @@ fn frame(
     stop: &(dyn Fn() -> bool + Sync),
     capture: Capture,
 ) -> AnyResult<Vec<u8>> {
+    // Home's poster draws 3D at Draft: a card needs the picture, not a
+    // clean render.
+    let studio_quality = matches!(capture, Capture::Poster).then(|| serde_json::json!("draft"));
+    frame_with(
+        jobs,
+        published,
+        fps,
+        time,
+        size,
+        look,
+        stop,
+        capture,
+        studio_quality,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn frame_with(
+    jobs: &EngineJobs,
+    published: &Arc<Published>,
+    fps: f64,
+    time: f64,
+    size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
+    studio_quality: Option<serde_json::Value>,
+) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
     let span = rate.den() as f64 / rate.num() as f64;
@@ -527,6 +566,8 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
+        studio_quality,
+        None,
     )?;
     while matches!(
         handle.status().state,
@@ -564,9 +605,12 @@ fn media_type(path: &Path) -> Option<(&'static str, String)> {
     }
     let extension = path.extension()?.to_str()?.to_lowercase();
     let mime = match extension.as_str() {
+        "hdr" => return Some(("image", "image/vnd.radiance".into())),
+        "exr" => return Some(("image", "image/x-exr".into())),
         "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",
         "obj" => "model/obj",
+        "fbx" => "model/fbx",
         _ => return None,
     };
     Some(("model", mime.into()))
@@ -631,13 +675,24 @@ impl MediaImporter for EngineJobs {
                 "Replace media with a file of the same kind.",
             ));
         }
-        let probe = (kind != "model")
+        let environment = matches!(mime.as_str(), "image/vnd.radiance" | "image/x-exr");
+        let image_size = environment
+            .then(|| pm_engine_service::studio::probe_environment(path))
+            .transpose()
+            .map_err(|e| {
+                Error::invalid(format!("This environment image could not be read: {e}"))
+            })?;
+        let probe = (kind != "model" && !environment)
             .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
             .transpose()
             .map_err(|_| Error::invalid("This file could not be read as media."))?;
         let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
-        let width = video.map(|video| f64::from(video.width));
-        let height = video.map(|video| f64::from(video.height));
+        let width = image_size
+            .map(|d| f64::from(d[0]))
+            .or_else(|| video.map(|video| f64::from(video.width)));
+        let height = image_size
+            .map(|d| f64::from(d[1]))
+            .or_else(|| video.map(|video| f64::from(video.height)));
         // The clip's own length (first frame start to last frame end), as
         // the Project panel's import records it.
         // A relinked asset keeps reading its file's times as it did, so its

@@ -102,6 +102,7 @@ mod v4_native;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
+mod studio_panes;
 mod viewer2;
 mod viewer_overlays;
 mod waveforms;

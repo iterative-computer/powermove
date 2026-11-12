@@ -56,6 +56,9 @@ impl Padding {
 /// What the plan builder tells a host about the frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EffectFrame {
+    /// Source captures supply their actual output transform and local canvas.
+    /// Ordinary composition renders derive these from the authored owner.
+    pub owner: Option<OwnerSpace>,
     /// The target's full size (output pixels of this level).
     pub width: u32,
     pub height: u32,
@@ -63,6 +66,12 @@ pub struct EffectFrame {
     pub scale: (f64, f64),
     /// Composition time in seconds.
     pub time: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OwnerSpace {
+    pub world: pm_eval::transform::Mat2d,
+    pub bounds: Option<pm_fx_defs::spatial::Extent>,
 }
 
 /// Local content and padded effect extent, before the layer transform/opacity.

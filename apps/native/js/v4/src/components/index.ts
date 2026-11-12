@@ -146,6 +146,8 @@ export interface Option {
   separator?: boolean;
   keyEquivalent?: string;
   detail?: string;
+  /** A checkmark beside the row (a pull-down showing several settings). */
+  checked?: boolean;
 }
 export function PopUpButton(
   props: Omit<Bound<Json>, "options"> & {
@@ -240,6 +242,10 @@ export interface SegmentOption {
   disabled?: boolean;
   /** SF Symbol shown instead of the label; the label becomes the tooltip. */
   symbol?: string;
+  /** Tooltip line 1 when it differs from the label (a shortcut, say). */
+  title?: string;
+  /** Tooltip line 2: what it does, one sentence. */
+  help?: string;
 }
 export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
@@ -281,8 +287,13 @@ export function SegmentedControl(
             key: option.id,
             id: `${group}:${option.id}`,
             label: option.label,
-            ...(option.symbol
-              ? { attr: { symbol: option.symbol }, title: option.label }
+            ...(option.symbol ? { attr: { symbol: option.symbol } } : {}),
+            ...(option.symbol || option.help || option.title
+              ? {
+                  title: [option.title ?? option.label, option.help]
+                    .filter(Boolean)
+                    .join("\n"),
+                }
               : {}),
             role: "radio",
             disabled: props.disabled || option.disabled,
@@ -631,6 +642,29 @@ export function SettingsRoot(props: Common) {
     role: "group",
     metadata: { ...props.metadata, hostWindow: "settings" },
   });
+}
+export interface SliderProps extends Bound<number> {
+  min: number;
+  max: number;
+  step?: number;
+  /** A logarithmic track (brightness, size): equal moves multiply the value. */
+  log?: boolean;
+  unit?: string;
+}
+/** A native NSSlider for a bounded value. It changes once per pull (one
+ * Undo) and steps with the arrow keys; VoiceOver reads the value itself. */
+export function Slider(props: SliderProps) {
+  const { log, ...rest } = props;
+  return field(
+    "slider",
+    "slider",
+    "input",
+    {
+      ...rest,
+      metadata: kitMetadata(props, { log: !!log }),
+    },
+    { ...target, width: token("metrics.value_column") },
+  );
 }
 export function Switch(props: Bound<boolean>) {
   return field(

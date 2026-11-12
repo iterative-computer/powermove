@@ -1069,11 +1069,19 @@ impl crate::composite::EffectHost for Effects {
         frame: crate::composite::effects::EffectFrame,
         prefix: Option<usize>,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps =
-            match plan::effect_steps_prefix(scope, self, layer, frame.time, frame.scale, prefix)? {
-                Ok(steps) => steps,
-                Err(f) => return Ok(Err(f)),
-            };
+        let steps = match plan::effect_steps_frame(
+            scope,
+            self,
+            layer,
+            frame.time,
+            frame.scale,
+            prefix,
+            None,
+            frame.owner,
+        )? {
+            Ok(steps) => steps,
+            Err(f) => return Ok(Err(f)),
+        };
         if steps.is_empty() {
             return Ok(Ok(None));
         }

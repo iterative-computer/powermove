@@ -66,9 +66,10 @@ impl Gpu {
         if !available.contains(required_features()) {
             return Err(DeviceError::Missing("TEXTURE_FORMAT_16BIT_NORM"));
         }
-        let features = required_features() | (available & optional_features());
+        let ray_query = available.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) && std::env::var_os("STUDIO_NO_RT").is_none();
+        let features = required_features() | (available & optional_features()) | if ray_query { wgpu::Features::EXPERIMENTAL_RAY_QUERY } else { wgpu::Features::empty() };
         let adapter_limits = adapter.limits();
-        let limits = wgpu::Limits {
+        let mut limits = wgpu::Limits {
             max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d.min(16384),
             // Studio's path tracer (pm-studio) binds 10 storage buffers per
             // stage and its scene buffers can be large.
@@ -77,13 +78,22 @@ impl Gpu {
                 .min(12),
             max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
             max_buffer_size: adapter_limits.max_buffer_size,
+            max_storage_textures_per_shader_stage: adapter_limits.max_storage_textures_per_shader_stage.min(8),
             max_color_attachment_bytes_per_sample: adapter_limits
                 .max_color_attachment_bytes_per_sample,
             ..wgpu::Limits::default()
         };
+        if ray_query {
+            limits.max_blas_primitive_count=adapter_limits.max_blas_primitive_count;
+            limits.max_blas_geometry_count=adapter_limits.max_blas_geometry_count;
+            limits.max_tlas_instance_count=adapter_limits.max_tlas_instance_count;
+            limits.max_acceleration_structures_per_shader_stage=adapter_limits.max_acceleration_structures_per_shader_stage.max(1);
+            limits.max_buffers_and_acceleration_structures_per_shader_stage=adapter_limits.max_buffers_and_acceleration_structures_per_shader_stage;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some(label),
             required_features: features,
+            experimental_features: if ray_query { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             required_limits: limits.clone(),
             ..Default::default()
         }))

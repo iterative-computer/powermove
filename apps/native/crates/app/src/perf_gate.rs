@@ -57,6 +57,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let r_layer = r["layer"].as_str().map(str::to_owned);
                     match op {
                         "status" => {},
+                        "focus" => {
+                            v.host.borrow().window.makeKeyAndOrderFront(None);
+                            let app=objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+                            #[allow(deprecated)]
+                            app.activateIgnoringOtherApps(true);
+                        },
                         "open" => {
                             let path = std::path::PathBuf::from(r["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?);
                             let path = path.canonicalize()?;
@@ -164,7 +170,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let status = v.viewer.as_ref().map(|v| v.status());
                     let frame = status.as_ref().and_then(|s| s.frame.as_ref());
                     let mut out = json!({
-                        "accepted_host_s":now, "opening":v.opening,
+                        "accepted_host_s":now, "window_key":v.host.borrow().window.isKeyWindow(), "window_visible":v.host.borrow().window.isVisible(), "opening":v.opening,
                         "opened":v.session.is_some(), "message":v.message,
                         "revision":v.published.as_ref().map(|p| p.revision()),
                         "viewer_id":v.viewer.as_ref().map(|v| v.identity()),

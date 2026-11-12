@@ -117,6 +117,7 @@ fn transport_jkl_pause_seek_step_and_loop() {
 #[test]
 fn cache_key_includes_every_content_coordinate() {
     let k = policy::CacheKey {
+        studio_preview: studio::Preview::Live,
         content: 1,
         revision: 3,
         time: 7,
@@ -126,10 +127,16 @@ fn cache_key_includes_every_content_coordinate() {
         moment: policy::Moment::Paused,
         scale: 1f64.to_bits(),
         sampling: pm_render::sampling::Sampling::Final,
+        studio_view: 0,
         inputs: 5,
     };
     for other in [
+        policy::CacheKey {
+            studio_preview: studio::Preview::Refine,
+            ..k
+        },
         policy::CacheKey { content: 2, ..k },
+        policy::CacheKey { studio_view:1, ..k },
         // A media file saved again by another app.
         policy::CacheKey { inputs: 6, ..k },
         policy::CacheKey { revision: 4, ..k },
@@ -583,6 +590,7 @@ fn worker_exact_cache_and_revision_resize_retirement() {
     wait_frame(&v, v.stamp().unwrap());
     // Separate content/session at the same revision cannot collide.
     let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
     assert!(!wait_frame(&b, b.stamp().unwrap()).cache_hit);
     v.retire();
     b.retire();
@@ -595,6 +603,7 @@ fn two_viewers_keep_each_others_cached_frames() {
     let service = EngineService::start(pm_gpu::Gpu::new("two-viewers-test").unwrap()).unwrap();
     let a = service.viewer(config(snapshot())).unwrap();
     let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
     wait_frame(&a, a.stamp().unwrap());
     wait_frame(&b, b.stamp().unwrap());
     let seek = |v: &pm_engine_service::Viewer, seconds| {
@@ -617,6 +626,63 @@ fn two_viewers_keep_each_others_cached_frames() {
     }
     a.retire();
     b.retire();
+}
+#[test]
+fn composition_identity_cannot_reuse_other_pixels_at_one_content_revision() {
+    let snapshot = snapshot();
+    let original = snapshot.open_comp().unwrap();
+    let mut project: serde_json::Value = serde_json::from_str(
+        &pm_model::json::to_canonical_string(&snapshot.document.to_value().unwrap()),
+    )
+    .unwrap();
+    let mut alternate = project["comps"][&original].clone();
+    alternate["id"] = serde_json::json!("alternate");
+    for layer in alternate["layers"].as_array_mut().unwrap() {
+        layer["d"]["color"] = serde_json::json!("#00FF00");
+    }
+    project["comps"]["alternate"] = alternate;
+    let document = Arc::new(pm_model::Document::new(
+        Some(pm_model::json::parse(&project.to_string()).unwrap()),
+        1,
+    ));
+    let scene = Scene {
+        doc: document,
+        comp: original,
+        media: Default::default(),
+        content: 1,
+    };
+    let mut h = Headless::new().unwrap();
+    let size = Size::new(64, 36);
+    let red = h
+        .frame(&scene, Ticks::ZERO, size, &Default::default())
+        .unwrap();
+    let green = h
+        .frame(
+            &Scene {
+                comp: "alternate".into(),
+                ..scene.clone()
+            },
+            Ticks::ZERO,
+            size,
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(red.iter().flatten().any(|v| *v > 0.5));
+    let difference = red
+        .iter()
+        .zip(&green)
+        .flat_map(|(a, b)| (0..3).map(move |i| (a[i] - b[i]).abs()))
+        .sum::<f64>()
+        / (red.len() * 3) as f64;
+    assert!(
+        difference > 0.01,
+        "distinct composition pixels differ by {difference}"
+    );
+    assert_eq!(
+        red,
+        h.frame(&scene, Ticks::ZERO, size, &Default::default())
+            .unwrap()
+    );
 }
 #[test]
 fn worker_evaluates_locked_geometry_at_the_rendered_time() {

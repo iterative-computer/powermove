@@ -856,6 +856,7 @@ impl Controller {
                     if let Some(popout) = v.popout.take() {
                         popout.shutdown();
                     }
+                    v.close_studio_panes();
                     v.session = None;
                     v.published = None;
                     v.media_refresh.reset();
@@ -912,6 +913,9 @@ impl Controller {
                         }
                         cx.notify();
                     } else if let Some(handle) = v.close_window {
+                        // The integrated close guard owns this, after the
+                        // kernel close succeeds. A cancelled/failed close must
+                        // leave the restored window session intact.
                         if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
                             shell.update(cx, |s, _| s.forget_session());
                         }

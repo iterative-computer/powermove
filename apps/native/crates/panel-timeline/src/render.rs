@@ -143,6 +143,15 @@ impl Label {
             _ => Self::Gray,
         }
     }
+    /// Studio 3D layers are `extension` layers told apart by their definition
+    /// (3d-studio.md §1): models on blue, lights and cameras on gray.
+    pub fn for_layer(kind: &str, definition: Option<&str>) -> Self {
+        match display_kind(kind, definition) {
+            "model3d" => Self::Blue,
+            "light3d" | "camera3d" => Self::Gray,
+            other => Self::for_kind(other),
+        }
+    }
     /// The `colors.labels.*` field name.
     pub fn name(self) -> &'static str {
         pm_design::Labels::NAMES[self as usize]
@@ -2126,5 +2135,15 @@ mod key_cover_tests {
         );
         assert_eq!(ops.len(), keys.len());
         assert_eq!(ops[1].id, format!("key:{}", json!(["L1", "a"])));
+    }
+}
+
+/// The kind a row's badge and clip read as: a Studio 3D layer by its role.
+pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
+    match (kind, definition) {
+        ("extension", Some("powermove.3d.object")) => "model3d",
+        ("extension", Some("powermove.3d.light")) => "light3d",
+        ("extension", Some("powermove.3d.camera")) => "camera3d",
+        _ => kind,
     }
 }

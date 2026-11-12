@@ -314,6 +314,7 @@ struct MediaSeen {
 }
 struct CachedFrame {
     key: crate::policy::CacheKey,
+    composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
 }
@@ -349,7 +350,10 @@ pub struct Engine {
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64)>,
+    studio_content: Option<(usize, u64, String, crate::studio::Preview, u64, Option<u64>)>,
+    pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
+    studio_preview: crate::studio::Preview,
+    studio_view: crate::studio::ViewCamera,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
@@ -572,6 +576,9 @@ impl Engine {
         next.resources = self.resources.clone();
         next.mastering = self.mastering;
         next.cache_enabled = self.cache_enabled;
+        next.studio_preview = self.studio_preview;
+        next.studio_progress = self.studio_progress.clone();
+        next.studio_view = self.studio_view.clone();
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
@@ -722,6 +729,9 @@ impl Engine {
             strip: None,
             refine_bands: 0,
             studio_content: None,
+            studio_progress: None,
+            studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+            studio_view: crate::studio::ViewCamera::Active,
             lost,
             failed,
             waker,
@@ -815,6 +825,8 @@ impl Engine {
             scale: spec.scale.to_bits(),
             sampling: spec.sampling(),
             inputs: self.observed_inputs(scene),
+            studio_preview: self.studio_preview,
+            studio_view: self.studio_view.key(),
         }
     }
     /// What a frame of `scene` reads besides its document, as observed: its
@@ -927,7 +939,7 @@ impl Engine {
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
     pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<(String, u64)> {
-        if self.sync_studio(scene).is_err() {
+        if self.sync_studio(scene, time).is_err() {
             return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {
@@ -963,9 +975,48 @@ impl Engine {
             self.cache.clear();
         }
     }
-    fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
-        let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
-        if self.studio_content != Some(key) {
+    /// Each viewer supplies its tier before rendering on this shared worker.
+    /// Frame cache identities include the tier, independently for each view.
+    pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
+        self.studio_preview = preview;
+    }
+    pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
+        self.studio_view = camera;
+    }
+    #[cfg(feature = "kernel")]
+    pub(crate) fn start_export_calibration(
+        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64, render_scale:f32,
+    ) -> Result<crate::export_estimate::Calibration> {
+        self.sync_studio(scene, time)?;
+        crate::export_estimate::Calibration::new(
+            self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,render_scale,
+            self.renderer.definitions(), self.fonts.as_ref(),
+        ).map_err(anyhow::Error::msg)
+    }
+    pub(crate) fn pick_surface(
+        &mut self,
+        scene: &Scene,
+        request: &crate::studio::SceneRequest,
+        point: [f32; 2],
+    ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>> {
+        self.sync_studio(
+            scene,
+            Ticks::new(request.ticks).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        self.renderer
+            .pick_studio_surface(request, point[0], point[1])
+            .map_err(anyhow::Error::msg)
+    }
+    fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        let key = (
+            Arc::as_ptr(&scene.doc) as usize,
+            scene.content,
+            scene.comp.clone(),
+            self.studio_preview,
+            self.studio_view.key(),
+            self.fonts.as_ref().map(|f|f.generation()),
+        );
+        if self.studio_content.as_ref() != Some(&key) {
             // A bad contribution draws nothing and is reported; frames carry on.
             // A compiler slot that was busy is retried, never reported as broken.
             let busy = |e: &str| e.contains("compiler-busy");
@@ -985,7 +1036,23 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
             #[cfg(feature = "kernel")]
-            crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
+            crate::studio::attach_with_camera_fonts_progress(
+                &mut self.renderer,
+                scene.doc.clone(),
+                scene.media.as_ref(),
+                &crate::studio::SceneRequest {
+                    composition: scene.comp.clone(),
+                    revision: scene.doc.revision(),
+                    ticks: time.get(),
+                    width: 1,
+                    height: 1,
+                },
+                self.studio_preview,
+                self.studio_view.clone(),
+                self.fonts.as_ref(),
+                self.studio_progress.clone(),
+            )
+            .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines
             // it draws with, so no frame met while playing does (built ones
             // are kept: later documents pay nothing).
@@ -1036,7 +1103,7 @@ impl Engine {
         self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, time)?;
         self.sync_fonts();
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
         request.export = true;
@@ -1096,7 +1163,7 @@ impl Engine {
             let mut t = trace.lock().unwrap();
             t.enter_ms = (now() - t.worker_start) * 1e3;
         }
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, spec.time)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
@@ -1110,7 +1177,11 @@ impl Engine {
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
         let hit = (self.cache_enabled && !spec.exact)
-            .then(|| self.cache.iter().position(|c| c.key == key))
+            .then(|| {
+                self.cache
+                    .iter()
+                    .position(|c| c.key == key && c.composition == scene.comp)
+            })
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
@@ -1288,6 +1359,7 @@ impl Engine {
                 if self.cache_enabled && !spec.exact && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
+                        composition: scene.comp.clone(),
                         surface: surface.clone(),
                         failures: failures.clone(),
                     });
@@ -1523,11 +1595,15 @@ impl Engine {
         if !self.cache_enabled {
             return Ok(true);
         }
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, spec.time)?;
         self.sync_fonts();
         let size = spec.size_in(scene);
         let key = self.cache_key(scene, &spec, size);
-        if self.cache.iter().any(|c| c.key == key) {
+        if self
+            .cache
+            .iter()
+            .any(|c| c.key == key && c.composition == scene.comp)
+        {
             return Ok(true);
         }
         let mut request = spec.request(scene)?;
@@ -1580,6 +1656,7 @@ impl Engine {
         if late.is_empty() {
             self.cache.push_back(CachedFrame {
                 key,
+                composition: scene.comp.clone(),
                 surface,
                 failures: failures.into(),
             });
@@ -1699,7 +1776,7 @@ impl Engine {
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
     pub fn compat_needs(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<CompatNeed> {
-        if self.compat_document.is_none() || self.sync_studio(scene).is_err() {
+        if self.compat_document.is_none() || self.sync_studio(scene, time).is_err() {
             return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {

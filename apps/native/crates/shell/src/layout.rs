@@ -1146,3 +1146,38 @@ mod contributed_tests {
         assert_eq!(other.title("synthetic.panel"), "synthetic.panel");
     }
 }
+
+/// Panes for 1, 2 (side by side) or 4 (two by two) views of `r`, `gap`
+/// apart, in reading order.
+pub fn view_tiles(r: Rect, count: u8, gap: f32) -> Vec<Rect> {
+    let (cols, rows) = match count {
+        2 => (2, 1),
+        4 => (2, 2),
+        _ => return vec![r],
+    };
+    let w = ((r.w - gap * (cols - 1) as f32) / cols as f32).max(1.);
+    let h = ((r.h - gap * (rows - 1) as f32) / rows as f32).max(1.);
+    (0..rows)
+        .flat_map(|row| {
+            (0..cols).map(move |col| Rect {
+                x: r.x + col as f32 * (w + gap),
+                y: r.y + row as f32 * (h + gap),
+                w,
+                h,
+            })
+        })
+        .collect()
+}
+#[cfg(test)]
+mod view_tile_tests {
+    use super::*;
+    #[test]
+    fn four_views_tile_two_by_two_with_gaps() {
+        let r = Rect { x: 10., y: 20., w: 402., h: 202. };
+        let t = view_tiles(r, 4, 2.);
+        assert_eq!(t.len(), 4);
+        assert_eq!((t[0].w, t[0].h), (200., 100.));
+        assert_eq!((t[3].x, t[3].y), (212., 122.));
+        assert_eq!(view_tiles(r, 1, 2.), vec![r]);
+    }
+}

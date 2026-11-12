@@ -81,6 +81,8 @@ pub enum HostEffect {
     Announce(String),
     /// Technical gap only, never displayed as product copy.
     IntegrationGap(&'static str),
+    /// The Error Log keeps why a kernel operation failed, never alert copy.
+    Diagnostic(String),
 }
 #[derive(Clone, Debug)]
 enum PromptAction {
@@ -502,10 +504,13 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         Command::Load(_) => String::new(),
                     };
-                    let code = if let Failure::Service(code) = failure {
-                        code
-                    } else {
-                        ServiceErrorCode::Unavailable
+                    let code = match failure {
+                        Failure::Service(code) => code,
+                        Failure::Kernel { code, detail } => {
+                            self.effects.push_back(HostEffect::Diagnostic(detail));
+                            code
+                        }
+                        _ => ServiceErrorCode::Unavailable,
                     };
                     let alert = error_alert(code, &name);
                     self.effects

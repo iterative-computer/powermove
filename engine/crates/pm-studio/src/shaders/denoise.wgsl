@@ -73,8 +73,8 @@ fn guide(i: u32, j: u32, step: f32) -> f32 {
   if (dot(n0, n0) > 0.5 && dot(nq, nq) > 0.5) { w *= pow(max(dot(n0, nq), 0.0), 64.0); }
   // Distance, averaged over the lens like the rest (one sample's would jump in shallow focus).
   if (h0 > 0.0 && hq > 0.0) {
-    let z0 = aov[2u * i + 1u].w;
-    w *= exp(-abs(z0 - aov[2u * j + 1u].w) / (0.004 * z0 * step + 1e-4));
+    let z0 = abs(aov[2u * i + 1u].w);
+    w *= exp(-abs(z0 - abs(aov[2u * j + 1u].w)) / (0.004 * z0 * step + 1e-4));
   }
   return w;
 }
@@ -97,7 +97,8 @@ fn demod(@builtin(global_invocation_id) g: vec3u) {
   // The variance of the mean of the samples' luminance.
   let mean = lum(p);
   let l = max(lum(al), 0.02);
-  var v = max(e.w / n - mean * mean, 0.0) / max(n - 1.0, 1.0) / (l * l);
+  let sampling_mean = lum((a.xyz + e.xyz + bgsum[i].xyz) / n);
+  var v = max(e.w / n - sampling_mean * sampling_mean, 0.0) / max(n - 1.0, 1.0) / (l * l);
   // From few samples that estimate is often far too low (they happen to
   // agree): then the spread among alike neighbours bounds it from below.
   if (n < 16.0) {

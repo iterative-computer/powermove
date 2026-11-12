@@ -95,6 +95,9 @@ pub struct CacheKey {
     pub scale: u64,
     /// The resampler the frame was drawn with.
     pub sampling: pm_render::sampling::Sampling,
+    pub studio_preview: crate::studio::Preview,
+    /// `ViewCamera::key` of the pane's camera.
+    pub studio_view: u64,
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
@@ -107,6 +110,8 @@ impl CacheKey {
             && self.width == other.width
             && self.height == other.height
             && self.crop == other.crop
+            && self.studio_preview == other.studio_preview
+            && self.studio_view == other.studio_view
     }
 }
 
