@@ -49,7 +49,7 @@ pub fn knob(name: &str) -> Option<u64> {
     KNOBS
         .get_or_init(|| {
             std::env::vars()
-                .filter(|(k, _)| k.starts_with("PM_ABL_") || k.starts_with("PM_FIX_"))
+                .filter(|(k, _)| k.starts_with("PM_ABL_") || k.starts_with("PM_FIX_") || k.starts_with("PM_SCRUB_"))
                 .filter_map(|(k, v)| Some((k, v.parse().ok()?)))
                 .collect()
         })
