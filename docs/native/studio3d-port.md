@@ -2319,8 +2319,35 @@ The glass object's full-HD RMS is 0.023719 (limit 0.02); whole-image bias
 p95 is 0.012257 (limit 0.012). Small chrome-set flicker is 0.006698
 (limit 0.006). Glass flicker itself passes at 0.004011. The guard alone
 therefore does not repair the regression. A separate eight-glossy-bounce
-control is required before choosing the final preset; no acceptance limit
+control was needed before choosing the final preset; no acceptance limit
 or reference has changed. These remain development-build measurements.
+
+That control isolates the glass regression: retaining **eight glossy bounces**
+with the same 8-sample floor, 12% convergence and glass guard reduces full-HD
+object RMS from **0.023719 to 0.011945**, at essentially unchanged mean spp
+(23.218 versus 23.222). Glass then passes noise (0.003913), bias (0.004507)
+and flicker (0.004051). The per-kind glossy limit must remain eight; raising
+the sample ceiling alone had not repaired this lost reflection energy.
+
+A conservative candidate E (16–128 spp, 9%, diffuse/glossy/transmission limits
+4/8/8, with the glass guard) passes the small combined chrome-set flicker
+check at 0.005848 and all three full-HD fixtures:
+
+| Candidate E, full-HD object region | RMS <0.02 | Noise <0.006 | Bias p95 <0.012 | Flicker <0.006 |
+|---|---:|---:|---:|---:|
+| Teapot | 0.002250 | 0.001289 | 0.002537 | 0.001519 |
+| Glass | 0.011968 | 0.003913 | 0.004456 | 0.004029 |
+| Chrome | 0.005649 | 0.002238 | 0.003799 | 0.001887 |
+
+Its real 30-frame exports have not been measured, so it is a validated image
+fallback rather than an accepted speed round. The new floor regression passes
+on both BVH and Metal RT and confirms that an explicit sample ceiling remains
+authoritative. A separate diagnostic of the faster candidate locates excessive
+flicker in the catcher/background (0.006508 at 9.35 mean spp) and polished
+metal (0.007722 at 25.72 mean spp). A candidate that allocates more observations
+to those paths is prepared but remains uncompiled and unverified. Production
+defaults and the round-1 decision are not shipped on the strength of these
+partial results.
 
 The command/state contract adds optional `perceptualNoise`,
 `edgeSamplesMultiplier`, `diffuseBounces`, `glossyBounces` and
@@ -2351,6 +2378,12 @@ its warm full-HD application cost and graph/filter reuse still need measurement.
 The diagnostic log reports actual backend, fallback, guide scale and individual
 filter/upload/download times. The profiler can request `--oidn-device cpu` or
 `metal` for controlled runs.
+
+A three-frame native diagnostic measures first-use Metal denoising at
+5468 ms, followed by 577 and 508 ms warm frames. The diagnostic export averages
+4.602 s/frame; its short range and the unaccepted sampling candidate make it
+unsuitable for the speed-round decision. A matched **30-frame** CPU/Metal
+comparison is still required. No 15% end-to-end GPU gain is claimed.
 
 **Shipping blocker:** the development TBB library declares macOS 27.0, while
 the app's Info.plist and linker target require macOS 14.0. The bundle helper
