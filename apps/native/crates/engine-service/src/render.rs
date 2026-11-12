@@ -653,6 +653,9 @@ impl Engine {
         let Ok(request) = spec.request(scene) else {
             return Vec::new();
         };
+        // Media is prepared as the frame will read it (a viewer frame's
+        // stills at the size it draws them).
+        self.renderer.set_preview_media(!spec.exact);
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(
