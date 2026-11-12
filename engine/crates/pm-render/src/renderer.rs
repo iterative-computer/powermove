@@ -1357,6 +1357,12 @@ impl Renderer {
         self.media.draw_edge = None;
     }
 
+    /// Drops the stills kept at their full size (`MediaCache::release_whole_images`).
+    pub fn release_whole_stills(&mut self) {
+        self.media.release_whole_images();
+        // Kept bind groups hold their views (and textures) alive.
+        self.binds.clear();
+    }
     pub fn set_image_cache_budget(&mut self, bytes: u64) {
         self.media.trim_images(bytes);
     }

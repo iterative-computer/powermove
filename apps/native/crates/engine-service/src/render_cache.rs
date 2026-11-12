@@ -3224,6 +3224,267 @@ mod tests {
         }
     }
 
+    /// What a paused viewer settles on at 1 s as its drawable takes each of
+    /// `drawables` in turn (one engine: a window resized), drawn as the
+    /// worker draws it: the picture at the drawable's size at once, then
+    /// its refinement at the composition's size in bands. With `disk`, the
+    /// frame on disk is shown instead; whether it was comes with each
+    /// picture.
+    fn settled_pictures(
+        disk: Option<&DiskFrames>,
+        scene: &Scene,
+        definitions: &[DefinitionSnapshot],
+        drawables: &[(u32, u32)],
+    ) -> Vec<(bool, Vec<[f64; 3]>)> {
+        use crate::render::{Engine, FrameSpec};
+        let mut engine = Engine::new(pm_gpu::Gpu::new("settled-pictures").unwrap()).unwrap();
+        engine.set_resources(Arc::new(crate::resources::ResourceSnapshot {
+            generation: 1,
+            definitions: definitions.to_vec(),
+            ..Default::default()
+        }));
+        engine.disk = disk.cloned();
+        let shown = |engine: &mut Engine, spec: FrameSpec| {
+            let start = Instant::now();
+            loop {
+                let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
+                let sub = engine
+                    .frame(scene, spec, None, &Default::default(), true, trace.clone())
+                    .unwrap()
+                    .unwrap();
+                sub.commit();
+                sub.complete().unwrap();
+                assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+                let from_disk = trace.lock().unwrap().disk == 2;
+                // A frame on disk is shown once its read lands.
+                if !sub.stand_ins && (from_disk || disk.is_none()) {
+                    return (from_disk, sub.pixels());
+                }
+                assert!(start.elapsed() < Duration::from_secs(20), "never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        drawables
+            .iter()
+            .map(|&(width, height)| {
+                let output = crate::Output {
+                    width,
+                    height,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                };
+                let fast = FrameSpec {
+                    exact: false,
+                    ..FrameSpec::exact(second(), output)
+                };
+                let full = FrameSpec::paused_full_scale(scene, &output);
+                if full <= 1. {
+                    return shown(&mut engine, fast);
+                }
+                let first = shown(&mut engine, fast);
+                if first.0 {
+                    return first;
+                }
+                let refined = FrameSpec {
+                    scale: full,
+                    ..fast
+                };
+                let mut costs = crate::jobs::Costs::default();
+                assert!(
+                    engine
+                        .refine(scene, refined, &mut costs, &|| false)
+                        .unwrap()
+                );
+                shown(&mut engine, refined)
+            })
+            .collect()
+    }
+
+    /// The fixture with `layer` on top, its still linked to `path`.
+    fn scene_with(layer: serde_json::Value, still: Option<&Path>) -> Scene {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"].as_array_mut().unwrap().insert(0, layer);
+        if still.is_some() {
+            project["assets"]["pic"] = serde_json::json!(
+                {"id":"pic","type":"image","name":"Texture","w":2048,"h":2048,"dur":0});
+        }
+        let mut scene = scene_from(&project.to_string());
+        if let Some(still) = still {
+            scene.media = Arc::new(pm_export::render::MediaPaths {
+                paths: [("pic".to_owned(), still.to_owned())].into(),
+                ..Default::default()
+            });
+        }
+        scene
+    }
+
+    /// A paused picture drawn and the same frame read from disk, at a
+    /// drawable of the composition's size, at smaller ones, and again at
+    /// the first after the window was resized: one picture.
+    fn assert_drawn_is_rendered(scene: &Scene, definitions: &[DefinitionSnapshot]) {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(scene, definitions, None, None, None, 1, Ticks::ZERO);
+        ready(&disk);
+        disk.start_fill(
+            1.,
+            1.03,
+            &job_binary(),
+            crate::jobs::Activity::default(),
+            |_| {},
+        )
+        .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert_eq!(bars.error.as_deref(), None, "{bars:?}");
+        let drawables = [(640, 360), (320, 180), (213, 120), (640, 360)];
+        let drawn = settled_pictures(None, scene, definitions, &drawables);
+        let rendered = settled_pictures(Some(&disk), scene, definitions, &drawables);
+        for ((drawable, drawn), rendered) in drawables.iter().zip(&drawn).zip(&rendered) {
+            assert!(rendered.0, "{drawable:?}: the frame on disk is shown");
+            let differing = drawn
+                .1
+                .iter()
+                .zip(&rendered.1)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                (differing, apart(&rendered.1, &drawn.1)),
+                (0, 0.),
+                "{drawable:?}: the paused picture changes when its frame is rendered"
+            );
+        }
+    }
+
+    /// A large detailed still fitted small is the same in a paused picture
+    /// drawn and one read from disk: a settled paused frame is drawn from
+    /// the original, as an export and a rendered frame are. (Before: the
+    /// viewer drew it from a thumbnail at the size it is shown, and its
+    /// fine texture changed when the render bar turned green.)
+    #[test]
+    fn a_detailed_still_fitted_small_is_the_same_drawn_and_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2048 × 2048, every pixel its own grey: texture at the finest scale.
+        let (w, h) = (2048u32, 2048u32);
+        let mut bmp = Vec::with_capacity((54 + w * h * 3) as usize);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(w as i32).to_le_bytes());
+        bmp.extend_from_slice(&(h as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        let mut seed = 0x2545_F491u32;
+        for _ in 0..w * h {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            bmp.extend_from_slice(&[(seed >> 24) as u8; 3]);
+        }
+        let still = dir.path().join("texture.bmp");
+        std::fs::write(&still, bmp).unwrap();
+        let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
+        let scene = scene_with(
+            serde_json::json!({
+                "id":"still","type":"image","name":"Texture","from":0,"dur":3,"on":true,
+                "solo":false,"mblur":false,"fx":[],"masks":[],
+                "p":{"position.x":ch(170.),"position.y":ch(30.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                     "scale.x":ch(14.7),"scale.y":ch(14.7),"rotation":ch(0.),"opacity":ch(100.)},
+                "d":{"asset":"pic","fit":"stretch","w":2048,"h":2048}
+            }),
+            Some(&still),
+        );
+        assert_drawn_is_rendered(&scene, &[]);
+    }
+
+    /// An extension's glow in the shape of a multi-pass bloom (a
+    /// half-resolution tile packed into its target, blurred and upsampled;
+    /// it declares a spread of 10 px and reaches 40) is
+    /// the same in a paused picture drawn and one read from disk: a settled
+    /// paused frame draws its effects over the whole frame, as an export
+    /// and a rendered frame do. (Before: its refinement drew the effect
+    /// band by band within the declared spread.)
+    #[test]
+    fn a_reduced_pass_effect_is_the_same_drawn_and_rendered() {
+        const HALO: &str = "#version 300 es
+precision highp float;
+in vec2 v_st;
+uniform sampler2D u_tex;
+uniform sampler2D u_orig;
+uniform vec2 u_texel;
+uniform int u_pass;
+uniform float u_radius;
+out vec4 o;
+void main() {
+  vec2 halfTexel = 0.5 * u_texel;
+  bool tile = v_st.x < 0.5 && v_st.y < 0.5;
+  vec2 logicalUV = v_st / 0.5;
+  if (u_pass == 0) {
+    vec4 sum = vec4(0.0);
+    if (tile) {
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          sum += texture(u_orig, logicalUV + (vec2(float(dx), float(dy)) - 0.5) * u_texel) * 0.25;
+        }
+      }
+    }
+    o = sum;
+  } else if (u_pass < 3) {
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    if (tile) {
+      vec2 axis = u_pass == 1 ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      for (int i = -16; i <= 16; i++) {
+        float t = float(i) / 16.0;
+        float w = exp(-4.5 * t * t);
+        vec2 uv = logicalUV + axis * (u_radius * t) * u_texel;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+          sum += texture(u_tex, clamp(uv * 0.5, halfTexel, vec2(0.5) - halfTexel)) * w;
+        }
+        weights += w;
+      }
+    }
+    o = sum / max(weights, 0.00001);
+  } else {
+    vec4 bloom = texture(u_tex, clamp(v_st * 0.5, halfTexel, vec2(0.5) - halfTexel));
+    o = texture(u_orig, v_st) + bloom * 2.0;
+  }
+}
+";
+        let halo: DefinitionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "acme.halo", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+            "glsl": { "source": HALO, "bodyLineOffset": 0,
+                      "bodyUtf16Len": HALO.encode_utf16().count(), "bodyUtf8Len": HALO.len() },
+            "params": [
+                { "type": "number", "key": "radius", "default": 40, "min": 0, "max": 500, "step": null },
+                { "type": "number", "key": "reach", "default": 40, "min": 0, "max": 500, "step": null }
+            ],
+            "flags": { "passes": 4, "keepOrig": true, "backdrop": false, "rawShader": true,
+                       "viewportSafe": true, "viewportPadding": ["reach"], "clamp": false }
+        }))
+        .unwrap();
+        let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
+        let scene = scene_with(
+            serde_json::json!({
+                "id":"lit","type":"shape","name":"Lit","from":0,"dur":3,"on":true,
+                "solo":false,"mblur":false,"masks":[],
+                "fx":[{"id":"e1","type":"acme.halo","on":true,
+                       "p":{"radius":ch(40.),"reach":ch(10.)}}],
+                "p":{"position.x":ch(320.),"position.y":ch(125.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                     "scale.x":ch(100.),"scale.y":ch(100.),"rotation":ch(0.),"opacity":ch(100.)},
+                "d":{"shape":"rect","w":180,"h":60,"radius":0,"color":"#FFE9A0"}
+            }),
+            None,
+        );
+        assert_drawn_is_rendered(&scene, &[halo]);
+    }
+
     /// A stored frame is a delivery: an effect whose extension isn't
     /// installed refuses the fill and nothing is stored (the viewer draws it
     /// bypassed live; a stored frame without it would play back silently).

@@ -97,12 +97,42 @@ impl FrameSpec {
             1.
         }
     }
+    /// Whether this frame is the final picture of its time: a capture, or
+    /// a paused frame of the whole composition at its own size (the
+    /// refinement a paused viewer settles on, or a frame on a drawable of
+    /// exactly that size). It is drawn from the sources and with the effect
+    /// passes an export draws with, so it is the picture a rendered frame
+    /// on disk holds: a paused picture is the same before and after its
+    /// range is rendered. Every other viewer frame is a preview, and a
+    /// paused one is never replaced by the frame on disk.
+    pub(crate) fn final_picture(&self, scene: &Scene) -> bool {
+        self.exact
+            || (self.moment == Moment::Paused
+                && (self.whole_composition(scene).is_some()
+                    || (self.scale == 1. && self.fills_composition(scene))))
+    }
+    /// Whether the drawable is the whole composition at its own size.
+    fn fills_composition(&self, scene: &Scene) -> bool {
+        self.output.crop.is_none()
+            && composition_size(scene) == Some(Size::new(self.output.width, self.output.height))
+    }
+    /// Whether a paused frame of this output settles on the final picture
+    /// ([`Self::final_picture`]), at once or by its refinement: where the
+    /// frame on disk may be shown for it. A reduced quality never does.
+    pub(crate) fn settles_final(&self, scene: &Scene) -> bool {
+        let refined = FrameSpec {
+            scale: Self::paused_full_scale(scene, &self.output),
+            ..*self
+        };
+        self.scale >= 1.
+            && (refined.whole_composition(scene).is_some() || self.fills_composition(scene))
+    }
     /// Whether stills are read at the view's resolution (ImageIO's
-    /// filtered thumbnail of the original): every viewer frame, captures
-    /// excepted. Full-resolution stills held for paused frames cost
-    /// gigabytes on large images for no visible difference.
-    pub(crate) fn preview_stills(&self) -> bool {
-        !self.exact
+    /// filtered thumbnail of the original): every preview frame. A final
+    /// picture reads the originals, which the engine lets go of once it is
+    /// drawn (held, they cost gigabytes on large images).
+    pub(crate) fn preview_stills(&self, scene: &Scene) -> bool {
+        !self.final_picture(scene)
     }
     /// Whether video frames are converted at the view's resolution: only
     /// for frames a final picture replaces, playing and dragged ones. A
@@ -171,9 +201,10 @@ impl FrameSpec {
             MotionBlurKind::Export
         });
         request.sampling = self.sampling();
-        // A capture reads the exact picture: final output, as an export
-        // (effects at the composition's density, `pm_render::plan`).
-        if self.exact {
+        // A capture and a settled paused frame are the final picture:
+        // final output, as an export (effects at the composition's density
+        // and over the whole frame, `pm_render::plan`).
+        if self.final_picture(scene) {
             request.output_kind = pm_render::OutputKind::Final;
         }
         #[cfg(test)]
@@ -758,6 +789,14 @@ impl Engine {
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
+    /// A settled paused frame read its stills whole, as an export does. Its
+    /// picture is kept; the originals are not (a capture's stay within the
+    /// image budget, for the capture after it).
+    fn release_final_stills(&mut self, scene: &Scene, spec: &FrameSpec) {
+        if !spec.exact && spec.final_picture(scene) {
+            self.renderer.release_whole_stills();
+        }
+    }
     /// The key a frame of `spec` is kept in memory under.
     fn cache_key(
         &mut self,
@@ -898,7 +937,7 @@ impl Engine {
         // stills at the size it draws them, paused or playing; video at the
         // view's size only while playing or dragging).
         self.renderer
-            .set_preview_media(spec.preview_stills(), spec.preview_video());
+            .set_preview_media(spec.preview_stills(scene), spec.preview_video());
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(
@@ -1095,23 +1134,14 @@ impl Engine {
             Moment::Scrub => std::time::Duration::ZERO,
         };
         // A paused frame shows the frame on disk only where it would draw
-        // that very picture itself: the whole composition at its own size
-        // (its refinement at the paused Full scale, or a drawable that is
-        // the composition's size). Where a paused frame is drawn otherwise
-        // (zoomed in, or so far out that Full is bounded to the drawable),
-        // it is drawn as ever: whether a frame is rendered on disk never
-        // changes a paused picture.
-        let paused_whole = || {
-            let full = FrameSpec::paused_full_scale(scene, &output);
-            let refined = FrameSpec {
-                scale: full,
-                ..spec
-            };
-            refined.whole_composition(scene).is_some()
-                || (output.crop.is_none()
-                    && composition_size(scene) == Some(Size::new(output.width, output.height)))
-        };
-        let as_drawn = spec.moment != Moment::Paused || paused_whole();
+        // that very picture itself: the final picture of the whole
+        // composition at its own size (its refinement at the paused Full
+        // scale, or a drawable that is the composition's size). Where a
+        // paused frame is drawn otherwise (zoomed in, at a reduced quality,
+        // or so far out that Full is bounded to the drawable), it is drawn
+        // as ever: whether a frame is rendered on disk never changes a
+        // paused picture.
+        let as_drawn = spec.moment != Moment::Paused || spec.settles_final(scene);
         let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
@@ -1198,7 +1228,7 @@ impl Engine {
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
                 self.renderer
-                    .set_preview_media(spec.preview_stills(), spec.preview_video());
+                    .set_preview_media(spec.preview_stills(scene), spec.preview_video());
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
@@ -1245,6 +1275,7 @@ impl Engine {
                     .unwrap_or_default();
                 let rendered = rendered?;
                 self.renderer.trim_submitted_frame_caches();
+                self.release_final_stills(scene, &spec);
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
@@ -1519,7 +1550,7 @@ impl Engine {
         let surface = self.cache_surface(size)?;
         // Drawn as `frame` draws this spec: the cached picture stands for it.
         self.renderer
-            .set_preview_media(spec.preview_stills(), spec.preview_video());
+            .set_preview_media(spec.preview_stills(scene), spec.preview_video());
         self.renderer.set_draw_reuse(!spec.exact);
         self.renderer.set_scrub(false);
         self.renderer.set_playback(None);
@@ -1531,6 +1562,7 @@ impl Engine {
             scene, spec.time, &request, area, &surface, costs, total, stop,
         );
         self.renderer.set_isolate_layers(false);
+        self.release_final_stills(scene, &spec);
         let late = self
             .compat_document
             .as_ref()
@@ -2750,14 +2782,18 @@ mod frame_cache_tests {
     }
     /// A playing frame draws a reduced still with the final resampler, as the
     /// paused frame of the same time and density does: footage and
-    /// precomps don't sharpen when playback stops.
+    /// precomps don't sharpen when playback stops. (On a drawable half the
+    /// composition's size: the paused frame at the drawable's density is
+    /// the picture shown at once, a preview as the playing frame is. At the
+    /// composition's own size a paused frame is the final picture, drawn
+    /// from the original still.)
     #[test]
     fn playing_and_paused_frames_resample_alike() {
         let dir = tempfile::tempdir().unwrap();
         let scene = scene(&stripes(dir.path()));
         let output = Output {
-            width: 128,
-            height: 72,
+            width: 64,
+            height: 36,
             display: 0,
             headroom: 1.,
             crop: None,
@@ -2846,6 +2882,60 @@ mod frame_cache_tests {
         let (from, drawn) = shown(&mut engine, next);
         assert_eq!(from, 1, "the upload is of the still as it was");
         assert_ne!(drawn, rendered);
+    }
+    /// A paused frame at a reduced quality is drawn as ever although its
+    /// frame is rendered: the frame on disk is the final picture, which a
+    /// reduced frame is not, and whether a frame is rendered never changes
+    /// a paused picture.
+    #[test]
+    fn a_reduced_paused_frame_is_never_replaced_by_the_frame_on_disk() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let at = disk.test_put(3, 0.25);
+        let mut engine = Engine::new(Gpu::new("reduced-paused").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        // Whether a paused frame at `scale` came from disk (2) or was drawn (1).
+        let mut from = |scale: f64| {
+            let spec = FrameSpec {
+                exact: false,
+                scale,
+                ..FrameSpec::exact(
+                    at,
+                    Output {
+                        width: 128,
+                        height: 72,
+                        display: 0,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                )
+            };
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            sub.pixels();
+            trace.lock().unwrap().disk
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while from(1.) != 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the frame on disk was never read"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(from(0.5), 1, "a half-resolution paused frame is drawn");
+        assert_eq!(from(1.), 2, "at Full the frame on disk is the picture");
     }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take
