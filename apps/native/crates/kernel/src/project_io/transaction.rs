@@ -1354,7 +1354,7 @@ pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
             if found.iter().any(|l| l.path == path) {
                 continue;
             }
-            let role = match holds(&path, &record) {
+            let role = match proves(&path, &record) {
                 Holds::Old => "previous",
                 Holds::New => "saving",
                 _ => continue,
@@ -1363,6 +1363,20 @@ pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
         }
     }
     found
+}
+
+/// Which of `record`'s two versions `path` holds, by its bytes alone: a
+/// version offered to the person is what it holds, and a file a share is
+/// still settling the times of right after it was written is that too.
+fn proves(path: &Path, record: &Record) -> Holds {
+    let Ok(Some(stat)) = lstat_file(path) else {
+        return Holds::Nothing;
+    };
+    match super::durable::hash_file(path) {
+        Ok(hash) if hash == record.new && stat.size == record.size => Holds::New,
+        Ok(hash) if Some(&hash) == record.old.as_ref() => Holds::Old,
+        _ => Holds::Other,
+    }
 }
 
 /// The files `record` names that may hold one of its two versions: its own
@@ -1422,7 +1436,7 @@ fn use_leftover_now(
             r.staged == chosen
                 || r.aside == chosen
                 || (proven_candidates(r).iter().any(|p| p == chosen)
-                    && matches!(holds(chosen, r), Holds::Old | Holds::New))
+                    && matches!(proves(chosen, r), Holds::Old | Holds::New))
         })
         .ok_or_else(|| {
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
