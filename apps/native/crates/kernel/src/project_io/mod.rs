@@ -56,7 +56,7 @@ pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     temporary_sibling,
 };
-pub(crate) use durable::{Host, remove_abandoned_temps};
+pub(crate) use durable::{Host, forget_local_copies, remove_abandoned_temps};
 pub use durable::{PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, WriteCoordinator};
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};

@@ -567,30 +567,95 @@ pub fn sync_file(file: &File) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// `syncDirectory`: makes a rename/link durable. A volume that has no
-/// folder sync to ask for (a network share answers "Operation not
-/// supported") is not a failed save: the file's own bytes were synced, and
-/// when the rename is durable is the server's to decide. The plain sync is
-/// still asked for.
+/// How far a folder's entries (a rename, a new name) can be made to
+/// survive a power cut, weakest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FolderSync {
+    /// The volume has no way to ask (neither sync exists for a folder).
+    Unproven,
+    /// Only the plain sync, which hands the entries to the volume or the
+    /// server without proof they are on stable storage (a network share).
+    Plain,
+    /// The full sync (`F_FULLFSYNC`).
+    Full,
+}
+
+/// What a folder answered when it was synced: how far, and the error
+/// numbers by which it said a kind of sync does not exist there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Folder {
+    pub sync: FolderSync,
+    unsupported: (Option<i32>, Option<i32>),
+}
+
+/// `syncDirectory`: makes a rename/link durable ([`folder_sync`]), wherever
+/// the volume allows.
 pub fn sync_directory(dir: &Path) -> Result<(), ProjectIoError> {
+    folder_sync(dir, &PublishHooks::default()).map(drop)
+}
+
+/// Syncs a folder so that its entries survive a power cut. The full sync
+/// first; a volume that has none for folders (a network share answers
+/// "Operation not supported") gets the plain sync, and where even that does
+/// not exist nothing can be asked. Only those two answers mean "does not
+/// exist"; every other failure of either sync (an I/O error, for one) is a
+/// real failure and is returned.
+pub(crate) fn folder_sync(dir: &Path, hooks: &PublishHooks) -> Result<Folder, ProjectIoError> {
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
     } else {
         dir
     };
     let handle = File::open(dir).map_err(|e| io_err(dir, e))?;
-    match handle.sync_all() {
-        Err(e) if !folder_sync_unsupported(&e) => Err(io_err(dir, e)),
-        Err(_) => {
-            #[cfg(unix)]
-            {
-                use std::os::fd::AsRawFd;
-                // SAFETY: a live descriptor; the result is not relied on.
-                unsafe { libc::fsync(handle.as_raw_fd()) };
-            }
-            Ok(())
+    let (full, plain) = hooks.folder_sync.as_ref().map_or((None, None), |f| f());
+    let injected = |errno: i32| Err(io::Error::from_raw_os_error(errno));
+    let full = match full.map_or_else(|| handle.sync_all(), injected) {
+        Ok(()) => {
+            return Ok(Folder {
+                sync: FolderSync::Full,
+                unsupported: (None, None),
+            });
         }
-        Ok(()) => Ok(()),
+        Err(e) if folder_sync_unsupported(&e) => e.raw_os_error(),
+        Err(e) => return Err(io_err(dir, e)),
+    };
+    #[cfg(unix)]
+    let synced = {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a live descriptor.
+        match unsafe { libc::fsync(handle.as_raw_fd()) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    };
+    #[cfg(not(unix))]
+    let synced: io::Result<()> = Ok(());
+    match plain.map_or(synced, injected) {
+        Ok(()) => Ok(Folder {
+            sync: FolderSync::Plain,
+            unsupported: (full, None),
+        }),
+        Err(e) if folder_sync_unsupported(&e) => Ok(Folder {
+            sync: FolderSync::Unproven,
+            unsupported: (full, e.raw_os_error()),
+        }),
+        Err(e) => Err(io_err(dir, e)),
+    }
+}
+
+/// [`folder_sync`] after a save installed its file, held to what the folder
+/// answered when the save began (`probed`): "does not exist" is believed
+/// only from a folder that said so then, with the same error. A folder
+/// that could be synced then and cannot now has failed.
+fn folder_sync_as(dir: &Path, probed: Folder, hooks: &PublishHooks) -> Result<(), ProjectIoError> {
+    let now = folder_sync(dir, hooks)?;
+    if now == probed {
+        Ok(())
+    } else {
+        Err(ProjectIoError::Invalid(format!(
+            "{}: the folder could not be synced as it was when the save began",
+            dir.display()
+        )))
     }
 }
 
@@ -655,6 +720,10 @@ pub type PublishHook = Arc<dyn Fn(&Path) + Send + Sync>;
 #[doc(hidden)]
 pub type StepHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
 
+/// What a test makes a folder's syncs answer.
+#[doc(hidden)]
+pub type FolderSyncHook = Arc<dyn Fn() -> (Option<i32>, Option<i32>) + Send + Sync>;
+
 /// Test hooks on publication.
 #[doc(hidden)]
 #[derive(Clone, Default)]
@@ -690,6 +759,9 @@ pub struct PublishHooks {
     /// `restore`, `keep`, `closed`, ...): the step is recorded, and not yet
     /// taken.
     pub step: Option<StepHook>,
+    /// What the next sync of a folder answers, as error numbers: the full
+    /// sync's and the plain sync's (`None`: the real call).
+    pub folder_sync: Option<FolderSyncHook>,
     /// Called with the destination half way through a copy into an
     /// exclusively created name.
     pub mid_copy: Option<PublishHook>,
@@ -710,6 +782,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("before_install", &self.before_install.is_some())
             .field("after_judged", &self.after_judged.is_some())
             .field("step", &self.step.is_some())
+            .field("folder_sync", &self.folder_sync.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
             .finish()
@@ -1189,6 +1262,35 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
         .is_some_and(is_uuid_v4)
 }
 
+/// Whether `destination` holds the file a save just installed: the same
+/// file (whose bytes were synced and read back before anything was moved),
+/// or, where a rename gives a file a new number, the same content.
+fn installed_at(destination: &Path, incoming: &FileStat, new_hash: &str) -> bool {
+    lstat_file(destination).ok().flatten().is_some_and(|now| {
+        now.same_identity(incoming)
+            || (now.size == incoming.size && hash_file(destination).is_ok_and(|h| h == new_hash))
+    })
+}
+
+/// After the install: the path must hold the file just installed, and the
+/// folder must sync as it did when the save began. Only then is the step
+/// recorded, and only after that is anything done with the version that was
+/// replaced.
+fn confirm_installed(
+    tx: &mut Transaction,
+    destination: &Path,
+    incoming: &FileStat,
+    new_hash: &str,
+    hooks: &PublishHooks,
+) -> Result<(), ProjectIoError> {
+    if !installed_at(destination, incoming, new_hash) {
+        return Err(ProjectIoError::ChangedOnDisk);
+    }
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    folder_sync_as(dir, tx.folder(), hooks).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
+    tx.step("installed")
+}
+
 /// Replaces the file at `destination` with the staged `temp` on a volume
 /// without an atomic exchange, in two steps, each recorded in the save's
 /// record `tx` before it is taken:
@@ -1201,16 +1303,14 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
 ///    since stays; this save's file is kept beside it and the save fails
 ///    naming it ([`ProjectIoError::KeptBeside`]).
 ///
-/// Then what was moved aside is read: if it does not have `expected`'s bytes
-/// (another version landed after the last check) it is kept beside the
-/// project under a plain name and reported ([`Published::displaced`]).
-///
-/// The file moved aside is never removed here: read and found to hold
-/// `expected`'s bytes, it is retained ([`retire`]). A failure to install
-/// puts it back. A process killed on the way leaves the record and the
-/// files it names for the next open ([`super::transaction::settle`]).
-/// A file of this save that stays under a private name it should not have
-/// strands the record ([`Transaction::strand`]).
+/// The install is then confirmed ([`confirm_installed`]), and only after
+/// that is the file that was moved aside read: with `expected`'s bytes it
+/// is retained ([`retire`]); with others (another version landed after the
+/// last check) it is kept beside the project under a plain name and
+/// reported ([`Published::displaced`]). It is never removed here. A failure
+/// to install puts it back; a failure to confirm leaves it where the record
+/// names it. A process killed on the way leaves the record and the files it
+/// names for the next open ([`super::transaction::settle`]).
 fn replace_aside(
     temp: TempFile,
     destination: &Path,
@@ -1269,45 +1369,59 @@ fn replace_aside(
     if let Some(hook) = &hooks.after_exchange {
         hook(destination);
     }
-    // What was moved aside is read only now, so the name is empty for no
-    // longer than the two renames. It is judged by its bytes, not its file
-    // number: a network share numbers files by name, so a renamed file has
-    // a new one. A file with exactly the bytes the session read holds
-    // nothing the session did not read.
-    let replaced = FileVersion::read(&aside)
-        .ok()
-        .flatten()
-        .is_some_and(|moved| moved.hash == expected.hash);
-    let mut published = Published::default();
-    let keep = |tx: &mut Transaction, held: PathBuf, label: &str| {
-        tx.keep(held, label).unwrap_or_else(|private| private)
-    };
-    if replaced {
-        published.backup = retire(aside, &expected.hash, tx, host);
-    } else {
-        published.displaced = Some(keep(tx, aside, "other version"));
-    }
     match installed {
         // The staged file is the project file now.
         Some(Placed::Moved) => drop(temp.keep()),
         // The project file is a verified copy of it.
         Some(Placed::Copied) => drop(temp),
         None => {
-            let kept = keep(tx, temp.keep(), "recovered");
+            // The version that landed stays under the name. This save's
+            // file and the one it moved aside are kept, each as what it is.
+            if judged(&aside, expected, false) {
+                retire(aside, &expected.hash, tx, host);
+            } else {
+                let _ = tx.keep(aside, "other version");
+            }
+            let kept = tx
+                .keep(temp.keep(), "recovered")
+                .unwrap_or_else(|private| private);
             let _ = sync_directory(dir);
             return Err(ProjectIoError::KeptBeside { kept });
         }
     }
-    // The path must still hold the file just installed: the same file, or
-    // (where a rename gives a file a new number) the same content.
-    if !lstat_file(destination).ok().flatten().is_some_and(|now| {
-        now.same_identity(incoming)
-            || (now.size == incoming.size && hash_file(destination).is_ok_and(|h| h == new_hash))
-    }) {
-        let _ = sync_directory(dir);
-        return Err(ProjectIoError::ChangedOnDisk);
+    // Not confirmed: the file moved aside stays where the record names it.
+    confirm_installed(tx, destination, incoming, new_hash, hooks).inspect_err(|_| tx.strand())?;
+    // What was moved aside is read only now: the name was empty for no
+    // longer than the two renames, and the new file is confirmed in place.
+    let mut published = Published::default();
+    if judged(&aside, expected, false) {
+        published.backup = retire(aside, &expected.hash, tx, host);
+    } else {
+        published.displaced = Some(
+            tx.keep(aside, "other version")
+                .unwrap_or_else(|private| private),
+        );
     }
     Ok(published)
+}
+
+/// Whether `displaced`, the file a save took from the project's path, is
+/// the version it could replace: read now, with exactly `expected`'s bytes.
+/// By its bytes, not its file number, where the file was renamed (a
+/// network share numbers files by name); `same_file` asks for the same
+/// file and permissions too, where an exchange handed it back untouched. A
+/// file with exactly the bytes the session read holds nothing it did not
+/// read.
+fn judged(displaced: &Path, expected: &FileVersion, same_file: bool) -> bool {
+    FileVersion::read(displaced)
+        .ok()
+        .flatten()
+        .is_some_and(|d| {
+            d.hash == expected.hash
+                && (!same_file
+                    || (d.stat.same_identity(&expected.stat)
+                        && d.stat.same_permissions(&expected.stat)))
+        })
 }
 
 /// What a publication left on disk besides the published file.
@@ -1322,6 +1436,12 @@ pub(crate) struct Published {
     pub changed: Vec<PathBuf>,
     /// The replaced version itself, where it is the backup of record now.
     pub backup: Option<PathBuf>,
+    /// The volume cannot prove the new file's name survives a power cut (a
+    /// network share: the server decides). The save stands as far as can
+    /// be told; `local_copy` is the copy of the new version kept on this
+    /// machine until the file is read back.
+    pub unproven: bool,
+    pub local_copy: Option<PathBuf>,
 }
 
 /// The system's way for programs to take turns at a file (on macOS,
@@ -1366,6 +1486,9 @@ pub(crate) struct Host<'a> {
     /// replaced that this save made there before it began.
     pub backups: Option<&'a BackupPolicy>,
     pub backup: Option<&'a Path>,
+    /// Where on this machine a copy of the new version is kept when the
+    /// volume cannot prove its name durable ([`Published::unproven`]).
+    pub unconfirmed: Option<&'a Path>,
 }
 
 impl Host<'_> {
@@ -1575,6 +1698,14 @@ fn publish_now(
         incoming.size,
         host,
     )?;
+    // A volume that cannot prove a name durable (a network share) may lose
+    // the new file's name after the save was reported: the new version is
+    // kept on this machine first, until the file is read back.
+    let unproven = tx.folder().sync != FolderSync::Full;
+    let local_copy = match host.unconfirmed {
+        Some(local) if unproven => local_copy(&temp.path, local, new_hash).ok(),
+        _ => None,
+    };
     let mut published = Published::default();
     let exchanged = route == Route::Exchange && {
         if let Some(hook) = &hooks.before_exchange {
@@ -1596,28 +1727,25 @@ fn publish_now(
             if let Some(hook) = &hooks.after_exchange {
                 hook(destination);
             }
-            // `temp.path` now names the displaced file: the version we were
+            let confirmed = confirm_installed(&mut tx, destination, &incoming, new_hash, hooks);
+            // The folder did not sync: the displaced file stays where the
+            // record names it, for the next open or save to settle.
+            if let Err(ProjectIoError::Finalize(_)) = &confirmed {
+                let _ = temp.keep();
+                tx.strand();
+                tx.finish();
+                return confirmed.map(|()| published);
+            }
+            // `temp.path` names the displaced file: the version we were
             // allowed to replace (retained), or one to keep beside.
-            let replaced = FileVersion::read(&temp.path)
-                .ok()
-                .flatten()
-                .is_some_and(|d| {
-                    d.hash == expected.hash
-                        && d.stat.same_identity(&expected.stat)
-                        && d.stat.same_permissions(&expected.stat)
-                });
-            if replaced {
+            if judged(&temp.path, expected, true) {
                 published.backup = retire(temp.keep(), &expected.hash, &mut tx, host);
             } else {
                 let kept = tx.keep(temp.keep(), "other version");
                 published.displaced = Some(kept.unwrap_or_else(|private| private));
             }
-            // The path must still hold the file just published.
-            if !lstat_file(destination)
-                .ok()
-                .flatten()
-                .is_some_and(|now| now.same_identity(&incoming))
-            {
+            // The path no longer holds the file just published.
+            if confirmed.is_err() {
                 let _ = sync_directory(dir);
                 tx.finish();
                 return Err(match published.displaced {
@@ -1667,9 +1795,12 @@ fn publish_now(
                     return Err(e);
                 }
             }
+            if let Err(e) = confirm_installed(&mut tx, destination, &incoming, new_hash, hooks) {
+                tx.finish();
+                return Err(e);
+            }
         }
     }
-    sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.
     published.changed = transaction::prune_retained(destination, &tx, hooks);
@@ -1689,7 +1820,45 @@ fn publish_now(
         }
     }
     tx.finish();
+    published.unproven = unproven;
+    published.local_copy = local_copy;
+    // A save whose name is proven durable needs no earlier local copy.
+    if let (false, Some(local)) = (unproven, host.unconfirmed) {
+        forget_local_copies(local, None);
+    }
     Ok(published)
+}
+
+/// Keeps `staged`, the finished new version (hash `hash`), in the folder
+/// `local` on this machine as `<hash>.pmv`, synced, and then drops the
+/// local copies of earlier saves of the project. Returns where it is.
+fn local_copy(staged: &Path, local: &Path, hash: &str) -> Result<PathBuf, ProjectIoError> {
+    fs::create_dir_all(local).map_err(|e| io_err(local, e))?;
+    let kept = local.join(format!("{hash}.pmv"));
+    if !kept.is_file() {
+        let writing = local.join(format!("{hash}.writing"));
+        fs::copy(staged, &writing)
+            .and_then(|_| File::open(&writing)?.sync_all())
+            .and_then(|()| fs::rename(&writing, &kept))
+            .map_err(|e| {
+                let _ = fs::remove_file(&writing);
+                io_err(&kept, e)
+            })?;
+        sync_directory(local)?;
+    }
+    forget_local_copies(local, Some(&kept));
+    Ok(kept)
+}
+
+/// Removes the app's own local copies of unconfirmed saves in `local`,
+/// other than `keep`.
+pub(crate) fn forget_local_copies(local: &Path, keep: Option<&Path>) {
+    for entry in fs::read_dir(local).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if Some(path.as_path()) != keep && path.extension().is_some_and(|e| e == "pmv") {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 // ── version backups (`ProjectFiles.backup` / `retain`) ─────────────────────

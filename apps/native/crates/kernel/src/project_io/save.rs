@@ -152,6 +152,10 @@ pub struct SaveOptions {
     pub profile: Option<PathBuf>,
     /// Asked for a coordinated write around the publication.
     pub coordinator: Option<durable::SharedWriteCoordinator>,
+    /// A folder on this machine for a copy of the saved version where the
+    /// project's volume cannot prove the save durable (see
+    /// [`SaveReceipt::unproven`]).
+    pub unconfirmed: Option<PathBuf>,
 }
 
 /// The `history` member a plan writes.
@@ -256,6 +260,12 @@ pub struct SaveReceipt {
     /// (something wrote into them after they were replaced): kept beside
     /// the project under these names. The person must be told.
     pub changed: Vec<PathBuf>,
+    /// The file is in place and its bytes are synced, but the volume cannot
+    /// prove that its name survives a power cut (a network share: the server
+    /// decides when a rename is durable). `local_copy` is the copy of this
+    /// version kept on this machine until the file is read back.
+    pub unproven: bool,
+    pub local_copy: Option<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -905,6 +915,7 @@ impl SavePlan {
             profile: self.options.profile.as_deref(),
             backups: self.options.backups.as_ref(),
             backup: backup.as_deref(),
+            unconfirmed: self.options.unconfirmed.as_deref(),
         };
         let published = durable::publish(temp, dest, &publish, &file_hash, &host);
         if published.is_err()
@@ -977,6 +988,8 @@ impl SavePlan {
             backup,
             displaced: published.displaced,
             changed: published.changed,
+            unproven: published.unproven,
+            local_copy: published.local_copy,
             ticket: self.ticket.clone(),
         })
     }

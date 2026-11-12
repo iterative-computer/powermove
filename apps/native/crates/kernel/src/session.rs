@@ -299,7 +299,11 @@ pub enum ShellReply {
     /// the path by a save that stands), `restored` (a save was cut short and
     /// the last saved version is back under the project's name), `other`
     /// (the file such a save had moved aside, where the path holds a file),
-    /// `unfinished` (the finished file of the save that was cut short).
+    /// `unfinished` (the finished file of the save that was cut short),
+    /// `undecided` (a file such a save left that recovery would not move),
+    /// `unconfirmed` (the copy kept on this machine of the last save to a
+    /// volume that could not prove it durable, when the file read is not
+    /// that save).
     Kept(Vec<Value>),
     /// Rows of files a cut-short save left that the person has to choose
     /// between: `path`, `role` (`previous`: the file that was under the
@@ -681,11 +685,15 @@ impl Kernel {
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
                 let journals = self.project_dir(&handle.project);
+                // A volume that could not prove the save durable may still
+                // lose it: the journal stays until the file is read back.
+                let proven = !self.unproven.contains(&handle.project);
                 self.remove_closed_project(&handle.project);
                 // Saved where it belongs and durable: the journal holds nothing
                 // more. Left behind, every quit reopened the project to compact
                 // it, and a later open asked to recover work that was saved.
                 if recovery_copy.is_none()
+                    && proven
                     && let Some(dir) = journals
                 {
                     for session in crate::journal::sessions(&dir) {
@@ -950,6 +958,7 @@ impl Kernel {
             }
         };
         let displaced = self.note_changed(&session.project, &receipt);
+        self.note_unproven(&session.project, receipt.unproven);
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
         self.refuse_faulted(&session.project)?;
@@ -1520,6 +1529,18 @@ impl Kernel {
                         None => {}
                     }
                 }
+                // The last save here went to a volume that could not prove
+                // it durable, and a copy of it was kept on this machine. The
+                // file read back with that version confirms it; any other
+                // file means that save may not have arrived, and the person
+                // is told where the copy is.
+                if decision == OpenDecision::Writable
+                    && let Some(version) = &opened.file.version
+                    && let Some(copy) = self.unconfirmed_copy(&id, &version.hash)
+                    && let Value::Object(m) = &mut meta
+                {
+                    push_kept(m, [kept_row("unconfirmed", Some(&copy))]);
+                }
                 // What a save that was cut short left is said once the
                 // project is open (`ShellCall::KeptBeside`).
                 if let Value::Object(m) = &mut meta {
@@ -2054,11 +2075,16 @@ impl Kernel {
             }
             let p = self.project_mut(id).unwrap();
             let mut changed = Vec::new();
+            let mut unproven = None;
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
                 changed = receipt.changed.clone();
+                unproven = Some(receipt.unproven);
                 p.store_mut().finish_save(receipt)
             });
+            if let Some(unproven) = unproven {
+                self.note_unproven(id, unproven);
+            }
             // A retained version found changed is another version to tell
             // about: at once where nothing else is, at the next open else.
             let mut changed = changed.into_iter();
@@ -2511,6 +2537,7 @@ impl Kernel {
             profile: self.profile_dir(),
             backups: None,
             backup: None,
+            unconfirmed: None,
         }
     }
     /// Private files beside a project that no save's record names are never
@@ -2546,6 +2573,30 @@ impl Kernel {
         {
             self.project_mut(id).unwrap().store_mut().file_moved(now);
         }
+    }
+    /// Whether session `id`'s last save is on a volume that could not prove
+    /// it durable.
+    fn note_unproven(&mut self, id: &str, unproven: bool) {
+        if unproven {
+            self.unproven.insert(id.to_owned());
+        } else {
+            self.unproven.remove(id);
+        }
+    }
+    /// The copy this machine keeps of `id`'s last save to a volume that
+    /// could not prove it durable, unless the file just read (`hash`) is
+    /// that save: then it arrived, and the copy goes.
+    fn unconfirmed_copy(&self, id: &str, hash: &str) -> Option<PathBuf> {
+        let local = self.unconfirmed_dir(id)?;
+        if local.join(format!("{hash}.pmv")).is_file() {
+            project_io::forget_local_copies(&local, None);
+            return None;
+        }
+        std::fs::read_dir(&local)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "pmv"))
     }
     /// The other version a save kept beside the project that its reply
     /// names: the one found at the path, else the first of the versions an

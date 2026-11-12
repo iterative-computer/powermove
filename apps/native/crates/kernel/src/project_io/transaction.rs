@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
-    FileVersion, Host, Placed, PublishHooks, begins, is_uuid_v4, keep_beside, lstat_file,
-    place_new, sync_directory, sync_file, withdraw,
+    FileVersion, Folder, Host, Placed, PublishHooks, begins, folder_sync, is_uuid_v4, keep_beside,
+    lstat_file, place_new, sync_directory, sync_file, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -328,6 +328,9 @@ pub(super) struct Transaction {
     /// A file this record names is retained under its private name, or
     /// could not be given the name it should have: the record stays with it.
     retains: bool,
+    /// What the project's folder answered when it was synced as the save
+    /// began ([`Self::folder`]).
+    folder: Folder,
 }
 
 impl Transaction {
@@ -378,18 +381,23 @@ impl Transaction {
             .write_all(line(&Value::Object(begin)).as_bytes())
             .and_then(|()| sync_file(&file))
             .map_err(|e| io_err(&record, e))
-            // Its name must be there after a power cut too.
-            .and_then(|()| sync_directory(destination.parent().unwrap_or(Path::new("."))));
-        if let Err(e) = written {
-            let _ = fs::remove_file(&record);
-            return Err(e);
-        }
+            // Its name must be there after a power cut too. What the folder
+            // answers here is what it is held to after the install.
+            .and_then(|()| folder_sync(destination.parent().unwrap_or(Path::new(".")), host.hooks));
+        let folder = match written {
+            Ok(folder) => folder,
+            Err(e) => {
+                let _ = fs::remove_file(&record);
+                return Err(e);
+            }
+        };
         let tx = Transaction {
             file,
             record,
             destination: destination.to_owned(),
             hooks: host.hooks.clone(),
             retains: false,
+            folder,
         };
         tx.reached("begin");
         Ok(tx)
@@ -403,7 +411,14 @@ impl Transaction {
             destination: destination.to_owned(),
             hooks: hooks.clone(),
             retains: !record.retained.is_empty(),
+            folder: folder_sync(destination.parent().unwrap_or(Path::new(".")), hooks)
+                .map_err(|_| io::Error::other("the folder cannot be synced"))?,
         })
+    }
+
+    /// How far the project's folder could be synced when the save began.
+    pub fn folder(&self) -> Folder {
+        self.folder
     }
 
     fn reached(&self, step: &str) {

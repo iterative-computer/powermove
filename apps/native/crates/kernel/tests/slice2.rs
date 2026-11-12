@@ -1151,6 +1151,220 @@ fn work_written_into_the_replaced_file_after_it_was_read_is_never_removed() {
         assert_eq!(private_leftovers(&file), [""; 0], "{disk}");
     }
 }
+/// Every private file beside `file` (staged, moved aside, retained): what
+/// each holds.
+fn private_versions(file: &Path) -> Vec<Vec<u8>> {
+    fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            name.starts_with('.') && (name.ends_with(".aside") || name.ends_with(".tmp"))
+        })
+        .map(|p| fs::read(p).unwrap())
+        .collect()
+}
+/// The order of a save: install, confirm (the path holds the new file and
+/// the folder synced), record that, and only then look at the version that
+/// was replaced. Nothing is done with the old version while the new one is
+/// not confirmed in place.
+#[test]
+fn the_replaced_version_is_looked_at_only_after_the_new_one_is_confirmed() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        let dir = common::TempDir::new("order");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (steps, judged, syncs) = (order.clone(), order.clone(), order.clone());
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            step: Some(std::sync::Arc::new(move |step, _| {
+                steps.lock().unwrap().push(step.to_owned())
+            })),
+            after_judged: Some(std::sync::Arc::new(move |_| {
+                judged.lock().unwrap().push("replaced version read".into())
+            })),
+            folder_sync: Some(std::sync::Arc::new(move || {
+                syncs.lock().unwrap().push("folder synced".into());
+                (None, None)
+            })),
+            ..hooks
+        });
+        let plan = k.prepare_session_save(session, None, false).unwrap();
+        k.finish_session_save(plan.run()).unwrap();
+        let order = order.lock().unwrap().clone();
+        let at = |what: &str| order.iter().rposition(|o| o == what);
+        let installed = at("installed").unwrap_or_else(|| panic!("{disk}: {order:?}"));
+        assert!(
+            order[..installed]
+                .iter()
+                .rev()
+                .take(1)
+                .eq(["folder synced"]),
+            "{disk}: the folder is synced right before the step is recorded: {order:?}"
+        );
+        assert!(
+            at("replaced version read").is_some_and(|read| read > installed),
+            "{disk}: {order:?}"
+        );
+    }
+}
+/// A folder sync that really fails fails the save. "This volume has no
+/// folder sync" is believed only from the two answers that mean it, only
+/// when the folder gave that answer as the save began, and the plain sync
+/// asked for instead is not ignored: an I/O error from it is an error. The
+/// replaced version is not retired, the record stays, and the journal with
+/// the work is not forgotten.
+#[test]
+fn a_folder_sync_that_fails_fails_the_save_and_keeps_the_old_version_and_the_journal() {
+    type Answers = fn(usize) -> (Option<i32>, Option<i32>);
+    let cases: [(&str, Answers); 2] = [
+        // No full sync for folders here (EINVAL), the plain one works: until
+        // the sync after the install fails with an I/O error.
+        ("the plain sync fails", |call| match call {
+            0 => (Some(22), None),
+            _ => (Some(22), Some(5)),
+        }),
+        // The folder synced as the save began, and then says it cannot.
+        ("a folder that could be synced cannot", |call| match call {
+            0 => (None, None),
+            _ => (Some(45), None),
+        }),
+    ];
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (case, answers) in cases {
+        for (disk, hooks) in disks.clone() {
+            let dir = common::TempDir::new("sync-fails");
+            fs::create_dir_all(dir.path("job")).unwrap();
+            let file = dir.path("job/cut.pmv");
+            fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+            let original = fs::read(&file).unwrap();
+            let native = dir.path("native");
+            let mut k = kernel(&native);
+            let (session, _) = open_file(&mut k, &file);
+            rename_comp(&mut k, "P", "One");
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+                folder_sync: Some(std::sync::Arc::new(move || {
+                    answers(calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+                })),
+                ..hooks
+            });
+            let plan = k
+                .prepare_session_save(session.clone(), None, false)
+                .unwrap();
+            let failed = k
+                .finish_session_save(plan.run())
+                .expect_err("the folder did not sync");
+            assert!(
+                failed.to_string().contains("save finalization failed"),
+                "{case}, {disk}: {failed}"
+            );
+            assert!(
+                private_versions(&file).contains(&original),
+                "{case}, {disk}: the version it replaced is still beside the project"
+            );
+            assert!(
+                private_leftovers(&file)
+                    .iter()
+                    .any(|n| n.ends_with(".save")),
+                "{case}, {disk}: and the save's record with it"
+            );
+            assert!(
+                live_sessions(&native, "P") > 0,
+                "{case}, {disk}: the journal still holds the work"
+            );
+        }
+    }
+}
+/// A network share has no way to prove that a rename survives a power cut
+/// (measured: the full sync of a folder is "not supported" there; the plain
+/// one answers, and the server decides). A save to such a volume stands,
+/// but the app does not act as if it were proven: a copy of the saved
+/// version is kept on this machine and the journal is not deleted at close,
+/// until the file is read back with that version. If something else is
+/// read back (the server lost the save), the person is told where the copy
+/// is.
+#[test]
+fn a_save_the_volume_cannot_prove_durable_keeps_a_local_copy_until_it_is_read_back() {
+    for lost in [false, true] {
+        let dir = common::TempDir::new("unproven");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let native = dir.path("native");
+        let share = || pm_kernel::project_io::PublishHooks {
+            no_exchange: true,
+            no_exclusive: true,
+            folder_sync: Some(std::sync::Arc::new(|| (Some(45), None))),
+            ..Default::default()
+        };
+        let mut k = kernel(&native);
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        k.set_publish_hooks(share());
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .expect("the save stands as far as the volume can tell");
+        let saved = fs::read(&file).unwrap();
+        let local_copies = || -> Vec<std::path::PathBuf> {
+            fs::read_dir(native.join("unconfirmed/P"))
+                .map(|d| d.map(|e| e.unwrap().path()).collect())
+                .unwrap_or_default()
+        };
+        let kept = local_copies();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(
+            fs::read(&kept[0]).unwrap(),
+            saved,
+            "the saved version, on this machine"
+        );
+        k.shell(ShellCall::Close(session)).unwrap();
+        assert!(
+            live_sessions(&native, "P") > 0,
+            "the journal is not deleted while the save is unproven"
+        );
+        drop(k);
+        if lost {
+            // The server lost the rename: the old version is what is there.
+            fs::write(&file, &original).unwrap();
+        }
+        let mut k = kernel(&native);
+        k.set_publish_hooks(share());
+        let session = match k
+            .shell(ShellCall::PrepareOpen {
+                id: "P".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap()
+        {
+            ShellReply::Opened { session, .. } => session,
+            ShellReply::RecoveryRequired { ticket, .. } => {
+                assert!(lost, "a save that arrived opens without a question");
+                decide(&mut k, ticket, RecoveryDecision::Discard)
+            }
+            other => panic!("{other:?}"),
+        };
+        let told = kept_beside(&mut k, &session);
+        if lost {
+            assert_eq!(told, [("unconfirmed".to_owned(), Some(kept[0].clone()))]);
+            assert_eq!(saved_name(&kept[0]).as_deref(), Some("One"));
+        } else {
+            assert_eq!(told, [], "read back: confirmed");
+            assert_eq!(local_copies(), [""; 0].map(Path::new), "and the copy goes");
+        }
+    }
+}
 /// A coordinator as the app supplies one: grants every write (or none),
 /// and notes what the project file held when the work began and ended.
 struct Coordinator {

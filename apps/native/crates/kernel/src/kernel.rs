@@ -136,6 +136,9 @@ pub struct Kernel {
     history_max_entries: usize,
     pub(crate) trimmed_projects: Vec<String>,
     pub(crate) publish_hooks: crate::project_io::PublishHooks,
+    /// Open projects whose last save is on a volume that could not prove it
+    /// durable: their journals are kept at close.
+    pub(crate) unproven: std::collections::HashSet<String>,
     log: Vec<String>,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
@@ -159,6 +162,7 @@ impl Kernel {
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
             publish_hooks: Default::default(),
+            unproven: Default::default(),
             log: Vec::new(),
             durability,
             slots: BTreeMap::new(),
@@ -418,6 +422,7 @@ impl Kernel {
     /// Remove only after the caller's flush/compaction barrier succeeded.
     pub(crate) fn remove_closed_project(&mut self, id: &str) -> bool {
         self.sessions.remove(id);
+        self.unproven.remove(id);
         std::sync::Arc::make_mut(&mut self.state.ui).remove(id);
         self.history_order.retain(|p| p != id);
         self.slots.remove(id).is_some()
@@ -437,11 +442,17 @@ impl Kernel {
             hooks: self.publish_hooks.clone(),
             profile: self.profile_dir().map(Into::into),
             coordinator: self.config.write_coordinator.clone(),
+            unconfirmed: self.unconfirmed_dir(project),
             ..Default::default()
         }
     }
     pub(crate) fn write_coordinator(&self) -> Option<&crate::project_io::SharedWriteCoordinator> {
         self.config.write_coordinator.as_ref()
+    }
+    /// Where a copy of `project`'s last save is kept on this machine while
+    /// its volume cannot prove that save durable.
+    pub(crate) fn unconfirmed_dir(&self, project: &str) -> Option<PathBuf> {
+        Some(self.profile_dir()?.join("unconfirmed").join(project))
     }
     /// The profile folder this kernel keeps its journals in.
     pub(crate) fn profile_dir(&self) -> Option<&std::path::Path> {
