@@ -583,6 +583,9 @@ fn classify(error: &pm_proxy::ProxyError) -> TaskFailureCode {
 /// audio layout and colour interpretation (a proxy plays its own audio
 /// and shows its own colour).
 fn attach_check(original: &Path, file: &Path) -> Result<(), String> {
+    if let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(original) {
+        return attach_check_sequence(&sequence, file);
+    }
     let a = pm_media::probe::probe(original).map_err(|_| "The original can't be read.")?;
     let b =
         pm_media::probe::probe(file).map_err(|_| "This file isn't a video Powermove can read.")?;
@@ -645,6 +648,51 @@ fn attach_check(original: &Path, file: &Path) -> Result<(), String> {
     let (ca, cb) = (&va.color.interpreted, &vb.color.interpreted);
     if ca.primaries != cb.primaries || ca.transfer != cb.transfer {
         return refuse("Its colour is different.");
+    }
+    Ok(())
+}
+
+/// [`attach_check`] for an image sequence read in place: one frame per
+/// file at its rate, from its first number, in its shape and with its
+/// transparency.
+fn attach_check_sequence(
+    sequence: &pm_media::image::sequence::Manifest,
+    file: &Path,
+) -> Result<(), String> {
+    let unreadable = "This file isn't a video Powermove can read.";
+    let b = pm_media::probe::probe(file).map_err(|_| unreadable)?;
+    let vb = b.probe.video.as_ref().ok_or(unreadable)?;
+    let refuse = |why: &str| Err(format!("This file doesn’t match the original. {why}"));
+    if vb.frames as u64 != sequence.frames() {
+        return refuse("Check its length.");
+    }
+    let [num, den] = sequence.rate.map(i64::from);
+    if let Some(rb) = &vb.nominal_rate
+        && (rb.rate.num(), rb.rate.den()) != (num, den)
+    {
+        return refuse("Check its frame rate.");
+    }
+    if b.probe.start_us.unwrap_or(0).abs() > 500_000 * den / num {
+        return refuse("Check its start.");
+    }
+    let Some(first) = (sequence.first..=sequence.last)
+        .map(|n| sequence.file(n))
+        .find(|f| f.is_file())
+    else {
+        return Err("The original can't be read.".into());
+    };
+    let still = pm_media::image::read(&first, &pm_media::pool::FramePool::new(0))
+        .map_err(|_| "The original can't be read.")?;
+    let (w, h) = (still.frame.format.width, still.frame.format.height);
+    let (n, d) = vb.pixel_aspect;
+    let aspect = vb.width as f64 * n.max(1) as f64 / (vb.height.max(1) as f64 * d.max(1) as f64);
+    let original = w as f64 / h.max(1) as f64;
+    if (aspect - original).abs() > 0.01 * original {
+        return refuse("Check its shape.");
+    }
+    let alpha = still.color.alpha != pm_protocol::color::AlphaMode::Opaque;
+    if alpha && vb.alpha.is_none() {
+        return refuse("The original has transparency; this file doesn’t.");
     }
     Ok(())
 }
@@ -2261,6 +2309,77 @@ mod tests {
     }
 
     /// Attach refuses a file that is not the same picture and sound.
+    #[test]
+    fn a_sequence_takes_a_proxy_of_its_frames_at_its_rate() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let frames = d.join("renders");
+        std::fs::create_dir(&frames).unwrap();
+        // Four opaque 320×180 frames, numbered from 11.
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24",
+            ])
+            .args([
+                "-frames:v",
+                "4",
+                "-start_number",
+                "11",
+                "-pix_fmt",
+                "rgb48be",
+            ])
+            .arg(frames.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: frames,
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 11,
+            last: 14,
+            rate: [24, 1],
+        };
+        let original = d.join("retained");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        let movie = |name: &str, rate: &str, frames: &str| {
+            clip(
+                d,
+                name,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=size=160x90:rate={rate}"),
+                    "-frames:v",
+                    frames,
+                    "-c:v",
+                    "prores_videotoolbox",
+                ],
+            )
+        };
+        attach_check(&original, &movie("proxy.mov", "24", "4")).unwrap();
+        assert_eq!(
+            attach_check(&original, &movie("short.mov", "24", "3")).unwrap_err(),
+            "This file doesn’t match the original. Check its length."
+        );
+        assert_eq!(
+            attach_check(&original, &movie("fast.mov", "30", "4")).unwrap_err(),
+            "This file doesn’t match the original. Check its frame rate."
+        );
+    }
+
     #[test]
     fn attach_checks_alpha_audio_start_and_colour() {
         if ffmpeg().is_none() {
