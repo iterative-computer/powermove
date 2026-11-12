@@ -1556,7 +1556,8 @@ impl Render for ProjectLibrary {
         #[cfg(debug_assertions)]
         let body = if kit::GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
             if self.gallery_native.is_empty() && pm_shell::text::available(window) {
-                let specs: [(Kind, &str, Value, Vec<Value>, Option<u32>); 9] = [
+                type Sample = (Kind, &'static str, Value, Vec<Value>, Option<u32>);
+                let specs: [Sample; 9] = [
                     (Kind::Switch, "Switch off", json!(false), vec![], None),
                     (Kind::Switch, "Switch on", json!(true), vec![], None),
                     (Kind::Checkbox, "Checkbox", json!(true), vec![], None),

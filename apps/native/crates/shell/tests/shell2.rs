@@ -352,14 +352,10 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         let item = all.iter().find(|i| i.command == command).unwrap();
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
-    // Window-tab, workspace and panel menus exist (HIG placement).
-    for c in [
-        "newTab",
-        "mergeAllWindows:",
-        "toggleTabBar:",
-        "panels",
-        "workspaces",
-    ] {
+    // Window-tab, workspace and panel menus exist (HIG placement). The
+    // toolbar draws the project tabs, so there is no Show Tab Bar item.
+    assert!(all.iter().all(|i| i.command != "toggleTabBar:"));
+    for c in ["newTab", "mergeAllWindows:", "panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");
     }
 }

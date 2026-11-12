@@ -8,6 +8,12 @@ is [tokens.md](tokens.md).
 The bar: next to Final Cut Pro, Finder and Xcode it reads as a first-class Mac
 app, and it is better than v1 on every surface side by side.
 
+Kit API, additive changes since the first hand-back: `Kit::disabled`;
+`pm_shell::native_control` (the real AppKit control host, moved from the app,
+with `Radio`, `Segmented` and `Slider` kinds, `tint` and `symbol`);
+`typography.display_weight`; `Strip::glow` and `Strip::grid`;
+`translucency.glass_tint`. Nothing was renamed or removed.
+
 ## Colour
 
 Seven roles per appearance, chosen in OKLCH (`Colors::of`): an ink, four
@@ -44,14 +50,15 @@ The system font through CoreText (`TEXT_FONT`), one role per job
 | Label | 12 | medium | Button labels, the name in a row |
 | Title | 13 | medium | Panel and window titles |
 | Reading | 13 | regular | Running prose |
-| Heading | 15 | semibold | Sheet and section headings |
-| Display | 24 | semibold | A screen's title (Home, Settings) |
+| Heading | 15 | semibold (`display_weight`) | Sheet and section headings |
+| Display | 24 | semibold (`display_weight`) | A screen's title (Home, Settings) |
 | Timecode | 13 | medium, tabular | Timecode and numeric readouts |
 
 Text sizes use the font's own tracking table; Heading and Display are set
 tighter (`typography.*_tracking`). Counts, sizes and times use tabular figures
 (`kit::tabular`). Weight is not the hierarchy: a panel title is medium, never
-semibold.
+semibold. Panels ask for `typography.semibold_weight` for their titles and
+section headings; it is the medium weight, so every panel matches the kit.
 
 ## Space and shape
 
@@ -75,7 +82,11 @@ outer shadows under the whole element, so translucent surfaces (`Panel`,
 
 Real system material through AppKit, for what the system itself makes glass:
 
-- Toolbar and title bar controls: the window's `NSToolbar`.
+- Toolbar and title bar controls: the window's `NSToolbar` in the regular
+  unified style, at the system's own height and spacing. Its items are Home,
+  the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
+  own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
+  and hidden from the menus and by their tabs, not from the toolbar.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
   light tint of the window colour) in a column under the GPUI view, which
   leaves that column unpainted.
@@ -107,31 +118,51 @@ not animate. Reduce Motion snaps anything that moves and turns fades into a
 
 ## Controls
 
-`Kit::new(&tokens, &motion, access, window, cx)` once per frame, then:
-`button` (primary, neutral, quiet, destructive), `icon_button`, `segmented`
-(pill track or flat tabs, gliding selection), `search`, `switch`, `check`
+Real controls first. Wherever AppKit has the control and the system draws it
+(liquid glass on macOS 26 and later), host the real one:
+`pm_shell::native_control::NativeControl` with a `ControlSpec` of kind `Push`
+(optionally tinted, the view's one accent action), `Popup`, `Segmented`,
+`Switch`, `Checkbox`, `Radio` or `Slider`. A view creates them once (an entity
+each), places them like any element, and subscribes to their values. Each
+sits in its own clipping wrapper above the GPUI view and is staged with the
+element's bounds and the content mask of its scroll region, so it scrolls and
+clips with the panel. Focus, disabled state, Reduce Transparency and both
+appearances are the system's own. Extension panels get the same controls from
+the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`).
+
+Drawn controls (`pm_shell::kit`) are for where a view per control cannot work:
+long scrolling lists, the timeline, anything over the viewer, and windows with
+no AppKit view (tests). `Kit::new(&tokens, &motion, access, window, cx)` once
+per frame, then: `button` (primary, neutral, quiet, destructive),
+`icon_button`, `segmented` (pill track or flat tabs, gliding selection),
+`search`, `switch` (the system switch's shape at the small size), `check`
 (checkbox or radio), `slider`, `disclosure`, `row`, `menu` and `menu_row`,
 `card` and `form_row` (the Settings anatomy sheets reuse), `progress`,
-`empty_state`, `banner`, `tooltip`. Text and numeric fields are
-`pm_shell::text::TextField`. Right-click menus are `NSMenu`
-(`Host::context_menu`); a menu opened from a button is `menu`.
+`empty_state`, `banner`, `tooltip`, `disabled`. Text and numeric fields are
+`pm_shell::text::TextField` (a native field in a drawn well). Right-click
+menus are `NSMenu` (`Host::context_menu`).
 
-Every control: arrow cursor, hover wash, pressed fill, neutral keyboard-only
-focus ring (`Tokens::focus_ring`), one symbol size per context
+Every drawn control: arrow cursor, hover wash, pressed fill, neutral
+keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
 (`metrics.symbol_toolbar` 14, `symbol_panel` 14, `symbol_inline` 12).
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
 ## Timeline strips
 
 `Tokens::strip(layer colour, StripState)`: a slab of tinted glass on the solid
-timeline canvas. A saturated body in the layer's hue, lighter toward the
-bottom, slightly translucent so the time grid reads through it; a 1 px rim of
-light inside the edge instead of an outline; corner `strip_radius`; an even
-`strip_gap`. Hover brightens the rim, selection makes it white, dragging lifts
-it, disabled drops chroma and opacity. Labels and waveforms are tints of the
-same hue. `Tokens::playhead` is a hairline with a round head; `trim_grip` is a
-short pill inside the hovered edge. It is drawn by the timeline renderer,
-never a system view.
+timeline canvas, the same in both appearances (a clip is an object with its
+own colour). A deep, saturated top opens into a luminous lower half (`glow`);
+a 1 px rim of light in the strip's hue runs inside the edge, brightest along
+the top and round its corners, with no outline; corners are continuous and
+about a quarter of the strip's height (`strip_radius`); an even `strip_gap`
+parts neighbours; the ruler's grid reads through the body (`grid`). Labels are
+a pale tint of the hue and stay at 4.5:1; waveforms are a paler filled shape
+on the bottom edge. Hover brightens and whitens the rim and shows the trim
+grip (`trim_grip`) inside the nearer edge; selection is a white rim; dragging
+lifts it; disabled drops chroma and opacity. Rows are 30 pt (v1's height), so
+a strip is 26 pt. Ruler labels stand over a small dot with a faint line down
+the tracks. `Tokens::playhead` is a hairline with a round head. Strips are
+drawn by the timeline renderer, never system views.
 
 ## Three mistakes to avoid
 

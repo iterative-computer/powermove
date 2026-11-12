@@ -73,9 +73,11 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
             .iter()
             .find(|o| o.id == "clip-content:selected")
             .unwrap();
+        // The name starts clear of the trim grip inside the strip's edge.
+        let grip = t.trim_grip();
         assert_eq!(
             content.bounds.x,
-            clip.bounds.x + (t.metrics.inset - t.metrics.inner_radius) as f64
+            clip.bounds.x + (grip.inset + grip.width + t.space.xs) as f64
         );
     }
 }

@@ -278,11 +278,10 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
             radius: t.metrics.control_radius,
             thumb: t.metrics.inset,
             ring: t.metrics.control_radius - t.metrics.inner_radius,
-            // Approved concentric math in inspector.md §7 (keyframe + 3;
-            // track_row / 2 + 2; gap + 4) expressed using existing tokens.
+            // The track is the keyframe glyph plus the drag threshold; the
+            // thumb and the row gap come from the spacing scale.
             slider_track: t.metrics.keyframe + t.metrics.drag_threshold,
-            slider_thumb: t.metrics.track_row / 2.
-                + (t.metrics.control_radius - t.metrics.inner_radius),
+            slider_thumb: t.space.xl,
             row_gap: t.metrics.gap + t.space.xs,
             checker: metric("metrics.checker"),
             fill_modes: bool_option(node, "fill"),

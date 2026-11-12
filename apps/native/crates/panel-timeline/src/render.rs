@@ -1242,7 +1242,10 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
         ops.push(o);
     }
     // "Offline" leads in `danger`; the name follows in the clip's foreground.
-    let lead = (m.inset - m.inner_radius) as f64;
+    // The name starts clear of the trim grip that stands inside a hovered
+    // strip's edge.
+    let grip = t.trim_grip();
+    let lead = (grip.inset + grip.width + t.space.xs) as f64;
     let offline_w = if offline {
         let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
         let mut o = Op::new(

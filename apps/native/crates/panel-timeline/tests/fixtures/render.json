@@ -736,9 +736,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             26.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -991,7 +991,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             56.0,
             39.6,
             26.0
@@ -1016,9 +1016,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             56.0,
-            397.4,
+            392.4,
             26.0
           ],
           "color": 1908517,
@@ -1199,9 +1199,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             86.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -1382,9 +1382,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             116.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -3271,9 +3271,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             26.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -3526,7 +3526,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             56.0,
             39.6,
             26.0
@@ -3551,9 +3551,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             56.0,
-            397.4,
+            392.4,
             26.0
           ],
           "color": 1908517,
@@ -3734,9 +3734,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             86.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -3917,9 +3917,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             116.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285306,
@@ -5703,9 +5703,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             28.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -5981,7 +5981,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             58.0,
             39.6,
             22.0
@@ -6006,9 +6006,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             58.0,
-            396.4,
+            391.4,
             22.0
           ],
           "color": 1908517,
@@ -6212,9 +6212,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             88.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -6418,9 +6418,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             118.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -8222,9 +8222,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             28.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -8500,7 +8500,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             58.0,
             39.6,
             22.0
@@ -8525,9 +8525,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             58.0,
-            396.4,
+            391.4,
             22.0
           ],
           "color": 1908517,
@@ -8731,9 +8731,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             88.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -8937,9 +8937,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             118.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -10844,9 +10844,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             26.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -11099,7 +11099,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             56.0,
             39.6,
             26.0
@@ -11124,9 +11124,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             56.0,
-            397.4,
+            392.4,
             26.0
           ],
           "color": 16119284,
@@ -11307,9 +11307,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             86.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -11490,9 +11490,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             116.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -13379,9 +13379,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             26.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -13634,7 +13634,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             56.0,
             39.6,
             26.0
@@ -13659,9 +13659,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             56.0,
-            397.4,
+            392.4,
             26.0
           ],
           "color": 16119284,
@@ -13842,9 +13842,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             86.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -14025,9 +14025,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             116.0,
-            443.0,
+            438.0,
             26.0
           ],
           "color": 14285310,
@@ -15811,9 +15811,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             28.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -16089,7 +16089,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             58.0,
             39.6,
             22.0
@@ -16114,9 +16114,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             58.0,
-            396.4,
+            391.4,
             22.0
           ],
           "color": 16119284,
@@ -16320,9 +16320,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             88.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -16526,9 +16526,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             118.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -18330,9 +18330,9 @@
           "id": "clip-content:selected",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             28.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -18608,7 +18608,7 @@
           "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             58.0,
             39.6,
             22.0
@@ -18633,9 +18633,9 @@
           "id": "clip-content:offline",
           "shape": "text",
           "bounds": [
-            371.6,
+            376.6,
             58.0,
-            396.4,
+            391.4,
             22.0
           ],
           "color": 16119284,
@@ -18839,9 +18839,9 @@
           "id": "clip-content:loading",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             88.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
@@ -19045,9 +19045,9 @@
           "id": "clip-content:locked",
           "shape": "text",
           "bounds": [
-            326.0,
+            331.0,
             118.0,
-            442.0,
+            437.0,
             22.0
           ],
           "color": 16777215,
