@@ -614,7 +614,7 @@ fn a_copy_made_while_the_original_app_runs_is_reopened_not_copied_again() {
     let file = dir.path("cut.pmv");
     fs::write(&file, PROJECT).unwrap();
     let mut k = kernel(&dir.path("native"));
-    let mut open = |k: &mut Kernel| match k
+    let open = |k: &mut Kernel| match k
         .shell(ShellCall::Open {
             id: "P".into(),
             source: SessionSource::File(file.clone()),
