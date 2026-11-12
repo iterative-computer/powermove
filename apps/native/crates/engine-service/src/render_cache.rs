@@ -1095,6 +1095,7 @@ impl DiskFrames {
 
     /// One look of the background scheduler (see the module).
     fn tick(&self, watch: &mut Watch) {
+        self.retire_gone();
         let (host, config, activity, generation) = {
             let state = self.inner.state.lock().unwrap();
             (
@@ -1311,9 +1312,52 @@ impl DiskFrames {
         }
     }
 
+    /// Frames a read found missing or damaged ([`Reader::read_asks`]) are
+    /// not rendered: they leave the index, the render bar shows them
+    /// unrendered and background rendering renders them again. A frame
+    /// written again in the meantime (a stat, outside the lock) stays.
+    fn retire_gone(&self) {
+        let gone = {
+            let state = self.inner.state.lock().unwrap();
+            let Some(frames) = state.frames.as_ref() else {
+                return;
+            };
+            let gone = self.inner.reader.gone(state.generation);
+            if gone.is_empty() {
+                return;
+            }
+            let Some(cache) = state.cache.clone() else {
+                return;
+            };
+            let keys: Vec<(i64, RenderKey)> = gone
+                .into_iter()
+                .filter_map(|n| Some((n, frames.key(n)?)))
+                .collect();
+            (state.generation, cache, keys)
+        };
+        let (generation, cache, keys) = gone;
+        let absent: Vec<i64> = keys
+            .iter()
+            .filter(|(_, key)| !matches!(cache.presence(key), Ok(Some(_))))
+            .map(|(n, _)| *n)
+            .collect();
+        self.with(|s| {
+            let Some(frames) = s.frames.as_mut().filter(|_| s.generation == generation) else {
+                return ((), false);
+            };
+            let mut changed = false;
+            for n in absent {
+                changed |= frames.present.remove(&n);
+                frames.kept.remove(&n);
+            }
+            ((), changed)
+        });
+    }
+
     /// [`Self::read`], waiting up to `patience` for the frame when it is on
     /// disk and still being read (a playing frame: [`PATIENCE`]).
     pub(crate) fn read_within(&self, scene: &Scene, time: Ticks, patience: Duration) -> Read {
+        self.retire_gone();
         let Some((size, held, n, found)) = self.ask_ahead(scene, time, AHEAD, false) else {
             return Read::Absent;
         };
@@ -1365,6 +1409,7 @@ impl DiskFrames {
     /// The paused playhead is at `time`: its frame and the next few are
     /// read ([`WARM`]), so a play from here starts on frames already read.
     pub(crate) fn warm(&self, scene: &Scene, time: Ticks) {
+        self.retire_gone();
         self.ask_ahead(scene, time, WARM, true);
     }
 
@@ -1821,6 +1866,8 @@ struct Ready {
     /// The frames the latest read wants (generation, first, last): asks
     /// queued before a reversal or a jump are dropped, not read.
     wanted: Option<(u64, i64, i64)>,
+    /// Frames a read found missing or damaged on disk.
+    gone: Vec<ReadId>,
 }
 impl Reader {
     /// The thread holds only the ready list: dropping the cache's last
@@ -1855,45 +1902,59 @@ impl Reader {
         loop {
             let ask = rx.lock().unwrap().recv();
             let Ok(ask) = ask else { return };
-            {
-                {
-                    let stale = {
-                        let mut ready = shared.lock().unwrap();
-                        let (generation, n) = ask.id;
-                        let stale = ready.wanted.is_some_and(|(g, first, last)| {
-                            g != generation || n < first || n > last
-                        });
-                        if stale {
-                            ready.asked.remove(&ask.id);
-                        }
-                        stale
-                    };
-                    if stale {
-                        end.notify_all();
-                        continue;
-                    }
-                    // Stored as the viewer's surface holds it.
-                    let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
-                        crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
-                    });
-                    if data.is_some() {
-                        // Played frames are the last the limit removes.
-                        let _ = ask.cache.touch(&ask.key);
-                    }
-                    let mut ready = shared.lock().unwrap();
+            let stale = {
+                let mut ready = shared.lock().unwrap();
+                let (generation, n) = ask.id;
+                let stale = ready
+                    .wanted
+                    .is_some_and(|(g, first, last)| g != generation || n < first || n > last);
+                if stale {
                     ready.asked.remove(&ask.id);
-                    end.notify_all();
-                    if ready.wanted.is_some_and(|(g, first, last)| {
-                        ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
-                    }) {
-                        continue;
-                    }
-                    if let Some(data) = data {
-                        ready.frames.push_back((ask.id, Arc::new(data)));
-                        while ready.frames.len() > READY_FRAMES {
-                            ready.frames.pop_front();
-                        }
-                    }
+                }
+                stale
+            };
+            if stale {
+                end.notify_all();
+                continue;
+            }
+            // Stored as the viewer's surface holds it. An entry that is not
+            // there, or whose bytes are wrong (damaged on disk, or not a
+            // frame of this size), is not a rendered frame: it leaves the
+            // index ([`DiskFrames::retire_gone`]) and a damaged file is
+            // removed, so the frame shows as unrendered and is rendered
+            // again. A read that merely failed is asked again next time.
+            let data = match ask.cache.get(&ask.key) {
+                Ok(Some(d)) => {
+                    crate::frame_codec::decode(&d, ask.size.width, ask.size.height).ok_or(true)
+                }
+                Ok(None) => Err(true),
+                Err(e) => Err(pm_promedia::cache::corrupt(&e)),
+            };
+            match &data {
+                // Played frames are the last the limit removes.
+                Ok(_) => {
+                    let _ = ask.cache.touch(&ask.key);
+                }
+                Err(true) => {
+                    let _ = ask.cache.discard(&ask.key);
+                }
+                Err(false) => {}
+            }
+            let mut ready = shared.lock().unwrap();
+            ready.asked.remove(&ask.id);
+            end.notify_all();
+            if matches!(data, Err(true)) {
+                ready.gone.push(ask.id);
+            }
+            if ready.wanted.is_some_and(|(g, first, last)| {
+                ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
+            }) {
+                continue;
+            }
+            if let Ok(data) = data {
+                ready.frames.push_back((ask.id, Arc::new(data)));
+                while ready.frames.len() > READY_FRAMES {
+                    ready.frames.pop_front();
                 }
             }
         }
@@ -1948,6 +2009,16 @@ impl Reader {
             wanted: Some((generation, 1, 0)),
             ..Default::default()
         };
+    }
+    /// The frames of `generation` reads found missing or damaged since the
+    /// last call.
+    fn gone(&self, generation: u64) -> Vec<i64> {
+        let mut ready = self.ready.lock().unwrap();
+        std::mem::take(&mut ready.gone)
+            .into_iter()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, n)| n)
+            .collect()
     }
     fn want(&self, generation: u64, first: i64, last: i64) {
         self.ready.lock().unwrap().wanted = Some((generation, first, last));
@@ -3363,6 +3434,86 @@ mod tests {
             fills,
             "nothing left"
         );
+    }
+
+    /// A rendered frame damaged on disk (a flipped byte, a cut payload, a
+    /// file cut inside its header) is not shown and does not stay
+    /// "rendered": the read that finds it removes it, the bar shows the
+    /// stretch unrendered, background rendering renders it again by itself,
+    /// and the frames then read from disk.
+    #[test]
+    fn a_damaged_rendered_frame_is_rendered_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        disk.set_activity(crate::jobs::Activity::default());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        // Every chunk plays in real time (injected costs) except 45-59,
+        // where playback dropped frame 50.
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        for a in (0..90).step_by(15) {
+            for n in [a, a + 14] {
+                disk.measured(disk.frame_id(&scene, at(n)).unwrap(), 1_000.);
+            }
+        }
+        disk.measured(disk.frame_id(&scene, at(50)).unwrap(), DROPPED_US);
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(200),
+            floor: 0,
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        let whole = |b: &RenderBars| b.bars == vec![(1.5, 2., BarState::Rendered)] && !b.running;
+        settle(&disk, whole);
+        let fills = disk.inner.state.lock().unwrap().fill.serial;
+        let file = |n: i64| {
+            let state = disk.inner.state.lock().unwrap();
+            let key = state.frames.as_ref().unwrap().key(n).unwrap();
+            dir.path()
+                .join("frames")
+                .join(format!("{}.frame", key.digest().unwrap()))
+        };
+        for (n, damage) in [(50, 0), (51, 1), (52, 2)] {
+            let mut bytes = std::fs::read(file(n)).unwrap();
+            match damage {
+                0 => *bytes.last_mut().unwrap() ^= 1,
+                1 => bytes.truncate(bytes.len() / 2),
+                _ => bytes.truncate(10),
+            }
+            std::fs::write(file(n), bytes).unwrap();
+        }
+        // Playback reads them: none is shown, each leaves the index.
+        let start = Instant::now();
+        for n in [50, 51, 52] {
+            while present(&disk).contains(&n)
+                && disk.inner.state.lock().unwrap().fill.serial == fills
+            {
+                assert!(
+                    !matches!(disk.read_within(&scene, at(n), PATIENCE), Read::Frame(..)),
+                    "a damaged frame was shown"
+                );
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {n} is damaged on disk and still counts as rendered"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        // Rendered again without being asked, and read from disk after.
+        settle(&disk, |b| {
+            whole(b) && disk.inner.state.lock().unwrap().fill.serial > fills
+        });
+        assert_eq!(present(&disk), (45..60).collect());
+        for n in [50, 51, 52] {
+            assert!(read_eventually(&disk, &scene, at(n)).is_some(), "frame {n}");
+        }
     }
 
     /// Background rendering never takes the volume below its floor: with
