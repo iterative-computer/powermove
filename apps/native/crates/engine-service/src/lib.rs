@@ -3430,7 +3430,7 @@ mod worker_tests {
     #[test]
     fn a_capture_in_flight_at_a_panic_is_delivered_after_restart() {
         let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let service = EngineService::start(pm_gpu::Gpu::new("restart-capture").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("restart-capture");
         let v = shapes_viewer(&service, None);
         v.capture_next().unwrap();
         let before = drawn(&v).frame.unwrap().pixels.unwrap();
@@ -4036,7 +4036,7 @@ mod worker_tests {
     /// from, the store the window's extensions hold from before the switch.
     #[test]
     fn a_composition_switch_keeps_the_document_and_its_override_answers() {
-        let service = EngineService::start(pm_gpu::Gpu::new("comp-switch-test").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("comp-switch-test");
         let other = shapes_viewer(&service, None);
         other
             .command(TransportCommand::SetLoop {
