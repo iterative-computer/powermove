@@ -2185,7 +2185,10 @@ impl Render for Editor {
                     .px(px(m.gap))
                     .h(px(m.hit))
                     .rounded(px(m.control_radius))
-                    .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                    // A control among the bar's quiet facts: the primary
+                    // ink, so it never reads as a disabled one.
+                    .text_color(rgb(c.text))
+                    .hover_style(|s| s.bg(rgb(c.hover)))
                     .child(workspace.to_string())
                     .child(crate::symbol::symbol(
                         "chevron.up.chevron.down",

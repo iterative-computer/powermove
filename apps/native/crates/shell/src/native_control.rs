@@ -195,6 +195,10 @@ pub struct ControlSpec<'a> {
     /// A borderless pop-up sized to its title, for panel bars (the viewer's
     /// zoom and resolution); rows and sheets keep the bezel at `value_column`.
     pub inline: bool,
+    /// An inline pop-up titled in the secondary ink: an option under the
+    /// content it qualifies (a composer's option bar, a list's sort). A bar
+    /// of controls keeps the primary ink, so its titles never read disabled.
+    pub quiet: bool,
     /// The view's one accent action: a push button tinted with this colour.
     pub tint: Option<u32>,
     /// A push button's leading SF Symbol. On a search field, its shortcut
@@ -220,6 +224,7 @@ impl NativeControl {
             default,
             destructive,
             inline,
+            quiet,
             tint,
             symbol,
         } = spec;
@@ -258,9 +263,11 @@ impl NativeControl {
                 }
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
                 if inline {
-                    // An option beside the content it qualifies: quiet, as a
-                    // caption, never the content's own ink.
                     v.setBordered(false);
+                }
+                if inline && quiet {
+                    // An option under the content it qualifies: a caption,
+                    // never the content's own ink.
                     v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
                 }
                 v.sizeToFit();
@@ -271,13 +278,16 @@ impl NativeControl {
                     NSSegmentedControl::initWithFrame(NSSegmentedControl::alloc(mtm), NSRect::ZERO);
                 v.setSegmentCount(options.len() as isize);
                 v.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+                let font = v
+                    .font()
+                    .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
                 for (i, option) in options.iter().enumerate() {
                     let title = option
                         .get("label")
                         .and_then(Value::as_str)
                         .or_else(|| option.as_str())
                         .unwrap_or("");
-                    match option
+                    let glyph = option
                         .get("symbol")
                         .and_then(Value::as_str)
                         .and_then(|name| {
@@ -285,8 +295,8 @@ impl NativeControl {
                                 &NSString::from_str(name),
                                 Some(&NSString::from_str(title)),
                             )
-                        }) {
-                        Some(image) => {
+                        })
+                        .map(|image| {
                             // A glyph segment: the panel's symbol size in a
                             // segment a row high wide, never scaled to fit.
                             let config =
@@ -294,15 +304,23 @@ impl NativeControl {
                                     t.metrics.symbol_panel as f64,
                                     unsafe { NSFontWeightRegular },
                                 );
-                            let image =
-                                image.imageWithSymbolConfiguration(&config).unwrap_or(image);
-                            v.setImage_forSegment(Some(&image), i as isize);
-                            v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
-                            v.setWidth_forSegment((t.metrics.row + t.space.xs) as f64, i as isize);
-                            v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
-                        }
-                        None => v.setLabel_forSegment(&NSString::from_str(title), i as isize),
-                    }
+                            image.imageWithSymbolConfiguration(&config).unwrap_or(image)
+                        });
+                    let width = if glyph.is_some() {
+                        v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
+                        (t.metrics.row + t.space.xs) as f64
+                    } else {
+                        0.
+                    };
+                    let face = segment_face(title, glyph, &font);
+                    let width = if width > 0. {
+                        width
+                    } else {
+                        face.size().width + 2. * t.space.lg as f64
+                    };
+                    v.setImage_forSegment(Some(&face), i as isize);
+                    v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
+                    v.setWidth_forSegment(width, i as isize);
                 }
                 unsafe {
                     v.setTarget(Some(&target));
@@ -611,6 +629,50 @@ impl Render for NativeControl {
             .inset_0(),
         )
     }
+}
+/// A segment's content, drawn by us in the label ink. AppKit paints a title
+/// or a template glyph white on a custom selected bezel, which only reads on
+/// a dark bezel: a heavy pill in the light appearance. A face is an image
+/// that is not a template, so the selected segment is the same pale raised
+/// neutral as a selected tab, with the content's own ink on it.
+fn segment_face(title: &str, glyph: Option<Retained<NSImage>>, font: &NSFont) -> Retained<NSImage> {
+    let text = NSString::from_str(title);
+    let attributes = objc2_foundation::NSDictionary::<NSString, AnyObject>::from_slices(
+        &[unsafe { NSFontAttributeName }, unsafe {
+            NSForegroundColorAttributeName
+        }],
+        &[font as &AnyObject, &*NSColor::labelColor() as &AnyObject],
+    );
+    let size = match &glyph {
+        Some(image) => image.size(),
+        None => {
+            let size: NSSize = unsafe { msg_send![&*text, sizeWithAttributes: &*attributes] };
+            NSSize::new(size.width.ceil(), size.height.ceil())
+        }
+    };
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        match &glyph {
+            Some(image) => {
+                image.drawInRect(rect);
+                // The label ink of the appearance being drawn in.
+                NSColor::labelColor().set();
+                NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
+            }
+            None => unsafe {
+                let _: () = msg_send![
+                    &*text,
+                    drawAtPoint: rect.origin,
+                    withAttributes: &*attributes
+                ];
+            },
+        }
+        objc2::runtime::Bool::YES
+    });
+    let face = NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw);
+    // Drawn afresh each time, so the ink follows the appearance.
+    face.setCacheMode(NSImageCacheMode::Never);
+    face.setAccessibilityDescription(Some(&NSString::from_str(title)));
+    face
 }
 fn add_items(popup: &NSPopUpButton, options: &[Value]) {
     for option in options {

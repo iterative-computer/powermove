@@ -829,7 +829,7 @@ export function AgentView({
           }}
         >
           <UI.PopUpButton
-            data-pm-variant="inline"
+            data-pm-variant="quiet"
             style={shrink}
             id="agent-provider"
             label="Agent provider"
@@ -842,7 +842,7 @@ export function AgentView({
             options={pairs(s.catalog.providers, s.settings.provider)}
           />
           <UI.PopUpButton
-            data-pm-variant="inline"
+            data-pm-variant="quiet"
             style={shrink}
             id="agent-model"
             label="Model"
@@ -860,7 +860,7 @@ export function AgentView({
           />
           {s.catalog.efforts.length > 1 && (
             <UI.PopUpButton
-              data-pm-variant="inline"
+              data-pm-variant="quiet"
               style={shrink}
               id="agent-effort"
               label="Reasoning effort"
@@ -882,7 +882,7 @@ export function AgentView({
           )}
           <div style={{ flexGrow: 1 }} />
           <UI.PopUpButton
-            data-pm-variant="inline"
+            data-pm-variant="quiet"
             style={shrink}
             id="agent-access"
             label={`Agent access, ${copy[s.settings.access]}`}
