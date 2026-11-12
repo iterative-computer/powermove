@@ -665,6 +665,7 @@ impl Kit {
         div()
             .flex()
             .flex_col()
+            .relative()
             .p(px(t.space.xs))
             .corner(t, t.radius.lg)
             .bg(rgb(t.colors.floating))
@@ -673,9 +674,57 @@ impl Kit {
             .text_color(rgb(t.colors.text))
             .occlude()
     }
-    /// A menu row: 28 pt, concentric in the menu (`lg − xs`), nothing lit
-    /// until the pointer arrives, the wash leaves with it. `checked` reserves
-    /// the leading mark column.
+    /// A menu's one highlight, the first child of [`Kit::menu`]: `top` is the
+    /// lit row's offset from the first row, `None` while nothing is lit (as
+    /// the menu opens, and once the pointer has left). It appears on the row
+    /// it lands on, glides between rows on the layout spring and fades out;
+    /// the view keeps which row is lit in a `transient::Picker`.
+    pub fn menu_light(&self, name: &str, top: Option<f32>) -> Div {
+        let t = &self.t;
+        let (lit, at) = (key(&format!("{name}.lit")), key(&format!("{name}.at")));
+        let value = |k: u64| self.values.borrow().get(&k).map(|v| v.get());
+        let before = value(lit).unwrap_or(0.);
+        let fade = if top.is_some() {
+            Preset::HoverIn
+        } else {
+            Preset::HoverOut
+        };
+        let shown = self
+            .animate(lit, f32::from(top.is_some()), Some(fade))
+            .clamp(0., 1.);
+        let y = match top {
+            // It travels only from a row that is lit.
+            Some(top) => self.animate(at, top, (before > 0.05).then_some(Preset::Layout)),
+            None => value(at).unwrap_or(0.),
+        };
+        div()
+            .absolute()
+            .left(px(t.space.xs))
+            .right(px(t.space.xs))
+            .top(px(t.space.xs + y))
+            .h(px(t.metrics.row))
+            .rounded(px(t.radius.nested(t.radius.lg, t.space.xs)))
+            .bg(ink(t.colors.text, t.translucency.selected * shown))
+    }
+    /// A section heading in a menu: the caption role in the muted ink, at
+    /// the rows' text inset.
+    pub fn menu_heading(&self, label: impl Into<SharedString>) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_none()
+            .items_end()
+            .h(px(t.metrics.row - t.space.xs))
+            .px(px(t.space.sm))
+            .pb(px(t.space.xs))
+            .text_role(t, Text::Caption)
+            .text_color(rgb(t.colors.muted))
+            .child(label.into())
+    }
+    /// A menu row: 28 pt, concentric in the menu (`lg − xs`). It draws no
+    /// highlight of its own: the menu's [`Kit::menu_light`] is lit behind
+    /// the row the pointer or the keyboard is on. `checked` reserves the
+    /// leading mark column.
     pub fn menu_row(
         &self,
         id: impl Into<SharedString>,
@@ -685,10 +734,9 @@ impl Kit {
     ) -> Stateful<Div> {
         let (t, id, label) = (&self.t, id.into(), label.into());
         let (c, m) = (&t.colors, &t.metrics);
-        let k = key(&id);
-        let radius = t.radius.nested(t.radius.lg, t.space.xs);
-        let d = div()
+        div()
             .id(id)
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -696,7 +744,6 @@ impl Kit {
             .h(px(m.row))
             .pl(px(t.space.sm))
             .pr(px(t.space.md))
-            .rounded(px(radius))
             .role(Role::MenuItem)
             .aria_label(label.clone())
             .children(checked.map(|on| {
@@ -721,8 +768,7 @@ impl Kit {
                     .text_role(t, Text::Caption)
                     .text_color(rgb(c.faint))
                     .child(keys.to_string())
-            }));
-        self.wash(d, k, radius)
+            }))
     }
     /// A Settings-anatomy card: rows grouped on a soft fill, no outline.
     pub fn card(&self) -> Div {

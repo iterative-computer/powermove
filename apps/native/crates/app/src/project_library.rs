@@ -59,6 +59,11 @@ fn layout_options() -> Vec<Value> {
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
 /// A menu opened from one of Home's buttons (ours, never NSMenu).
+const ACCOUNT_MENU: [(&str, &str); 3] = [
+    ("Your Library", "store"),
+    ("Account Settings…", "settings"),
+    ("Sign Out", "cloudSignOut"),
+];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Menu {
     Sort,
@@ -105,6 +110,8 @@ pub struct ProjectLibrary {
     gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
+    /// The open menu's rows: which one the pointer or the keyboard has lit.
+    pick: pm_shell::transient::Picker,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
     /// Columns and card width at the last layout: when they change (a resize)
     /// cards are placed at once; otherwise (a sort, a search) they slide.
@@ -188,6 +195,7 @@ impl ProjectLibrary {
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
+            pick: Default::default(),
             anchors: Rc::default(),
             grid: (0, 0),
             editor,
@@ -475,8 +483,31 @@ impl ProjectLibrary {
             Layout::Grid => self.columns.max(1) as isize,
             Layout::List => 1,
         };
+        // An open menu has the keyboard: arrows move its highlight, Return
+        // chooses the lit row, a letter lights the first row it starts.
+        if self.menu.is_some() {
+            let key = event.keystroke.key.as_str();
+            match key {
+                "escape" => self.menu = None,
+                "enter" | "space" => {
+                    if let Some(row) = self.pick.lit() {
+                        self.choose(row, cx);
+                    }
+                }
+                "up" | "down" | "home" | "end" => {
+                    self.pick.navigate(key);
+                }
+                _ => {
+                    if let Some(typed) = &event.keystroke.key_char {
+                        self.pick.type_ahead(typed);
+                    }
+                }
+            }
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         match event.keystroke.key.as_str() {
-            "escape" if self.menu.is_some() => self.menu = None,
             "f" if event.keystroke.modifiers.platform => {
                 if let Some(field) = &self.search {
                     field.read(cx).focus();
@@ -610,10 +641,50 @@ impl ProjectLibrary {
     /// Opens or closes a button menu; it enters on the `Enter` spring.
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.menu = (self.menu != Some(menu)).then_some(menu);
+        // Nothing is lit as it opens.
+        self.pick = pm_shell::transient::Picker {
+            choices: self.menu.map(|menu| self.rows_of(menu)).unwrap_or_default(),
+            open: self.menu.is_some(),
+            ..Default::default()
+        };
         self.motion
             .values
             .borrow_mut()
             .insert(kit::key("home-menu"), pm_design::motion::Animated::unit(0.));
+        cx.notify();
+    }
+    /// The rows of a button menu.
+    fn rows_of(&self, menu: Menu) -> Vec<pm_shell::transient::Choice> {
+        use pm_shell::transient::Choice;
+        match menu {
+            Menu::Sort => [Sort::Recent, Sort::Name]
+                .into_iter()
+                .map(|sort| {
+                    Choice::new(sort.label(), sort.key())
+                        .checked(sort == self.controller.query.sort)
+                })
+                .collect(),
+            Menu::Account => ACCOUNT_MENU
+                .iter()
+                .map(|(label, command)| Choice::new(*label, *command))
+                .collect(),
+        }
+    }
+    /// Runs a row of the open menu and closes it.
+    fn choose(&mut self, row: usize, cx: &mut Context<Self>) {
+        match self.menu.take() {
+            Some(Menu::Sort) => {
+                if let Some(sort) = [Sort::Recent, Sort::Name].get(row) {
+                    self.set_sort(*sort, cx);
+                }
+            }
+            Some(Menu::Account) => {
+                if let Some((_, command)) = ACCOUNT_MENU.get(row) {
+                    (self.sink)(Outbound::Command(command), cx);
+                }
+            }
+            None => {}
+        }
         cx.notify();
     }
     /// The open button menu: our popover (rows light only under the pointer),
@@ -629,38 +700,30 @@ impl ProjectLibrary {
             v.menu = None;
             cx.notify();
         });
-        let rows: Vec<Stateful<Div>> = match menu {
-            Menu::Sort => [Sort::Recent, Sort::Name]
-                .into_iter()
-                .map(|sort| {
-                    kit.menu_row(
-                        format!("home-sort-{}", sort.key()),
-                        sort.label(),
-                        Some(sort == self.controller.query.sort),
-                        None,
-                    )
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        v.menu = None;
-                        v.set_sort(sort, cx);
-                    }))
-                })
-                .collect(),
-            Menu::Account => [
-                ("Your Library", "store"),
-                ("Account Settings…", "settings"),
-                ("Sign Out", "cloudSignOut"),
-            ]
-            .into_iter()
-            .map(|(label, command)| {
-                kit.menu_row(format!("home-account-{command}"), label, None, None)
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        v.menu = None;
-                        (v.sink)(Outbound::Command(command), cx);
+        let rows: Vec<Stateful<Div>> = self
+            .pick
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(row, choice)| {
+                kit.menu_row(
+                    format!("home-menu-{}", choice.command),
+                    choice.label.clone(),
+                    choice.checked,
+                    None,
+                )
+                // The highlight follows the pointer and leaves with it.
+                .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                    if (*hovered || v.pick.hover == Some(row))
+                        && v.pick.point(hovered.then_some(row))
+                    {
                         cx.notify();
-                    }))
+                    }
+                }))
+                .on_click(cx.listener(move |v, _, _, cx| v.choose(row, cx)))
             })
-            .collect(),
-        };
+            .collect();
+        let lit = self.pick.lit().map(|row| row as f32 * t.metrics.row);
         // It grows out of its button: a few points of travel with the fade.
         let travel = (1. - shown) * t.space.sm;
         let (corner, at) = match menu {
@@ -683,6 +746,7 @@ impl ProjectLibrary {
                         .font_family(pm_design::TEXT_FONT)
                         .role(Role::Menu)
                         .on_mouse_down_out(close)
+                        .child(kit.menu_light("home-menu", lit))
                         .children(rows),
                 ),
             )
@@ -2023,6 +2087,7 @@ impl ProjectLibrary {
                     .child(
                         kit.menu()
                             .w(px(220.))
+                            .child(kit.menu_light("g-menu", Some(t.metrics.row)))
                             .child(kit.menu_row("g-menu-a", "Recently edited", Some(true), None))
                             .child(kit.menu_row("g-menu-b", "Name", Some(false), None))
                             .child(kit.menu_row(
