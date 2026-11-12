@@ -160,6 +160,17 @@ type Stamp = (PathBuf, u64, u128, u64);
 /// time.
 type FrameId = [u8; 32];
 
+/// What a read frame's pixels are of: the frame's key digest, and the cache
+/// generation it was read under. Whoever holds the pixels past the read (an
+/// upload made ahead of its turn) shows them only while both still are the
+/// frame's ([`DiskFrames::held`]): an observation of anything the fingerprint
+/// covers, a storage change or a deletion moves the generation on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    generation: u64,
+    id: FrameId,
+}
+
 /// The composition state a fingerprint is taken of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
@@ -1295,7 +1306,7 @@ impl DiskFrames {
     #[cfg(test)]
     pub(crate) fn read(&self, scene: &Scene, time: Ticks) -> Option<(Size, Arc<Vec<u8>>)> {
         match self.read_within(scene, time, Duration::ZERO) {
-            Read::Frame(size, bytes) => Some((size, bytes)),
+            Read::Frame(size, bytes, _) => Some((size, bytes)),
             Read::Late(_) | Read::Absent => None,
         }
     }
@@ -1303,17 +1314,32 @@ impl DiskFrames {
     /// [`Self::read`], waiting up to `patience` for the frame when it is on
     /// disk and still being read (a playing frame: [`PATIENCE`]).
     pub(crate) fn read_within(&self, scene: &Scene, time: Ticks, patience: Duration) -> Read {
-        let Some((size, generation, n, found)) = self.ask_ahead(scene, time, AHEAD, false) else {
+        let Some((size, held, n, found)) = self.ask_ahead(scene, time, AHEAD, false) else {
             return Read::Absent;
         };
         match found {
-            Some(bytes) => Read::Frame(size, bytes),
-            None => match self.inner.reader.wait(generation, n, patience) {
-                Ok(Some(bytes)) => Read::Frame(size, bytes),
+            Some(bytes) => Read::Frame(size, bytes, held),
+            None => match self.inner.reader.wait(held.generation, n, patience) {
+                Ok(Some(bytes)) => Read::Frame(size, bytes, held),
                 Ok(None) => Read::Absent,
                 Err(Late) => Read::Late(size),
             },
         }
+    }
+
+    /// What `scene`'s rendered frame at `time` is now ([`Held`]): `None` when
+    /// this state has no such frame on disk.
+    pub(crate) fn held(&self, scene: &Scene, time: Ticks) -> Option<Held> {
+        let state = self.inner.state.lock().unwrap();
+        let frames = state.frames.as_ref()?;
+        if !frames.identity.scene_matches(scene) {
+            return None;
+        }
+        let n = frames.index(time)?;
+        frames.present.contains(&n).then_some(Held {
+            generation: state.generation,
+            id: frames.id(n)?,
+        })
     }
 
     /// The media files the open composition's rendered frames are drawn
@@ -1344,8 +1370,8 @@ impl DiskFrames {
 
     /// Asks the reader for the frame at `time` and the `ahead - 1` after it
     /// in the direction of motion (forward when `still`: a play starts
-    /// forward): the stored size, the generation and index asked at, and
-    /// the frame if it is read already.
+    /// forward): the stored size, what the frame is of, its index, and the
+    /// frame if it is read already.
     #[allow(clippy::type_complexity)]
     fn ask_ahead(
         &self,
@@ -1353,7 +1379,7 @@ impl DiskFrames {
         time: Ticks,
         ahead: i64,
         still: bool,
-    ) -> Option<(Size, u64, i64, Option<Arc<Vec<u8>>>)> {
+    ) -> Option<(Size, Held, i64, Option<Arc<Vec<u8>>>)> {
         let mut state = self.inner.state.lock().unwrap();
         let state = &mut *state;
         let frames = state.frames.as_ref()?;
@@ -1361,6 +1387,7 @@ impl DiskFrames {
             return None;
         }
         let n = frames.index(time)?;
+        let id = frames.id(n)?;
         if let Some(last) = state.last_read.replace(n)
             && last != n
         {
@@ -1392,7 +1419,60 @@ impl DiskFrames {
         for (k, key) in asks {
             self.inner.reader.ask(generation, k, key, &cache, size);
         }
-        Some((size, generation, n, found))
+        Some((size, Held { generation, id }, n, found))
+    }
+}
+
+/// What tests elsewhere in the crate need of the cache's state.
+#[cfg(test)]
+impl DiskFrames {
+    /// Waits until the observed state's fingerprint is taken.
+    pub(crate) fn test_ready(&self) {
+        let start = Instant::now();
+        while self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .frames
+            .as_ref()
+            .is_none_or(|f| f.fingerprint.is_none())
+        {
+            assert!(start.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Frame `n` of the observed state written as a fill child writes it,
+    /// every sample `value`: its time.
+    pub(crate) fn test_put(&self, n: i64, value: f32) -> Ticks {
+        let (key, time, size, cache) = {
+            let state = self.inner.state.lock().unwrap();
+            let frames = state.frames.as_ref().unwrap();
+            (
+                frames.key(n).unwrap(),
+                frames.ticks(n).unwrap(),
+                frames.size,
+                state.cache.clone().unwrap(),
+            )
+        };
+        let bytes: Vec<u8> = std::iter::repeat_n(
+            half::f16::from_f32(value).to_le_bytes(),
+            (size.width * size.height * 4) as usize,
+        )
+        .flatten()
+        .collect();
+        cache
+            .put(
+                &key,
+                &crate::frame_codec::encode(&bytes, size.width, size.height),
+            )
+            .unwrap();
+        self.reindex(true).unwrap();
+        time
+    }
+    /// Media stamps are looked at again at the next observation.
+    pub(crate) fn test_recheck_media(&self) {
+        self.inner.state.lock().unwrap().media_checked = None;
     }
 }
 
@@ -1714,8 +1794,8 @@ fn run_fill(
 
 /// What [`DiskFrames::read_within`] found.
 pub(crate) enum Read {
-    /// The frame, at its stored size.
-    Frame(Size, Arc<Vec<u8>>),
+    /// The frame, at its stored size, and what it is of.
+    Frame(Size, Arc<Vec<u8>>, Held),
     /// On disk at this size, and still being read when the patience ran
     /// out.
     Late(Size),
@@ -2257,40 +2337,11 @@ mod tests {
         }
     }
     fn ready(disk: &DiskFrames) {
-        let start = Instant::now();
-        while disk
-            .inner
-            .state
-            .lock()
-            .unwrap()
-            .frames
-            .as_ref()
-            .is_none_or(|f| f.fingerprint.is_none())
-        {
-            assert!(start.elapsed() < Duration::from_secs(20));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        disk.test_ready();
     }
-    /// Frame 30 of the fixture written as a fill child writes it.
+    /// Frame `n` of the fixture written as a fill child writes it.
     fn write_frame(disk: &DiskFrames, n: i64) -> Ticks {
-        let (key, time, cache) = {
-            let state = disk.inner.state.lock().unwrap();
-            let frames = state.frames.as_ref().unwrap();
-            (
-                frames.key(n).unwrap(),
-                frames.ticks(n).unwrap(),
-                state.cache.clone().unwrap(),
-            )
-        };
-        let bytes: Vec<u8> =
-            std::iter::repeat_n(half::f16::from_f32(0.25).to_le_bytes(), 640 * 360 * 4)
-                .flatten()
-                .collect();
-        cache
-            .put(&key, &crate::frame_codec::encode(&bytes, 640, 360))
-            .unwrap();
-        disk.reindex(true).unwrap();
-        time
+        disk.test_put(n, 0.25)
     }
     fn read_eventually(disk: &DiskFrames, scene: &Scene, time: Ticks) -> Option<Arc<Vec<u8>>> {
         let start = Instant::now();

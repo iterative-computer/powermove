@@ -2362,9 +2362,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 fonts,
                 stamp.doc_id,
                 spec.time,
-            ) && let Some(recorder) = &recorder
-            {
-                recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+            ) {
+                // A frame uploaded ahead is of the state before.
+                engine.drop_upload_ahead();
+                if let Some(recorder) = &recorder {
+                    recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+                }
             }
             let landed_before = engine.media_landed();
             let tap = shared

@@ -219,17 +219,21 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
             )
         )
 }
-/// A rendered frame uploaded ahead of its turn.
+/// A rendered frame uploaded ahead of its turn: the pixels of one frame key
+/// under one cache generation ([`crate::render_cache::Held`]).
 struct DiskUpload {
-    content: u64,
-    revision: u64,
+    held: crate::render_cache::Held,
     time: Ticks,
     size: Size,
     surface: Arc<ExportedSurface>,
 }
 impl DiskUpload {
-    fn is(&self, scene: &Scene, time: Ticks) -> bool {
-        self.content == scene.content && self.revision == scene.doc.revision() && self.time == time
+    /// Whether it is still `scene`'s rendered frame at `time`: the cache
+    /// has that frame under the key and generation it was read under. A
+    /// document, media, font, tone or override change, a storage change or
+    /// a deletion since the upload each fail this.
+    fn is(&self, disk: &crate::render_cache::DiskFrames, scene: &Scene, time: Ticks) -> bool {
+        self.time == time && disk.held(scene, time) == Some(self.held)
     }
 }
 struct CachedFrame {
@@ -727,14 +731,20 @@ impl Engine {
     /// came took 5 ms on a quiet machine and 12 to 100 ms on a busy one,
     /// of the 15 ms a frame has before its refresh.
     pub fn upload_ahead(&mut self, scene: &Scene, time: Ticks) {
-        if self.disk_next.as_ref().is_some_and(|n| n.is(scene, time)) {
+        let Some(disk) = self.disk.clone() else {
+            self.disk_next = None;
+            return;
+        };
+        if self
+            .disk_next
+            .as_ref()
+            .is_some_and(|n| n.is(&disk, scene, time))
+        {
             return;
         }
         self.disk_next = None;
-        let Some(crate::render_cache::Read::Frame(size, pixels)) = self
-            .disk
-            .as_ref()
-            .map(|disk| disk.read_within(scene, time, std::time::Duration::ZERO))
+        let crate::render_cache::Read::Frame(size, pixels, held) =
+            disk.read_within(scene, time, std::time::Duration::ZERO)
         else {
             return;
         };
@@ -743,12 +753,16 @@ impl Engine {
         };
         self.upload(&surface, size, &pixels);
         self.disk_next = Some(DiskUpload {
-            content: scene.content,
-            revision: scene.doc.revision(),
+            held,
             time,
             size,
             surface,
         });
+    }
+    /// The rendered frames' state changed (a new observation): a frame
+    /// uploaded ahead is of the state before.
+    pub(crate) fn drop_upload_ahead(&mut self) {
+        self.disk_next = None;
     }
 
     /// Opens and warms the videos of a coming frame on background workers, so
@@ -972,15 +986,20 @@ impl Engine {
         let fits = |size: &Size| canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
-        let uploaded = self
-            .disk_next
-            .take()
-            .filter(|next| looked && next.is(scene, time) && fits(&next.size));
+        // Shown only while it still is this frame's picture.
+        let uploaded = self.disk_next.take().filter(|next| {
+            looked
+                && fits(&next.size)
+                && self
+                    .disk
+                    .as_ref()
+                    .is_some_and(|disk| next.is(disk, scene, time))
+        });
         let disk = match (looked && uploaded.is_none())
             .then(|| Some(self.disk.as_ref()?.read_within(scene, time, patience)))
             .flatten()
         {
-            Some(crate::render_cache::Read::Frame(size, pixels)) if fits(&size) => {
+            Some(crate::render_cache::Read::Frame(size, pixels, _)) if fits(&size) => {
                 self.disk_late = 0;
                 Some((size, pixels))
             }
@@ -2630,6 +2649,81 @@ mod frame_cache_tests {
         let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
         let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
         assert_eq!(playing, paused);
+    }
+    /// A rendered frame uploaded ahead of its turn is of one cache state.
+    /// When a media file its composition draws from changes on disk, the
+    /// document untouched, the cache's next observation retires that state:
+    /// the frame already uploaded is not shown either.
+    #[test]
+    fn an_uploaded_frame_is_dropped_when_its_media_changes() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let still = stripes(dir.path());
+        let scene = scene(&still);
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let (first, next) = (disk.test_put(3, 0.25), disk.test_put(4, 0.25));
+        let mut engine = Engine::new(Gpu::new("upload-pin").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        // A playing frame: whether it came from disk (2) or was drawn (1),
+        // and its picture.
+        let shown = |engine: &mut Engine, time: Ticks| {
+            let spec = FrameSpec {
+                moment: Moment::Playing,
+                exact: false,
+                ..FrameSpec::exact(
+                    time,
+                    Output {
+                        width: 128,
+                        height: 72,
+                        display: 0,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                )
+            };
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+                match engine.frame(&scene, spec, None, &Default::default(), true, trace.clone()) {
+                    Ok(sub) => {
+                        let sub = sub.unwrap();
+                        sub.commit();
+                        sub.complete().unwrap();
+                        if !sub.stand_ins {
+                            return (trace.lock().unwrap().disk, sub.pixels());
+                        }
+                    }
+                    Err(e) => assert!(e.is::<DiskFramePending>(), "{e:#}"),
+                }
+                assert!(Instant::now() < deadline, "the frame never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let (from, rendered) = shown(&mut engine, first);
+        assert_eq!(from, 2, "the frame on disk plays");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while engine.disk_next.is_none() {
+            engine.upload_ahead(&scene, next);
+            assert!(Instant::now() < deadline, "the next frame was never read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The still is saved again by another app.
+        let mut bytes = std::fs::read(&still).unwrap();
+        for b in &mut bytes[54..] {
+            *b = 255 - *b;
+        }
+        bytes.push(0);
+        std::fs::write(&still, bytes).unwrap();
+        disk.test_recheck_media();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, next));
+        disk.test_ready();
+        let (from, drawn) = shown(&mut engine, next);
+        assert_eq!(from, 1, "the upload is of the still as it was");
+        assert_ne!(drawn, rendered);
     }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take
