@@ -143,6 +143,8 @@ pub struct SaveOptions {
     pub compact_min_dead_bytes: Option<u64>,
     #[doc(hidden)]
     pub fault: Option<WriteFault>,
+    #[doc(hidden)]
+    pub hooks: durable::PublishHooks,
 }
 
 /// The `history` member a plan writes.
@@ -239,6 +241,10 @@ pub struct SaveReceipt {
     pub reused_media_bytes: u64,
     /// The replaced version's backup, when a [`BackupPolicy`] was given.
     pub backup: Option<PathBuf>,
+    /// Another version found at the destination in the exchange (it arrived
+    /// after the last check, or cannot be read), kept beside the project
+    /// under this name. The person must be told.
+    pub displaced: Option<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -626,6 +632,12 @@ impl SavePlan {
                 Publish::CreateNew
             }
         };
+        // A disk that cannot replace a file conditionally is refused before
+        // anything is staged beside the project or copied to its backups.
+        if matches!(publish, Publish::Replace(_)) && !durable::exchanges(dest, &self.options.hooks)?
+        {
+            return Err(ProjectIoError::NoSafeReplace);
+        }
         let previous = match &publish {
             Publish::Replace(v) => Some(v),
             Publish::CreateNew => None,
@@ -882,8 +894,11 @@ impl SavePlan {
             (Some(policy), Some(_)) => Some(durable::backup(policy, dest)?),
             _ => None,
         };
-        if let Err(e) = durable::publish(temp, dest, &publish, &file_hash) {
-            if let (Some(path), Some(prev)) = (&backup, previous) {
+        let published = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks);
+        if published.is_err()
+            && let (Some(path), Some(prev)) = (&backup, previous)
+        {
+            {
                 let still_old = FileVersion::read(dest)
                     .ok()
                     .flatten()
@@ -897,17 +912,27 @@ impl SavePlan {
                     let _ = fs::rename(path, recovery);
                 }
             }
-            return Err(e);
         }
+        let published = published?;
         if let Some(policy) = &self.options.backups {
             let _ = durable::retain(policy, backup.as_deref());
         }
 
         let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+        // Held from here on, so the session can follow this file if it is
+        // renamed or moved (only if the path still names what was published).
+        let held = File::open(dest)
+            .ok()
+            .filter(|f| {
+                f.metadata()
+                    .is_ok_and(|m| durable::stat_of(&m).same_identity(&stat))
+            })
+            .map(durable::HeldFile::new);
         let version = Arc::new(FileVersion {
             path: dest.clone(),
             stat,
             hash: file_hash.clone(),
+            held,
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
@@ -940,6 +965,7 @@ impl SavePlan {
             media: table,
             reused_media_bytes,
             backup,
+            displaced: published.displaced,
             ticket: self.ticket.clone(),
         })
     }
@@ -1036,7 +1062,33 @@ fn write_media(
                 ))
             };
             if !version.is_unchanged()? {
-                return Err(changed());
+                // The path no longer names the file (renamed, moved or
+                // deleted while open). The descriptor held since the version
+                // was read is still that file: copy from it while its bytes
+                // are proven the version's, before and after.
+                let Some(src) = version.held_unchanged()? else {
+                    return Err(changed());
+                };
+                copy_range(
+                    src,
+                    *offset,
+                    *length,
+                    out,
+                    &mut hasher,
+                    buf,
+                    &media_err,
+                    temp,
+                )?;
+                if version.held_unchanged()?.is_none() {
+                    return Err(changed());
+                }
+                let digest = hex(&hasher.finalize());
+                if sha256.as_deref().is_some_and(|want| want != digest) {
+                    return Err(media_err(
+                        "The project media checksum does not match.".into(),
+                    ));
+                }
+                return Ok((*length, digest));
             }
             #[cfg(test)]
             source_hooks::hit(&source_hooks::BEFORE_OPEN);

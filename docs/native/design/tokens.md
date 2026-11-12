@@ -125,6 +125,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.sidebar` | Sidebar width of Home and Settings | 224 | 224 | 224 | 224 |
 | `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
+| `metrics.symbol_action` | SF Symbol size of a surface's one primary action glyph | 20 | 20 | 20 | 20 |
 | `metrics.symbol_inline` | SF Symbol size inside rows | 12 | 12 | 12 | 12 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 14 | 14 | 14 | 14 |
 | `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 14 | 14 | 14 | 14 |

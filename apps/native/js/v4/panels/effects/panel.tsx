@@ -87,12 +87,11 @@ export function EffectsPanel({
           gap: token("metrics.gap"),
         }}
       >
-        {/* API gap: TextField is a neutral native text field until kit SearchField exists. */}
         <TextField
           id={ids.search}
           label="Search effects"
           title="Search effects"
-          metadata={{ placeholder: "Search" }}
+          metadata={{ placeholder: "Search", search: true }}
           binding={bindings.search}
           value={model.query}
           disabled={model.installedCount() === 0}
@@ -291,6 +290,9 @@ export function EffectsPanel({
                   style={{
                     ...textStyle,
                     ...(item.failed ? { color: token("colors.muted") } : {}),
+                    // The name's parts (before, match, after) run on one line.
+                    display: "flex",
+                    flexDirection: "row",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",

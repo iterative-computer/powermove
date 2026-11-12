@@ -344,6 +344,35 @@ fn a_stopped_project_leaves_the_others_editable() {
     shell(&kernel, ShellCall::Save(other)).unwrap();
 }
 
+/// A panic while another project is being opened stops only that open: the
+/// project already open keeps taking edits and saves.
+#[test]
+fn a_panic_in_one_projects_open_leaves_the_others_editable() {
+    let root = Temp::new("open-panics");
+    let (_actor, kernel, session) = fixture(&root.0, "working");
+    kernel.arm_fault(Stage::InPublish, "damaged");
+    assert!(
+        kernel
+            .shell(ShellCall::PrepareOpen {
+                id: "damaged".into(),
+                source: SessionSource::New(project("damaged")),
+                electron_profile: None,
+            })
+            .wait()
+            .is_none(),
+        "the open that panicked is not answered"
+    );
+    assert!(kernel.published("working").unwrap().fault.is_none());
+    let ack = kernel
+        .call_blocking("working", Request::new(Caller::native(), opacity(5.0)))
+        .expect("the other project still takes edits");
+    assert_eq!(
+        kernel.published("working").unwrap().revision(),
+        ack.revision
+    );
+    shell(&kernel, ShellCall::Save(session)).unwrap();
+}
+
 /// A caller waiting on the stopped project (an Undo deferred to a realm)
 /// gets the failure instead of waiting forever.
 #[test]
