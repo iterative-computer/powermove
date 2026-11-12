@@ -492,3 +492,116 @@ fn a_short_soundtrack_in_matroska_reports_its_own_length() {
         }
     }
 }
+
+/// The sound classes of the measured table the tests above leave out, read
+/// both ways. An older project hears program sample t at source time t
+/// (codec priming and a head-trimming audio edit removed, a stream's start
+/// not applied); a new one hears the sound placed against the start of the
+/// presentation (FFmpeg's command-line `ffprobe` gives the stream starts).
+#[test]
+fn the_remaining_sound_classes_are_heard_as_measured() {
+    let dir = temp_dir("clip-origin-classes");
+    let wav = dir.join("click.wav");
+    let click = clicks(SR as usize, &[CLICK], 0.9);
+    write_wav(&wav, SR, &[click.clone(), click]);
+    let aac: &[&str] = &[
+        "-c:v", "mpeg4", "-q:v", "4", "-g", "1", "-c:a", "aac", "-b:a", "256k",
+    ];
+    let opus: &[&str] = &[
+        "-c:v",
+        "libvpx-vp9",
+        "-crf",
+        "30",
+        "-b:v",
+        "0",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "256k",
+    ];
+    let start = |path: &std::path::Path, stream: &str| -> f64 {
+        let out = std::process::Command::new(ffmpeg().with_file_name("ffprobe"))
+            .args(["-v", "error", "-select_streams", stream, "-show_entries"])
+            .args(["stream=start_time", "-of", "csv=p=0"])
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    // AAC priming: both streams from zero.
+    let zero = dir.join("aac.mp4");
+    clip(&zero, &wav, 0.0, 0.0, aac);
+    // A head-trimming edit on both tracks: the first 0.1 s cut by an edit
+    // list, the sound's media still holding it.
+    let trimmed = dir.join("aac-head-trim.mp4");
+    let status = std::process::Command::new(ffmpeg())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "0.1",
+            "-i",
+        ])
+        .arg(&zero)
+        .args(["-c", "copy"])
+        .arg(&trimmed)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // A converted file: the picture 12 ms after its Opus sound (moved by a
+    // stream copy: an encoder quantises the offset to its frame grid).
+    let encoded = dir.join("together.webm");
+    clip(&encoded, &wav, 0.0, 0.0, opus);
+    let webm = dir.join("picture-12ms-late.webm");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-itsoffset", "0.012", "-i"])
+        .arg(&encoded)
+        .arg("-i")
+        .arg(&encoded)
+        .args(["-map", "0:v", "-map", "1:a", "-c", "copy"])
+        .arg(&webm)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let cut = (0.1 * SR as f64) as i64;
+    // (file, legacy click, picture start - sound start for the versioned
+    // reading when the picture opens the clip, else 0, tolerance)
+    for (path, legacy, lead, tolerance) in [
+        (&zero, CLICK as i64, 0.0, 2),
+        (&trimmed, CLICK as i64 - cut, 0.0, 2),
+        (
+            &webm,
+            CLICK as i64,
+            start(&webm, "v:0") - start(&webm, "a:0"),
+            2,
+        ),
+    ] {
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            lead < 0.04,
+            "{name}: the picture must be within a frame ({lead})"
+        );
+        if name.ends_with("webm") {
+            assert!(lead > 0.01, "{name}: the picture must start late ({lead})");
+        }
+        let versioned = legacy - (lead * SR as f64).round() as i64;
+        for (timing, expected) in [
+            (None, legacy),
+            (Some(pm_media::clip::ASSET_TIMING), versioned),
+        ] {
+            let (at, level) = click_with(path, r#""trim":0,"speed":1"#, timing);
+            assert!(level.abs() > 0.2, "{name}: no click ({level})");
+            assert!(
+                (at as i64 - expected).abs() <= tolerance,
+                "{name}, timing {timing:?}: the click is at sample {at}, {expected} expected",
+            );
+        }
+    }
+}
