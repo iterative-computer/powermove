@@ -2226,6 +2226,12 @@ per frame and is included consistently in these totals.
 | Chrome set, including glass | 27.779 | 116.91 | 25790 | 271 | 1335 |
 | Terrain + 320 conifers | 72.524 | 144.39 | 70897 | 292 | 938 |
 
+The environment's **72.5 s/frame is an outlier against the product-scene
+speed gates**; its own gate is still unassigned. Tracing consumes 70.9 s
+(97.8%) with 144.4 mean spp: expensive foliage visibility/multiple-bounce
+paths and high adaptive work are the likely cause, rather than per-frame
+geometry uploads or BLAS rebuilds, which remain reused.
+
 Two-frame **diagnostic** fixed-32-spp exports, using the same binary, isolate
 warm tracing from startup and denoising. Eight-bounce tracing takes 1.113 s
 for the bottle, 1.077 s for Hero, 3.257 s for chrome and 9.323 s for the
@@ -2297,6 +2303,24 @@ than a reference change. Early variance stopping and the glossy limit are
 being tested independently; the limits and reference remain fixed. A candidate
 rare-path floor preserves observations of glass and narrow coats, with edge
 classification retaining that floor. It is unaccepted until these tests pass.
+
+Trial C keeps the 128-sample ceiling and uses an explicit 8-sample floor,
+12% convergence and the rare-path guard. Its real 30-frame bottle export
+improves substantially, but **this candidate is rejected for image quality**:
+
+| Bottle, 1080p / 30 frames | Round 0 CPU | Trial C CPU | Reduction |
+|---|---:|---:|---:|
+| Real export s/frame | 10.361 | 3.381 | 67.4% |
+| Mean actual spp | 79.75 | 14.50 | 81.8% |
+| Tracing ms/frame | 8960 | 2037 | 77.3% |
+| CPU OIDN ms/frame | 976 | 824 | 15.5% |
+
+The glass object's full-HD RMS is 0.023719 (limit 0.02); whole-image bias
+p95 is 0.012257 (limit 0.012). Small chrome-set flicker is 0.006698
+(limit 0.006). Glass flicker itself passes at 0.004011. The guard alone
+therefore does not repair the regression. A separate eight-glossy-bounce
+control is required before choosing the final preset; no acceptance limit
+or reference has changed. These remain development-build measurements.
 
 The command/state contract adds optional `perceptualNoise`,
 `edgeSamplesMultiplier`, `diffuseBounces`, `glossyBounces` and
