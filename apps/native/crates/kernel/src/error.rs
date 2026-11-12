@@ -170,6 +170,11 @@ pub enum ProjectIoError {
     /// the file there (between moving the old file aside and installing the
     /// new one). It was left in place; this save's file is kept beside it.
     KeptBeside { kept: std::path::PathBuf },
+    /// The save failed (the error inside) after the file at the path had
+    /// been moved aside, and the volume has no way to give a file a name
+    /// other than creating it: the path holds a verified copy of what it
+    /// held, the same bytes in another file.
+    PutBack(Box<ProjectIoError>),
     /// Our file was published but the final directory sync failed. Your
     /// edits stay open (and dirty); save again to confirm.
     Finalize(String),
@@ -222,6 +227,7 @@ impl fmt::Display for ProjectIoError {
                  was left in place. {KEPT_BESIDE}{}",
                 kept.display()
             ),
+            ProjectIoError::PutBack(e) => e.fmt(f),
             ProjectIoError::Finalize(m) => write!(
                 f,
                 "The project file was written, but save finalization failed. Your edits are \

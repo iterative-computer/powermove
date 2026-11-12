@@ -18,8 +18,10 @@
 //!   the volume has no exchange the file is moved aside under a private name
 //!   and the new one installed at the empty path ([`replace_aside`]). No
 //!   route removes a file before it was read and found to be that version.
-//! * A first save never overwrites: exclusive rename (`RENAME_EXCL`) or a
-//!   hard link, both of which fail if anything appeared at the destination.
+//! * No file is ever renamed onto a public name (the project's, or the name
+//!   a kept file gets): a name is taken by the exclusive rename
+//!   (`RENAME_EXCL`), by a hard link, or by exclusive creation and a verified
+//!   copy, all of which fail if anything appeared there ([`place_new`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -655,8 +657,11 @@ pub struct PublishHooks {
     /// The volume answers the exchange with success but only renames the
     /// first name over the second (a FAT32 volume on macOS 27).
     pub exchange_renames: bool,
-    /// The volume has neither an exclusive rename nor hard links (exFAT).
+    /// The volume has neither an exclusive rename nor hard links (exFAT, a
+    /// network share).
     pub no_exclusive: bool,
+    /// The volume has hard links but no exclusive rename.
+    pub links_only: bool,
     /// Called with the destination after its last check, right before the
     /// file there is taken (exchanged with the staged file, or moved aside).
     pub before_exchange: Option<PublishHook>,
@@ -665,6 +670,13 @@ pub struct PublishHooks {
     pub between_renames: Option<PublishHook>,
     /// Called with the destination right after the staged file is there.
     pub after_exchange: Option<PublishHook>,
+    /// Called with a name right before a file is placed under it (the
+    /// project's own name, or the name a kept file gets): after every look
+    /// at that name, immediately before the call that takes it.
+    pub before_install: Option<PublishHook>,
+    /// While set, the next copy into an exclusively created name stops
+    /// half way with "No space left on device" (and clears it).
+    pub copy_fails: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 impl std::fmt::Debug for PublishHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -672,9 +684,12 @@ impl std::fmt::Debug for PublishHooks {
             .field("no_exchange", &self.no_exchange)
             .field("exchange_renames", &self.exchange_renames)
             .field("no_exclusive", &self.no_exclusive)
+            .field("links_only", &self.links_only)
             .field("before_exchange", &self.before_exchange.is_some())
             .field("between_renames", &self.between_renames.is_some())
             .field("after_exchange", &self.after_exchange.is_some())
+            .field("before_install", &self.before_install.is_some())
+            .field("copy_fails", &self.copy_fails.is_some())
             .finish()
     }
 }
@@ -805,7 +820,7 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
 /// refuses the taken name and then cannot do the rename at all: exFAT.)
 fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
     static PROVEN: Proven = std::sync::Mutex::new(Vec::new());
-    if hooks.no_exclusive {
+    if hooks.no_exclusive || hooks.links_only {
         return Ok(false);
     }
     #[cfg(target_os = "macos")]
@@ -831,78 +846,122 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
     }
 }
 
-/// Renames `from` to the name `to`, which nothing may hold: by the exclusive
-/// rename where the volume has one ([`excludes`]), which fails rather than
-/// replace a file that appeared there. A volume without one (exFAT) gets a
-/// plain rename only after the name was looked at and found free. A file
-/// that lands between that look and the rename is replaced unread: the gap
-/// such a volume leaves, as narrow as two system calls.
-fn rename_new(from: &Path, to: &Path, hooks: &PublishHooks) -> Result<(), ProjectIoError> {
-    let taken = || ProjectIoError::DestinationExists(to.display().to_string());
-    if excludes(to, hooks)? {
-        #[cfg(target_os = "macos")]
-        return match sys::renamex(from, to, sys::RENAME_EXCL) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(taken()),
-            Err(e) => Err(io_err(from, e)),
-        };
-    }
-    match fs::symlink_metadata(to) {
-        Ok(_) => return Err(taken()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(to, e)),
-    }
-    fs::rename(from, to).map_err(|e| io_err(from, e))
+/// How a file came to be under a name nothing held ([`place_new`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placed {
+    /// The file itself is under the new name and its old name is gone.
+    Moved,
+    /// The new name holds a verified copy of the file, which is still under
+    /// its old name too.
+    Copied,
 }
 
-/// `installFile`: exclusive rename where supported. `Ok(false)` to fall back.
-fn install_exclusive(
-    temp: &Path,
-    destination: &Path,
+/// Puts the file `from` under the name `to`, which nothing may hold. No
+/// route looks at the name and then renames onto it: a file that lands under
+/// `to` at any instant is never replaced, on any volume, and the answer is
+/// then [`ProjectIoError::DestinationExists`]. In order:
+///
+/// 1. the exclusive rename, where the volume has one ([`excludes`]);
+/// 2. a hard link, which fails on a taken name, and then the old name is
+///    removed (the file keeps the new one);
+/// 3. the name is created exclusively and the bytes copied into it, synced
+///    and read back ([`create_exclusive`]): a volume with neither of the
+///    above (exFAT, a network share) has no other call that refuses a taken
+///    name.
+///
+/// `hash` is what `from` holds, when the caller knows.
+fn place_new(
+    from: &Path,
+    to: &Path,
+    hash: Option<&str>,
     hooks: &PublishHooks,
-) -> Result<bool, ProjectIoError> {
-    if !excludes(destination, hooks)? {
-        return Ok(false);
-    }
+) -> Result<Placed, ProjectIoError> {
+    let taken = || ProjectIoError::DestinationExists(to.display().to_string());
+    let about_to = || {
+        if let Some(hook) = &hooks.before_install {
+            hook(to);
+        }
+    };
     #[cfg(target_os = "macos")]
-    {
-        match sys::renamex(temp, destination, sys::RENAME_EXCL) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(
-                ProjectIoError::DestinationExists(destination.display().to_string()),
-            ),
-            Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => Ok(false),
-            Err(e) => Err(io_err(destination, e)),
+    if excludes(to, hooks)? {
+        about_to();
+        match sys::renamex(from, to, sys::RENAME_EXCL) {
+            Ok(()) => return Ok(Placed::Moved),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
+            Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => {}
+            Err(e) => return Err(io_err(from, e)),
+        }
+    }
+    about_to();
+    let linked = if hooks.no_exclusive {
+        Err(io::Error::from_raw_os_error(45))
+    } else {
+        fs::hard_link(from, to)
+    };
+    match linked {
+        // Both names lead to the one file: removing the old name removes no
+        // bytes. If it cannot be removed the file simply has both.
+        Ok(()) => {
+            return Ok(match fs::remove_file(from) {
+                Ok(()) => Placed::Moved,
+                Err(_) => Placed::Copied,
+            });
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
+        // No links (or none allowed): exclusive creation replaces nothing
+        // whatever the reason was, and reports its own error if the folder
+        // cannot be written at all.
+        Err(_) => {}
+    }
+    about_to();
+    create_exclusive(from, to, hash, hooks)?;
+    Ok(Placed::Copied)
+}
+
+/// Renames `from` to `to`, a private name of this save's own making: it
+/// carries a UUID drawn for this save, so no other writer can have chosen
+/// it and nothing lands under it. (The exclusive rename is used all the
+/// same where the volume has one.) Taking a file away from a public name
+/// this way destroys nothing: whatever is there at that instant is what
+/// gets the private name.
+fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io::Result<()> {
+    debug_assert!(
+        to.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+    );
+    #[cfg(target_os = "macos")]
+    if excludes(to, hooks).unwrap_or(false) {
+        match sys::renamex(from, to, sys::RENAME_EXCL) {
+            Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => {}
+            other => return other,
         }
     }
     #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (temp, destination);
-        Ok(false)
-    }
+    let _ = hooks;
+    fs::rename(from, to)
 }
 
-/// The last way to create a new file, for a volume with neither an exclusive
-/// rename nor hard links (exFAT), which has no atomic way to give a finished
-/// file a name nothing holds yet: the name is created exclusively (never
-/// over a file that is there), the staged bytes are copied into it and
-/// synced, and what the name then holds is read back and must be that
-/// content. A crash mid-copy leaves an incomplete file under a name that
-/// held nothing before; the work is still open or in its journal.
+/// [`place_new`]'s last route: `destination` is created exclusively (never
+/// over a file that is there), `source`'s bytes are copied into it and
+/// synced, and what the name then holds is read back and must be those
+/// bytes (and `hash`, when the caller knows what the source holds). A copy
+/// that fails is taken back ([`withdraw`]). A crash mid-copy leaves an
+/// incomplete file under a name that held nothing before.
 fn create_exclusive(
-    staged: &Path,
+    source: &Path,
     destination: &Path,
-    new_hash: &str,
+    hash: Option<&str>,
+    hooks: &PublishHooks,
 ) -> Result<(), ProjectIoError> {
-    let mut source = File::open(staged).map_err(|e| io_err(staged, e))?;
+    let from = File::open(source).map_err(|e| io_err(source, e))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mode = source
+        let mode = from
             .metadata()
-            .map_err(|e| io_err(staged, e))?
+            .map_err(|e| io_err(source, e))?
             .permissions()
             .mode();
         options.mode(mode & 0o777);
@@ -916,42 +975,90 @@ fn create_exclusive(
         }
         Err(e) => return Err(io_err(destination, e)),
     };
-    // Its identity is read once it has bytes: on FAT-family volumes an empty
-    // file has no stable inode number yet.
-    let written = io::copy(&mut source, &mut out)
-        .and_then(|_| sync_file(&out))
-        .and_then(|()| out.metadata())
-        .map(|m| stat_of(&m))
-        .map_err(|e| io_err(destination, e));
-    let verified = written.as_ref().map_err(|_| ()).and_then(|ours| {
-        let file = File::open(destination).map_err(|_| ())?;
-        let same = file
+    let copied = (|| {
+        use std::io::Write;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut reader = &from;
+        loop {
+            let n = read_retry(|| reader.read(&mut buf)).map_err(|e| io_err(source, e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            if hooks
+                .copy_fails
+                .as_ref()
+                .is_some_and(|armed| armed.swap(false, std::sync::atomic::Ordering::SeqCst))
+            {
+                let _ = out.write_all(&buf[..n / 2]);
+                return Err(io_err(destination, io::Error::from_raw_os_error(28)));
+            }
+            out.write_all(&buf[..n])
+                .map_err(|e| io_err(destination, e))?;
+        }
+        sync_file(&out).map_err(|e| io_err(destination, e))?;
+        let read = hex(&hasher.finalize());
+        // Its identity is read once it has bytes: on FAT-family volumes an
+        // empty file has no stable inode number yet.
+        let ours = stat_of(&out.metadata().map_err(|e| io_err(destination, e))?);
+        let back = File::open(destination).map_err(|e| io_err(destination, e))?;
+        let same = back
             .metadata()
-            .is_ok_and(|now| stat_of(&now).same_identity(ours));
-        let hash = hash_reader(&file, destination).map_err(|_| ())?;
-        (same && hex(&hash.finalize()) == new_hash)
-            .then_some(())
-            .ok_or(())
-    });
-    if verified.is_ok() {
-        return Ok(());
+            .is_ok_and(|now| stat_of(&now).same_identity(&ours));
+        let holds = hex(&hash_reader(&back, destination)?.finalize());
+        if same && holds == read && hash.is_none_or(|hash| hash == read) {
+            Ok(())
+        } else {
+            Err(ProjectIoError::Invalid(
+                "The file could not be verified after writing it.".into(),
+            ))
+        }
+    })();
+    if copied.is_err() {
+        drop(out);
+        withdraw(destination, source, hooks);
     }
-    // Our own incomplete file, under a name that held nothing before: gone
-    // again unless the name already holds something else.
-    let ours = out.metadata().map(|m| stat_of(&m));
-    if let Ok(ours) = ours
-        && lstat_file(destination)
-            .ok()
-            .flatten()
-            .is_some_and(|now| now.same_identity(&ours))
-    {
-        let _ = fs::remove_file(destination);
+    copied
+}
+
+/// Takes back the incomplete copy [`create_exclusive`] left under
+/// `destination`, a name that held nothing before it. Nothing is removed by
+/// that name: whatever the name holds is first moved to a private name
+/// ([`rename_private`]) and read. Bytes that are a beginning of `whole`, the
+/// file being copied, are that incomplete copy and are removed (`whole` still
+/// has all of them). Anything else landed there since and goes back under
+/// the name, or beside it if the name was taken again.
+fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
+    let taken = temporary_sibling(destination).with_extension("partial");
+    if rename_private(destination, &taken, hooks).is_err() {
+        return;
     }
-    Err(written.err().unwrap_or_else(|| {
-        ProjectIoError::Invalid(
-            "The new project file could not be verified after writing it.".into(),
-        )
-    }))
+    if begins(whole, &taken) {
+        let _ = fs::remove_file(&taken);
+    } else if place_new(&taken, destination, None, hooks).is_err() {
+        keep_beside(taken, destination, "other version", hooks);
+    }
+}
+
+/// Whether `part`'s bytes are the beginning (or all) of `whole`'s.
+fn begins(whole: &Path, part: &Path) -> bool {
+    let (Ok(whole), Ok(part)) = (File::open(whole), File::open(part)) else {
+        return false;
+    };
+    let (mut a, mut b) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    let (mut whole, mut part) = (io::BufReader::new(whole), io::BufReader::new(part));
+    loop {
+        let Ok(n) = read_retry(|| part.read(&mut b)) else {
+            return false;
+        };
+        if n == 0 {
+            return true;
+        }
+        if whole.read_exact(&mut a[..n]).is_err() || a[..n] != b[..n] {
+            return false;
+        }
+    }
 }
 
 /// How the destination may be written.
@@ -996,7 +1103,7 @@ fn local_stamp() -> String {
 
 /// Gives `held`, a file under a private name beside `destination`, a name
 /// the person finds: `<name> (<label> <date time>).<ext>`, never over
-/// anything. `label` says what it is: `other version` for a file found at
+/// anything ([`place_new`]). `label` says what it is: `other version` for a file found at
 /// the project's path that is not the version the save could replace,
 /// `recovered` for a finished save that could not take the path. Where that
 /// cannot be done it keeps a hidden name no sweep removes
@@ -1019,8 +1126,13 @@ fn keep_beside(held: PathBuf, destination: &Path, label: &str, hooks: &PublishHo
             name.push_str(&extension.to_string_lossy());
         }
         let to = dir.join(name);
-        match rename_new(&held, &to, hooks) {
-            Ok(()) => return to,
+        match place_new(&held, &to, None, hooks) {
+            Ok(Placed::Moved) => return to,
+            // The copy was read back and holds the file's bytes.
+            Ok(Placed::Copied) => {
+                let _ = fs::remove_file(&held);
+                return to;
+            }
             Err(ProjectIoError::DestinationExists(_)) => continue,
             Err(_) => break,
         }
@@ -1115,6 +1227,22 @@ pub enum LeftAside {
     Unfinished(PathBuf),
 }
 
+/// Puts the file a save moved aside back under the project's name, which
+/// must hold nothing ([`place_new`]: never over a file that landed there).
+/// True when the name now holds a copy: the same bytes, another file.
+fn put_back(
+    aside: &Path,
+    destination: &Path,
+    hooks: &PublishHooks,
+) -> Result<bool, ProjectIoError> {
+    let copied = place_new(aside, destination, None, hooks)? == Placed::Copied;
+    // The copy was read back and holds the same bytes: the private name goes.
+    if copied {
+        let _ = fs::remove_file(aside);
+    }
+    Ok(copied)
+}
+
 /// A save on a volume without an atomic exchange moves the project file
 /// aside and installs the new one at the empty path ([`replace_aside`]). Cut
 /// short between the two (a crash, a disk pulled), it leaves the path empty
@@ -1129,7 +1257,7 @@ pub(crate) fn settle_asides(destination: &Path, hooks: &PublishHooks) -> Vec<Lef
     let mut settled = Vec::new();
     for aside in asides_of(destination) {
         let restored = matches!(lstat_file(destination), Ok(None))
-            && rename_new(&aside, destination, hooks).is_ok();
+            && put_back(&aside, destination, hooks).is_ok();
         let staged = aside.with_extension("tmp");
         settled.push(if restored {
             LeftAside::Restored
@@ -1158,7 +1286,7 @@ pub(crate) fn settle_asides(destination: &Path, hooks: &PublishHooks) -> Vec<Lef
 ///    folder. That takes whatever is there at that instant and destroys
 ///    nothing.
 /// 2. The staged file is installed at the now empty path by a rename that
-///    refuses a taken name ([`rename_new`]). A file that landed there
+///    takes it only if nothing holds it ([`place_new`]). A file that landed there
 ///    between the two renames stays; this save's file is kept beside it and
 ///    the save fails naming it ([`ProjectIoError::KeptBeside`]).
 ///
@@ -1183,24 +1311,23 @@ fn replace_aside(
     if let Some(hook) = &hooks.before_exchange {
         hook(destination);
     }
-    rename_new(destination, &aside, hooks).map_err(|e| match e {
+    rename_private(destination, &aside, hooks).map_err(|e| match e.kind() {
         // Gone since the last check: nothing was moved.
-        ProjectIoError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
-            ProjectIoError::ChangedOnDisk
-        }
-        other => other,
+        io::ErrorKind::NotFound => ProjectIoError::ChangedOnDisk,
+        _ => io_err(destination, e),
     })?;
     if let Some(hook) = &hooks.between_renames {
         hook(destination);
     }
-    let installed = match rename_new(&temp.path, destination, hooks) {
-        Ok(()) => true,
-        // Something landed at the path between the two renames: it stays.
-        Err(ProjectIoError::DestinationExists(_)) => false,
+    let installed = match place_new(&temp.path, destination, Some(new_hash), hooks) {
+        Ok(placed) => Some(placed),
+        // Something landed at the path since it was emptied: it stays.
+        Err(ProjectIoError::DestinationExists(_)) => None,
         // Not installed and nothing arrived: what was at the path goes back.
         Err(e) => {
-            return Err(match rename_new(&aside, destination, hooks) {
-                Ok(()) => e,
+            return Err(match put_back(&aside, destination, hooks) {
+                Ok(true) => ProjectIoError::PutBack(Box::new(e)),
+                Ok(false) => e,
                 Err(_) => ProjectIoError::Conflict {
                     message: format!(
                         "The project file could not be replaced ({e}), and the file that was \
@@ -1229,11 +1356,16 @@ fn replace_aside(
     } else {
         published.displaced = Some(keep_beside(aside, destination, "other version", hooks));
     }
-    let staged = temp.keep();
-    if !installed {
-        let kept = keep_beside(staged, destination, "recovered", hooks);
-        let _ = sync_directory(dir);
-        return Err(ProjectIoError::KeptBeside { kept });
+    match installed {
+        // The staged file is the project file now.
+        Some(Placed::Moved) => drop(temp.keep()),
+        // The project file is a verified copy of it.
+        Some(Placed::Copied) => drop(temp),
+        None => {
+            let kept = keep_beside(temp.keep(), destination, "recovered", hooks);
+            let _ = sync_directory(dir);
+            return Err(ProjectIoError::KeptBeside { kept });
+        }
     }
     // The path must still hold the file just installed: the same file, or
     // (where a rename gives a file a new number) the same content.
@@ -1346,32 +1478,11 @@ pub(crate) fn publish(
                 });
             }
         }
-        None => {
-            if install_exclusive(&temp.path, destination, hooks)? {
-                let _ = temp.keep();
-            } else {
-                let linked = if hooks.no_exclusive {
-                    Err(io::Error::from_raw_os_error(45))
-                } else {
-                    fs::hard_link(&temp.path, destination)
-                };
-                match linked {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        return Err(ProjectIoError::DestinationExists(
-                            destination.display().to_string(),
-                        ));
-                    }
-                    // No links either (or none allowed): exclusive creation
-                    // replaces nothing whatever the reason was, and reports
-                    // its own error if the folder cannot be written at all.
-                    Err(_) => create_exclusive(&temp.path, destination, new_hash)?,
-                }
-                // The link or the copy keeps the data; `temp` unlinks its
-                // name on drop.
-                drop(temp);
-            }
-        }
+        None => match place_new(&temp.path, destination, Some(new_hash), hooks)? {
+            Placed::Moved => drop(temp.keep()),
+            // The copy keeps the data; `temp` unlinks its name on drop.
+            Placed::Copied => drop(temp),
+        },
     }
     sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
     Ok(published)

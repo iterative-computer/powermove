@@ -941,10 +941,11 @@ fn a_file_renamed_moved_or_deleted_while_open_can_still_be_saved() {
         "every embedded item was written from the held file"
     );
 }
-/// Hooks for a disk without the atomic exchange: HFS+ and most network
-/// shares (it has an exclusive rename), exFAT (it has neither), and a FAT32
-/// volume whose driver answers the exchange with success and only renames.
-fn disks_without_an_exchange() -> [(&'static str, pm_kernel::project_io::PublishHooks); 3] {
+/// Hooks for a disk without the atomic exchange: HFS+ (it has an exclusive
+/// rename), exFAT and a network share (neither that nor hard links), a
+/// volume with hard links only, and a FAT32 volume whose driver answers the
+/// exchange with success and only renames.
+fn disks_without_an_exchange() -> [(&'static str, pm_kernel::project_io::PublishHooks); 4] {
     use pm_kernel::project_io::PublishHooks;
     [
         (
@@ -959,6 +960,14 @@ fn disks_without_an_exchange() -> [(&'static str, pm_kernel::project_io::Publish
             PublishHooks {
                 no_exchange: true,
                 no_exclusive: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "no exchange, hard links but no exclusive rename",
+            PublishHooks {
+                no_exchange: true,
+                links_only: true,
                 ..Default::default()
             },
         ),
@@ -1202,6 +1211,217 @@ fn a_version_that_lands_between_the_two_renames_is_never_replaced() {
         k.finish_session_save(plan.run()).unwrap();
         assert_eq!(saved_name(&rescued).as_deref(), Some("One"), "{disk}");
         assert_eq!(fs::read(&file).unwrap(), b"version C", "{disk}");
+    }
+}
+/// Lands `bytes` under the first name `wanted` accepts, once, at the instant
+/// right before a file is placed under that name: after every look a save or
+/// a recovery takes at the name, before the call that takes it. Says whether
+/// it landed.
+fn lands_at_the_install(
+    hooks: pm_kernel::project_io::PublishHooks,
+    wanted: impl Fn(&Path) -> bool + Send + Sync + 'static,
+    bytes: Vec<u8>,
+) -> (
+    pm_kernel::project_io::PublishHooks,
+    std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+) {
+    let landed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = landed.clone();
+    let hooks = pm_kernel::project_io::PublishHooks {
+        before_install: Some(std::sync::Arc::new(move |to: &Path| {
+            let mut seen = seen.lock().unwrap();
+            if seen.is_none() && wanted(to) {
+                assert!(!to.exists(), "the name was looked at and found free");
+                land(to, &bytes);
+                *seen = Some(to.to_owned());
+            }
+        })),
+        ..hooks
+    };
+    (hooks, landed)
+}
+/// "Look that the name is free, then rename" is no way to install a file: a
+/// version that lands after the look and before the rename would be replaced
+/// unread, however short that is. On a disk with no rename that refuses a
+/// taken name (exFAT, a network share) the install still never replaces: the
+/// version that landed at that instant stays under the project's name, and
+/// this save's finished file is kept beside it.
+#[test]
+fn a_version_that_lands_at_the_instant_of_the_install_is_never_replaced() {
+    for (disk, hooks) in disks_without_an_exchange() {
+        let dir = common::TempDir::new("aside-d");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let project = file.clone();
+        let (hooks, landed) =
+            lands_at_the_install(hooks, move |to| to == project, b"version D".to_vec());
+        k.set_publish_hooks(hooks);
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let failed = k
+            .finish_session_save(plan.run())
+            .expect_err("the name was taken at the instant of the install");
+        assert!(landed.lock().unwrap().is_some(), "{disk}: D landed");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            b"version D",
+            "{disk}: the version that landed is still there: {failed}"
+        );
+        let kept = visible_siblings(&file);
+        assert_eq!(kept.len(), 1, "{disk}: {kept:?}");
+        assert_eq!(saved_name(&kept[0]).as_deref(), Some("One"), "{disk}");
+        assert_eq!(
+            pm_kernel::project_io::kept_beside(&failed.to_string()).as_deref(),
+            Some(kept[0].as_path()),
+            "{disk}: the failure names where the save is: {failed}"
+        );
+    }
+}
+/// Where a name can only be taken by creating it and copying into it, a copy
+/// that fails half way (a full disk) is taken back: the project's name
+/// holds the last saved version again, whole, the work is still open, and
+/// the next save writes it.
+#[test]
+fn a_copy_that_fails_while_installing_leaves_the_last_saved_version_under_the_name() {
+    let dir = common::TempDir::new("aside-g");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        no_exclusive: true,
+        copy_fails: Some(armed.clone()),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let failed = k
+        .finish_session_save(plan.run())
+        .expect_err("the copy failed");
+    assert!(!armed.load(std::sync::atomic::Ordering::SeqCst), "{failed}");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        original,
+        "the last saved version is under the project's name, whole: {failed}"
+    );
+    assert_eq!(visible_siblings(&file), [""; 0].map(Path::new));
+    assert_eq!(private_leftovers(&file), [""; 0]);
+    let plan = k.prepare_session_save(session, None, false).unwrap();
+    k.finish_session_save(plan.run())
+        .expect("the next save writes the file");
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+}
+/// The names kept files get ("… (other version …)", "… (recovered …)") are
+/// taken the same way: a file that lands under one of them at the instant
+/// it is taken is never replaced; the kept file gets the next name.
+#[test]
+fn a_file_that_lands_under_the_name_a_kept_version_is_given_is_never_replaced() {
+    for (disk, hooks) in disks_without_an_exchange() {
+        let dir = common::TempDir::new("aside-e");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let (hooks, landed) = lands_at_the_install(
+            pm_kernel::project_io::PublishHooks {
+                before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+                ..hooks
+            },
+            |to| {
+                to.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("cut (other version "))
+            },
+            b"somebody else's file".to_vec(),
+        );
+        k.set_publish_hooks(hooks);
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let ShellReply::Saved {
+            displaced: Some(kept),
+            ..
+        } = k
+            .finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{disk}: the save is published: {e}"))
+        else {
+            panic!("{disk}: the save says another version was kept")
+        };
+        let arrival = landed.lock().unwrap().clone().expect("a file landed");
+        assert_eq!(
+            fs::read(&arrival).unwrap(),
+            b"somebody else's file",
+            "{disk}: the file that landed under that name is untouched"
+        );
+        assert_ne!(kept, arrival, "{disk}");
+        assert_eq!(fs::read(&kept).unwrap(), b"version B", "{disk}");
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "{disk}");
+    }
+}
+/// The same at the next open after a save was killed between its two
+/// renames: the last saved version is put back under the project's name
+/// only if the name is still free at the instant it is taken. A version
+/// that lands right then stays; the last saved version and the unfinished
+/// save are both kept beside it.
+#[test]
+fn a_version_that_lands_while_the_last_saved_version_is_put_back_is_never_replaced() {
+    for (disk, hooks) in disks_without_an_exchange() {
+        let dir = common::TempDir::new("aside-f");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        // Another version of the project, as another computer would save it.
+        let elsewhere = dir.path("elsewhere/cut.pmv");
+        fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        fs::copy(&file, &elsewhere).unwrap();
+        {
+            let mut other = kernel(&dir.path("other"));
+            let (session, _) = open_file(&mut other, &elsewhere);
+            rename_comp(&mut other, "P", "Elsewhere");
+            other.shell(ShellCall::Save(session)).unwrap();
+        }
+        let version_d = fs::read(&elsewhere).unwrap();
+        let native = dir.path("native");
+        assert!(killed_between_renames(&native, &file, false));
+        assert!(!file.exists(), "{disk}: killed with the name empty");
+        let mut k = kernel(&native);
+        let project = file.clone();
+        let (hooks, landed) =
+            lands_at_the_install(hooks, move |to| to == project, version_d.clone());
+        k.set_publish_hooks(hooks);
+        let _ = k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        });
+        assert!(landed.lock().unwrap().is_some(), "{disk}: D landed");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            version_d,
+            "{disk}: the version that landed is still under the project's name"
+        );
+        let beside: Vec<_> = visible_siblings(&file)
+            .into_iter()
+            .map(|p| fs::read(p).unwrap())
+            .collect();
+        assert!(
+            beside.contains(&original),
+            "{disk}: the last saved version is kept beside it"
+        );
+        assert_eq!(beside.len(), 2, "{disk}: and the unfinished save");
     }
 }
 /// What the kernel has to tell about files kept beside the session's

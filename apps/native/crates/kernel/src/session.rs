@@ -886,7 +886,13 @@ impl Kernel {
             .pending_save
             .take()
             .unwrap();
-        let receipt = result.map_err(failure)?;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                self.adopt_put_back(&session.project, &e);
+                return Err(failure(e));
+            }
+        };
         let displaced = receipt.displaced.clone();
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
@@ -2407,6 +2413,30 @@ impl Kernel {
             }
         }
         maybe
+    }
+    /// A save that failed put the version it had moved aside back under
+    /// the project's name as a copy ([`ProjectIoError::PutBack`]): the same
+    /// bytes in another file. The session carries on with that file, so
+    /// its next save is an ordinary one, if the file there holds exactly
+    /// the version the session read.
+    fn adopt_put_back(&mut self, id: &str, error: &crate::ProjectIoError) {
+        if !matches!(error, crate::ProjectIoError::PutBack(_)) {
+            return;
+        }
+        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
+            return;
+        };
+        let Some(version) = self
+            .project(id)
+            .and_then(|p| p.store().file().version.clone())
+        else {
+            return;
+        };
+        if let Ok(Some(now)) = project_io::FileVersion::read(path)
+            && now.hash == version.hash
+        {
+            self.project_mut(id).unwrap().store_mut().file_moved(now);
+        }
     }
     /// Remembers files kept beside session `id`'s project file until the
     /// person is told (`ShellCall::KeptBeside`); the file's entry keeps them
