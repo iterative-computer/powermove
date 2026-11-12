@@ -114,6 +114,19 @@ fn running_exports(
         .map(|t| (t.id, t.title.clone()))
         .collect()
 }
+/// How long a quit waits for the exports it stopped to say they have ended.
+/// An export's worker removes its unfinished file before it reports that;
+/// quitting sooner killed the worker with that file still on disk.
+const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Whether every export in `stopping` has ended (cancelled, failed or done).
+fn exports_ended(
+    tasks: &[pm_promedia::tasks::Task],
+    stopping: &[pm_promedia::tasks::TaskId],
+) -> bool {
+    !running_exports(tasks)
+        .iter()
+        .any(|(id, _)| stopping.contains(id))
+}
 /// The question a quit asks while an export runs: quitting would stop it.
 fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button, Key};
@@ -158,12 +171,29 @@ pub fn begin_quit(cx: &mut App) {
         let answer = export_quit_alert(&titles).sheet(&window);
         cx.spawn(async move |cx| {
             let stop = answer.recv().await.ok().flatten() == Some(true);
+            if stop {
+                let stopping: Vec<_> = exporting.iter().map(|(id, _)| *id).collect();
+                for id in &stopping {
+                    crate::export_coordinator::cancel_export(*id);
+                }
+                // The quit goes on once each stopped export has ended (its
+                // unfinished file is removed by then), or after a short
+                // wait if one never answers: a quit is never held for good.
+                let asked = std::time::Instant::now();
+                while asked.elapsed() < EXPORT_STOP_WAIT
+                    && !exports_ended(
+                        &crate::export_coordinator::tasks().lock().unwrap().all(),
+                        &stopping,
+                    )
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                }
+            }
             cx.update(|cx| {
                 cx.global_mut::<QuitCoordinator>().asking_exports = false;
                 if stop {
-                    for (id, _) in exporting {
-                        crate::export_coordinator::cancel_export(id);
-                    }
                     start_quit(cx);
                 } else {
                     cancel_quit(cx);
@@ -1013,6 +1043,28 @@ mod tests {
         assert!(alert.buttons[1].action);
         let two = export_quit_alert(&["a".to_owned(), "b".to_owned()]);
         assert_eq!(two.labels(), ["Cancel", "Stop Exports and Quit"]);
+    }
+    /// "Stop Export and Quit" stops the export and then waits for it to have
+    /// ended: the request to stop is not the end (the worker still has its
+    /// unfinished file to remove), the settled task is.
+    #[test]
+    fn a_quit_goes_on_only_after_the_export_it_stopped_has_ended() {
+        use crate::export_coordinator::{AgentExport, cancel_export, tasks};
+        let export = AgentExport::start("Promo", "quit-stops-export", 120).unwrap();
+        let id = running_exports(&tasks().lock().unwrap().all())
+            .into_iter()
+            .find(|(_, title)| title == "Promo (Agent)")
+            .expect("it is running")
+            .0;
+        let ended = || exports_ended(&tasks().lock().unwrap().all(), &[id]);
+        assert!(!ended());
+        assert!(cancel_export(id));
+        assert!(!ended(), "asked to stop is not stopped");
+        // Its worker cleaned up and says so.
+        export.finish(Err("cancelled".into()));
+        assert!(ended());
+        // An export nobody stopped is not waited for.
+        assert!(exports_ended(&tasks().lock().unwrap().all(), &[]));
     }
     /// A quit asks every window with unsaved changes before it closes a
     /// clean one (windows are taken from the end).
