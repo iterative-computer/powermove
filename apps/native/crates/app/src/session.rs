@@ -573,6 +573,13 @@ impl Controller {
             .detach();
         match opening {
             Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
+            Some(crate::entry::Pending::Session(session)) => {
+                // Gone before this window took it: nothing to show.
+                if self.kernel.published(&session.project).is_some() {
+                    self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+                    self.mcp.activate_window(self.window_key);
+                }
+            }
             Some(crate::entry::Pending::Adopt { reply, name, file }) => {
                 self.adopt_reply(*reply, name, file, cx)
             }
@@ -1154,6 +1161,19 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        // A window's project is never replaced by an open: the file joins
+        // the window's tabs and the project shown stays as it is.
+        if self.session.is_some() {
+            match source {
+                SessionSource::File(path) => {
+                    let leader = self.shell_window_id(cx);
+                    crate::entry::open_in_new_tab(crate::entry::Pending::File(path), leader, cx);
+                }
+                _ => self.message = "Close this project before opening another here.".into(),
+            }
+            cx.notify();
+            return;
+        }
         let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try opening again when it finishes.".into();
@@ -1197,6 +1217,19 @@ impl Controller {
         file: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        // This window shows a project (or is opening one): the opened one
+        // joins its tabs, and Home gives way to the project behind it.
+        if self.session.is_some() || self.opening {
+            let leader = self.shell_window_id(cx);
+            let reply = Box::new(reply);
+            crate::entry::open_in_new_tab(
+                crate::entry::Pending::Adopt { reply, name, file },
+                leader,
+                cx,
+            );
+            self.hide_home(cx);
+            return;
+        }
         let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try opening again when it finishes.".into();
@@ -1227,8 +1260,9 @@ impl Controller {
         pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
         cx: &mut Context<Self>,
     ) {
-        // Switching is explicitly saved through the session API; never drop dirty work.
-        let old = self.session.clone();
+        // Only a window without a project opens one (`open_named`,
+        // `adopt_reply`): nothing is closed or saved to make room.
+        debug_assert!(self.session.is_none());
         let kernel = self.kernel.clone();
         let after_stop = std::mem::take(&mut self.reopening_stopped);
         // Commands still waiting on an earlier open never reach this project.
@@ -1287,14 +1321,6 @@ impl Controller {
                     }
                 }
             }
-            let previous_save_failed = if let Some(Ok(ShellReply::Opened { session, .. })) = &result
-            {
-                crate::lifecycle::close_replaced(&kernel, old, session)
-                    .await
-                    .is_err()
-            } else {
-                false
-            };
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
@@ -1324,10 +1350,6 @@ impl Controller {
                         // Media resolves on a worker after the project shows.
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
-                        if previous_save_failed {
-                            v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
-                            v.errors.borrow_mut().push("Project", &v.message);
-                        }
                         v.load_recent(cx);
                     }
                     // Already open in a window: that window comes forward.
@@ -1628,28 +1650,14 @@ impl Controller {
             self.mcp.bind_window(self.window_key, self.session.clone());
             return;
         }
-        let old = self.session.clone();
-        self.adopt(
-            session.clone(),
-            pm_kernel::locks::OpenDecision::Writable,
-            false,
-            cx,
-        );
-        let old = old.filter(|old| self.mcp.session_of(&old.project).is_none());
-        let kernel = self.kernel.clone();
-        cx.spawn(async move |this, cx| {
-            if crate::lifecycle::close_replaced(&kernel, old, &session)
-                .await
-                .is_err()
-            {
-                let _ = this.update(cx, |v, cx| {
-                    v.message = crate::lifecycle::PREVIOUS_SAVE_FAILED.into();
-                    v.errors.borrow_mut().push("Project", &v.message);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        if self.session.is_some() {
+            // This window still shows its own project.
+            self.mcp.bind_window(self.window_key, self.session.clone());
+            let leader = self.shell_window_id(cx);
+            crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            return;
+        }
+        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
         cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {

@@ -204,29 +204,49 @@ fn ask_quit_now(cx: &mut App) {
         let Some(kernel) = kernel else {
             return;
         };
-        // Every edit the kernel acknowledged is already written to its
-        // journal; make it durable without waiting for the busy kernel.
-        // Saves journal their save point before replacing a file, so the
-        // journal replays onto whatever the disk holds.
-        let synced = cx
-            .background_executor()
-            .spawn(async move { kernel.sync_journals() })
-            .await;
-        cx.update(|cx| {
-            let q = cx.global_mut::<QuitCoordinator>();
-            // The quit may have been cancelled (a failed save) meanwhile.
-            if !q.quitting {
-                return;
-            }
-            q._delegate.resolve_quit_events(false);
-            if let Err(e) = synced {
-                eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
-            }
-            eprintln!("Quit Now: {note}");
-            std::process::exit(0);
-        });
+        quit_as_is(kernel, note, cx).await;
     })
     .detach();
+}
+/// Quits without the work the quit was waiting for, leaving everything as a
+/// crash would: every edit the kernel acknowledged is already written to its
+/// journal and is made durable here without waiting for the busy kernel.
+/// Saves journal their save point before replacing a file, so the journal
+/// replays onto whatever the disk holds, and the next open offers it.
+async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp) {
+    let synced = cx
+        .background_executor()
+        .spawn(async move { kernel.sync_journals() })
+        .await;
+    cx.update(|cx| {
+        let q = cx.global_mut::<QuitCoordinator>();
+        // The quit may have been cancelled (a failed save) meanwhile.
+        if !q.quitting {
+            return;
+        }
+        q._delegate.resolve_quit_events(false);
+        if let Err(e) = synced {
+            eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
+        }
+        eprintln!("Quit Now: {note}");
+        std::process::exit(0);
+    });
+}
+/// The quit alert when the project library could not be written or released.
+/// Nothing in a window can fix it by then (every project's own close was
+/// answered), so the person is never left with a quit that only refuses.
+fn quit_failed_alert(reason: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    Alert::new(
+        "Powermove couldn’t finish saving before quitting.",
+        format!(
+            "{reason}. If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them."
+        ),
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new("Quit Anyway", true),
+        ],
+    )
 }
 /// The quit alert for a window session that couldn't be written.
 fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
@@ -297,16 +317,27 @@ fn finish_quit(cx: &mut App) {
                 cx.quit();
             }
             other => {
-                let message = format!("Couldn’t quit: {}. Your work is kept.", reason(other));
-                eprintln!("{message}");
-                let controllers = cx.global::<QuitCoordinator>().controllers.clone();
-                cancel_quit(cx);
-                for weak in controllers {
-                    let _ = weak.update(cx, |v, cx| {
-                        v.message = message.clone();
-                        cx.notify();
-                    });
-                }
+                let reason = reason(other);
+                eprintln!("Couldn’t quit: {reason}. Your work is kept.");
+                let q = cx.global::<QuitCoordinator>();
+                let kernel = q.host.kernel.clone();
+                let window = q
+                    .controllers
+                    .iter()
+                    .find_map(|weak| weak.upgrade())
+                    .map(|c| c.read(cx).host.borrow().window.clone());
+                let Some(window) = window else {
+                    return cancel_quit(cx);
+                };
+                let answer = quit_failed_alert(&reason).sheet(&window);
+                cx.spawn(async move |cx| {
+                    if answer.recv().await.ok().flatten() == Some(true) {
+                        quit_as_is(kernel, format!("Quitting: {reason}"), cx).await;
+                    } else {
+                        cx.update(cancel_quit);
+                    }
+                })
+                .detach();
             }
         });
     })
@@ -368,22 +399,6 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         false
     });
 }
-pub(crate) const PREVIOUS_SAVE_FAILED: &str =
-    "The previous project couldn’t be saved; its recovery journal is kept.";
-
-/// Only a successfully adopted, different session displaces the old one.
-/// Home and MCP use the same kernel close, releasing its lock and history.
-pub(crate) async fn close_replaced(
-    kernel: &KernelHandle,
-    old: Option<SessionHandle>,
-    new: &SessionHandle,
-) -> Result<(), String> {
-    if let Some(old) = old.filter(|old| old != new) {
-        expect_closed(kernel.shell(ShellCall::Close(old)).await)?;
-    }
-    Ok(())
-}
-
 /// The kernel archives rejected work and releases the session atomically.
 pub async fn discard_close(kernel: &KernelHandle, session: SessionHandle) -> Result<(), String> {
     expect_closed(kernel.shell(ShellCall::DiscardClose(session)).await)
@@ -791,6 +806,22 @@ mod tests {
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
     }
+    /// A quit the project library refuses is asked about, never only
+    /// refused: Cancel is the default, and quitting anyway is offered with
+    /// what happens to unsaved work.
+    #[test]
+    fn a_quit_the_library_refuses_offers_to_quit_anyway() {
+        let alert = quit_failed_alert("The disk is full");
+        assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(
+            alert
+                .informative
+                .starts_with("The disk is full. If you quit anyway")
+        );
+        assert!(alert.informative.contains("offers to recover"));
+    }
     use std::{
         future::Future,
         sync::Arc,
@@ -831,97 +862,37 @@ mod tests {
         answer(&k, ShellCall::Save(session.clone()));
         (dir, actor, session)
     }
+    /// A quit that ends with a project no window shows still open in the
+    /// kernel (an agent's project nobody showed, an open nothing adopted)
+    /// is not refused: its file is not written without anyone asking, its
+    /// unsaved work stays in its journal for the next open to offer, and
+    /// the library and its file lock are released.
     #[test]
-    fn replacing_a_home_project_releases_it_and_allows_quit() {
-        for from_library in [false, true] {
-            let (dir, actor, old) = fixture();
-            let k = actor.handle();
-            let file = dir.path().join("previous.pmv");
-            answer(
-                &k,
-                ShellCall::SaveAs {
-                    session: old.clone(),
-                    path: file.clone(),
-                    replace: false,
-                },
-            );
-            let lock = pm_kernel::locks::project_lock_path(&file);
-            assert!(lock.exists());
-            let source = if from_library {
-                // Opening a saved project from Home follows the same handoff.
-                SessionSource::Library {
-                    profile: dir.path().to_path_buf(),
-                    project: "replacement".into(),
-                }
-            } else {
-                SessionSource::New(pm_model::json::parse(
-                    r##"{"id":"replacement","name":"Untitled","compId":"c","w":320,"h":180,"fps":30,"dur":1,"bg":"#000000","layers":[],"assets":{},"comps":{}}"##
-                ).unwrap())
-            };
-            if from_library {
-                // Seed the library using the kernel's normal save/close path.
-                let ShellReply::Opened { session, .. } = answer(&k, ShellCall::Open {
-                    id: "replacement".into(),
-                    source: SessionSource::New(pm_model::json::parse(
-                        r##"{"id":"replacement","name":"Saved","compId":"c","w":320,"h":180,"fps":30,"dur":1,"bg":"#000000","layers":[],"assets":{},"comps":{}}"##
-                    ).unwrap()), electron_profile: None,
-                }) else { panic!() };
-                answer(&k, ShellCall::Close(session));
-            }
-            let ShellReply::Opened { session: new, .. } = answer(
-                &k,
-                ShellCall::Open {
-                    id: "replacement".into(),
-                    source,
-                    electron_profile: None,
-                },
-            ) else {
-                panic!()
-            };
-            // Reproduce the hidden-session failure before the handoff closes it:
-            // quit cannot release the library while sessions remain.
-            assert!(k.shell(ShellCall::ReleaseLibrary).wait().unwrap().is_err());
-            wait(close_replaced(&k, Some(old), &new)).unwrap();
-            assert!(
-                k.published("test").is_none(),
-                "old project must leave the kernel"
-            );
-            assert!(k.published("replacement").is_some());
-            let released =
-                pm_kernel::locks::FileLock::acquire(&lock).expect("old file lock must be released");
-            drop(released);
-            // Re-adopting the same session must keep it alive.
-            wait(close_replaced(&k, Some(new.clone()), &new)).unwrap();
-            assert!(k.published("replacement").is_some());
-            answer(&k, ShellCall::Close(new));
-            answer(&k, ShellCall::PrepareQuit);
-            answer(&k, ShellCall::ReleaseLibrary);
-            actor.shutdown();
-        }
-    }
-
-    #[test]
-    fn a_failed_replacement_close_keeps_the_previous_project_recoverable() {
-        let (dir, actor, old) = fixture();
+    fn a_quit_defers_a_project_no_window_shows_and_releases_the_library() {
+        let (dir, actor, session) = fixture();
         let k = actor.handle();
-        k.call_blocking(
-            "test",
-            Request::new(
-                Caller::native(),
-                GestureCall::Begin {
-                    label: "Active edit".into(),
-                },
-            ),
-        )
-        .unwrap();
-        let mut different = old.clone();
-        different.project = "next".into();
-        assert!(wait(close_replaced(&k, Some(old), &different)).is_err());
-        assert!(k.published("test").is_some());
-        assert!(dir.path().join("journals/test").exists());
-        assert_eq!(
-            PREVIOUS_SAVE_FAILED,
-            "The previous project couldn’t be saved; its recovery journal is kept."
+        let file = dir.path().join("unshown.pmv");
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        // What Quit sends once every window closed its project.
+        answer(&k, ShellCall::PrepareQuit);
+        answer(&k, ShellCall::ReleaseLibrary);
+        assert!(k.published("test").is_none(), "the session is released");
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        let lock = pm_kernel::locks::project_lock_path(&file);
+        drop(pm_kernel::locks::FileLock::acquire(&lock).expect("its file lock is released"));
+        assert!(
+            !pm_kernel::journal::sessions(&dir.path().join("journals/test")).is_empty(),
+            "the unsaved edit is kept for recovery"
         );
         actor.shutdown();
     }
