@@ -35,6 +35,56 @@ file_bytes() {
   fi
 }
 
+# The exact-seek subset under seek/ (pm-media's random_access suite runs it
+# by default): the structures that break frame-exact random access, small
+# enough to live in the repository. Every frame is unique (testsrc2 animates
+# a counter and moving shapes), so a seek that lands one frame off can never
+# hash equal to the right frame. `./gen.sh seek` regenerates only these.
+gen_seek() {
+  if ! has_encoder libx264 || ! has_encoder libx265; then
+    echo "seek fixtures need libx264 and libx265" >&2
+    return 1
+  fi
+  mkdir -p seek
+  local ff=("$FFMPEG" -hide_banner -loglevel error -y -f lavfi)
+  local src="testsrc2=size=160x90:rate"
+  local x264=(-c:v libx264 -profile:v high -crf 30 -pix_fmt yuv420p)
+  # B-pyramid long GOP at 29.97.
+  "${ff[@]}" -i "$src=30000/1001" -frames:v 48 "${x264[@]}" \
+    -x264-params "bframes=3:b-pyramid=normal:keyint=16:min-keyint=16:scenecut=0" seek/h264-bpyramid.mp4
+  # Open GOP: leading pictures reference the previous GOP.
+  "${ff[@]}" -i "$src=25" -frames:v 48 "${x264[@]}" \
+    -x264-params "bframes=3:b-pyramid=normal:keyint=16:min-keyint=16:scenecut=0:open-gop=1" seek/h264-opengop.mov
+  "${ff[@]}" -i "$src=24" -frames:v 48 -c:v libx265 -tag:v hvc1 -crf 32 -pix_fmt yuv420p \
+    -x265-params "keyint=16:min-keyint=16:scenecut=0:open-gop=1:bframes=4:log-level=error" seek/hevc-opengop.mp4
+  # Variable frame rate: 30 fps with every fifth frame dropped.
+  "${ff[@]}" -i "$src=30" -frames:v 60 -vf "select='not(eq(mod(n,5),4))'" -fps_mode vfr "${x264[@]}" \
+    -x264-params "bframes=0:keyint=15" seek/vfr-h264.mp4
+  # A transport stream (90 kHz timestamps, first frame near 1.4 s) and its
+  # AVCHD wrapper (192-byte packets).
+  "${ff[@]}" -i "$src=30000/1001" -frames:v 48 "${x264[@]}" \
+    -x264-params "bframes=3:b-pyramid=normal:keyint=16:min-keyint=16:scenecut=0" -f mpegts seek/h264-2997.ts
+  "${ff[@]}" -i "$src=25" -frames:v 48 "${x264[@]}" \
+    -x264-params "bframes=3:keyint=16:min-keyint=16:scenecut=0" -f mpegts -mpegts_m2ts_mode 1 seek/h264.m2ts
+  # Fragmented MP4 with reordered frames: no sample tables, and no edit
+  # list to hide the reorder delay, so the first frame starts after zero.
+  "${ff[@]}" -i "$src=30" -frames:v 48 "${x264[@]}" \
+    -x264-params "bframes=2:keyint=16:min-keyint=16:scenecut=0" \
+    -movflags +frag_keyframe+empty_moov+default_base_moof seek/h264-fragmented.mp4
+  local f
+  for f in seek/*; do
+    if (( $(file_bytes "$f") > MAX_BYTES )); then
+      echo "$f exceeds the fixture size limit" >&2
+      return 1
+    fi
+  done
+}
+
+if [[ "${1:-}" == "seek" ]]; then
+  gen_seek
+  exit 0
+fi
+
 OUTPUTS=(
   h264-aac.mp4 h264-aac.mov hevc.mov hevc.mp4 hevc-alpha.mov
   prores422.mov prores4444-alpha.mov vp9-opus.webm vp8-opus.webm av1.mp4

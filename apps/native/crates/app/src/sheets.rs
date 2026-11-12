@@ -160,21 +160,6 @@ pub fn hex_colour(hex: &str) -> Option<u32> {
         _ => None,
     }
 }
-/// The token rows a surface takes, so the footer sits below all of them.
-fn rows(surface: &Surface) -> usize {
-    // A size's two numbers share one row.
-    let controls = surface.fields.len();
-    let lines = surface
-        .fields
-        .iter()
-        .map(|f| usize::from(f.error.is_some()) + usize::from(f.description.is_some()))
-        .sum::<usize>();
-    controls
-        + lines
-        + surface.groups.len()
-        + usize::from(surface.line.is_some())
-        + usize::from(surface.warning.is_some())
-}
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
 /// Returns the sheet and its fields' description lines.
@@ -184,7 +169,7 @@ pub fn from_surface(
 ) -> (Sheet, BTreeMap<String, Retained<NSTextField>>) {
     let mtm = MainThreadMarker::new().unwrap();
     let mut descriptions = BTreeMap::new();
-    let mut sheet = Sheet::new(&surface.title, rows(surface), tokens, false, mtm);
+    let mut sheet = Sheet::new(&surface.title, tokens, false, mtm);
     if let Some(line) = &surface.line {
         sheet.line(line, tokens.typography.body.into(), tokens.colors.secondary);
     }
@@ -195,11 +180,7 @@ pub fn from_surface(
             .iter()
             .find(|g| g.fields.first() == Some(&field.id.as_str()))
         {
-            sheet.line(
-                group.title,
-                tokens.typography.body.into(),
-                tokens.colors.text,
-            );
+            sheet.heading(group.title);
         }
         match field.piece {
             NativePiece::NumberField if field.values.len() == 2 => {
@@ -255,15 +236,11 @@ pub fn from_surface(
             } else {
                 tokens.colors.muted
             };
-            let label = sheet.line_reserving(text, &reserve, tokens.typography.minimum.into(), rgb);
+            let label = sheet.note(text, &reserve, rgb);
             descriptions.insert(field.id.clone(), label);
         }
         if let Some(error) = field.error {
-            sheet.line(
-                error,
-                tokens.typography.minimum.into(),
-                tokens.colors.danger,
-            );
+            sheet.note(error, error, tokens.colors.danger);
         }
     }
     if let Some(warning) = &surface.warning {
@@ -290,7 +267,6 @@ pub fn from_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dialogs::{CompositionDraft, DialogId, MixedNumber, VelocityDraft, WindowId};
     #[test]
     fn hex_seeds_only_what_it_can_read() {
         assert_eq!(hex_colour("#1a1a2e"), Some(0x1a1a2e));
@@ -298,31 +274,5 @@ mod tests {
         assert_eq!(hex_colour("#FFFFFF00"), None);
         assert_eq!(hex_colour("red"), None);
         assert_eq!(hex_colour(""), None);
-    }
-    #[test]
-    fn rows_count_every_line_a_surface_draws() {
-        let draft = CompositionDraft {
-            name: "Comp".into(),
-            width: 1920.,
-            height: 1080.,
-            fps: 30.,
-            duration: 10.,
-            background: "#000000".into(),
-        };
-        let (id, owner) = (DialogId("sheet".into()), WindowId("window".into()));
-        // Six fields (Size's two numbers share a row) and Duration's detail line.
-        let plain = draft.surface(id.clone(), owner.clone(), false, 0);
-        assert_eq!(rows(&plain), 7);
-        let warned = draft.surface(id.clone(), owner.clone(), true, 2);
-        assert_eq!(rows(&warned), 7);
-        let number = MixedNumber::new(&[1.]);
-        let velocity = VelocityDraft {
-            incoming_speed: number.clone(),
-            incoming_influence: number.clone(),
-            outgoing_speed: number.clone(),
-            outgoing_influence: number,
-        };
-        // Four fields, two headings and the keyframe count.
-        assert_eq!(rows(&velocity.surface(id, owner, 1, "")), 7);
     }
 }

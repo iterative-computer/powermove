@@ -167,6 +167,8 @@ pub struct NativeControl {
     /// Fills a slot that may be narrower than `width` (its node has
     /// `flexShrink`); AppKit then truncates the title.
     pub fill: bool,
+    /// A segmented control as wide as its row, in equal segments.
+    stretch: bool,
     /// The keyboard was asked for before the control was in its window.
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
@@ -478,6 +480,7 @@ impl NativeControl {
             inline,
             // A search field is as wide as the place it is given.
             fill: matches!(kind, Kind::Search),
+            stretch: false,
             focus: Rc::default(),
             host_revision: None,
         }
@@ -513,6 +516,22 @@ impl NativeControl {
     }
     pub fn is_search(&self) -> bool {
         matches!(self.control, Control::Search(_))
+    }
+    /// Whether the control takes the whole width of its row.
+    pub fn stretches(&self) -> bool {
+        self.stretch
+    }
+    /// A segmented control fills its row with equal segments (a sheet's
+    /// destinations), instead of standing at the width of its titles.
+    pub fn stretch(&mut self) {
+        let Control::Segmented(v) = &self.control else {
+            return;
+        };
+        for i in 0..v.segmentCount() {
+            v.setWidth_forSegment(0., i);
+        }
+        v.setSegmentDistribution(NSSegmentDistribution::FillEqually);
+        self.stretch = true;
     }
     /// Whether the keyboard is in this control (a search field's editor).
     pub fn focused(&self) -> bool {
@@ -593,7 +612,7 @@ impl Render for NativeControl {
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
-        let root = if matches!(self.control, Control::Search(_)) {
+        let root = if self.stretch || matches!(self.control, Control::Search(_)) {
             div().w_full()
         } else if self.fill {
             div().w_full().max_w(px(self.width))

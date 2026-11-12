@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use pm_media::clip::ClipTiming;
 use pm_media::frame::{Layout, PixelFormat, PlaneFormat, PlaneView};
 use pm_media::probe::color::frame_reading;
 use pm_protocol::color::{
@@ -25,13 +26,16 @@ impl Renderer {
     /// frame's colour tags. `outputSize`/fit are presentation geometry and
     /// deliberately do not resample these samples. `Ok(None)`: Chromium cannot
     /// apply this frame's reading exactly; draw it with `source_rgba8_composed`.
+    /// `clip` is the asset's reading of its file's times, so a source time
+    /// shows the frame the asset's layers show at it.
     pub fn source_video_planes(
         &mut self,
         path: &Path,
         time: Ticks,
+        clip: ClipTiming,
         sequence: bool,
     ) -> Result<Option<(Size, Vec<u8>, SourceVideoFrame)>, String> {
-        self.source_video_planes_with(path, time, sequence, u64::MAX, |length, pack| {
+        self.source_video_planes_with(path, time, clip, sequence, u64::MAX, |length, pack| {
             let mut bytes = vec![0; length];
             pack(&mut bytes).map(|()| bytes)
         })
@@ -49,6 +53,7 @@ impl Renderer {
         &mut self,
         path: &Path,
         time: Ticks,
+        clip: ClipTiming,
         sequence: bool,
         max_pixels: u64,
         sink: impl FnOnce(usize, &mut dyn FnMut(&mut [u8]) -> Result<(), String>) -> Result<T, String>,
@@ -66,7 +71,7 @@ impl Renderer {
         }
         let Some((source, frame)) = self
             .media
-            .source_exact_decoded(path, time, |source| {
+            .source_exact_decoded(path, time, clip, |source| {
                 tags(source).is_some()
                     && source.probe.video.as_ref().is_some_and(|video| {
                         u64::from(video.width) * u64::from(video.height) <= max_pixels

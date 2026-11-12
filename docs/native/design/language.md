@@ -18,7 +18,14 @@ the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
 text field's `metadata.search`; `metrics.symbol_action`;
 `pm_shell::native::selected_color`; `ControlSpec::quiet` and the panel
 variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
-`TreeItem`) are rounded. Nothing was renamed or removed.
+`TreeItem`) are rounded; `pm_shell::resize_from_top`;
+`NativeControl::stretch` (a `SegmentedControl` with `flexGrow`); a sheet's
+`data-pm-slot="body"`; a `Switch` in a sheet; `translucency.glass_menu`;
+`Kit::menu_light` and `Kit::menu_heading`; a `transient::Choice` has a
+`category` and a `checked` state (`Choice::new(..).within(..).checked(..)`).
+One change of meaning: `transient::Picker::selected` is gone. A menu has no
+selected row; it has the keyboard's row (`keyed`) and the pointer's (`hover`),
+and `lit()` is the one that shows. `Kit::menu_row` no longer washes itself.
 
 ## Colour
 
@@ -63,7 +70,8 @@ The system font through CoreText (`TEXT_FONT`), one role per job
 | Title | 13 | medium | Panel and window titles |
 | Reading | 13 | regular | Running prose |
 | Heading | 15 | semibold (`display_weight`) | Sheet and section headings |
-| Display | 24 | semibold (`display_weight`) | A screen's title (Home, Settings) |
+| Headline | 17 | semibold (`display_weight`) | The title in a screen's header row (Home) |
+| Display | 24 | semibold (`display_weight`) | A screen's title (Settings) |
 | Timecode | 13 | medium, tabular | Timecode and numeric readouts |
 
 Text sizes use the font's own tracking table; Heading and Display are set
@@ -120,7 +128,10 @@ Real system material through AppKit, for what the system itself makes glass:
   sheet stands out from it: the change of value is the only line between
   them.
 - Popovers with their own window: `popover_frame`. The palette and field menu
-  are pooled child windows (`native::Popup`).
+  are pooled child windows (`native::Popup`) on glass, with the floating
+  colour laid under their rows (`translucency.glass_menu`): glass alone takes
+  its value from what is behind it, so dark ink over a dark viewer in the
+  light appearance would not read, and a glass tint does not hold it.
 - The window ground is a tint over a behind-window blur.
 
 The viewer, the timeline and dense panels are solid. Glass has no hover of its
@@ -142,8 +153,9 @@ ticks while nothing moves.
 | `Show`, `Pop` | A row appearing; a mark confirming an action |
 
 Press answers on pointer-down with no animation. Keyboard-driven changes do
-not animate. Reduce Motion snaps anything that moves and turns fades into a
-0.15 s cross-fade.
+not animate, with one exception: a menu's highlight glides one row for one
+key press, and steps without the glide while a key repeats. Reduce Motion
+snaps anything that moves and turns fades into a 0.15 s cross-fade.
 
 ## Controls
 
@@ -183,6 +195,29 @@ per frame, then: `button` (primary, neutral, quiet, destructive),
 `pm_shell::text::TextField` (a native field in a drawn well). Right-click
 menus are `NSMenu` (`Host::context_menu`).
 
+Menus. The system's menu (`NSMenu`) is for a right-click and for a pop-up
+button. A menu a button of ours opens, and the command palette, are ours and
+share their parts, in AppKit (`native::Popup`) and drawn (`Kit::menu`):
+
+- Nothing is lit when it opens. One highlight (`Kit::menu_light`) shows the
+  lit row: the row under the pointer while the pointer is over one, else the
+  keyboard's. It appears on the row it lands on, glides between rows on the
+  layout spring and leaves with the pointer. `transient::Picker` holds that
+  state for both.
+- Rows are the Body role with a check column when any row has a state,
+  section headings in the Caption role and the muted ink
+  (`Kit::menu_heading`; the palette lists a command under its menu), and
+  shortcut hints right-aligned in the faint ink.
+- Keys: the arrows, Home and End move the highlight (wrapping), Return
+  chooses the lit row and does nothing when none is lit, Escape closes. The
+  palette and the field menu filter as you type in the system's search field
+  and light the best match; a section stays whole and stands where its best
+  match does. A menu with no field lights the first row a typed letter
+  starts.
+- Corners are concentric: the palette is 16 with rows 6 inside it (row corner
+  10), a menu is 12 with rows 4 inside (row corner 8).
+- It opens on the enter spring and closes on the exit fade.
+
 Every drawn control: arrow cursor, hover wash, pressed fill, neutral
 keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
 (`metrics.symbol_toolbar` 14, `symbol_panel` 14, `symbol_inline` 12, and
@@ -195,17 +230,34 @@ Lists are quiet text for recall by name: no glyph tiles, no dividers.
 ## Home
 
 A sidebar for navigation only (Recents, Trash, Store, the account) on the
-window's glass, and one inset sheet. The sheet's header is two rows on the
-sheet's margins: the section title, the one wide search field in the middle
-(the large system field, its shortcut at the trailing end while it is empty)
-and Open… with the one accent action; then the count and the quiet sort and
-layout controls. A project is its poster: the frame in the composition's own
-shape with a continuous corner, a hairline and a soft shadow, the name and
-one line of facts under it, and a small dot when it is open (the accent for
-this window's project). A project with no poster yet is a quiet ground of the
-same shape that says its size. Under the pointer a card rises on the hover
-springs; pressed, it sits back down; a sort or a search slides cards to their
-new places. The list is the dense alternative under the same header.
+window's glass, and one inset sheet. The sheet's header is drawn, quiet and
+borderless: nothing in it is a bezelled system control (hosted AppKit
+controls are for forms: Settings, sheets, panel option rows).
+
+- One inset (24) for the title, both header rows and the cards; one text
+  size for the header's controls (Body); one ink in alpha steps (wash 4.5 %,
+  a step deeper under the pointer or when on, deeper again while pressed).
+- First row, 48 high: the title in the Headline role (17, semibold); the
+  search in the middle of the sheet, a soft pill 32 high with no edge (a
+  magnifier, the bare native text field, the shortcut in the faint ink while
+  it is empty), at most 360 wide; at the trailing edge Open… and New Project
+  as icons alone, 32 square, no fill at rest, their names and shortcuts in
+  the tooltips. ⌘F puts the keyboard in the search; typing filters.
+- Second row, 28 high: the count in the muted ink; the sort as a text action
+  (an icon and the current order) that opens our menu; then the grid/list
+  switch, the header's one raised element (a small pill, two 30 × 24 cells,
+  the on fill gliding between them).
+- A project is a framed page: a 4 pt frame of ink around the page, corners
+  concentric (page 16, frame 20, continuous), in one shape for every card.
+  The poster fills the page when it has the page's shape and stands whole on
+  the viewer's ground otherwise; a project with no poster yet is an empty
+  page that says its size. Under the pointer the frame deepens a step;
+  selected, it carries a ring of ink inside its edge. The name and one line
+  of facts stand under the card on the page's edge, with a small dot when
+  the project is open (the accent for this window's).
+- Cards are 240 wide when four or more fit, and one to three wider ones on
+  a narrow sheet; a sort or a search slides them to their new places. The
+  list is the dense alternative under the same header.
 
 ## Settings
 
@@ -221,6 +273,38 @@ and every row title start on one x: a card bleeds past that column by the
 row inset. Lists that are not settings (speech models, installed extensions,
 the Store, memory notes) are rows of the same cards, never loose text. A
 search lists every section with a match and dims the others in the sidebar.
+
+## Sheets
+
+A form in a sheet is a Settings page in a sheet: the title, then cards of
+rows under quiet headings, then Cancel and the default action at the trailing
+edge of the bottom (no rule above them). A row is its title over its notes
+(a description, or what is wrong with the value), with a real control of its
+natural width at the trailing edge: the pop-up, the system switch (never a
+checkbox or Off | On segments for a yes-or-no row), a text or number field, a
+colour well. Numbers end before one unit column, so their right edges line
+up whatever the unit. Radios keep their own titles, one to a row.
+
+One text column: the sheet's title, a destination's description, section
+headings, row titles, notes and the summary all start on
+`sheet_inset + inset` (32 pt); cards start on `sheet_inset`. Measure it in a
+capture before showing a sheet.
+
+Two builders, one anatomy: a panel sheet is `SheetAnchor` with `FormGroup`
+and `FormRow` (Export), and an AppKit sheet is `surfaces::sheet_layout`
+(`Sheet`: `text`, `number`, `pair`, `control`, `toggle`, `swatch`, `option`,
+`note`, `heading`, `line`, laid out by `footer`), which every `Surface` form
+goes through (composition settings, new composition and project, pre-compose,
+keyframe value, velocity and scale, captions, sequence import, sign-in and
+Store forms). Confirmations are the system's alert sheets.
+
+A sheet whose content changes height marks the part between its title and
+its actions `data-pm-slot="body"`. Its window follows the body's height on
+the layout spring from a fixed top edge (`pm_shell::resize_from_top`; AppKit
+would centre the sheet again on every frame, so the window class hangs it
+from the top it was first given), the actions ride the bottom edge, and
+nothing else moves. Hosted controls keep their distance from the window's
+top between a resize and the next paint.
 
 ## Timeline strips
 

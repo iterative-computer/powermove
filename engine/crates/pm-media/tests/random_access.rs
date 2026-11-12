@@ -6,8 +6,11 @@
 //! own decode (our LGPL build) gives the same frames; and every file reaches
 //! GPU-shareable memory through at least one backend without a copy.
 //!
-//! The e2e fixtures run by default. The generated corpus
-//! (`tests/corpus/gen.sh`) runs with `--ignored`:
+//! The e2e fixtures and the exact-seek subset (`engine/fixtures/seek`:
+//! B-pyramid, open GOP, variable frame rate, a transport stream and its
+//! AVCHD wrapper, fragmented MP4; three of them start after zero) run by
+//! default. The generated corpus (`tests/corpus/gen.sh`) runs with
+//! `--ignored`:
 //!
 //! ```sh
 //! cargo test -p pm-media --release --test random_access -- --ignored --test-threads=1
@@ -21,6 +24,27 @@ use pm_media::vt::DecodePurpose;
 #[test]
 fn e2e_fixtures() {
     run_all(&videos(&fixtures_dir(), &|_| true), DecodePurpose::Display);
+}
+
+/// The structures that break frame-exact random access, in every run:
+/// reordered long GOPs, open GOPs in H.264 and HEVC, variable frame rate,
+/// 90 kHz transport-stream timestamps with a first frame near 1.4 s, the
+/// 192-byte AVCHD wrapper, and fragmented MP4 without sample tables.
+#[test]
+fn seek_fixtures() {
+    let files = videos(&fixtures_dir().join("seek"), &|_| true);
+    assert_eq!(files.len(), 7, "{files:?}");
+    let late = files
+        .iter()
+        .filter(|f| {
+            pm_media::decode::service::MediaSource::open(f)
+                .unwrap()
+                .origin_pts
+                > 0
+        })
+        .count();
+    assert_eq!(late, 3, "the transport streams and the fragmented MP4");
+    run_all(&files, DecodePurpose::Display);
 }
 
 /// Cancellation can stop a seek after reset, before any picture is fed.

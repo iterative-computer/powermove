@@ -2831,6 +2831,7 @@ pub(crate) fn sync_render_storage(
     std::thread::Builder::new()
         .name("pm-render-storage".into())
         .spawn(move || {
+            disk.set_content_named(Some(pro_media.objects().to_owned()));
             let _ = disk.set_storage(pro_media.render_frames());
         })
         .ok();

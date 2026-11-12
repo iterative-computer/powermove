@@ -32,7 +32,7 @@
 //! - The shared state is never held across disk IO; the render bar reads a
 //!   snapshot published on every change.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -46,9 +46,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::render::Scene;
 
-/// Frames on disk: RGBA32F rows, top-down, the export's premultiplied
-/// working values, coded losslessly (`crate::frame_codec`).
-pub const FORMAT: &str = "rgba32f-export-lzfse-v3";
+/// Frames on disk: RGBA16F rows, top-down, the export's premultiplied
+/// working values rounded to the half floats the viewer's surface holds,
+/// coded losslessly (`crate::frame_codec`).
+pub const FORMAT: &str = "rgba16f-export-lzfse-v4";
 /// Media stamps are looked at again at most this often.
 const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
@@ -56,6 +57,29 @@ const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
 const AHEAD: i64 = 6;
 const READY_FRAMES: usize = 8;
+/// Reader threads.
+const READERS: usize = 3;
+/// Frames kept read at a paused playhead, so a play starts from them.
+const WARM: i64 = 3;
+/// The most the reader holds: read frames, and for every read asked for or
+/// in flight its decoded frame and its coded bytes (twice the frame at
+/// most). Look-ahead is what fits: six frames ahead at 1080p (as measured
+/// for playback without a dropped frame), three at 4K, one frame at a time
+/// at 8K. Half under memory pressure; at Critical only the frame the
+/// playhead is on.
+pub(crate) const READ_AHEAD_BYTES: u64 = 256 << 20;
+/// The most kept read while stopped ([`WARM`] frames of 1080p).
+const WARM_BYTES: u64 = 64 << 20;
+/// How long a playing frame waits for its frame on disk to be read. A
+/// frame is on disk because drawing it takes longer than its interval, so
+/// a short wait for the reader always beats drawing it again.
+pub(crate) const PATIENCE: Duration = Duration::from_millis(40);
+/// How long a paused frame waits for its frame on disk: longer than a
+/// playing one, and still far less than drawing and refining it.
+pub(crate) const PAUSED_PATIENCE: Duration = Duration::from_millis(250);
+/// Playing frames in a row that give way to the reader before one is drawn
+/// after all (a disk too slow to play from must not freeze the viewer).
+pub(crate) const LATE_AT_MOST: u32 = 6;
 /// Background rendering judges and renders the composition in chunks of
 /// about this long.
 const CHUNK_SECONDS: f64 = 0.5;
@@ -69,6 +93,8 @@ const NEAR_AHEAD: f64 = 5.;
 /// A background fill waits paused for the person at most this long; then
 /// its child stops (and gives back its memory) until they are idle again.
 const PAUSED_AT_MOST: Duration = Duration::from_secs(20);
+/// The volume's free space is looked at again at most this often.
+const FLOOR_EVERY: Duration = Duration::from_secs(3);
 /// A background fill that failed is not tried again on the same state
 /// sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -127,6 +153,12 @@ pub struct FrameReport {
 /// A fill child's failure when the volume is nearly full.
 pub const DISK_FULL: &str =
     "Rendering stopped because the disk is almost full. Free some space and render again.";
+/// Background rendering leaves at least this much free on the volume that
+/// holds rendered frames: below it no fill starts and a running one stops.
+/// (A render the person asks for keeps the export's own reserve.)
+pub const BACKGROUND_FLOOR: u64 = 20 << 30;
+/// Why background rendering is not rendering while the volume is that full.
+pub const BACKGROUND_LOW_DISK: &str = "Background rendering is paused: less than 20 GB is free on the disk that holds rendered frames.";
 /// A fill child's failure when kept frames fill Settings › Media › Render Files Limit.
 pub const LIMIT_FULL: &str =
     "Kept rendered frames fill the Render Files Limit. Raise the limit or delete rendered frames.";
@@ -136,6 +168,17 @@ type Stamp = (PathBuf, u64, u128, u64);
 /// A frame's key digest: the global fingerprint, its inputs' digest and its
 /// time.
 type FrameId = [u8; 32];
+
+/// What a read frame's pixels are of: the frame's key digest, and the cache
+/// generation it was read under. Whoever holds the pixels past the read (an
+/// upload made ahead of its turn) shows them only while both still are the
+/// frame's ([`DiskFrames::held`]): an observation of anything the fingerprint
+/// covers, a storage change or a deletion moves the generation on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    generation: u64,
+    id: FrameId,
+}
 
 /// The composition state a fingerprint is taken of.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -308,12 +351,15 @@ impl Known {
 pub struct Background {
     pub enabled: bool,
     pub delay: Duration,
+    /// Free space it leaves on the volume ([`BACKGROUND_FLOOR`]).
+    pub floor: u64,
 }
 impl Default for Background {
     fn default() -> Self {
         Self {
             enabled: true,
             delay: Duration::from_secs(5),
+            floor: BACKGROUND_FLOOR,
         }
     }
 }
@@ -375,10 +421,18 @@ struct State {
     notify: Option<Notify>,
     wake: Option<std::sync::mpsc::SyncSender<()>>,
     root: Option<(PathBuf, u64)>,
+    /// The volume's free space, as a test says it is.
+    free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// The folder whose files are named by their bytes
+    /// ([`DiskFrames::set_content_named`]).
+    content_named: Option<PathBuf>,
     cache: Option<Arc<RenderCache>>,
     /// Rises with every new observation, storage or deletion: fences
     /// fingerprints and indexes that started before it.
     generation: u64,
+    /// `generation` as of the last published change, for the indexer to
+    /// read without the lock ([`Indexer`]).
+    live: Arc<AtomicU64>,
     /// Rises with every storage change or deletion: fences fills' frames.
     storage: u64,
     frames: Option<Frames>,
@@ -411,6 +465,7 @@ struct Inner {
     published: Mutex<Arc<RenderBars>>,
     running: Mutex<Option<Running>>,
     reader: Reader,
+    indexer: Indexer,
     /// The background delay in milliseconds, read live by fill children.
     delay_ms: Arc<AtomicU64>,
     scheduling: std::sync::Once,
@@ -433,12 +488,15 @@ pub struct DiskFrames {
 }
 impl Default for DiskFrames {
     fn default() -> Self {
+        let state = State::default();
+        let indexer = Indexer::start(state.live.clone());
         Self {
             inner: Arc::new(Inner {
-                state: Mutex::default(),
+                state: Mutex::new(state),
                 published: Mutex::default(),
                 running: Mutex::default(),
                 reader: Reader::start(),
+                indexer,
                 delay_ms: Arc::new(AtomicU64::new(
                     Background::default().delay.as_millis() as u64
                 )),
@@ -451,6 +509,7 @@ impl Default for DiskFrames {
 /// Something the render bar shows changed: publish a snapshot and tell
 /// whoever listens (never blocking).
 fn bump(state: &mut State, published: &Mutex<Arc<RenderBars>>) {
+    state.live.store(state.generation, Ordering::Release);
     state.revision += 1;
     *published.lock().unwrap() = Arc::new(snapshot(state));
     if let Some(notify) = &state.notify {
@@ -524,26 +583,45 @@ fn snapshot(state: &State) -> RenderBars {
 }
 
 impl DiskFrames {
-    /// Drop CPU read-ahead while stopped, fencing queued/in-flight reads
-    /// with an empty wanted range. Authored/kept files and scene identity stay.
+    /// Drop CPU read-ahead while stopped, except the few frames at the
+    /// paused playhead a play starts from ([`WARM`]); queued and in-flight
+    /// reads beyond them are fenced by the wanted range. Authored/kept
+    /// files and scene identity stay.
     pub(crate) fn release_idle_reads(&self) {
-        let generation = self.with(|s| {
-            s.last_read = None;
-            (s.generation, false)
+        let (generation, at, size) = self.with(|s| {
+            (
+                (s.generation, s.last_read, s.frames.as_ref().map(|f| f.size)),
+                false,
+            )
         });
-        self.inner.reader.clear(generation);
+        match (at, size) {
+            (Some(n), Some(size)) => {
+                let warm = WARM.min((WARM_BYTES / frame_bytes(size)) as i64);
+                self.inner.reader.keep(generation, n, n + warm - 1)
+            }
+            _ => self.inner.reader.clear(generation),
+        }
     }
 
+    /// Every byte the reader holds or is about to: read frames, and reads
+    /// asked for or in flight ([`READ_AHEAD_BYTES`]).
     pub(crate) fn ready_bytes(&self) -> u64 {
-        self.inner
-            .reader
-            .ready
-            .lock()
-            .unwrap()
-            .frames
-            .iter()
-            .map(|(_, bytes)| bytes.len() as u64)
-            .sum()
+        self.inner.reader.ready.lock().unwrap().held()
+    }
+
+    /// The process's memory pressure, as the engine sees it at every frame:
+    /// the reader's budget follows it at once (frames beyond it are
+    /// dropped, reads not yet started are cancelled).
+    pub(crate) fn memory_pressure(&self, level: crate::memory::Pressure) {
+        self.inner.reader.pressure(level);
+    }
+
+    /// The reader's budget at no pressure (tests: a small lease).
+    #[cfg(test)]
+    pub(crate) fn set_read_budget(&self, bytes: u64) {
+        let mut ready = self.inner.reader.ready.lock().unwrap();
+        ready.cap = bytes;
+        ready.trim();
     }
 
     /// Called (on any thread, never blocking) whenever the render bar changes.
@@ -591,7 +669,7 @@ impl DiskFrames {
     /// any fingerprint or disk read that was already running.
     pub(crate) fn forget_document(&self, doc_id: u64) {
         let generation = self.with(|s| {
-            if !s.frames.as_ref().is_some_and(|f| f.source.doc_id == doc_id) {
+            if s.frames.as_ref().is_none_or(|f| f.source.doc_id != doc_id) {
                 return (None, false);
             }
             s.generation += 1;
@@ -605,6 +683,19 @@ impl DiskFrames {
             self.inner.reader.clear(generation);
             self.cancel_fill();
         }
+    }
+
+    /// The folder whose files are named by their bytes (the app's media
+    /// cache objects). Such a file's name is its content; its modification
+    /// time is the media cache's recency mark, set again at every open, and
+    /// its inode changes when it is extracted again. Neither is part of a
+    /// frame's identity: with them, every launch orphaned the frames the
+    /// one before had rendered.
+    pub fn set_content_named(&self, dir: Option<PathBuf>) {
+        self.with(|s| {
+            s.content_named = dir;
+            ((), false)
+        });
     }
 
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
@@ -701,7 +792,8 @@ impl DiskFrames {
         }
         drop(state);
         // A few stats, every 2 s at most, outside the lock.
-        let media = stamps(&scene.media);
+        let content_named = self.with(|s| (s.content_named.clone(), false));
+        let media = stamps(&scene.media, content_named.as_deref());
         let mut state = self.inner.state.lock().unwrap();
         state.media_checked = Some(Instant::now());
         if unchanged
@@ -763,61 +855,18 @@ impl DiskFrames {
         bump(&mut state, &self.inner.published);
         let cache = state.cache.clone().expect("checked above");
         drop(state);
-        let weak = Arc::downgrade(&self.inner);
-        std::thread::Builder::new()
-            .name("pm-render-cache".into())
-            .spawn(move || {
-                let fingerprint = fingerprint(&source, &identity);
-                let inputs = crate::frame_inputs::frame_digests(
-                    &source.scene.doc,
-                    &identity.comp,
-                    rate,
-                    count,
-                    // Override code can read anything in the document.
-                    identity.overrides.is_some(),
-                )
-                .unwrap_or_default();
-                // A frame is its inputs at its time.
-                let ids: Vec<FrameId> = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(n, d)| {
-                        let mut id = blake3::Hasher::new();
-                        id.update(&fingerprint);
-                        id.update(d);
-                        id.update(&rate.frame_start(n as i64).unwrap_or(-1).to_le_bytes());
-                        *id.finalize().as_bytes()
-                    })
-                    .collect();
-                let template = Frames {
-                    identity,
-                    source,
-                    fingerprint: Some(fingerprint),
-                    ids: Arc::new(ids),
-                    size,
-                    rate,
-                    count,
-                    present: HashSet::new(),
-                    kept: HashSet::new(),
-                };
-                let keys: Vec<(i64, RenderKey)> = (0..count)
-                    .filter_map(|n| Some((n, template.key(n)?)))
-                    .collect();
-                let (present, kept) = index(&cache, &keys);
-                let Some(inner) = weak.upgrade() else { return };
-                let mut state = inner.state.lock().unwrap();
-                // Only the observation it was taken for: anything since
-                // (another observation, storage, a deletion) wins.
-                if state.generation == generation {
-                    state.frames = Some(Frames {
-                        present,
-                        kept,
-                        ..template
-                    });
-                    bump(&mut state, &inner.published);
-                }
-            })
-            .ok();
+        // One worker takes it: a newer observation replaces one still
+        // waiting, and the one being worked on stops at its next stage.
+        self.inner.indexer.submit(Indexing {
+            inner: Arc::downgrade(&self.inner),
+            generation,
+            source,
+            identity,
+            cache,
+            size,
+            rate,
+            count,
+        });
         true
     }
 
@@ -960,6 +1009,13 @@ impl DiskFrames {
             ..Fill::default()
         };
         let storage = state.storage;
+        // Background rendering stops at its floor; a render asked for keeps
+        // the export's reserve.
+        let reserve = if background {
+            state.background.floor
+        } else {
+            0
+        };
         // Probes measure frames at the size the viewer draws them.
         let probe_scale = state.viewer.map_or(1., |v| {
             (f64::from(v.width) / f64::from(size.width.max(1))).clamp(0.05, 1.)
@@ -977,7 +1033,7 @@ impl DiskFrames {
             probe_scale,
         };
         let delay = self.inner.delay_ms.clone();
-        let started = fill_request(&source, rate, fill)
+        let started = fill_request(&source, rate, fill, reserve)
             .and_then(|request| {
                 let mut session = crate::jobs::JobSession::new(request);
                 if background {
@@ -1013,8 +1069,24 @@ impl DiskFrames {
         }
     }
 
+    /// Free space on the volume that holds rendered frames.
+    fn free_space(&self) -> Option<u64> {
+        let (dir, free) = {
+            let state = self.inner.state.lock().unwrap();
+            (
+                state.root.as_ref().map(|r| r.0.clone())?,
+                state.free.clone(),
+            )
+        };
+        match free {
+            Some(free) => Some(free()),
+            None => crate::jobs::free_bytes(&dir).ok(),
+        }
+    }
+
     /// One look of the background scheduler (see the module).
     fn tick(&self, watch: &mut Watch) {
+        self.retire_gone();
         let (host, config, activity, generation) = {
             let state = self.inner.state.lock().unwrap();
             (
@@ -1048,7 +1120,13 @@ impl DiskFrames {
             let state = self.inner.state.lock().unwrap();
             (
                 state.fill.generation,
-                state.fill.error.is_some(),
+                // Stopped at the floor is not a failure to wait out: it
+                // goes on as soon as there is room.
+                state
+                    .fill
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e != BACKGROUND_LOW_DISK),
                 state.fill.ended,
             )
         };
@@ -1069,6 +1147,36 @@ impl DiskFrames {
         let (Some(host), true, true) = (host, allowed, idle) else {
             return;
         };
+        // Never below the floor: nothing starts, and the bars say why
+        // (looked at every few seconds; rendering goes on once there is room).
+        let low = match watch.floor {
+            Some((at, low)) if at.elapsed() < FLOOR_EVERY => low,
+            _ => {
+                let low = self.free_space().is_some_and(|free| free < config.floor);
+                watch.floor = Some((Instant::now(), low));
+                low
+            }
+        };
+        if low {
+            self.with(|s| {
+                let said = s.fill.background
+                    && s.fill.generation == generation
+                    && s.fill.error.as_deref() == Some(BACKGROUND_LOW_DISK);
+                if !said {
+                    s.fill = Fill {
+                        serial: s.fill.serial + 1,
+                        generation,
+                        background: true,
+                        error: Some(BACKGROUND_LOW_DISK.to_owned()),
+                        disk_full: true,
+                        ended: Some(Instant::now()),
+                        ..Fill::default()
+                    };
+                }
+                ((), !said)
+            });
+            return;
+        }
         if fill.1 && fill.0 == generation && fill.2.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
             return;
         }
@@ -1187,7 +1295,127 @@ impl DiskFrames {
 
     /// A frame on disk for `scene` at `time` that the reader has loaded, and
     /// the next frames asked of it. Never waits on disk.
+    #[cfg(test)]
     pub(crate) fn read(&self, scene: &Scene, time: Ticks) -> Option<(Size, Arc<Vec<u8>>)> {
+        match self.read_within(scene, time, Duration::ZERO) {
+            Read::Frame(size, bytes, _) => Some((size, bytes)),
+            Read::Late(_) | Read::Absent => None,
+        }
+    }
+
+    /// Frames a read found missing or damaged ([`Reader::read_asks`]) are
+    /// not rendered: they leave the index, the render bar shows them
+    /// unrendered and background rendering renders them again. A frame
+    /// written again in the meantime (a stat, outside the lock) stays.
+    fn retire_gone(&self) {
+        let gone = {
+            let state = self.inner.state.lock().unwrap();
+            let Some(frames) = state.frames.as_ref() else {
+                return;
+            };
+            let gone = self.inner.reader.gone(state.generation);
+            if gone.is_empty() {
+                return;
+            }
+            let Some(cache) = state.cache.clone() else {
+                return;
+            };
+            let keys: Vec<(i64, RenderKey)> = gone
+                .into_iter()
+                .filter_map(|n| Some((n, frames.key(n)?)))
+                .collect();
+            (state.generation, cache, keys)
+        };
+        let (generation, cache, keys) = gone;
+        let absent: Vec<i64> = keys
+            .iter()
+            .filter(|(_, key)| !matches!(cache.presence(key), Ok(Some(_))))
+            .map(|(n, _)| *n)
+            .collect();
+        self.with(|s| {
+            let Some(frames) = s.frames.as_mut().filter(|_| s.generation == generation) else {
+                return ((), false);
+            };
+            let mut changed = false;
+            for n in absent {
+                changed |= frames.present.remove(&n);
+                frames.kept.remove(&n);
+            }
+            ((), changed)
+        });
+    }
+
+    /// [`Self::read`], waiting up to `patience` for the frame when it is on
+    /// disk and still being read (a playing frame: [`PATIENCE`]).
+    pub(crate) fn read_within(&self, scene: &Scene, time: Ticks, patience: Duration) -> Read {
+        self.retire_gone();
+        let Some((size, held, n, found)) = self.ask_ahead(scene, time, AHEAD, false) else {
+            return Read::Absent;
+        };
+        match found {
+            Some(bytes) => Read::Frame(size, bytes, held),
+            None => match self.inner.reader.wait(held.generation, n, patience) {
+                Ok(Some(bytes)) => Read::Frame(size, bytes, held),
+                Ok(None) => Read::Absent,
+                Err(Late) => Read::Late(size),
+            },
+        }
+    }
+
+    /// What `scene`'s rendered frame at `time` is now ([`Held`]): `None` when
+    /// this state has no such frame on disk.
+    pub(crate) fn held(&self, scene: &Scene, time: Ticks) -> Option<Held> {
+        let state = self.inner.state.lock().unwrap();
+        let frames = state.frames.as_ref()?;
+        if !frames.identity.scene_matches(scene) {
+            return None;
+        }
+        let n = frames.index(time)?;
+        frames.present.contains(&n).then_some(Held {
+            generation: state.generation,
+            id: frames.id(n)?,
+        })
+    }
+
+    /// The media files the open composition's rendered frames are drawn
+    /// from, by asset.
+    pub fn rendered_from(&self) -> Option<BTreeMap<String, PathBuf>> {
+        let state = self.inner.state.lock().unwrap();
+        Some(state.frames.as_ref()?.source.scene.media.paths.clone())
+    }
+
+    /// Whether `scene`'s frame at `time` is rendered on disk: playback
+    /// reads it, so nothing ahead of the playhead needs preparing for it.
+    pub(crate) fn rendered(&self, scene: &Scene, time: Ticks) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state.frames.as_ref().is_some_and(|frames| {
+            frames.identity.scene_matches(scene)
+                && frames.fingerprint.is_some()
+                && frames
+                    .index(time)
+                    .is_some_and(|n| frames.present.contains(&n))
+        })
+    }
+
+    /// The paused playhead is at `time`: its frame and the next few are
+    /// read ([`WARM`]), so a play from here starts on frames already read.
+    pub(crate) fn warm(&self, scene: &Scene, time: Ticks) {
+        self.retire_gone();
+        self.ask_ahead(scene, time, WARM, true);
+    }
+
+    /// Asks the reader for the frame at `time` and the `ahead - 1` after it
+    /// in the direction of motion (forward when `still`: a play starts
+    /// forward): the stored size, what the frame is of, its index, and the
+    /// frame if it is read already.
+    #[allow(clippy::type_complexity)]
+    fn ask_ahead(
+        &self,
+        scene: &Scene,
+        time: Ticks,
+        ahead: i64,
+        still: bool,
+    ) -> Option<(Size, Held, i64, Option<Arc<Vec<u8>>>)> {
         let mut state = self.inner.state.lock().unwrap();
         let state = &mut *state;
         let frames = state.frames.as_ref()?;
@@ -1195,24 +1423,28 @@ impl DiskFrames {
             return None;
         }
         let n = frames.index(time)?;
+        let id = frames.id(n)?;
         if let Some(last) = state.last_read.replace(n)
             && last != n
         {
             state.backward = n < last;
         }
+        state.backward &= !still;
         let size = frames.size;
+        // As far ahead as the reader's budget holds frames of this size.
+        let ahead = ahead.min(self.inner.reader.fit(size));
         // The frame, then the next ones in the direction of motion.
         let window = if state.backward {
-            (n - AHEAD + 1).max(0)..=n
+            (n - ahead + 1).max(0)..=n
         } else {
-            n..=(n + AHEAD - 1).min(frames.count - 1)
+            n..=(n + ahead - 1).min(frames.count - 1)
         };
         let order: Vec<i64> = if state.backward {
             window.clone().rev().collect()
         } else {
             window.clone().collect()
         };
-        let ahead: Vec<(i64, RenderKey)> = order
+        let asks: Vec<(i64, RenderKey)> = order
             .into_iter()
             .filter(|k| frames.present.contains(k))
             .filter_map(|k| Some((k, frames.key(k)?)))
@@ -1222,10 +1454,65 @@ impl DiskFrames {
         self.inner
             .reader
             .want(generation, *window.start(), *window.end());
-        for (k, key) in ahead {
-            self.inner.reader.ask(generation, k, key, &cache, size);
+        for (k, key) in asks {
+            self.inner
+                .reader
+                .ask(generation, k, key, &cache, size, k == n);
         }
-        found.map(|bytes| (size, bytes))
+        Some((size, Held { generation, id }, n, found))
+    }
+}
+
+/// What tests elsewhere in the crate need of the cache's state.
+#[cfg(test)]
+impl DiskFrames {
+    /// Waits until the observed state's fingerprint is taken.
+    pub(crate) fn test_ready(&self) {
+        let start = Instant::now();
+        while self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .frames
+            .as_ref()
+            .is_none_or(|f| f.fingerprint.is_none())
+        {
+            assert!(start.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Frame `n` of the observed state written as a fill child writes it,
+    /// every sample `value`: its time.
+    pub(crate) fn test_put(&self, n: i64, value: f32) -> Ticks {
+        let (key, time, size, cache) = {
+            let state = self.inner.state.lock().unwrap();
+            let frames = state.frames.as_ref().unwrap();
+            (
+                frames.key(n).unwrap(),
+                frames.ticks(n).unwrap(),
+                frames.size,
+                state.cache.clone().unwrap(),
+            )
+        };
+        let bytes: Vec<u8> = std::iter::repeat_n(
+            half::f16::from_f32(value).to_le_bytes(),
+            (size.width * size.height * 4) as usize,
+        )
+        .flatten()
+        .collect();
+        cache
+            .put(
+                &key,
+                &crate::frame_codec::encode(&bytes, size.width, size.height),
+            )
+            .unwrap();
+        self.reindex(true).unwrap();
+        time
+    }
+    /// Media stamps are looked at again at the next observation.
+    pub(crate) fn test_recheck_media(&self) {
+        self.inner.state.lock().unwrap().media_checked = None;
     }
 }
 
@@ -1337,6 +1624,9 @@ struct Watch {
     active_at: Instant,
     /// When the current stretch of activity began (`None` while idle).
     active_since: Option<Instant>,
+    /// When the volume's free space was last looked at, and whether it
+    /// was under [`BACKGROUND_FLOOR`].
+    floor: Option<(Instant, bool)>,
 }
 
 /// The background scheduler: looks ten times a second while the cache lives.
@@ -1345,6 +1635,7 @@ fn schedule(inner: Weak<Inner>) {
         seen: 0,
         active_at: Instant::now(),
         active_since: None,
+        floor: None,
     };
     loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -1360,21 +1651,13 @@ fn stop(running: Running) {
     let _ = running.thread.join();
 }
 
-/// The project's export default for motion blur (`exportDefaults.mblur`,
-/// on unless turned off, as the Export sheet reads it).
-fn export_motion_blur(doc: &pm_model::Document) -> bool {
-    doc.root()
-        .and_then(|r| r.get("exportDefaults"))
-        .and_then(|d| d.get("mblur"))
-        .is_none_or(|m| !matches!(m.kind(), pm_model::NodeKind::Bool(false)))
-}
-
 /// The fill child's request: the viewer's scene as an export job (png
 /// settings stand in for delivery; the child renders `fill`'s frames only).
 fn fill_request(
     source: &Source,
     rate: Rate,
     fill: CacheFill,
+    reserve: u64,
 ) -> anyhow::Result<crate::jobs::ExportRequest> {
     use pm_protocol::{
         color::{OutputColor, Precision},
@@ -1388,7 +1671,7 @@ fn fill_request(
     let settings = ExportSettings {
         format: ExportFormat::PngSequence { sixteen_bit: true },
         // Cached frames are the export's: opaque (the viewer shows the
-        // background), with the project's export motion blur.
+        // background).
         alpha: AlphaOutput::None,
         quality: QualityTier::High,
         size: Size::new(fill.width, fill.height),
@@ -1399,7 +1682,11 @@ fn fill_request(
         },
         audio: false,
         audio_index_playhead: None,
-        motion_blur: export_motion_blur(&source.scene.doc),
+        // The viewer's motion blur, not the Export sheet's default: every
+        // viewer frame draws the blur of the layers that have it on, and a
+        // rendered frame is the paused viewer's picture (drawn with the
+        // export's sample count, as a paused frame is).
+        motion_blur: true,
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
@@ -1429,7 +1716,7 @@ fn fill_request(
             definitions: source.definitions.clone(),
             ..Default::default()
         },
-        disk_reserve: crate::jobs::DISK_RESERVE,
+        disk_reserve: reserve.max(crate::jobs::DISK_RESERVE),
         // Cached frames are exact: a missing effect is never left out.
         bypass_missing_effects: false,
         without_offline: true,
@@ -1491,6 +1778,14 @@ fn run_fill(
         if let Some((error, disk_full)) = end {
             state.fill.running = false;
             state.fill.queued.clear();
+            // Background rendering stopped at its floor says so in its
+            // own words (the child's are an export's).
+            let error =
+                if state.fill.background && disk_full && error.as_deref() != Some(LIMIT_FULL) {
+                    Some(BACKGROUND_LOW_DISK.to_owned())
+                } else {
+                    error
+                };
             state.fill.error = error;
             state.fill.disk_full = disk_full;
             state.fill.ended = Some(Instant::now());
@@ -1532,10 +1827,24 @@ fn run_fill(
     }
 }
 
-/// Reads frames on a thread of its own, ahead of the playhead.
+/// What [`DiskFrames::read_within`] found.
+pub(crate) enum Read {
+    /// The frame, at its stored size, and what it is of.
+    Frame(Size, Arc<Vec<u8>>, Held),
+    /// On disk at this size, and still being read when the patience ran
+    /// out.
+    Late(Size),
+    /// Not on disk for this state.
+    Absent,
+}
+/// A frame still being read when the wait for it ended.
+struct Late;
+/// Reads frames on threads of its own, ahead of the playhead.
 struct Reader {
     asks: std::sync::mpsc::SyncSender<Ask>,
     ready: Arc<Mutex<Ready>>,
+    /// Signalled whenever a read ends ([`Reader::wait`]).
+    ended: Arc<std::sync::Condvar>,
 }
 struct Ask {
     id: (u64, i64),
@@ -1545,14 +1854,92 @@ struct Ask {
 }
 /// A read frame: the generation it was asked at, and its index.
 type ReadId = (u64, i64);
-#[derive(Default)]
 struct Ready {
     frames: VecDeque<(ReadId, Arc<Vec<u8>>)>,
     asked: HashSet<(u64, i64)>,
     /// The frames the latest read wants (generation, first, last): asks
     /// queued before a reversal or a jump are dropped, not read.
     wanted: Option<(u64, i64, i64)>,
+    /// Frames a read found missing or damaged on disk.
+    gone: Vec<ReadId>,
+    /// [`READ_AHEAD_BYTES`], and the memory pressure that scales it.
+    cap: u64,
+    pressure: crate::memory::Pressure,
+    /// One frame's bytes at the size last asked for.
+    frame: u64,
+    /// The most ever held (tests).
+    peak: u64,
 }
+impl Default for Ready {
+    fn default() -> Self {
+        Self {
+            frames: VecDeque::new(),
+            asked: HashSet::new(),
+            wanted: None,
+            gone: Vec::new(),
+            cap: READ_AHEAD_BYTES,
+            pressure: crate::memory::Pressure::Normal,
+            frame: 0,
+            peak: 0,
+        }
+    }
+}
+/// A frame's decoded bytes (RGBA16F).
+fn frame_bytes(size: Size) -> u64 {
+    (u64::from(size.width) * u64::from(size.height) * 8).max(1)
+}
+impl Ready {
+    fn budget(&self) -> u64 {
+        match self.pressure {
+            crate::memory::Pressure::Normal => self.cap,
+            crate::memory::Pressure::Warning => self.cap / 2,
+            crate::memory::Pressure::Critical => 0,
+        }
+    }
+    /// Read frames, and twice a frame (decoded, and its coded bytes at
+    /// most) for every read asked for or in flight.
+    fn held(&self) -> u64 {
+        self.frames
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum::<u64>()
+            + self.asked.len() as u64 * 2 * self.frame
+    }
+    fn in_window(&self, (generation, n): ReadId) -> bool {
+        self.wanted
+            .is_some_and(|(g, first, last)| g == generation && (first..=last).contains(&n))
+    }
+    /// Back within the budget: frames outside the wanted range go first,
+    /// then the furthest from where it starts. The frame it starts at stays
+    /// (the picture on screen is read from it).
+    fn trim(&mut self) {
+        let budget = self.budget();
+        if self.held() <= budget {
+            return;
+        }
+        let keep: Vec<bool> = self
+            .frames
+            .iter()
+            .map(|(id, _)| self.in_window(*id))
+            .collect();
+        let mut keep = keep.into_iter();
+        self.frames.retain(|_| keep.next().unwrap_or(false));
+        while self.held() > budget && self.frames.len() > 1 {
+            let first = self.wanted.map_or(0, |(_, first, _)| first);
+            let furthest = self
+                .frames
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, ((_, n), _))| (n - first).abs())
+                .map(|(i, _)| i);
+            match furthest {
+                Some(i) => self.frames.remove(i),
+                None => break,
+            };
+        }
+    }
+}
+
 impl Reader {
     /// The thread holds only the ready list: dropping the cache's last
     /// owner closes the channel and ends it.
@@ -1560,63 +1947,124 @@ impl Reader {
         let (asks, rx) = std::sync::mpsc::sync_channel::<Ask>(2 * AHEAD as usize);
         let ready = Arc::new(Mutex::new(Ready::default()));
         let shared = ready.clone();
-        std::thread::Builder::new()
-            .name("pm-render-cache-read".into())
-            .spawn(move || {
-                for ask in rx {
-                    let stale = {
-                        let mut ready = shared.lock().unwrap();
-                        let (generation, n) = ask.id;
-                        let stale = ready.wanted.is_some_and(|(g, first, last)| {
-                            g != generation || n < first || n > last
-                        });
-                        if stale {
-                            ready.asked.remove(&ask.id);
-                        }
-                        stale
-                    };
-                    if stale {
-                        continue;
-                    }
-                    // Stored at full precision, shown on a half-float surface.
-                    let data = ask
-                        .cache
-                        .get(&ask.key)
-                        .ok()
-                        .flatten()
-                        .and_then(|d| {
-                            crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
-                        })
-                        .map(|values| {
-                            values
-                                .chunks_exact(4)
-                                .flat_map(|b| {
-                                    half::f16::from_f32(f32::from_le_bytes(b.try_into().unwrap()))
-                                        .to_le_bytes()
-                                })
-                                .collect::<Vec<u8>>()
-                        });
-                    if data.is_some() {
-                        // Played frames are the last the limit removes.
-                        let _ = ask.cache.touch(&ask.key);
-                    }
-                    let mut ready = shared.lock().unwrap();
+        let ended = Arc::new(std::sync::Condvar::new());
+        let end = ended.clone();
+        // Frames are read side by side: a frame takes several times longer
+        // to read on a busy machine, and one reader then falls behind the
+        // playhead for good while three still deliver a frame an interval.
+        let rx = Arc::new(Mutex::new(rx));
+        for _ in 0..READERS {
+            let (rx, shared, end) = (rx.clone(), shared.clone(), end.clone());
+            std::thread::Builder::new()
+                .name("pm-render-cache-read".into())
+                .spawn(move || Self::read_asks(&rx, &shared, &end))
+                .expect("render cache reader thread");
+        }
+        Self { asks, ready, ended }
+    }
+    /// One reader: takes asks until the cache's last owner is gone.
+    fn read_asks(
+        rx: &Mutex<std::sync::mpsc::Receiver<Ask>>,
+        shared: &Mutex<Ready>,
+        end: &std::sync::Condvar,
+    ) {
+        // A frame on screen waits for these reads.
+        crate::qos::set_interactive_qos();
+        loop {
+            let ask = rx.lock().unwrap().recv();
+            let Ok(ask) = ask else { return };
+            let stale = {
+                let mut ready = shared.lock().unwrap();
+                let (generation, n) = ask.id;
+                let stale = ready
+                    .wanted
+                    .is_some_and(|(g, first, last)| g != generation || n < first || n > last);
+                if stale {
                     ready.asked.remove(&ask.id);
-                    if ready.wanted.is_some_and(|(g, first, last)| {
-                        ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
-                    }) {
-                        continue;
-                    }
-                    if let Some(data) = data {
-                        ready.frames.push_back((ask.id, Arc::new(data)));
-                        while ready.frames.len() > READY_FRAMES {
-                            ready.frames.pop_front();
-                        }
-                    }
                 }
-            })
-            .expect("render cache reader thread");
-        Self { asks, ready }
+                stale
+            };
+            if stale {
+                end.notify_all();
+                continue;
+            }
+            // Stored as the viewer's surface holds it. An entry that is not
+            // there, or whose bytes are wrong (damaged on disk, or not a
+            // frame of this size), is not a rendered frame: it leaves the
+            // index ([`DiskFrames::retire_gone`]) and a damaged file is
+            // removed, so the frame shows as unrendered and is rendered
+            // again. A read that merely failed is asked again next time.
+            let data = match ask.cache.get(&ask.key) {
+                Ok(Some(d)) => {
+                    crate::frame_codec::decode(&d, ask.size.width, ask.size.height).ok_or(true)
+                }
+                Ok(None) => Err(true),
+                Err(e) => Err(pm_promedia::cache::corrupt(&e)),
+            };
+            match &data {
+                // Played frames are the last the limit removes.
+                Ok(_) => {
+                    let _ = ask.cache.touch(&ask.key);
+                }
+                Err(true) => {
+                    let _ = ask.cache.discard(&ask.key);
+                }
+                Err(false) => {}
+            }
+            let mut ready = shared.lock().unwrap();
+            ready.asked.remove(&ask.id);
+            end.notify_all();
+            if matches!(data, Err(true)) {
+                ready.gone.push(ask.id);
+            }
+            if ready.wanted.is_some_and(|(g, first, last)| {
+                ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
+            }) {
+                continue;
+            }
+            if let Ok(data) = data {
+                ready.frames.push_back((ask.id, Arc::new(data)));
+                while ready.frames.len() > READY_FRAMES {
+                    ready.frames.pop_front();
+                }
+            }
+        }
+    }
+    /// Frame `n` asked at `generation`, waiting up to `patience` while it
+    /// is being read: [`Late`] when it is still being read after that,
+    /// `None` at once when nobody is reading it (it is not on disk, or its
+    /// read was dropped).
+    fn wait(
+        &self,
+        generation: u64,
+        n: i64,
+        patience: Duration,
+    ) -> Result<Option<Arc<Vec<u8>>>, Late> {
+        let id = (generation, n);
+        let until = Instant::now() + patience;
+        let mut ready = self.ready.lock().unwrap();
+        loop {
+            if let Some((_, bytes)) = ready.frames.iter().find(|(i, _)| *i == id) {
+                return Ok(Some(bytes.clone()));
+            }
+            if !ready.asked.contains(&id) {
+                return Ok(None);
+            }
+            let left = until
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or(Late)?;
+            ready = self.ended.wait_timeout(ready, left).unwrap().0;
+        }
+    }
+    /// Keeps only the read frames `first..=last` of `generation`, and
+    /// fences reads beyond them.
+    fn keep(&self, generation: u64, first: i64, last: i64) {
+        let mut ready = self.ready.lock().unwrap();
+        ready
+            .frames
+            .retain(|((g, n), _)| *g == generation && (first..=last).contains(n));
+        ready.wanted = Some((generation, first, last));
     }
     fn take(&self, generation: u64, n: i64) -> Option<Arc<Vec<u8>>> {
         let ready = self.ready.lock().unwrap();
@@ -1630,20 +2078,88 @@ impl Reader {
         let mut ready = self.ready.lock().unwrap();
         *ready = Ready {
             wanted: Some((generation, 1, 0)),
+            cap: ready.cap,
+            pressure: ready.pressure,
+            peak: ready.peak,
             ..Default::default()
         };
+    }
+    /// How many frames of `size` the budget holds read (at least the one
+    /// the playhead is on).
+    fn fit(&self, size: Size) -> i64 {
+        let ready = self.ready.lock().unwrap();
+        ((ready.budget() / frame_bytes(size)) as i64).max(1)
+    }
+    fn pressure(&self, level: crate::memory::Pressure) {
+        let mut ready = self.ready.lock().unwrap();
+        if ready.pressure == level {
+            return;
+        }
+        ready.pressure = level;
+        // Reads asked for and not started are cancelled by the range: at
+        // Critical only the frame it starts at is wanted.
+        if level == crate::memory::Pressure::Critical
+            && let Some((g, first, last)) = ready.wanted
+            && last > first
+        {
+            ready.wanted = Some((g, first, first));
+        }
+        ready.trim();
+        drop(ready);
+        self.ended.notify_all();
+    }
+    /// The frames of `generation` reads found missing or damaged since the
+    /// last call.
+    fn gone(&self, generation: u64) -> Vec<i64> {
+        let mut ready = self.ready.lock().unwrap();
+        std::mem::take(&mut ready.gone)
+            .into_iter()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, n)| n)
+            .collect()
     }
     fn want(&self, generation: u64, first: i64, last: i64) {
         self.ready.lock().unwrap().wanted = Some((generation, first, last));
     }
-    fn ask(&self, generation: u64, n: i64, key: RenderKey, cache: &Arc<RenderCache>, size: Size) {
+    /// Asks for frame `n` if the budget admits another read (`head`: the
+    /// frame the playhead is on, read whatever the budget: everything else
+    /// read gives way to it). A frame not admitted is asked again at the
+    /// next frame.
+    fn ask(
+        &self,
+        generation: u64,
+        n: i64,
+        key: RenderKey,
+        cache: &Arc<RenderCache>,
+        size: Size,
+        head: bool,
+    ) {
         let id = (generation, n);
         {
             let mut ready = self.ready.lock().unwrap();
             if ready.asked.contains(&id) || ready.frames.iter().any(|(i, _)| *i == id) {
                 return;
             }
+            ready.frame = frame_bytes(size);
+            let need = 2 * ready.frame;
+            if ready.held() + need > ready.budget() {
+                // Frames outside the wanted range make room first.
+                let keep: Vec<bool> = ready
+                    .frames
+                    .iter()
+                    .map(|(i, _)| ready.in_window(*i))
+                    .collect();
+                let mut keep = keep.into_iter();
+                ready.frames.retain(|_| keep.next().unwrap_or(false));
+            }
+            if ready.held() + need > ready.budget() {
+                if !head || !ready.asked.is_empty() {
+                    return;
+                }
+                ready.frames.clear();
+            }
             ready.asked.insert(id);
+            ready.peak = ready.peak.max(ready.held());
         }
         let ask = Ask {
             id,
@@ -1659,16 +2175,184 @@ impl Reader {
 
 /// Which of `keys`' frames are on disk, and which of those are kept.
 fn index(cache: &RenderCache, keys: &[(i64, RenderKey)]) -> (HashSet<i64>, HashSet<i64>) {
+    index_until(cache, keys, &|| false).expect("never stopped")
+}
+/// [`index`], given up (`None`) as soon as `stop` says so, asked every 64
+/// frames: a long composition on a slow volume is not looked through for an
+/// observation nobody waits for any more.
+fn index_until(
+    cache: &RenderCache,
+    keys: &[(i64, RenderKey)],
+    stop: &dyn Fn() -> bool,
+) -> Option<(HashSet<i64>, HashSet<i64>)> {
     let (mut present, mut kept) = (HashSet::new(), HashSet::new());
-    for (n, key) in keys {
-        if let Ok(Some(keep)) = cache.presence(key) {
-            present.insert(*n);
-            if keep {
-                kept.insert(*n);
+    for chunk in keys.chunks(64) {
+        if stop() {
+            return None;
+        }
+        for (n, key) in chunk {
+            if let Ok(Some(keep)) = cache.presence(key) {
+                present.insert(*n);
+                if keep {
+                    kept.insert(*n);
+                }
             }
         }
     }
-    (present, kept)
+    Some((present, kept))
+}
+
+/// One observation to fingerprint and find on disk.
+struct Indexing {
+    inner: Weak<Inner>,
+    generation: u64,
+    source: Source,
+    identity: Identity,
+    cache: Arc<RenderCache>,
+    size: Size,
+    rate: Rate,
+    count: i64,
+}
+/// Takes fingerprints and finds frames on disk on one thread, one
+/// observation at a time. A newer observation replaces the one waiting (and
+/// frees its document snapshot); the one being worked on gives up at its
+/// next stage once the cache's generation has moved on (another
+/// observation, a storage change, a deletion, a closed project). Rapid
+/// edits or alternating viewers on a slow volume therefore cost one job in
+/// flight and one waiting, never a thread and a snapshot each.
+struct Indexer {
+    shared: Arc<IndexerShared>,
+}
+#[derive(Default)]
+struct IndexerShared {
+    slot: Mutex<(Option<Indexing>, bool)>,
+    wake: std::sync::Condvar,
+    live: Arc<AtomicU64>,
+    /// Jobs begun (tests).
+    begun: AtomicU64,
+    /// Held by a test to keep the worker at the start of a job.
+    #[cfg(test)]
+    gate: Mutex<()>,
+}
+impl Indexer {
+    fn start(live: Arc<AtomicU64>) -> Self {
+        let shared = Arc::new(IndexerShared {
+            live,
+            ..Default::default()
+        });
+        let worker = shared.clone();
+        std::thread::Builder::new()
+            .name("pm-render-cache".into())
+            .spawn(move || {
+                loop {
+                    let job = {
+                        let mut slot = worker.slot.lock().unwrap();
+                        loop {
+                            if slot.1 {
+                                return;
+                            }
+                            if let Some(job) = slot.0.take() {
+                                break job;
+                            }
+                            slot = worker.wake.wait(slot).unwrap();
+                        }
+                    };
+                    worker.run(job);
+                }
+            })
+            .expect("render cache indexer thread");
+        Self { shared }
+    }
+    fn submit(&self, job: Indexing) {
+        // The job it replaces is dropped outside the lock.
+        let replaced = self.shared.slot.lock().unwrap().0.replace(job);
+        drop(replaced);
+        self.shared.wake.notify_one();
+    }
+}
+impl Drop for Indexer {
+    fn drop(&mut self) {
+        self.shared.slot.lock().unwrap().1 = true;
+        self.shared.wake.notify_one();
+    }
+}
+impl IndexerShared {
+    fn run(&self, job: Indexing) {
+        self.begun.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        drop(self.gate.lock().unwrap());
+        let Indexing {
+            inner,
+            generation,
+            source,
+            identity,
+            cache,
+            size,
+            rate,
+            count,
+        } = job;
+        // Anything since (another observation, storage, a deletion) wins.
+        let stale = || self.live.load(Ordering::Acquire) != generation;
+        if stale() {
+            return;
+        }
+        let fingerprint = fingerprint(&source, &identity);
+        if stale() {
+            return;
+        }
+        let inputs = crate::frame_inputs::frame_digests(
+            &source.scene.doc,
+            &identity.comp,
+            rate,
+            count,
+            // Override code can read anything in the document.
+            identity.overrides.is_some(),
+        )
+        .unwrap_or_default();
+        if stale() {
+            return;
+        }
+        // A frame is its inputs at its time.
+        let ids: Vec<FrameId> = inputs
+            .iter()
+            .enumerate()
+            .map(|(n, d)| {
+                let mut id = blake3::Hasher::new();
+                id.update(&fingerprint);
+                id.update(d);
+                id.update(&rate.frame_start(n as i64).unwrap_or(-1).to_le_bytes());
+                *id.finalize().as_bytes()
+            })
+            .collect();
+        let template = Frames {
+            identity,
+            source,
+            fingerprint: Some(fingerprint),
+            ids: Arc::new(ids),
+            size,
+            rate,
+            count,
+            present: HashSet::new(),
+            kept: HashSet::new(),
+        };
+        let keys: Vec<(i64, RenderKey)> = (0..count)
+            .filter_map(|n| Some((n, template.key(n)?)))
+            .collect();
+        let Some((present, kept)) = index_until(&cache, &keys, &stale) else {
+            return;
+        };
+        let Some(inner) = inner.upgrade() else { return };
+        let mut state = inner.state.lock().unwrap();
+        // Only the observation it was taken for.
+        if state.generation == generation {
+            state.frames = Some(Frames {
+                present,
+                kept,
+                ..template
+            });
+            bump(&mut state, &inner.published);
+        }
+    }
 }
 
 /// Frame indices of `[from, to)` seconds, clamped to the composition.
@@ -1699,9 +2383,13 @@ fn composition(scene: &Scene) -> Option<(Size, Rate, i64)> {
     Some((Size::new(w.round() as u32, h.round() as u32), rate, count))
 }
 
-fn stamp(path: &Path) -> Stamp {
+fn stamp(path: &Path, content_named: Option<&Path>) -> Stamp {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok();
+    // Named by its bytes: its name (in the path) and length say it all.
+    if content_named.is_some() && path.parent() == content_named {
+        return (path.to_owned(), meta.as_ref().map_or(0, |m| m.len()), 0, 0);
+    }
     let modified = meta
         .as_ref()
         .and_then(|m| m.modified().ok())
@@ -1715,15 +2403,26 @@ fn stamp(path: &Path) -> Stamp {
     )
 }
 
-fn stamps(media: &pm_export::render::MediaPaths) -> Vec<Stamp> {
-    media.paths.values().map(|p| stamp(p)).collect()
+fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -> Vec<Stamp> {
+    media
+        .paths
+        .values()
+        .map(|p| stamp(p, content_named))
+        .collect()
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
-/// another renderer), taken once.
+/// another renderer), taken once. A development build takes
+/// `PM_RENDER_CACHE_RENDERER` instead when set, so a rebuild that did not
+/// change drawing keeps a long fill (measurement runs; never a release).
 fn renderer_identity() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
+        if cfg!(debug_assertions)
+            && let Ok(pinned) = std::env::var("PM_RENDER_CACHE_RENDERER")
+        {
+            return format!("pinned {pinned}");
+        }
         let digest = std::env::current_exe()
             .ok()
             .and_then(|exe| std::fs::read(exe).ok())
@@ -1754,34 +2453,17 @@ fn media_content(path: &Path, hash: &mut blake3::Hasher) {
     }
 }
 
-/// The installed fonts, by file: what resolves a family by name.
+/// The fonts text can resolve to: every font file CoreText has registered
+/// now (`pm_text::system_fonts::available_files`: installed for the system
+/// or the user, activated from anywhere else, or registered by the
+/// process), with its length and modification time. The list is current as
+/// soon as a font is installed or removed; the font generation observes
+/// again when it changes.
 fn fonts_identity(hash: &mut blake3::Hasher) {
-    let mut files = Vec::new();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let roots = [
-        Some(PathBuf::from("/System/Library/Fonts")),
-        Some(PathBuf::from("/Library/Fonts")),
-        home.map(|h| h.join("Library/Fonts")),
-    ];
-    fn walk(dir: &Path, out: &mut Vec<Stamp>, depth: u32) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(t) if t.is_dir() && depth < 4 => walk(&path, out, depth + 1),
-                Ok(t) if t.is_file() => out.push(stamp(&path)),
-                _ => {}
-            }
-        }
-    }
-    for root in roots.into_iter().flatten() {
-        walk(&root, &mut files, 0);
-    }
-    files.sort();
-    for (path, len, modified, _) in files {
+    for file in pm_text::system_fonts::available_files() {
+        let (path, len, modified, _) = stamp(&file, None);
         hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(&[0]);
         hash.update(&len.to_le_bytes());
         hash.update(&modified.to_le_bytes());
     }
@@ -1791,31 +2473,104 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
 fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v4");
-    hash.update(identity.comp.as_bytes());
-    // Frames are rendered as exported: with or without its motion blur.
-    hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
-    hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
-    for (asset, path) in &source.scene.media.paths {
-        hash.update(asset.as_bytes());
-        hash.update(path.as_os_str().as_encoded_bytes());
-        media_content(path, &mut hash);
+    let parts = fingerprint_parts(source, identity);
+    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v6");
+    for (_, part) in &parts {
+        hash.update(part);
     }
-    for (path, len, modified, inode) in &identity.media {
-        hash.update(path.as_os_str().as_encoded_bytes());
-        hash.update(&len.to_le_bytes());
-        hash.update(&modified.to_le_bytes());
-        hash.update(&inode.to_le_bytes());
+    let fingerprint = *hash.finalize().as_bytes();
+    // Which part of a state's identity changed (diagnostics only).
+    if let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") {
+        let mut path = PathBuf::from(trace).into_os_string();
+        path.push(".cache.jsonl");
+        let short = |digest: &[u8; 32]| digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+        let mut row: serde_json::Map<String, serde_json::Value> = parts
+            .iter()
+            .map(|(name, part)| ((*name).to_owned(), serde_json::Value::String(short(part))))
+            .collect();
+        row.insert(
+            "fingerprint".into(),
+            serde_json::Value::String(short(&fingerprint)),
+        );
+        row.insert("revision".into(), identity.revision.into());
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", serde_json::Value::Object(row));
+        }
     }
-    fonts_identity(&mut hash);
-    hash.update(format!("{:?}", identity.tone).as_bytes());
-    hash.update(renderer_identity().as_bytes());
-    // `CompatStore::cache_identity`: the wrappers' code and generation, or
-    // this process alone when their code is unknown.
-    if let Some(overrides) = identity.overrides {
-        hash.update(&overrides.to_le_bytes());
-    }
-    *hash.finalize().as_bytes()
+    fingerprint
+}
+
+/// What a composition state's frames depend on beyond its document, each
+/// part digested on its own.
+fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str, [u8; 32])> {
+    let part = |fill: &dyn Fn(&mut blake3::Hasher)| {
+        let mut hash = blake3::Hasher::new();
+        fill(&mut hash);
+        *hash.finalize().as_bytes()
+    };
+    vec![
+        (
+            "composition",
+            part(&|hash| {
+                hash.update(identity.comp.as_bytes());
+            }),
+        ),
+        (
+            "definitions",
+            part(&|hash| {
+                hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
+            }),
+        ),
+        (
+            "media",
+            part(&|hash| {
+                for (asset, path) in &source.scene.media.paths {
+                    hash.update(asset.as_bytes());
+                    hash.update(path.as_os_str().as_encoded_bytes());
+                    media_content(path, hash);
+                }
+            }),
+        ),
+        (
+            "media_stamps",
+            part(&|hash| {
+                for (path, len, modified, inode) in &identity.media {
+                    hash.update(path.as_os_str().as_encoded_bytes());
+                    hash.update(&len.to_le_bytes());
+                    hash.update(&modified.to_le_bytes());
+                    hash.update(&inode.to_le_bytes());
+                }
+            }),
+        ),
+        ("fonts", part(&|hash| fonts_identity(hash))),
+        (
+            "tone",
+            part(&|hash| {
+                hash.update(format!("{:?}", identity.tone).as_bytes());
+            }),
+        ),
+        (
+            "renderer",
+            part(&|hash| {
+                hash.update(renderer_identity().as_bytes());
+            }),
+        ),
+        // `CompatStore::cache_identity`: the wrappers' code and generation,
+        // or this process alone when their code is unknown.
+        (
+            "overrides",
+            part(&|hash| {
+                if let Some(overrides) = identity.overrides {
+                    hash.update(&overrides.to_le_bytes());
+                }
+            }),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -1926,39 +2681,11 @@ mod tests {
         }
     }
     fn ready(disk: &DiskFrames) {
-        let start = Instant::now();
-        while disk
-            .inner
-            .state
-            .lock()
-            .unwrap()
-            .frames
-            .as_ref()
-            .is_none_or(|f| f.fingerprint.is_none())
-        {
-            assert!(start.elapsed() < Duration::from_secs(20));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        disk.test_ready();
     }
-    /// Frame 30 of the fixture written as a fill child writes it.
+    /// Frame `n` of the fixture written as a fill child writes it.
     fn write_frame(disk: &DiskFrames, n: i64) -> Ticks {
-        let (key, time, cache) = {
-            let state = disk.inner.state.lock().unwrap();
-            let frames = state.frames.as_ref().unwrap();
-            (
-                frames.key(n).unwrap(),
-                frames.ticks(n).unwrap(),
-                state.cache.clone().unwrap(),
-            )
-        };
-        let bytes: Vec<u8> = std::iter::repeat_n(0.25f32.to_le_bytes(), 640 * 360 * 4)
-            .flatten()
-            .collect();
-        cache
-            .put(&key, &crate::frame_codec::encode(&bytes, 640, 360))
-            .unwrap();
-        disk.reindex(true).unwrap();
-        time
+        disk.test_put(n, 0.25)
     }
     fn read_eventually(disk: &DiskFrames, scene: &Scene, time: Ticks) -> Option<Arc<Vec<u8>>> {
         let start = Instant::now();
@@ -2054,6 +2781,139 @@ mod tests {
         let wanted = disk.inner.reader.ready.lock().unwrap().wanted;
         let generation = disk.inner.state.lock().unwrap().generation;
         assert_eq!(wanted, Some((generation, 34 - AHEAD + 1, 34)));
+    }
+
+    /// The app's media cache names a file by its bytes and marks its
+    /// recency in its modification time at every open: the frames rendered
+    /// from it stay the state's frames (every launch orphaned the last
+    /// one's). Any other file's modification time is still its identity.
+    #[test]
+    fn a_touched_media_cache_object_keeps_its_frames() {
+        let objects = tempfile::tempdir().unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        let fingerprint_after_touch = |file: &Path, content_named: Option<&Path>| {
+            std::fs::write(file, b"media bytes").unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let disk = DiskFrames::default();
+            disk.set_content_named(content_named.map(Path::to_owned));
+            disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+                .unwrap();
+            let scene = Scene {
+                media: Arc::new(pm_export::render::MediaPaths {
+                    paths: [("clip".to_owned(), file.to_owned())].into(),
+                    ..Default::default()
+                }),
+                ..scene()
+            };
+            let at = Ticks::new(0).unwrap();
+            let fingerprint = |disk: &DiskFrames| {
+                disk.observe(&scene, &[], None, None, None, 1, at);
+                ready(disk);
+                let state = disk.inner.state.lock().unwrap();
+                state.frames.as_ref().unwrap().fingerprint.unwrap()
+            };
+            let before = fingerprint(&disk);
+            // The next open: the recency mark moves, the bytes don't.
+            std::fs::File::options()
+                .append(true)
+                .open(file)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+                .unwrap();
+            disk.inner.state.lock().unwrap().media_checked = None;
+            (before, fingerprint(&disk))
+        };
+        let object = objects.path().join("0a1b2c.mp4");
+        let (before, after) = fingerprint_after_touch(&object, Some(objects.path()));
+        assert_eq!(before, after, "a media cache object");
+        let file = linked.path().join("clip.mp4");
+        let (before, after) = fingerprint_after_touch(&file, Some(objects.path()));
+        assert_ne!(before, after, "a linked file");
+    }
+
+    /// A playing frame gets its frame from disk on the first ask, waiting
+    /// for the reader (a frame is on disk because it can't be drawn in
+    /// time; never waiting, playback drew it again, fell behind, and the
+    /// reader then read frames the playhead had already passed). A frame
+    /// that is not on disk is not waited for.
+    #[test]
+    fn a_playing_frame_waits_for_its_frame_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
+        // Each frame as playback meets it: asked once, a skip of five
+        // frames at a time (what drawing a slow frame costs). The patience
+        // here is a slow test build's, not playback's.
+        let patience = Duration::from_secs(10);
+        for n in [10usize, 15, 20, 25] {
+            assert!(
+                matches!(
+                    disk.read_within(&scene, times[n - 10], patience),
+                    Read::Frame(..)
+                ),
+                "frame {n} on the first ask"
+            );
+        }
+        let absent = Ticks::new(Rate::FPS_30.frame_start(60).unwrap()).unwrap();
+        let asked = Instant::now();
+        assert!(matches!(
+            disk.read_within(&scene, absent, patience),
+            Read::Absent
+        ));
+        assert!(asked.elapsed() < patience / 4, "nothing to wait for");
+        // Still being read when the patience ran out: late, not absent, so
+        // playback gives way a tick instead of drawing the frame again.
+        let late = (0..200).any(|k| {
+            let n = 10 + (k * 7) % 31;
+            disk.release_idle_reads();
+            disk.inner
+                .reader
+                .clear(disk.inner.state.lock().unwrap().generation);
+            matches!(
+                disk.read_within(&scene, times[n - 10], Duration::ZERO),
+                Read::Late(_)
+            )
+        });
+        assert!(late, "a frame asked and not yet read is late");
+    }
+
+    /// A paused playhead keeps the frames a play starts from read, through
+    /// the idle release too, so the first playing frames don't wait on disk.
+    #[test]
+    fn a_paused_playhead_keeps_the_frames_a_play_starts_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
+        let generation = disk.inner.state.lock().unwrap().generation;
+        let read = |n: i64| disk.inner.reader.take(generation, n).is_some();
+        // Played to frame 25, then paused at 20.
+        read_eventually(&disk, &scene, times[15]).unwrap();
+        disk.warm(&scene, times[10]);
+        let start = Instant::now();
+        while !(20..20 + WARM).all(read) {
+            assert!(start.elapsed() < Duration::from_secs(2), "warm frames");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        disk.release_idle_reads();
+        assert!((20..20 + WARM).all(read), "kept through the idle release");
+        assert!(!read(25), "the rest is released");
+        assert_eq!(disk.ready_bytes(), WARM as u64 * 640 * 360 * 8);
+        // The play starts on a read frame, never waiting.
+        assert!(disk.read(&scene, times[10]).is_some());
+        // What is rendered needs no look-ahead; what is not still does.
+        assert!(disk.rendered(&scene, times[10]));
+        let beyond = Ticks::new(Rate::FPS_30.frame_start(60).unwrap()).unwrap();
+        assert!(!disk.rendered(&scene, beyond));
     }
 
     /// The viewer's output tone and its override wrappers are part of the
@@ -2176,25 +3036,156 @@ mod tests {
 
     /// One frame filled through the real child at 1 s.
     fn filled_frame(scene: &Scene) -> Arc<Vec<u8>> {
-        let exe = std::env::current_exe().unwrap();
-        let exe = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("pm-engine-service");
+        let (_dir, disk) = filled(scene);
+        read_eventually(&disk, scene, second()).expect("rendered frame")
+    }
+    /// Frame 30's time (1 s).
+    fn second() -> Ticks {
+        Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap()
+    }
+    /// A cache with `scene`'s frame 30 rendered by a fill child.
+    fn filled(scene: &Scene) -> (tempfile::TempDir, DiskFrames) {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
         disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
-            .unwrap();
+        disk.start_fill(
+            1.,
+            1.03,
+            &job_binary(),
+            crate::jobs::Activity::default(),
+            |_| {},
+        )
+        .unwrap();
         let bars = settle(&disk, |b| !b.running);
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
-        let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
-        read_eventually(&disk, scene, time).expect("rendered frame")
+        (dir, disk)
+    }
+    /// What a paused viewer (not a capture) settles on for `scene` at 1 s
+    /// on a `width` × `height` drawable: whether it was the frame on disk,
+    /// and the presented picture.
+    fn paused_picture(
+        disk: Option<&DiskFrames>,
+        scene: &Scene,
+        (width, height): (u32, u32),
+    ) -> (bool, Vec<[f64; 3]>) {
+        use crate::render::{Engine, FrameSpec};
+        let mut engine = Engine::new(pm_gpu::Gpu::new("paused-picture").unwrap()).unwrap();
+        engine.disk = disk.cloned();
+        let output = crate::Output {
+            width,
+            height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        // The settled paused picture: the refinement at the Full scale.
+        let spec = FrameSpec {
+            exact: false,
+            scale: FrameSpec::paused_full_scale(scene, &output),
+            ..FrameSpec::exact(second(), output)
+        };
+        let start = Instant::now();
+        loop {
+            let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let from_disk = trace.lock().unwrap().disk == 2;
+            // A frame on disk is shown once its read lands.
+            if !sub.stand_ins && (from_disk || disk.is_none()) {
+                return (from_disk, sub.pixels());
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "never settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// The largest difference between two pictures' samples.
+    fn apart(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+            .fold(0., f64::max)
+    }
+
+    /// Motion blur is the same in a paused picture drawn and one read from
+    /// disk, whatever the Export sheet's default says: a thin line crossing
+    /// the frame in a fifth of a second, its layer's blur on, with the
+    /// project's export default on and off, at the composition's size and
+    /// reduced. (Before: the drawn picture had 12 samples, the rendered one
+    /// 16, or none at all with the export default off.)
+    #[test]
+    fn motion_blur_is_the_same_drawn_and_rendered() {
+        for export_default in [true, false] {
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            let layers = project["layers"].as_array_mut().unwrap();
+            let line = layers.iter_mut().find(|l| l["id"] == "L007").unwrap();
+            line["mblur"] = true.into();
+            let key = |t: f64, v: f64, id: &str| {
+                serde_json::json!({"t": t, "v": v, "i": id,
+                    "inInterp": "linear", "outInterp": "linear",
+                    "inEase": {"speed": 0, "influence": 33.333333333333336},
+                    "outEase": {"speed": 0, "influence": 33.333333333333336},
+                    "autoBezier": false, "continuous": false})
+            };
+            line["p"]["position.y"]["kf"] =
+                serde_json::json!([key(0.9, 20., "kfast1"), key(1.1, 340., "kfast2")]);
+            project["exportDefaults"] = serde_json::json!({ "mblur": export_default });
+            let scene = scene_from(&project.to_string());
+            let (_dir, disk) = filled(&scene);
+            for drawable in [(640, 360), (320, 180)] {
+                let (_, drawn) = paused_picture(None, &scene, drawable);
+                let (from_disk, rendered) = paused_picture(Some(&disk), &scene, drawable);
+                assert!(from_disk, "{drawable:?}: the frame on disk is shown");
+                assert_eq!(
+                    apart(&rendered, &drawn),
+                    0.,
+                    "export default {export_default}, {drawable:?}: the blur differs"
+                );
+            }
+            // The blur is there: the same frame with the layer's switch off
+            // is another picture.
+            let line = project["layers"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|l| l["id"] == "L007")
+                .unwrap();
+            line["mblur"] = false.into();
+            let sharp = scene_from(&project.to_string());
+            let (_, blurred) = paused_picture(None, &scene, (640, 360));
+            let (_, unblurred) = paused_picture(None, &sharp, (640, 360));
+            assert!(apart(&blurred, &unblurred) > 0.05);
+        }
+    }
+
+    /// A paused picture is the same whether its frame is rendered on disk
+    /// or drawn: the composition's frame reduced to the drawable through
+    /// one footprint filter, at a quarter of its size and at a third (not a
+    /// whole reduction). Thin strokes and a 1-px grid would alias through a
+    /// single bilinear tap; motion blur is off.
+    #[test]
+    fn a_rendered_paused_frame_is_presented_as_a_drawn_one() {
+        let scene = scene();
+        let (_dir, disk) = filled(&scene);
+        for drawable in [(160, 90), (213, 120)] {
+            let (from_disk, drawn) = paused_picture(None, &scene, drawable);
+            assert!(!from_disk);
+            let (from_disk, rendered) = paused_picture(Some(&disk), &scene, drawable);
+            assert!(from_disk, "{drawable:?}: the frame on disk is shown");
+            assert_eq!(
+                apart(&rendered, &drawn),
+                0.,
+                "{drawable:?}: the rendered frame is presented differently from the drawn one"
+            );
+        }
     }
 
     /// A stored frame is a delivery: an effect whose extension isn't
@@ -2229,7 +3220,7 @@ mod tests {
         assert!(disk.read(&scene, time).is_none(), "nothing stored");
     }
 
-    /// Frame 30 filled through the real child, as stored (RGBA32F values).
+    /// Frame 30 filled through the real child, as stored.
     fn filled_values(scene: &Scene) -> Vec<f32> {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskFrames::default();
@@ -2271,12 +3262,12 @@ mod tests {
         );
     }
 
-    /// A cached frame is the exported frame: the cache's values through the
-    /// export's own 16-bit conversion (its dither too) are the samples of a
-    /// 16-bit PNG export of the same time, both through the real children.
-    /// An animated layer with motion blur (the paused viewer's samples and
-    /// the export's differ) and a 32-bit working depth (values finer than
-    /// half floats).
+    /// A cached frame is the exported frame at the viewer's precision: the
+    /// cache's half floats through the export's own 16-bit conversion (its
+    /// dither too) are the samples of a 16-bit PNG export of the same time,
+    /// both through the real children, to within a half float's rounding
+    /// ([`HALF_ROUNDING`]). An animated layer with motion blur (the paused
+    /// viewer's samples and the export's differ) and a 32-bit working depth.
     #[test]
     fn a_cached_frame_is_the_exported_frame() {
         let mut project: serde_json::Value =
@@ -2342,7 +3333,7 @@ mod tests {
             definitions: vec![],
             doc_id: 1,
         };
-        let mut request = fill_request(&source, Rate::FPS_30, frames).unwrap();
+        let mut request = fill_request(&source, Rate::FPS_30, frames, 0).unwrap();
         request.cache = None;
         request.destination = out.path().join("still");
         if let pm_protocol::priority::JobSpec::Export { settings, .. } = &mut request.spec {
@@ -2378,13 +3369,22 @@ mod tests {
         )
         .unwrap();
         let expected = expected.planes[0].u16().unwrap();
-        let differing = expected
+        let worst = expected
             .iter()
             .zip(exported)
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(differing, 0, "of {} samples", expected.len());
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= HALF_ROUNDING, "{worst} of 65535");
+        // The comparison would see a missing layer or sample.
+        assert!(exported.iter().any(|v| *v > 4096) && exported.iter().any(|v| *v < 60000));
     }
+
+    /// The most a 16-bit export sample moves when its working value is
+    /// rounded to a half float first: half a unit in the last of a half
+    /// float's 11 significant bits is 2⁻¹² of a value below 1.0, 16 of
+    /// 65535, and the transfer and the dither's rounding add at most one.
+    const HALF_ROUNDING: u16 = 17;
 
     /// Frame 30 rendered by background rendering (its chunk known not to
     /// play), as stored.
@@ -2401,6 +3401,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(100),
+            floor: 0,
         });
         disk.set_background_host(Some(BackgroundHost {
             executable: job_binary(),
@@ -2423,8 +3424,8 @@ mod tests {
         let coded = cache.get(&key).unwrap().expect("the stored frame");
         crate::frame_codec::decode(&coded, 640, 360)
             .unwrap()
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes(b.try_into().unwrap()).to_f32())
             .collect()
     }
 
@@ -2545,6 +3546,55 @@ mod tests {
         assert!(read_eventually(&disk, &edited, late).is_none());
     }
 
+    /// A rendered frame is missed when a layer its expression samples
+    /// changes, though that layer is drawn seconds away and named only
+    /// inside the expression; and when a layer added before it changes the
+    /// index its expression reads.
+    #[test]
+    fn an_edit_an_expression_reads_misses_the_rendered_frame() {
+        for (source, edit) in [
+            // L001 (0-1 s) samples L00d (2-3 s), whose value changes.
+            (
+                "sample('L00d', 'opacity', 0)",
+                (|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into()) as fn(&mut serde_json::Value),
+            ),
+            // L001 reads its index; a layer drawn at 2-3 s is added before it.
+            ("idx * 10", |p| {
+                let mut added = p["layers"][0].clone();
+                added["id"] = "Ladded".into();
+                p["layers"].as_array_mut().unwrap().insert(0, added);
+            }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let disk = DiskFrames::default();
+            disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+                .unwrap();
+            let reading = |p: &mut serde_json::Value| {
+                let layers = p["layers"].as_array_mut().unwrap();
+                let l001 = layers.iter_mut().find(|l| l["id"] == "L001").unwrap();
+                l001["p"]["opacity"]["expr"] = source.into();
+            };
+            let scene = sequenced(reading);
+            disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+            ready(&disk);
+            // Frame 10 (0.33 s) draws L001 alone.
+            let early = write_frame(&disk, 10);
+            assert!(read_eventually(&disk, &scene, early).is_some());
+            let mut edited = sequenced(|p| {
+                reading(p);
+                edit(p);
+            });
+            edited.content = 2;
+            assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+            ready(&disk);
+            assert!(
+                read_eventually(&disk, &edited, early).is_none(),
+                "{source}: the frame rendered before the edit is shown after it"
+            );
+            assert!(present(&disk).is_empty(), "{source}");
+        }
+    }
+
     /// With raster overrides producing, an edit anywhere misses every
     /// frame: the override's reads of the document aren't tracked.
     #[test]
@@ -2661,6 +3711,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(200),
+            floor: 0,
         });
         disk.set_background_host(Some(BackgroundHost {
             executable: job_binary(),
@@ -2680,6 +3731,254 @@ mod tests {
             fills,
             "nothing left"
         );
+    }
+
+    /// A hundred edits while the worker is busy (a slow volume being
+    /// looked through) cost one job in flight and one waiting: each newer
+    /// observation replaces the one waiting and frees its document
+    /// snapshot, the job in flight gives up at its next stage, and only the
+    /// latest observation is fingerprinted and lands.
+    #[test]
+    fn observations_coalesce_into_one_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let indexer = disk.inner.indexer.shared.clone();
+        // The worker stays at the start of whatever job it takes.
+        let gate = indexer.gate.lock().unwrap();
+        let mut snapshots = Vec::new();
+        let mut latest = None;
+        for revision in 1..=100 {
+            let mut scene = scene();
+            scene.content = revision;
+            snapshots.push(Arc::downgrade(&scene.doc));
+            assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+            latest = Some(scene);
+        }
+        let latest = latest.unwrap();
+        // The job in flight and the latest one: nothing in between is kept.
+        let alive = snapshots.iter().filter(|d| d.upgrade().is_some()).count();
+        assert!(alive <= 2, "{alive} document snapshots are held");
+        assert!(indexer.begun.load(Ordering::Relaxed) <= 1);
+        drop(gate);
+        ready(&disk);
+        {
+            let state = disk.inner.state.lock().unwrap();
+            let frames = state.frames.as_ref().unwrap();
+            assert!(frames.identity.scene_matches(&latest), "the latest landed");
+        }
+        assert!(
+            indexer.begun.load(Ordering::Relaxed) <= 2,
+            "the job in flight, then the latest: nothing in between ran"
+        );
+    }
+
+    /// Reading rendered frames ahead is bounded in bytes, not in frames:
+    /// what the reader holds (read frames, and for each read asked for or in
+    /// flight its decoded frame and coded bytes) stays within its budget
+    /// whatever the frame's size. A frame as large as the budget (an 8K
+    /// frame is 265 MB of the 256 MiB) plays one frame at a time; under
+    /// Critical memory pressure only the frame the playhead is on is read,
+    /// what was read ahead goes and queued reads are cancelled.
+    #[test]
+    fn read_ahead_is_bounded_in_bytes() {
+        let size = |w, h| Size::new(w, h);
+        let reader = Reader::start();
+        assert_eq!(reader.fit(size(1920, 1080)).min(AHEAD), AHEAD);
+        assert_eq!(reader.fit(size(3840, 2160)), 4);
+        assert_eq!(reader.fit(size(7680, 4320)), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..22).map(|n| write_frame(&disk, n)).collect();
+        let frame = frame_bytes(size(640, 360));
+        let held = || disk.ready_bytes();
+        let peak = || disk.inner.reader.ready.lock().unwrap().peak;
+        let frames = || disk.inner.reader.ready.lock().unwrap().frames.len();
+        let play = |range: std::ops::Range<usize>| {
+            for at in range {
+                let start = Instant::now();
+                while !matches!(
+                    disk.read_within(&scene, times[at], PATIENCE),
+                    Read::Frame(..)
+                ) {
+                    assert!(start.elapsed() < Duration::from_secs(5), "frame {at}");
+                }
+            }
+        };
+        // A budget a little under one frame, as 256 MiB is to an 8K frame.
+        disk.set_read_budget(frame * 97 / 100);
+        play(0..4);
+        assert!(peak() <= 2 * frame, "{} of {frame}", peak());
+        assert_eq!(frames(), 1, "one frame at a time");
+        // Room for four frames: never more held than that.
+        disk.set_read_budget(4 * frame);
+        disk.inner.reader.ready.lock().unwrap().peak = 0;
+        play(4..8);
+        assert!(peak() <= 4 * frame, "{} of {}", peak(), 4 * frame);
+        // The default budget reads this size six ahead, as before.
+        disk.set_read_budget(READ_AHEAD_BYTES);
+        play(8..9);
+        let start = Instant::now();
+        while frames() < 4 {
+            assert!(start.elapsed() < Duration::from_secs(5), "read ahead");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Critical pressure: only the frame the playhead is on stays, and
+        // nothing more is read ahead of it.
+        disk.memory_pressure(crate::memory::Pressure::Critical);
+        assert!(frames() <= 1, "what was read ahead goes at once");
+        // A read already in flight ends and is dropped; queued ones never
+        // start.
+        let start = Instant::now();
+        while held() > frame {
+            assert!(start.elapsed() < Duration::from_secs(5), "{} held", held());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        play(9..11);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(frames() <= 1 && held() <= 2 * frame, "{} held", held());
+        // Pressure over: it reads ahead again.
+        disk.memory_pressure(crate::memory::Pressure::Normal);
+        play(10..11);
+        let start = Instant::now();
+        while frames() < 2 {
+            assert!(start.elapsed() < Duration::from_secs(5), "read ahead again");
+            disk.read_within(&scene, times[10], Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A rendered frame damaged on disk (a flipped byte, a cut payload, a
+    /// file cut inside its header) is not shown and does not stay
+    /// "rendered": the read that finds it removes it, the bar shows the
+    /// stretch unrendered, background rendering renders it again by itself,
+    /// and the frames then read from disk.
+    #[test]
+    fn a_damaged_rendered_frame_is_rendered_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        disk.set_activity(crate::jobs::Activity::default());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        // Every chunk plays in real time (injected costs) except 45-59,
+        // where playback dropped frame 50.
+        let at = |n: i64| Ticks::new(Rate::FPS_30.frame_start(n).unwrap()).unwrap();
+        for a in (0..90).step_by(15) {
+            for n in [a, a + 14] {
+                disk.measured(disk.frame_id(&scene, at(n)).unwrap(), 1_000.);
+            }
+        }
+        disk.measured(disk.frame_id(&scene, at(50)).unwrap(), DROPPED_US);
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(200),
+            floor: 0,
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        let whole = |b: &RenderBars| b.bars == vec![(1.5, 2., BarState::Rendered)] && !b.running;
+        settle(&disk, whole);
+        let fills = disk.inner.state.lock().unwrap().fill.serial;
+        let file = |n: i64| {
+            let state = disk.inner.state.lock().unwrap();
+            let key = state.frames.as_ref().unwrap().key(n).unwrap();
+            dir.path()
+                .join("frames")
+                .join(format!("{}.frame", key.digest().unwrap()))
+        };
+        for (n, damage) in [(50, 0), (51, 1), (52, 2)] {
+            let mut bytes = std::fs::read(file(n)).unwrap();
+            match damage {
+                0 => *bytes.last_mut().unwrap() ^= 1,
+                1 => bytes.truncate(bytes.len() / 2),
+                _ => bytes.truncate(10),
+            }
+            std::fs::write(file(n), bytes).unwrap();
+        }
+        // Playback reads them: none is shown, each leaves the index.
+        let start = Instant::now();
+        for n in [50, 51, 52] {
+            while present(&disk).contains(&n)
+                && disk.inner.state.lock().unwrap().fill.serial == fills
+            {
+                assert!(
+                    !matches!(disk.read_within(&scene, at(n), PATIENCE), Read::Frame(..)),
+                    "a damaged frame was shown"
+                );
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "frame {n} is damaged on disk and still counts as rendered"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        // Rendered again without being asked, and read from disk after.
+        settle(&disk, |b| {
+            whole(b) && disk.inner.state.lock().unwrap().fill.serial > fills
+        });
+        assert_eq!(present(&disk), (45..60).collect());
+        for n in [50, 51, 52] {
+            assert!(read_eventually(&disk, &scene, at(n)).is_some(), "frame {n}");
+        }
+    }
+
+    /// Background rendering never takes the volume below its floor: with
+    /// less free it starts nothing and the bars say why, and it goes on by
+    /// itself once there is room.
+    #[test]
+    fn background_rendering_stops_at_its_free_space_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        disk.set_activity(crate::jobs::Activity::default());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let at = Ticks::new(Rate::FPS_30.frame_start(50).unwrap()).unwrap();
+        disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
+        // Just under the floor.
+        let free = Arc::new(std::sync::atomic::AtomicU64::new((8 << 30) - 1));
+        let says = free.clone();
+        disk.inner.state.lock().unwrap().free =
+            Some(Arc::new(move || says.load(Ordering::Acquire)));
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(100),
+            floor: 8 << 30,
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        let bars = settle(&disk, |b| b.error.is_some());
+        assert_eq!(bars.error.as_deref(), Some(BACKGROUND_LOW_DISK));
+        assert!(
+            bars.disk_full && bars.background && !bars.running,
+            "{bars:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(present(&disk).is_empty(), "nothing was rendered");
+        assert!(disk.inner.running.lock().unwrap().is_none(), "no child ran");
+        // Room again: it starts rendering by itself, and the note goes.
+        free.store(64 << 30, Ordering::Release);
+        let bars = settle(&disk, |b| b.error.is_none() && b.running);
+        assert!(!bars.disk_full, "{bars:?}");
+        disk.set_background_host(None);
     }
 
     /// Any viewer activity pauses a background fill at once (no frame
@@ -2704,6 +4003,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(300),
+            floor: 0,
         });
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exporting = busy.clone();

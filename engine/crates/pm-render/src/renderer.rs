@@ -2187,6 +2187,8 @@ impl Renderer {
                 working: color.working,
                 blend_domain: color.blend_domain,
                 export: request.export,
+                final_frame: request.export
+                    || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
                 pyramids: &mut self.pyramids,

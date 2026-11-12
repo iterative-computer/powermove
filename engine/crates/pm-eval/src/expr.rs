@@ -36,22 +36,31 @@ pub trait ExpressionEngine: Send + Sync {
 pub struct ExprDeps {
     /// Reads members of `layer`.
     pub layer: bool,
-    /// Reads members of `comp` or calls `param(...)`.
+    /// Reads members of `comp`: its other layers too.
     pub comp: bool,
+    /// Calls `param(...)`: the composition's `params`.
+    pub params: bool,
     /// Reads `idx` (the layer's index in the composition).
     pub index: bool,
+    /// Calls `sample(...)` or `motionPath(...)`: another layer's channels,
+    /// whatever that layer's span.
+    pub document: bool,
 }
 
 impl ExprDeps {
     pub const ALL: ExprDeps = ExprDeps {
         layer: true,
         comp: true,
+        params: true,
         index: true,
+        document: true,
     };
     pub const NONE: ExprDeps = ExprDeps {
         layer: false,
         comp: false,
+        params: false,
         index: false,
+        document: false,
     };
 }
 

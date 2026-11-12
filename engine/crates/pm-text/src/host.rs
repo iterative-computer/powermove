@@ -112,9 +112,15 @@ impl FontBroker {
         *self.0.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
-    /// The registry generation the service last reported.
+    /// The registry generation the service last reported, moved on by every
+    /// change of the installed fonts since ([`crate::system_fonts`]): a
+    /// renderer's fonts are then of an older generation whether or not the
+    /// service has answered anything since.
     pub fn generation(&self) -> u64 {
-        self.0.generation.load(Ordering::Acquire)
+        self.0
+            .generation
+            .load(Ordering::Acquire)
+            .wrapping_add(crate::system_fonts::epoch())
     }
 
     pub fn set_generation(&self, generation: u64) {

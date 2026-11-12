@@ -233,6 +233,9 @@ pub struct CoreTextRegistry {
     subsets: HashMap<(String, u32), Arc<Vec<u8>>>,
     manifests: HashMap<String, FallbackManifest>,
     generation: u64,
+    /// The installed-font epoch its lookups were made under
+    /// ([`crate::system_fonts::epoch`]).
+    system_epoch: u64,
 }
 
 /// Byte lengths of font payloads retained by this registry. The category
@@ -296,6 +299,10 @@ impl CoreTextRegistry {
             subsets: HashMap::new(),
             manifests: HashMap::new(),
             generation: 0,
+            system_epoch: {
+                crate::system_fonts::watch();
+                crate::system_fonts::epoch()
+            },
         })
     }
 
@@ -352,11 +359,32 @@ impl CoreTextRegistry {
             .map(|(i, f)| (i as FaceId, &f.info))
     }
 
-    /// Increments whenever project fonts or sources change. Answers given
-    /// under an older generation may be stale (a family that resolved to an
-    /// installed font may now resolve to a project font); hosts drop them.
+    /// Increments whenever project fonts or sources change, and with every
+    /// change of the installed fonts. Answers given under an older
+    /// generation may be stale (a family that resolved to an installed font
+    /// may now resolve to a project font; one that fell back may be
+    /// installed now); hosts drop them.
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.generation.wrapping_add(crate::system_fonts::epoch())
+    }
+
+    /// Before any lookup: after a change of the installed fonts, everything
+    /// resolved before it is retired (which family is available, which face
+    /// a family and style gave, files read by path, fallback manifests).
+    /// Faces already handed out stay: their ids are positions.
+    fn sync_system(&mut self) {
+        let epoch = crate::system_fonts::epoch();
+        if epoch == self.system_epoch {
+            return;
+        }
+        self.system_epoch = epoch;
+        self.by_key.clear();
+        self.unavailable.clear();
+        self.family_cache.clear();
+        self.files.clear();
+        self.table_fonts.clear();
+        self.variable.clear();
+        self.manifests.clear();
     }
 
     // ------------------------------------------------------------ project fonts
@@ -489,6 +517,7 @@ impl CoreTextRegistry {
 
     /// One family's faces and whether any of them is variable.
     pub fn family_info(&mut self, family: &str) -> Option<FamilyInfo> {
+        self.sync_system();
         let project: Vec<StyleInfo> = self
             .project
             .iter()
@@ -554,6 +583,7 @@ impl CoreTextRegistry {
     /// CoreText does not list (the system UI font) contributes the faces
     /// Blink's matching picks for it, upright and italic.
     pub fn family_faces(&mut self, family: &str) -> Vec<FaceSource> {
+        self.sync_system();
         let project: Vec<FaceSource> = self
             .project
             .iter()
@@ -621,6 +651,7 @@ impl CoreTextRegistry {
     /// manifests are cached per base family; they depend only on installed
     /// fonts.
     pub fn fallback_manifest(&mut self, base_family: &str) -> FallbackManifest {
+        self.sync_system();
         if let Some(m) = self.manifests.get(base_family) {
             return m.clone();
         }
@@ -749,6 +780,7 @@ impl CoreTextRegistry {
         queries: &[crate::answers::Query],
     ) -> Result<crate::answers::Answers, RegistryError> {
         use crate::answers::Query;
+        self.sync_system();
         for q in queries {
             if let Query::Fallback { primary: id, .. }
             | Query::EmAdvance { face: id, .. }
@@ -1444,6 +1476,7 @@ impl FontResolver for CoreTextRegistry {
     }
 
     fn family(&mut self, family: &str, desc: &FontDesc) -> Option<FaceId> {
+        self.sync_system();
         if let Some(f) = self.project_face(family, desc) {
             return Some(f);
         }
@@ -1451,6 +1484,7 @@ impl FontResolver for CoreTextRegistry {
     }
 
     fn standard(&mut self, desc: &FontDesc) -> Option<FaceId> {
+        self.sync_system();
         // Chrome's macOS default standard font (locale_settings_mac.grd).
         self.get_font_data("Times", desc, true)
     }
@@ -1473,11 +1507,13 @@ impl FontResolver for CoreTextRegistry {
     }
 
     fn last_resort(&mut self, desc: &FontDesc) -> Option<FaceId> {
+        self.sync_system();
         self.get_font_data("Times", desc, true)
             .or_else(|| self.get_font_data("Lucida Grande", desc, true))
     }
 
     fn variable_face(&mut self, family: &str) -> Option<FaceId> {
+        self.sync_system();
         if let Some(v) = self.variable.get(family) {
             return *v;
         }

@@ -49,6 +49,23 @@ impl std::ops::BitOr for ContextReads {
     }
 }
 
+/// What an expression's code can read beyond time, `fps`, `value` and `ch`,
+/// on any path through it: the superset of every evaluation's
+/// [`Dependencies`], known from the compiled program alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reach {
+    /// `layer`: the expression's own layer.
+    pub layer: bool,
+    /// `comp`: any member of the composition, its other layers included.
+    pub comp: bool,
+    /// `param(...)`: the composition's `params`.
+    pub params: bool,
+    /// `idx`: the layer's index in its composition.
+    pub index: bool,
+    /// `sample(...)` or `motionPath(...)`: another layer's channels.
+    pub document: bool,
+}
+
 /// Where a field path starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Root {

@@ -1048,6 +1048,7 @@ impl Controller {
         let undo = Choice {
             label: "Undo Extension Change".into(),
             command: UNDO.into(),
+            ..Default::default()
         };
         let choices: Vec<Choice> = value["commands"]
             .as_array()
@@ -1062,6 +1063,7 @@ impl Controller {
                         .unwrap_or(id)
                         .to_owned(),
                     command: format!("{COMMAND}{id}"),
+                    ..Default::default()
                 })
             })
             .chain([undo])
@@ -1298,12 +1300,14 @@ impl Controller {
                     t["panel"].as_str().unwrap_or_default(),
                     t["id"].as_str().unwrap_or_default()
                 ),
+                ..Default::default()
             })
             .collect();
         if !choices.is_empty() {
             choices.push(Choice {
                 label: "Theme: Default".into(),
                 command: format!("{V4_THEME}default"),
+                ..Default::default()
             });
         }
         self.extensions.v4_theme_choices = choices;
@@ -1358,6 +1362,7 @@ impl Controller {
             .map(|c| Choice {
                 label: c["title"].as_str().unwrap_or_default().to_owned(),
                 command: target(c),
+                ..Default::default()
             })
             .collect();
         let bindings: Vec<Binding> = list

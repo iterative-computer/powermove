@@ -86,6 +86,20 @@ pub struct Frame {
     pub pts: i64,
 }
 
+/// What an edit list means for the presented frames beyond their times.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditFacts {
+    /// When a sample straddles the start of the first media edit: how long
+    /// after that start the next sample begins (index units), else 0. The
+    /// straddled sample is presented from the edit's start for this long.
+    pub head_gap: i64,
+    /// Where the presentation ends on the frames' timeline, when the edit
+    /// list says: a dwell lasts its segment, and an edit ending part way
+    /// through a sample ends the picture there.
+    pub end: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum IndexSource {
@@ -222,6 +236,9 @@ pub struct FrameIndex {
     /// Presented frames in presentation order.
     pub frames: Vec<Frame>,
     pub config: CodecConfig,
+    /// MOV/MP4 edit lists.
+    #[serde(default)]
+    pub edits: EditFacts,
     /// Set when NAL types were read (H.264, HEVC).
     pub nal_codec: Option<NalCodec>,
     pub stats: IndexStats,
@@ -239,6 +256,38 @@ pub(crate) mod rational_serde {
         let [n, den] = <[i64; 2]>::deserialize(d)?;
         Rational::new(n, den).map_err(serde::de::Error::custom)
     }
+}
+
+/// The largest index block read whole (a movie box, an index chunk or
+/// table segment). Ten hours of 60 fps picture with its sound index in
+/// well under a quarter of this.
+const MAX_DECLARED: u64 = 256 << 20;
+
+/// Reads the `len` bytes a container declares at `offset`. A corrupt or
+/// truncated file can declare any length (an 8-byte MXF BER length, a
+/// 32-bit AVI chunk size); one the file cannot hold, or longer than any
+/// index ([`MAX_DECLARED`]), is refused before anything is allocated, so
+/// the probe fails cleanly instead of aborting or taking that memory.
+pub(crate) fn read_declared(f: &File, offset: u64, len: u64) -> Result<Vec<u8>> {
+    if len > MAX_DECLARED {
+        return Err(MediaError::invalid(format!(
+            "an index block of {len} bytes at {offset} is larger than any index"
+        )));
+    }
+    let size = f.metadata()?.len();
+    if offset.checked_add(len).is_none_or(|end| end > size) {
+        return Err(MediaError::invalid(format!(
+            "a block of {len} bytes at {offset} runs past the end of the file"
+        )));
+    }
+    let len = usize::try_from(len).map_err(|_| MediaError::OutOfMemory(usize::MAX))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| MediaError::OutOfMemory(len))?;
+    bytes.resize(len, 0);
+    f.read_exact_at(&mut bytes, offset)?;
+    Ok(bytes)
 }
 
 impl FrameIndex {
@@ -266,6 +315,38 @@ impl FrameIndex {
     /// Presented PTS in presentation order.
     pub fn presented_pts(&self) -> Vec<i64> {
         self.frames.iter().map(|f| f.pts).collect()
+    }
+
+    /// Where the picture starts: the timestamp of the first presented frame.
+    /// Containers start their timestamps anywhere (transport streams around
+    /// 1.4 s, program streams and fragmented MP4 at smaller offsets).
+    pub fn origin_pts(&self) -> i64 {
+        self.frames.first().map_or(0, |f| f.pts)
+    }
+
+    /// Where the presentation ends: where the edit list ends it, else the
+    /// last presented frame's timestamp plus its own duration. A last frame
+    /// the container gives no duration (some variable-rate files) is
+    /// assumed to last as long as the one before it: a guess, stated here,
+    /// that cannot know a longer final hold. The clip's length is this
+    /// minus its origin.
+    pub fn end_pts(&self) -> i64 {
+        if let Some(end) = self.edits.end {
+            return end;
+        }
+        let Some(last) = self.frames.last() else {
+            return 0;
+        };
+        let own = self.samples[last.sample].duration;
+        let duration = if own > 0 {
+            own
+        } else {
+            match self.frames.len().checked_sub(2) {
+                Some(k) => last.pts - self.frames[k].pts,
+                None => 0,
+            }
+        };
+        last.pts.saturating_add(duration.max(0))
     }
 
     /// Samples decoded but never presented (edit lists).
@@ -512,6 +593,10 @@ impl<'a> Cur<'a> {
     pub fn new(b: &'a [u8]) -> Self {
         Cur { b, p: 0 }
     }
+    /// Bytes not yet read.
+    pub fn remaining(&self) -> usize {
+        self.b.len().saturating_sub(self.p)
+    }
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.p.checked_add(n).is_none_or(|e| e > self.b.len()) {
             return Err(MediaError::invalid("truncated structure"));
@@ -573,6 +658,7 @@ mod tests {
             samples,
             frames: vec![],
             config: CodecConfig::default(),
+            edits: Default::default(),
             nal_codec: None,
             stats: IndexStats::default(),
         };
