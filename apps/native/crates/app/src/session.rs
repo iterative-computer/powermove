@@ -316,6 +316,14 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
 }
+/// Where the playhead of a composition being left is: the viewer's clock, or,
+/// while a viewer bound a moment ago has not reported one yet, the time last
+/// asked for (written to the transport state by every seek). Reading only the
+/// clock left a composition at 0 s when the person came back to it and left
+/// again before its first frame.
+fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
+    clock.or(asked).unwrap_or(0.)
+}
 impl Controller {
     /// A passing status note (v1's status toast): shown in the status line,
     /// then the line returns to Saved/Edited unless something replaced it.
@@ -664,7 +672,13 @@ impl Controller {
                 self.composition_views.insert(
                     (old.snapshot.doc_id, id),
                     CompositionView {
-                        time: self.time(),
+                        time: left_at(
+                            self.viewer
+                                .as_ref()
+                                .and_then(|v| v.status().clock)
+                                .map(|c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64),
+                            old.ui_state.transport.get("time").and_then(|v| v.as_f64()),
+                        ),
                         timeline: old.ui_state.timeline.clone(),
                         viewer: old.ui_state.viewer.clone(),
                     },
@@ -2274,6 +2288,14 @@ pub(crate) fn sync_render_storage(
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
+        // A viewer that reported a clock is where it says (playing included).
+        assert_eq!(left_at(Some(3.5), Some(12.)), 3.5);
+        // One bound a moment ago has none yet: the seek that restored it.
+        assert_eq!(left_at(None, Some(12.)), 12.);
+        assert_eq!(left_at(None, None), 0.);
+    }
     #[::core::prelude::v1::test]
     fn ntsc_projects_get_the_exact_rate_the_viewer_needs() {
         let rate = |json: &str| {
