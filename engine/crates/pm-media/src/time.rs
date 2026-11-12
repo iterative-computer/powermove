@@ -268,18 +268,23 @@ pub fn ticks_of(pts: i64, timebase: Rational) -> Tick {
 }
 
 /// The composition slot of each source frame when the clip's frame 0 is its
-/// first presented frame: m_k = round((pts_k − pts_0) × tb × rate), half up.
-/// Used to state the expected frame for each composition frame independently
-/// of rule 7 (tests and verification).
+/// first presented frame: the first composition frame that starts inside
+/// it, m_k = ⌈((pts_k − pts_0) × tb − q/2) × rate⌉ with q the
+/// [`selection_quantum`] absorbing timestamp rounding. A frame starting a
+/// fraction of a frame after a composition frame first shows at the next
+/// one, as AVFoundation presents the frame covering a time. Used to state
+/// the expected frame for each composition frame (tests and verification).
 pub fn grid(pts: &[i64], timebase: Rational, rate: Rate) -> Vec<i64> {
     let Some(&p0) = pts.first() else {
         return vec![];
     };
-    let den = timebase.den() as i128 * rate.den() as i128;
+    let (q_num, q_den) = selection_quantum(timebase, rate);
+    let (tn, td) = (timebase.num() as i128, timebase.den() as i128);
+    let den = 2 * td * q_den * rate.den() as i128;
     pts.iter()
         .map(|&p| {
-            let num = (p as i128 - p0 as i128) * timebase.num() as i128 * rate.num() as i128;
-            (2 * num + den).div_euclid(2 * den) as i64
+            let num = ((p as i128 - p0 as i128) * tn * 2 * q_den - q_num * td) * rate.num() as i128;
+            -(-num).div_euclid(den) as i64
         })
         .collect()
 }
@@ -377,6 +382,32 @@ mod tests {
                 assert_eq!(c.composition_frames, 20_000);
             }
         }
+    }
+
+    /// A head-trimming edit that starts 962 of a 1001-tick frame in leaves
+    /// the straddled frame 39 ticks at the clip start and puts every later
+    /// frame 39 ticks after its composition time. AVFoundation, asked with
+    /// zero tolerance at n·1001/30000 s, presents the frame covering that
+    /// time (the straddled one at 0, then frame n, which started 962 ticks
+    /// earlier), not the frame starting 39 ticks later.
+    #[test]
+    fn a_frame_starting_just_after_a_composition_frame_is_not_shown_there() {
+        let tb = r(1, 30000);
+        let pts: Vec<i64> = std::iter::once(0)
+            .chain((0..92).map(|k| 39 + k * 1001))
+            .collect();
+        let g = grid(&pts, tb, Rate::FPS_29_97);
+        for n in 0..pts.len() as i64 {
+            assert_eq!(
+                expected_frame(&g, n),
+                Some(n as usize),
+                "composition frame {n}"
+            );
+        }
+        assert_eq!(
+            check_selection(&pts, tb, Rate::FPS_29_97).rule7_mismatches,
+            0
+        );
     }
 
     #[test]
