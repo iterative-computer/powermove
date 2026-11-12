@@ -754,6 +754,11 @@ pub struct PublishHooks {
     /// after that file was read and found to be the version the save could
     /// replace.
     pub after_judged: Option<PublishHook>,
+    /// The save's record says it was written on this machine (its name and
+    /// identifier) instead of the real one.
+    pub owner_host: Option<String>,
+    /// The project's volume is one other machines write (a network share).
+    pub shared_volume: bool,
     /// While set, the volume answers the exchange with success and only
     /// renames, as [`Self::exchange_renames`]: a volume whose behaviour
     /// changed while the app ran (unmounted, and another mounted in its
@@ -786,6 +791,8 @@ impl std::fmt::Debug for PublishHooks {
             .field("after_exchange", &self.after_exchange.is_some())
             .field("before_install", &self.before_install.is_some())
             .field("after_judged", &self.after_judged.is_some())
+            .field("owner_host", &self.owner_host)
+            .field("shared_volume", &self.shared_volume)
             .field("weak_exchange", &self.weak_exchange.is_some())
             .field("step", &self.step.is_some())
             .field("folder_sync", &self.folder_sync.is_some())
@@ -1195,9 +1202,15 @@ pub enum Publish {
 
 /// `2026-11-12 14.03.22`, local time (a file name the person reads).
 fn local_stamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    local_time(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
+/// `now` (seconds since 1970) as `2026-11-12 14.03.22`, local time.
+pub fn local_time(now: u64) -> String {
     #[cfg(unix)]
     {
         let seconds = now as libc::time_t;
@@ -1508,6 +1521,11 @@ pub(crate) struct Host<'a> {
 }
 
 impl Host<'_> {
+    /// Whether other machines write the volume `path` is on.
+    pub fn shared_volume(&self, path: &Path) -> bool {
+        self.hooks.shared_volume || !crate::locks::is_local_volume(path)
+    }
+
     /// Runs `work` once, inside a coordinated write of `path` where the
     /// host has a coordinator and it grants one ([`WriteCoordinator`]).
     pub fn coordinated(&self, path: &Path, work: &mut dyn FnMut(bool)) {

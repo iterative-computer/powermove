@@ -1041,6 +1041,22 @@ fn private_leftovers(file: &Path) -> Vec<String> {
         })
         .collect()
 }
+/// A kernel with a lock folder of its own, as a build that does not share
+/// the user's has.
+fn kernel_with_locks(path: &Path, locks: &Path) -> Kernel {
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(path.join("journals")),
+        lock_root: Some(locks.into()),
+        ..Default::default()
+    });
+    k.shell(ShellCall::AttachLibrary {
+        profile: path.into(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    k
+}
 /// A kernel that keeps the versions its saves replace, as the app does.
 fn kernel_with_backups(path: &Path) -> Kernel {
     let mut k = Kernel::new(KernelConfig {
@@ -1424,6 +1440,173 @@ fn what_a_volume_does_is_proven_by_every_save_not_remembered_from_an_earlier_one
     };
     assert_eq!(fs::read(&kept).unwrap(), b"version B");
     assert_eq!(saved_name(&file).as_deref(), Some("Three"));
+}
+/// Two copies of the app on one Mac (the shipped app and a development
+/// build, or two profiles) never write one project file: the lock that
+/// excludes them is the user's, not a profile's. The second opens the
+/// file as a copy.
+#[test]
+fn another_profile_on_this_mac_is_excluded_from_a_file_that_is_open() {
+    let dir = common::TempDir::new("two-profiles");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut shipped = kernel(&dir.path("profile-a"));
+    let mut development = kernel(&dir.path("profile-b"));
+    assert_eq!(shipped.lock_root(), development.lock_root());
+    assert_eq!(shipped.lock_root(), user_lock_root());
+    let (_held, first) = open_file(&mut shipped, &file);
+    assert_eq!(first, OpenDecision::Writable);
+    let (_, second) = open_file(&mut development, &file);
+    assert_eq!(second, OpenDecision::AsCopy(CopyReason::Locked));
+}
+/// A save that is going on in another copy of the app is not a save that
+/// was cut short. Even a copy that does not share the lock (so nothing
+/// stopped it from getting this far) moves none of that save's files while
+/// the process that began it is alive: the open is refused in plain words,
+/// and the save finishes undisturbed.
+#[test]
+fn a_save_in_progress_in_another_live_process_is_never_recovered() {
+    let dir = common::TempDir::new("live-owner");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let go_on = dir.path("go-on");
+    let mut saving = Process::new(std::env::current_exe().unwrap())
+        .args(["--exact", "save_child_process"])
+        .env("PM_KERNEL_TEST_SAVE_PROFILE", dir.path("profile-a"))
+        .env("PM_KERNEL_TEST_SAVE_LOCKS", dir.path("locks-a"))
+        .env("PM_KERNEL_TEST_SAVE_FILE", &file)
+        .env("PM_KERNEL_TEST_SAVE_DISK", "no-exchange")
+        .env("PM_KERNEL_TEST_SAVE_KILL", "between")
+        .env("PM_KERNEL_TEST_SAVE_PAUSE", &go_on)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let reached = go_on.with_extension("reached");
+    for _ in 0..1500 {
+        if reached.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(reached.exists(), "the save is between its two renames");
+    assert!(!file.exists());
+    let before = tree(&dir.path("job"));
+    let mut other = kernel_with_locks(&dir.path("profile-b"), &dir.path("locks-b"));
+    let refused = other
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("the project is being saved right now");
+    assert!(
+        refused.to_string().contains("being saved right now"),
+        "{refused}"
+    );
+    let ShellReply::Leftovers(rows) = other.shell(ShellCall::Leftovers(file.clone())).unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        rows.iter()
+            .all(|r| r.get("why").and_then(Value::as_str) == Some("active")),
+        "{rows:?}"
+    );
+    let chosen = rows[0].get("path").and_then(Value::as_str).unwrap();
+    other
+        .shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: chosen.into(),
+        })
+        .expect_err("its files are not for anyone to choose from");
+    assert_eq!(tree(&dir.path("job")), before, "nothing was moved");
+    fs::write(&go_on, b"").unwrap();
+    assert_eq!(saving.wait().unwrap().code(), Some(3), "the save finished");
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(visible_siblings(&file), [""; 0].map(Path::new));
+    assert_eq!(private_leftovers(&file), [""; 0]);
+}
+/// On a volume other computers write, a save begun on another computer and
+/// not finished may be a crash or may still be going on (a lock there is
+/// only believed for a while). It is never settled unasked: the open says
+/// which computer, which user and since when, nothing is moved, and the
+/// person chooses. The same leftovers on a drive only this Mac writes (it
+/// was carried over from the other computer) are settled as any others.
+#[test]
+fn a_save_begun_on_another_computer_on_a_shared_volume_is_never_settled_unasked() {
+    for shared in [true, false] {
+        let dir = common::TempDir::new("elsewhere");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let killed = Process::new(std::env::current_exe().unwrap())
+            .args(["--exact", "save_child_process"])
+            .env("PM_KERNEL_TEST_SAVE_PROFILE", dir.path("their-profile"))
+            .env("PM_KERNEL_TEST_SAVE_FILE", &file)
+            .env("PM_KERNEL_TEST_SAVE_DISK", "no-exclusive")
+            .env("PM_KERNEL_TEST_SAVE_KILL", "between")
+            .env("PM_KERNEL_TEST_SAVE_HOST", "studio-mac-2")
+            .stdout(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(killed.status.code(), Some(0));
+        let before = tree(&dir.path("job"));
+        let mut k = kernel(&dir.path("my-profile"));
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            shared_volume: shared,
+            ..child_disk("no-exclusive")
+        });
+        let opened = k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        });
+        if !shared {
+            opened.expect("carried over on a drive: settled like any cut-short save");
+            assert_eq!(fs::read(&file).unwrap(), original);
+            continue;
+        }
+        let refused = opened.expect_err("another computer's save").to_string();
+        assert!(
+            refused.contains("studio-mac-2") && refused.contains("Nothing was moved"),
+            "{refused}"
+        );
+        assert_eq!(tree(&dir.path("job")), before, "nothing was moved");
+        let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap()
+        else {
+            panic!()
+        };
+        let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for row in &rows {
+            assert_eq!(text(row, "why").as_deref(), Some("elsewhere"));
+            assert_eq!(text(row, "computer").as_deref(), Some("studio-mac-2"));
+            assert!(
+                row.get("at")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|at| at > 0.0)
+            );
+        }
+        // The person chooses the last saved version.
+        let previous = rows
+            .iter()
+            .find(|r| text(r, "role").as_deref() == Some("previous"))
+            .and_then(|r| text(r, "path"))
+            .unwrap();
+        k.shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: previous.into(),
+        })
+        .unwrap();
+        assert_eq!(fs::read(&file).unwrap(), original);
+        let kept = visible_siblings(&file);
+        assert_eq!(kept.len(), 1, "their unfinished save is kept: {kept:?}");
+        assert_eq!(saved_name(&kept[0]).as_deref(), Some("One"));
+    }
 }
 /// A coordinator as the app supplies one: grants every write (or none),
 /// and notes what the project file held when the work began and ended.
@@ -2162,8 +2345,17 @@ fn save_child_process() {
         None => (kill.clone(), 1),
     };
     let seen = std::sync::atomic::AtomicUsize::new(0);
+    // Paused, not killed: says it got there, waits to be told to go on.
     let die: pm_kernel::project_io::PublishHook =
-        std::sync::Arc::new(|_| unsafe { libc::_exit(0) });
+        match std::env::var_os("PM_KERNEL_TEST_SAVE_PAUSE").map(std::path::PathBuf::from) {
+            Some(go_on) => std::sync::Arc::new(move |_| {
+                fs::write(go_on.with_extension("reached"), b"").unwrap();
+                while !go_on.exists() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }),
+            None => std::sync::Arc::new(|_| unsafe { libc::_exit(0) }),
+        };
     let hooks = pm_kernel::project_io::PublishHooks {
         between_renames: (kill == "between").then(|| die.clone()),
         mid_copy: (kill == "mid-copy").then(|| die.clone()),
@@ -2173,9 +2365,14 @@ fn save_child_process() {
                 unsafe { libc::_exit(0) }
             }
         })),
+        owner_host: var("PM_KERNEL_TEST_SAVE_HOST"),
         ..child_disk(&var("PM_KERNEL_TEST_SAVE_DISK").unwrap_or_else(|| "no-exchange".into()))
     };
-    let mut k = kernel(Path::new(&profile));
+    // A build that does not share the user's lock folder has its own.
+    let mut k = match std::env::var_os("PM_KERNEL_TEST_SAVE_LOCKS") {
+        Some(locks) => kernel_with_locks(Path::new(&profile), Path::new(&locks)),
+        None => kernel(Path::new(&profile)),
+    };
     if var("PM_KERNEL_TEST_SAVE_ACTION").as_deref() == Some("open") {
         k.set_publish_hooks(hooks);
         let _ = k.shell(ShellCall::PrepareOpen {
@@ -3525,19 +3722,20 @@ fn child_project_lock(root: &Path, file: &Path, expected: &str) {
         String::from_utf8_lossy(&result.stderr)
     );
 }
-/// A project on a volume only this Mac writes is locked in the profile, not
+/// A project on a volume only this Mac writes is locked in a lock folder
+/// (the user's; here one of the test's own, to count what is in it), not
 /// beside the file. Nothing is written into the project's folder, so a sync
 /// client has no lock file to upload or to replace; replacing a file that
 /// sits where the lock used to be changes nothing. Another process is
 /// excluded while the project is open, across a save (which replaces the
 /// file's inode), and until it closes; then the lock leaves no file behind.
 #[test]
-fn a_project_lock_is_in_the_profile_and_cannot_be_replaced_underneath() {
+fn a_project_lock_is_in_a_lock_folder_and_cannot_be_replaced_underneath() {
     let dir = common::TempDir::new("local-lock");
     fs::create_dir_all(dir.path("job")).unwrap();
     let file = dir.path("job/cut.pmv");
     fs::write(&file, PROJECT).unwrap();
-    let mut k = kernel(&dir.path("native"));
+    let mut k = kernel_with_locks(&dir.path("native"), &dir.path("locks"));
     let root = k.lock_root();
     let (session, decision) = open_file(&mut k, &file);
     assert_eq!(decision, OpenDecision::Writable);
@@ -3635,7 +3833,7 @@ fn a_locked_file_opens_as_a_named_copy_and_never_saves_over_the_source() {
     let file = dir.path("original.pmv");
     fs::write(&file, PROJECT).unwrap();
     let bytes = fs::read(&file).unwrap();
-    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
+    let _lock = lock_project(&user_lock_root(), &file).unwrap();
     let mut k = kernel(&dir.path("native"));
     let ShellReply::Opened {
         session, decision, ..
@@ -4158,7 +4356,7 @@ fn copy_journals_follow_the_copy_slot_after_a_crash() {
     let dir = common::TempDir::new("copy-crash");
     let file = dir.path("external.pmv");
     fs::write(&file, PROJECT).unwrap();
-    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
+    let _lock = lock_project(&user_lock_root(), &file).unwrap();
     let profile = dir.path("native");
     let mut k = kernel(&profile);
     open(&mut k, "P", SessionSource::File(file));
@@ -4187,7 +4385,7 @@ fn embedded_media_in_a_copy_survives_removal_of_the_original_file() {
     let dir = common::TempDir::new("copy-media");
     let file = dir.path("external.pmv");
     fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
-    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
+    let _lock = lock_project(&user_lock_root(), &file).unwrap();
     let profile = dir.path("native");
     let mut k = kernel(&profile);
     let h = open(&mut k, "P", SessionSource::File(file.clone()));

@@ -360,7 +360,11 @@ impl Transaction {
         begin.insert("step", Value::from("begin"));
         begin.insert("file", name(destination));
         begin.insert("route", Value::from(route.name()));
-        begin.insert("owner", Owner::this(host.profile).to_value());
+        let mut owner = Owner::this(host.profile);
+        if let Some(other) = &host.hooks.owner_host {
+            (owner.host, owner.computer) = (other.clone(), other.clone());
+        }
+        begin.insert("owner", owner.to_value());
         begin.insert("at", Value::from(crate::locks::now_ms().to_string()));
         if let Some(old) = old {
             begin.insert("old", Value::from(old));
@@ -640,6 +644,25 @@ pub enum Undecided {
     Several,
     /// The record itself cannot be read.
     Unreadable,
+    /// The save is going on right now: the process that began it is
+    /// running on this machine. Its files are not for anyone else to move.
+    Active,
+    /// The save was begun on another machine, on a volume other machines
+    /// write. From here it cannot be told whether that machine crashed or
+    /// is still at it, so nothing is settled unasked: the person is told
+    /// who and since when, and chooses.
+    Elsewhere,
+}
+
+/// Whose save `record` is, where that keeps recovery from acting on it.
+fn held_by_another(record: &Record, destination: &Path, host: &Host) -> Option<Undecided> {
+    if record.owner.is_alive_here() && !record.owner.is_this_process() {
+        Some(Undecided::Active)
+    } else if !record.owner.is_here() && host.shared_volume(destination) {
+        Some(Undecided::Elsewhere)
+    } else {
+        None
+    }
 }
 
 /// A file recovery did not move, for the person to decide about.
@@ -729,7 +752,9 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
     // grants one; nothing is asked for when there is nothing to settle.
     let settle_all = |left: &mut Vec<LeftAside>, undecided: &mut Vec<Leftover>| {
         for record in &records {
-            let unresolved = if several {
+            let unresolved = if let Some(held) = held_by_another(record, destination, host) {
+                Some(held)
+            } else if several {
                 Some(Undecided::Several)
             } else {
                 settle_one(record, destination, host, left)
@@ -980,7 +1005,7 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
 
 /// The files recovery left for the person to choose from ([`Settled`]'s
 /// `undecided`), without moving anything.
-pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
+pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
     let (records, unreadable) = records_of(destination);
     let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
     let mut found: Vec<_> = unreadable
@@ -993,6 +1018,7 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
         Undecided::Unknown
     };
     for record in &records {
+        let why = held_by_another(record, destination, host).unwrap_or(why);
         for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
             if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_))) {
                 found.push(leftover(path, role, why, Some(record)));
@@ -1037,6 +1063,13 @@ fn use_leftover_now(
         .ok_or_else(|| {
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
         })?;
+    // A save that is going on right now is not for anyone to choose from.
+    if held_by_another(record, destination, host) == Some(Undecided::Active) {
+        return Err(ProjectIoError::Invalid(
+            "This project is being saved right now by another copy of Powermove on this Mac."
+                .into(),
+        ));
+    }
     let mut tx =
         Transaction::resume(record, destination, hooks).map_err(|e| io_err(&record.path, e))?;
     take_back_copies(record, destination, hooks);

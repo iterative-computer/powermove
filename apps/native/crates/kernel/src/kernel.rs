@@ -37,9 +37,10 @@ pub struct KernelConfig {
     /// Previous versions (`<root>/<project id>/`). Every production host sets
     /// this: a save without it deletes the file it replaces.
     pub backup_root: Option<PathBuf>,
-    /// Where local project locks live (`locks::lock_project`). `None`: a
-    /// `locks` folder beside the journals, or the user's temporary folder
-    /// when there are no journals either.
+    /// Where local project locks live (`locks::lock_project`). `None`: the
+    /// user's lock folder ([`crate::locks::user_lock_root`]), which every
+    /// build and profile of the app shares, so two of them never write one
+    /// project file. Set only to isolate a test.
     pub lock_root: Option<PathBuf>,
     /// The system's file coordination, asked for a coordinated write around
     /// every save's publication and every recovery move
@@ -485,11 +486,7 @@ impl Kernel {
         self.config
             .lock_root
             .clone()
-            .or_else(|| {
-                let journals = self.config.journal_root.as_ref()?;
-                Some(journals.parent()?.join("locks"))
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("com.powermove.locks"))
+            .unwrap_or_else(crate::locks::user_lock_root)
     }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()

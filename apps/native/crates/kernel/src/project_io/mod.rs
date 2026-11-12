@@ -54,7 +54,7 @@ pub use crate::error::kept_beside;
 pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
-    temporary_sibling,
+    local_time, temporary_sibling,
 };
 pub(crate) use durable::{Host, forget_local_copies, remove_abandoned_temps};
 pub use durable::{PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, WriteCoordinator};

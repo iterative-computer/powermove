@@ -309,8 +309,11 @@ pub enum ShellReply {
     /// between: `path`, `role` (`previous`: the file that was under the
     /// project's name; `saving`: the file the save had finished; `record`:
     /// a save's record that cannot be read), `why` (`unknown`, `several`,
-    /// `unreadable`), `size`, and who was saving and when (`computer`,
-    /// `user`, `at` in milliseconds) where the record says.
+    /// `unreadable`; `active`: the save is going on right now in another
+    /// copy of the app on this Mac, and nothing can be chosen; `elsewhere`:
+    /// it was begun on another computer on a shared volume, which may have
+    /// crashed or may still be at it), `size`, and who was saving and when
+    /// (`computer`, `user`, `at` in milliseconds) where the record says.
     Leftovers(Vec<Value>),
     Changed(bool),
 }
@@ -358,6 +361,8 @@ fn leftover_row(left: &project_io::Leftover) -> Value {
             project_io::Undecided::Unknown => "unknown",
             project_io::Undecided::Several => "several",
             project_io::Undecided::Unreadable => "unreadable",
+            project_io::Undecided::Active => "active",
+            project_io::Undecided::Elsewhere => "elsewhere",
         }),
     );
     m.insert("size", Value::from(left.size as f64));
@@ -526,7 +531,7 @@ impl Kernel {
                 }))
             }
             ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
-                project_io::leftovers(&path)
+                project_io::leftovers(&path, &self.host())
                     .iter()
                     .map(leftover_row)
                     .collect(),
@@ -1500,6 +1505,27 @@ impl Kernel {
                         .iter()
                         .filter_map(|l| Some(l.path.file_name()?.to_string_lossy().into_owned()))
                         .collect();
+                    // Somebody else's save: who, and since when.
+                    let held = left_aside.undecided.iter().find_map(|l| {
+                        let owner = l.owner.as_ref()?;
+                        let since = project_io::local_time(l.at / 1000);
+                        match l.why {
+                            project_io::Undecided::Active => Some(format!(
+                                "This project is being saved right now by another copy of                                  Powermove on this Mac (user {}, since {since}). Nothing was                                  moved. Open it again when that save has finished.",
+                                owner.user
+                            )),
+                            project_io::Undecided::Elsewhere => Some(format!(
+                                "A save of this project from the computer “{}” (user {}),                                  begun {since}, has not finished: that computer may still be                                  saving, or it stopped part way. Nothing was moved or removed.                                  Its files are next to where the project was: {}",
+                                owner.computer,
+                                owner.user,
+                                names.join(", ")
+                            )),
+                            _ => None,
+                        }
+                    });
+                    if let Some(held) = held {
+                        return Err(failure(held));
+                    }
                     return Err(failure(format!(
                         "The last save of this project did not finish, and which of the files                          it left is the project cannot be told. Nothing was moved or removed.                          They are next to where the project was: {}",
                         names.join(", ")
@@ -1550,6 +1576,7 @@ impl Kernel {
                         left_aside
                             .undecided
                             .iter()
+                            .filter(|l| l.why != project_io::Undecided::Active)
                             .map(|l| kept_row("undecided", Some(&l.path))),
                     );
                 }
