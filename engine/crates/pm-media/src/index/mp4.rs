@@ -396,10 +396,24 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
             key[s - 1] = true;
         }
     }
+    // Each size table must count the samples the timing table does, and
+    // hold them, before anything of its declared length is allocated.
+    let counted = |count: usize, bits: usize, c: &Cur| -> Result<()> {
+        if count != n {
+            return Err(MediaError::invalid(format!(
+                "stsz count {count} != stts count {n}"
+            )));
+        }
+        if (count * bits).div_ceil(8) > c.remaining() {
+            return Err(MediaError::invalid("sample size table is truncated"));
+        }
+        Ok(())
+    };
     let sizes: Vec<u32> = if let Some(b) = child(stbl, b"stsz")? {
         let mut c = Cur::new(b);
         c.skip(4)?;
         let (fixed, count) = (c.u32()?, c.u32()? as usize);
+        counted(count, if fixed != 0 { 0 } else { 32 }, &c)?;
         if fixed != 0 {
             vec![fixed; count]
         } else {
@@ -410,6 +424,10 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
         c.skip(4 + 3)?;
         let field = c.u8()?;
         let count = c.u32()? as usize;
+        if !matches!(field, 4 | 8 | 16) {
+            return Err(MediaError::invalid("bad stz2 field size"));
+        }
+        counted(count, field as usize, &c)?;
         let mut v = Vec::with_capacity(count);
         match field {
             4 => {
@@ -435,12 +453,6 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
     } else {
         return Err(MediaError::invalid("no stsz or stz2"));
     };
-    if sizes.len() != n {
-        return Err(MediaError::invalid(format!(
-            "stsz count {} != stts count {n}",
-            sizes.len()
-        )));
-    }
     let chunk_off: Vec<u64> = if let Some(b) = child(stbl, b"stco")? {
         let mut c = Cur::new(b);
         c.skip(4)?;

@@ -258,11 +258,22 @@ pub(crate) mod rational_serde {
     }
 }
 
+/// The largest index block read whole (a movie box, an index chunk or
+/// table segment). Ten hours of 60 fps picture with its sound index in
+/// well under a quarter of this.
+const MAX_DECLARED: u64 = 256 << 20;
+
 /// Reads the `len` bytes a container declares at `offset`. A corrupt or
 /// truncated file can declare any length (an 8-byte MXF BER length, a
-/// 32-bit AVI chunk size); one the file cannot hold is refused before
-/// anything is allocated, so the probe fails cleanly instead of aborting.
+/// 32-bit AVI chunk size); one the file cannot hold, or longer than any
+/// index ([`MAX_DECLARED`]), is refused before anything is allocated, so
+/// the probe fails cleanly instead of aborting or taking that memory.
 pub(crate) fn read_declared(f: &File, offset: u64, len: u64) -> Result<Vec<u8>> {
+    if len > MAX_DECLARED {
+        return Err(MediaError::invalid(format!(
+            "an index block of {len} bytes at {offset} is larger than any index"
+        )));
+    }
     let size = f.metadata()?.len();
     if offset.checked_add(len).is_none_or(|end| end > size) {
         return Err(MediaError::invalid(format!(
@@ -581,6 +592,10 @@ pub(crate) struct Cur<'a> {
 impl<'a> Cur<'a> {
     pub fn new(b: &'a [u8]) -> Self {
         Cur { b, p: 0 }
+    }
+    /// Bytes not yet read.
+    pub fn remaining(&self) -> usize {
+        self.b.len().saturating_sub(self.p)
     }
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.p.checked_add(n).is_none_or(|e| e > self.b.len()) {
