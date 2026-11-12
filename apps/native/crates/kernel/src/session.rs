@@ -43,6 +43,10 @@ pub enum ShellCall {
         ticket: String,
         decision: RecoveryDecision,
     },
+    /// Library copies holding work for the file this session has open in
+    /// place that the person has not been told about yet (see
+    /// `Kernel::unoffered_copies`). Replies `Copies`.
+    CopiesOf(SessionHandle),
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
@@ -248,6 +252,8 @@ pub enum ShellReply {
     },
     Durable,
     Recent(Vec<Value>),
+    /// Library rows (`id`, `name`, `at`) of copies of a file.
+    Copies(Vec<Value>),
     Changed(bool),
 }
 pub(crate) enum Destination {
@@ -393,6 +399,10 @@ impl Kernel {
                 source,
                 electron_profile,
             } => self.open_session_mode(id, source, electron_profile, RecoveryMode::Ask),
+            ShellCall::CopiesOf(handle) => {
+                self.check_session(&handle)?;
+                Ok(ShellReply::Copies(self.unoffered_copies(&handle.project)))
+            }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
                     .pending_recovery
@@ -1929,6 +1939,89 @@ impl Kernel {
                 })
                 .unwrap_or(false)
         })
+    }
+    /// Copies in the library that hold work for the file session `id` has
+    /// open in place: copies recorded for the file (`copyOf`), and copies an
+    /// earlier build made of every file in a syncing folder without
+    /// recording it, known by their name ("<project name> — Native"). The
+    /// copies are never touched. Each is reported once per file: the file's
+    /// entry remembers the ones reported (`copiesOffered`).
+    fn unoffered_copies(&mut self, id: &str) -> Vec<Value> {
+        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
+            return Vec::new();
+        };
+        let (path, Some(store)) = (path.clone(), self.library.as_ref().map(|w| w.store())) else {
+            return Vec::new();
+        };
+        let name = self
+            .project(id)
+            .and_then(|p| p.store().root())
+            .and_then(|root| root.get("name"))
+            .map(|name| name.to_value())
+            .and_then(|name| name.as_str().map(|n| format!("{n} — Native")));
+        let offered: Vec<String> = self
+            .state
+            .ui
+            .get(id)
+            .and_then(|ui| ui.session.get("copiesOffered"))
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut found = Vec::new();
+        for row in store.projects().unwrap_or_default() {
+            if row.id == id || offered.contains(&row.id) {
+                continue;
+            }
+            let meta = store
+                .read(&format!("projectMeta.{}", row.id))
+                .ok()
+                .flatten();
+            let recorded = meta
+                .as_ref()
+                .and_then(|m| m.get("copyOf")?.get("path")?.as_str())
+                .map(std::path::Path::new);
+            let stands_for_it = match recorded {
+                Some(recorded) => {
+                    recorded == path
+                        || recorded
+                            .canonicalize()
+                            .is_ok_and(|r| path.canonicalize().is_ok_and(|p| p == r))
+                }
+                // An earlier build's copy: a `copy` slot with no file of
+                // its own, under the name copies are given.
+                None => {
+                    row.id.starts_with("copy")
+                        && meta.as_ref().is_none_or(|m| m.get("file").is_none())
+                        && name.as_deref() == Some(row.name.as_str())
+                }
+            };
+            if stands_for_it {
+                let mut m = Map::new();
+                m.insert("id", Value::from(row.id.clone()));
+                m.insert("name", Value::from(row.name.clone()));
+                if let Some(at) = row.at {
+                    m.insert("at", Value::from(at));
+                }
+                found.push(Value::Object(m));
+            }
+        }
+        if !found.is_empty() {
+            let ids = offered
+                .into_iter()
+                .map(Value::from)
+                .chain(found.iter().filter_map(|row| row.get("id").cloned()))
+                .collect();
+            if let Some(ui) = std::sync::Arc::make_mut(&mut self.state.ui).get_mut(id)
+                && let Value::Object(m) = &mut ui.session
+            {
+                m.insert("copiesOffered", Value::Array(ids));
+            }
+        }
+        found
     }
     /// Opens the copy `copy` in place of the file it stands in for; the
     /// reply still says the file opened as a copy, and why.

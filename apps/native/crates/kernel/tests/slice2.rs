@@ -585,6 +585,89 @@ fn a_file_that_must_open_as_a_copy_reopens_the_same_copy() {
     assert_eq!(fs::read(&file).unwrap(), bytes, "the file is untouched");
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
 }
+/// A file that opens in place again is told about the copies that hold work
+/// for it: the copy an earlier build made of a file in a syncing folder
+/// (named "<project> — Native", nothing recorded) and a copy recorded for
+/// the file. Each is reported once, the file's entry remembers it across a
+/// close, and the copies themselves are untouched.
+#[test]
+fn a_file_opened_in_place_is_told_once_about_its_stranded_copies() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("stranded");
+    let file = dir.path("Dropbox/cut.pmv");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, PROJECT).unwrap();
+    let native = dir.path("native");
+    // Two copies made while the file could not open in place.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    edit(&mut k, "P", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let copy = |native: &Path| {
+        let rows = LibraryStore::open(native).projects().unwrap();
+        let row = rows.iter().find(|r| r.name.ends_with("— Native")).unwrap();
+        (row.id.clone(), row.name.clone())
+    };
+    let (recorded, name) = copy(&native);
+    // The same copy as an earlier build left it: nothing says whose it is.
+    let store = LibraryStore::open(&native);
+    let project = store.load(&recorded).unwrap().unwrap();
+    let w = writer(&native);
+    let mut meta = project
+        .session
+        .clone()
+        .unwrap()
+        .as_object()
+        .cloned()
+        .unwrap();
+    meta.remove("copyOf");
+    w.save_project(
+        "copy-earlier",
+        project.project.clone(),
+        Value::Null,
+        Value::Null,
+        Value::Object(meta),
+    )
+    .unwrap();
+    w.flush().unwrap();
+    drop(w);
+    let before = fs::read(native.join(format!("project.{recorded}.json"))).ok();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut k = kernel(&native);
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    let copies = |k: &mut Kernel, session: &SessionHandle| match k
+        .shell(ShellCall::CopiesOf(session.clone()))
+        .unwrap()
+    {
+        ShellReply::Copies(rows) => rows
+            .iter()
+            .map(|r| r.get("id").and_then(Value::as_str).unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        _ => panic!(),
+    };
+    let mut told = copies(&mut k, &session);
+    told.sort();
+    let mut expected = vec!["copy-earlier".to_owned(), recorded.clone()];
+    expected.sort();
+    assert_eq!(told, expected);
+    assert!(copies(&mut k, &session).is_empty(), "told once");
+    k.shell(ShellCall::Close(session)).unwrap();
+    let (session, _) = open_file(&mut k, &file);
+    assert!(
+        copies(&mut k, &session).is_empty(),
+        "the file's entry remembers across a close"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(copy(&native).1, name);
+    assert_eq!(
+        fs::read(native.join(format!("project.{recorded}.json"))).ok(),
+        before,
+        "the copy is untouched"
+    );
+}
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");
