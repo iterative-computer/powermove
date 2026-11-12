@@ -135,6 +135,9 @@ counters! {
     /// Media files' size and modification time read from the file system
     /// (a `stat` each).
     FileStats = "engine.file_stats",
+    /// Still images decoded on the counting thread (a prefetched still is
+    /// decoded on its worker and adds nothing to the frame's thread).
+    StillDecodes = "engine.still_decodes",
     /// Layers planned (drawn from scratch) in a composition pass.
     LayersPlanned = "engine.layers_planned",
     /// Compositions evaluated and planned (passes built).
