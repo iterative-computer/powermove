@@ -1332,7 +1332,13 @@ fn plan_export_checked(
         tags,
         alpha,
         working: WorkingEncoding::Standard,
-        dither: if s.dither { Dither::On } else { Dither::Off },
+        // On is the engine's measured rule (EXPORT-DITHER-1): 8-bit PNG is
+        // dithered; lossy codecs and 10-bit and deeper outputs are not.
+        dither: if s.dither {
+            Dither::Default
+        } else {
+            Dither::Off
+        },
         audio: audio.as_ref().map(|a| AudioSpec {
             sample_rate: a.sample_rate,
             channels: 2,

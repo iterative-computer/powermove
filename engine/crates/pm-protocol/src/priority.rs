@@ -473,7 +473,8 @@ pub struct ExportSettings {
     pub color: OutputColor,
     /// Defaults to 32-bit when the output or any source exceeds 10 bits.
     pub precision: Precision,
-    /// Blue-noise dither, on by default for 8-bit outputs (section 17).
+    /// Blue-noise dither where it helps (section 17, EXPORT-DITHER-1): 8-bit
+    /// PNG; never lossy codecs or 10-bit and deeper outputs. False: never.
     pub dither: bool,
     /// "Render using: Proxies (draft)", chosen explicitly (section 14.6).
     pub draft_from_proxies: bool,

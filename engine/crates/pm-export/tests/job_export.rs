@@ -557,7 +557,8 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 tags: ColorTags::Rec709QuickTime,
-                dither: true,
+                // Dither on is the measured rule: H.264 is not dithered.
+                dither: false,
                 frame: n as u32,
             },
             ColorTags::Rec709QuickTime,
