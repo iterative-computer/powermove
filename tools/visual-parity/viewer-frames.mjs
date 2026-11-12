@@ -2,16 +2,17 @@
 // sees paused in the running lane app at each sample time.
 //
 //   node tools/visual-parity/viewer-frames.mjs --pid <lane app pid> --window <window id>
-//        --rect x,y,w,h --out <dir>
+//        --rect x,y,w,h --out <dir> [--times 2,8,13.458]
 //
 // Seeks through the timeline's Current time field with the cua-driver CLI
 // (background input, no focus change), waits until the viewer stops changing, and crops
 // the viewer canvas (`--rect`, in the window screenshot's pixels) from a
 // native-resolution window screenshot into <out>/v2viewer/<time>.png. Times
-// come from <out>/v1/manifest.json. The viewer shows the frame at its zoom,
+// come from <out>/v1/manifest.json (or v2/ without v1), all of them or the
+// samples nearest `--times` (seconds). The viewer shows the frame at its zoom,
 // so this column is for looking, not for pixel statistics.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { timeName } from './lib.mjs';
 
@@ -23,8 +24,11 @@ const pid = Number(opt.pid), window = Number(opt.window);
 const [x, y, w, h] = opt.rect.split(',').map(Number);
 const out = path.resolve(opt.out, 'v2viewer');
 mkdirSync(out, { recursive: true });
-const v1 = JSON.parse(readFileSync(path.resolve(opt.out, 'v1/manifest.json'), 'utf8'));
-const fps = v1.project.fps;
+const base = JSON.parse(readFileSync(['v1', 'v2'].map((d) => path.resolve(opt.out, d, 'manifest.json')).find(existsSync), 'utf8'));
+const fps = base.project.fps;
+const wanted = opt.times
+  ? opt.times.split(',').map(Number).map((t) => base.samples.reduce((a, b) => (Math.abs(b.time - t) < Math.abs(a.time - t) ? b : a)))
+  : base.samples;
 const session = `parity-${process.pid}`;
 const call = (tool, args) => JSON.parse(execFileSync(cua, ['call', tool, JSON.stringify({ pid, window_id: window, session, ...args })], { encoding: 'utf8', maxBuffer: 64 << 20 }));
 const steps = (list) => {
@@ -51,7 +55,7 @@ execFileSync(cua, ['call', 'start_session', JSON.stringify({ session })]);
 const samples = [];
 const shot = path.join(out, '.window.png');
 let before = null;
-for (const s of v1.samples) {
+for (const s of wanted) {
   const button = field('AXButton');
   if (button) steps([{ tool: 'click', args: { element_token: button.token } }]);
   const text = field('AXTextField');
