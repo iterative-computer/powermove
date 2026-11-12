@@ -643,7 +643,11 @@ export function ProjectView(props: ProjectViewProps) {
             label="Search media"
             title="Search media"
             value={query}
-            metadata={{ hostValue: hostFilter.current }}
+            metadata={{
+              hostValue: hostFilter.current,
+              placeholder: "Search",
+              search: true,
+            }}
             id="media-search"
             binding={native.searchBinding}
             focusRequest="media-search"

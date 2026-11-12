@@ -187,6 +187,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.symbol_toolbar", "SF Symbol size in toolbar items"),
     ("metrics.symbol_panel", "SF Symbol size in panel headers"),
     ("metrics.symbol_inline", "SF Symbol size inside rows"),
+    (
+        "metrics.symbol_action",
+        "SF Symbol size of a surface's one primary action glyph",
+    ),
     ("metrics.hit", "Minimum pointer target"),
     ("metrics.popover_width", "Default popover width"),
     (

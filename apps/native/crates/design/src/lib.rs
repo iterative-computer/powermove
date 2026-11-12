@@ -263,6 +263,8 @@ pub struct Metrics {
     pub symbol_toolbar: f32,
     pub symbol_panel: f32,
     pub symbol_inline: f32,
+    /// A surface's one primary action drawn as a glyph (a composer's Send).
+    pub symbol_action: f32,
     /// Minimum pointer target. Smaller glyphs get padded hit areas.
     pub hit: f32,
     pub popover_width: f32,
@@ -687,6 +689,7 @@ impl Tokens {
                 symbol_toolbar: 14.,
                 symbol_panel: 14.,
                 symbol_inline: 12.,
+                symbol_action: 20.,
                 hit: 24.,
                 popover_width: 260.,
                 popover_radius: radius.xl,

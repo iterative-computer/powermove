@@ -201,6 +201,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                           tab.active ? "colors.text" : "colors.secondary",
                         ),
                         fontSize: t("typography.body"),
+                        // The selected tab is a filled pill: its name stands
+                        // clear of the pill's ends.
+                        paddingLeft: t("metrics.gap"),
+                        paddingRight: t("metrics.gap"),
                       }}
                     >
                       {tab.name}

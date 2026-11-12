@@ -113,7 +113,7 @@ pub struct ProjectLibrary {
     editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     /// v1's `projectsView`.
     pub layout: Layout,
-    search: Option<Entity<pm_shell::text::TextField>>,
+    search: Option<Entity<NativeControl>>,
     /// The project this window shows (its card reads Active).
     pub active: Option<String>,
     /// Cards per grid row at the last layout, for arrow keys.
@@ -476,7 +476,7 @@ impl ProjectLibrary {
             "escape" if self.menu.is_some() => self.menu = None,
             "f" if event.keystroke.modifiers.platform => {
                 if let Some(field) = &self.search {
-                    field.update(cx, |f, cx| f.begin_editing(cx));
+                    field.read(cx).focus();
                 }
             }
             "up" => self.controller.move_selection(-columns),
@@ -502,7 +502,7 @@ impl ProjectLibrary {
     }
     pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
         if let Some(field) = &self.search {
-            field.update(cx, |f, cx| f.set_value("", cx));
+            field.update(cx, |f, cx| f.update(&json!(""), &[], false, cx));
         }
         self.set_text(String::new(), cx);
     }
@@ -1101,26 +1101,35 @@ impl Render for ProjectLibrary {
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         if self.search.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
+            // The system search field: its own glass, magnifier and clear
+            // button; Return and Escape hand the keyboard back to Home.
+            let query = json!(self.controller.query.text);
             let search = cx.new(|cx| {
-                let mut field = pm_shell::text::TextField::new(
-                    pm_shell::text::TextKind::Primary,
-                    "Search projects",
-                    &self.controller.query.text,
-                    tokens,
+                NativeControl::new(
+                    ControlSpec {
+                        kind: Kind::Search,
+                        label: "Search projects",
+                        identifier: "home.search",
+                        value: &query,
+                        options: Vec::new(),
+                        disabled: false,
+                        default: false,
+                        destructive: false,
+                        inline: false,
+                        tint: None,
+                        symbol: None,
+                    },
+                    &tokens,
                     window,
                     cx,
-                );
-                field.set_placeholder("Search projects");
-                field.set_bare(true);
-                field
+                )
             });
-            cx.subscribe(&search, |v: &mut Self, _, event, cx| {
-                use pm_shell::text::TextEvent;
-                if let TextEvent::Changed(text)
-                | TextEvent::Committed(text)
-                | TextEvent::Submitted(text) = event
-                {
-                    v.set_text(text.clone(), cx);
+            cx.subscribe(&search, |v: &mut Self, _, event: &Value, cx| {
+                match (event.as_str(), event.get("key").and_then(Value::as_str)) {
+                    (Some(text), _) => v.set_text(text.to_owned(), cx),
+                    // Escape in the field clears the search, as on Home.
+                    (_, Some("Escape")) => v.clear_search(cx),
+                    _ => {}
                 }
             })
             .detach();
@@ -1252,10 +1261,11 @@ impl Render for ProjectLibrary {
             .pb(px(m.dock_gap))
             .role(Role::Group)
             .aria_label("Home")
-            .child(
-                kit.search(self.search.clone(), Some("⌘F"))
-                    .mb(px(t.space.md)),
-            )
+            .child(match &self.search {
+                Some(search) => div().mb(px(t.space.md)).child(search.clone()),
+                // No AppKit view (tests): the drawn well.
+                None => kit.search(None, Some("⌘F")).mb(px(t.space.md)),
+            })
             .child(
                 self.nav_row(
                     &kit,
