@@ -93,6 +93,24 @@ pub fn show(window: &NSWindow, key: bool) {
     });
 }
 
+/// A development build launched for a review (`PM_NATIVE_REVIEW_OPEN`)
+/// stands a child window just above its own parent while the app is in the
+/// background, so a capture can see it. It is ordered relative to its
+/// parent, never front, so it cannot come above another app's window.
+#[cfg(debug_assertions)]
+pub fn review_show(window: &NSWindow, parent: &NSWindow) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if NSApplication::sharedApplication(mtm).isActive()
+        || std::env::var_os("PM_NATIVE_REVIEW_OPEN").is_none()
+    {
+        return;
+    }
+    window.setHidesOnDeactivate(false);
+    window.orderWindow_relativeTo(NSWindowOrderingMode::Above, parent.windowNumber());
+}
+
 /// Whether a child window waits for its app to become active.
 pub fn is_pending(window: &NSWindow) -> bool {
     PENDING.with(|p| {

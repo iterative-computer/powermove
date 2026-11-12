@@ -508,12 +508,17 @@ impl NativeTextSlot {
         // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
         // No input-context replacement or keyDown override is installed.
         if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
+            // As a hosted control: it keeps its distance from the window's
+            // top edge until the next paint places it.
+            let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
+            state.wrapper.setAutoresizingMask(top);
             content.addSubview_positioned_relativeTo(
                 &state.wrapper,
                 NSWindowOrderingMode::Above,
                 Some(gpui),
             );
             if let Some((host, _)) = &state.caret {
+                host.setAutoresizingMask(top);
                 content.addSubview_positioned_relativeTo(
                     host,
                     NSWindowOrderingMode::Above,

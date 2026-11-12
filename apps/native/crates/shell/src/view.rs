@@ -645,6 +645,32 @@ impl Editor {
             }
             return;
         }
+        // `reviewResize:-240:-140`: a stepped resize that measures whether
+        // hosted controls stay attached (`resize.txt` in `--save-dir`).
+        #[cfg(debug_assertions)]
+        if let Some((dw, dh)) = cmd
+            .name
+            .strip_prefix("reviewResize:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let (Some(host), Ok(dw), Ok(dh)) = (&self.host, dw.parse(), dh.parse()) {
+                host.borrow().review_resize(dw, dh);
+            }
+            return;
+        }
+        // `reviewPopup:hover:3`, `leave:`, `type:exp`, `key:down`: the open
+        // palette or menu, as the pointer and the keyboard drive it.
+        #[cfg(debug_assertions)]
+        if let Some((action, value)) = cmd
+            .name
+            .strip_prefix("reviewPopup:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let Some(host) = &self.host {
+                host.borrow().review_popup(action, value);
+            }
+            return;
+        }
         #[cfg(debug_assertions)]
         if cmd.name == "reviewViews" {
             if let (Some(host), Ok(dir)) = (&self.host, std::env::var("PM_NATIVE_REVIEW_SAVE_DIR"))
@@ -824,6 +850,9 @@ impl Editor {
                 }
             }
             "shellAppearanceChanged" => self.rebuild_tokens(),
+            // This window was brought forward in its tab group: draw again,
+            // which publishes the strip for the new selection.
+            "shellTabShown" => {}
             // A theme from the theme pipeline: args[0] is its JSON output.
             "shellTheme" => {
                 let json = cmd.args.first().map(|v| match v {

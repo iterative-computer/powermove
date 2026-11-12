@@ -197,6 +197,18 @@ pub(crate) fn over_image(surface: &Surface, node: &Node) -> bool {
     }
     false
 }
+/// A sheet is the Settings anatomy in a dialog: its rows take the same
+/// controls a Settings page does.
+pub(crate) fn in_sheet(surface: &Surface, node: &Node) -> bool {
+    let mut current = node.parent.and_then(|id| surface.node(id));
+    while let Some(n) = current {
+        if Component::of(n) == Some(Component::SheetAnchor) {
+            return true;
+        }
+        current = n.parent.and_then(|id| surface.node(id));
+    }
+    false
+}
 pub(crate) fn settings_host(surface: &Surface, node: &Node) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {

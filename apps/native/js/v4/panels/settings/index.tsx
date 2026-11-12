@@ -50,6 +50,7 @@ function Button({
   destructive?: boolean;
   disabled?: boolean;
   onClick: () => void;
+  key?: string;
 }) {
   return (
     <UI.PushButton

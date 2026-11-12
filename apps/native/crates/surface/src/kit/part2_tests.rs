@@ -136,6 +136,18 @@ fn switch_requires_top_level_settings_root_and_is_a_regular_native_switch() {
     );
 }
 #[test]
+fn a_sheet_row_takes_a_switch() {
+    let mut sheet = surface(Component::SheetAnchor, json!({}));
+    sheet.apply(Commit {base_revision:1,ops:vec![Op::Create{id:2,r#type:"div".into()},
+        Op::SetProps{id:2,patch:props(json!({"data-pm-component":"switch","label":"Motion Blur","value":true,"style":{"minWidth":{"token":"metrics.hit"},"minHeight":{"token":"metrics.hit"}}}))},
+        Op::InsertBefore{parent:1,id:2,before:None}]}).unwrap();
+    assert!(
+        !validate_panel(&sheet, &tokens(), &Layout::new())
+            .iter()
+            .any(|d| d.code == "switchOutsideSettings")
+    );
+}
+#[test]
 fn secure_field_never_projects_values_or_text_actions() {
     let p = panel(
         surface(

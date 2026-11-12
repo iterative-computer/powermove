@@ -319,6 +319,45 @@ fn sidebar_material(
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
 }
+/// Gives a sheet a new content height. The first time, its top edge is put
+/// where a sheet `tallest` high stands centred in its parent (the most it
+/// will grow to, so it never runs off its parent); from then on the top stays
+/// there, so a sheet whose content changes height grows and shrinks downwards
+/// and is never centred again on the way (AppKit centres a sheet on every
+/// new frame; the window class hangs it from the pinned top instead). The
+/// frame is set on a later turn of the run loop, because a view asks for
+/// this while its window is being drawn and resizing calls back into it.
+pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let view: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    cx.spawn(async move |_| {
+        let frame = window.frame();
+        let grow = f64::from(height) - window.contentRectForFrameRect(frame).size.height;
+        if grow.abs() < 0.25 {
+            return;
+        }
+        let tall = frame.size.height + grow;
+        if window.respondsToSelector(sel!(pmPinSheetTop:)) {
+            let most = tall.max(tall + f64::from(tallest - height));
+            let _: () = unsafe { msg_send![&*window, pmPinSheetTop: most] };
+        }
+        window.setFrame_display(
+            NSRect::new(
+                NSPoint::new(frame.origin.x, frame.origin.y - grow),
+                NSSize::new(frame.size.width, tall),
+            ),
+            true,
+        );
+    })
+    .detach();
+}
 /// A window laid out as Home is: a sidebar on the window's glass and a
 /// content sheet beside it (Settings). The GPUI window is transparent over
 /// the behind-window blur; the sidebar's material stands in the leading
@@ -453,12 +492,7 @@ define_class!(
             let number: isize = unsafe { msg_send![sender, tag] };
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
-                unsafe {
-                    let group: *mut AnyObject = msg_send![&*window, tabGroup];
-                    if !group.is_null() {
-                        let _: () = msg_send![group, setSelectedWindow: &*window];
-                    }
-                }
+                show_in_tab_group(&window);
             }
             // This window's own tab, pressed while Home shows over the
             // project: back to the project (v1's title-bar tab).
@@ -1374,6 +1408,22 @@ fn tab_layout(count: usize, selected: usize, room: f64) -> (usize, usize, f64, b
 /// is a title bar accessory AppKit adds once a second window joins, and may
 /// add again when the group changes, so this runs whenever the tabs are
 /// synced. Hiding the accessory's controller also gives its height back.
+/// Posted to a window brought forward in its tab group by one of our tabs.
+const TAB_SHOWN: &str = "PMShellTabShown";
+/// Brings `window` forward in its tab group and tells it so. A window shown
+/// this way while the app is inactive gets no activation, so nothing else
+/// makes it hide AppKit's tab row or draw its own strip for the new state.
+fn show_in_tab_group(window: &NSWindow) {
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if group.is_null() {
+            return;
+        }
+        let _: () = msg_send![group, setSelectedWindow: window];
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .postNotificationName_object(&NSString::from_str(TAB_SHOWN), Some(window));
+    }
+}
 fn hide_system_tab_bar(window: &NSWindow) {
     fn tab_bar(view: &NSView) -> Option<Retained<NSView>> {
         if view.class().name().to_bytes() == b"NSTabBar" {
@@ -1860,19 +1910,17 @@ fn base_choices() -> Vec<Choice> {
     let mut seen = std::collections::HashSet::new();
     menu::menus()
         .into_iter()
-        .flat_map(|(_, i)| i)
-        .chain(menu::tools())
-        .filter(|i| {
+        .flat_map(|(title, items)| items.into_iter().map(move |i| (title, i)))
+        .chain(menu::tools().into_iter().map(|i| ("Tools", i)))
+        .filter(|(_, i)| {
             !i.command.is_empty()
                 && i.role.is_none()
                 && i.args.is_empty()
                 && !menu::SUBMENUS.contains(&i.command.as_str())
         })
-        .filter(|i| seen.insert(i.command.clone()))
-        .map(|i| Choice {
-            label: i.label,
-            command: i.command,
-        })
+        .filter(|(_, i)| seen.insert(i.command.clone()))
+        // A row is listed under the menu it lives in.
+        .map(|(title, i)| Choice::new(i.label, i.command).within(title))
         .collect()
 }
 /// command → shortcut glyphs, preferring menu accelerators, then the first
@@ -1980,10 +2028,7 @@ impl Host {
             Surface::Menu,
             ["Position", "Scale", "Rotation", "Opacity"]
                 .iter()
-                .map(|n| Choice {
-                    label: n.to_string(),
-                    command: format!("field:{n}"),
-                })
+                .map(|n| Choice::new(*n, format!("field:{n}")))
                 .collect(),
             tx.clone(),
         );
@@ -2133,7 +2178,7 @@ impl Host {
                                         | "shift+tab"
                                 ) || (key == "space" && p.row_focus)
                                 {
-                                    p.key(&key);
+                                    p.key(&key, e.isARepeat());
                                     return std::ptr::null_mut();
                                 }
                             }
@@ -2297,6 +2342,34 @@ impl Host {
                 },
             )
         };
+        // Brought forward by a tab while the app is inactive: no activation
+        // follows, so the window is told to redraw its strip itself.
+        let shown = {
+            let (window, sender) = {
+                let host = host.borrow();
+                (host.window.clone(), host.sender.clone())
+            };
+            block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    hide_system_tab_bar(&window);
+                    let _ = sender.try_send(Command {
+                        name: "shellTabShown".into(),
+                        args: vec![],
+                        token: None,
+                    });
+                },
+            )
+        };
+        let observer = unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter()
+                .addObserverForName_object_queue_usingBlock(
+                    Some(&NSString::from_str(TAB_SHOWN)),
+                    Some(&host.borrow().window),
+                    None,
+                    &shown,
+                )
+        };
+        host.borrow_mut().window_observers.push(observer);
         for name in unsafe {
             [
                 NSWindowDidBecomeMainNotification,
@@ -2775,6 +2848,123 @@ impl Host {
     /// and `dragright` carry the tab one place along the strip with pointer
     /// events posted to this app's own queue; `holdleft` and `holdright`
     /// keep it lifted for a few seconds first, for a capture.
+    /// Development builds: resizes the window by (`dw`, `dh`) in twelve
+    /// steps, two frames apart, its top-left corner kept, and writes
+    /// `resize.txt` to `--save-dir`: for every hosted AppKit control, how far
+    /// it stood right after a step from where the following frames put it.
+    /// All zeros means the controls stay attached while the window resizes.
+    #[cfg(debug_assertions)]
+    pub fn review_resize(&self, dw: f64, dh: f64) {
+        use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
+        const STEPS: usize = 12;
+        fn controls(view: &NSView, skip: &NSView, out: &mut Vec<(String, NSRect)>) {
+            if std::ptr::eq(view, skip) || view.isHidden() {
+                return;
+            }
+            if unsafe { msg_send![view, isKindOfClass: NSControl::class()] } {
+                let name = format!(
+                    "{} {:?}",
+                    view.class().name().to_string_lossy(),
+                    view.accessibilityLabel()
+                        .map(|l| l.to_string())
+                        .unwrap_or_default()
+                );
+                // From the window's top-left, which the resize keeps.
+                let r = view.convertRect_toView(view.bounds(), None);
+                let top = view.window().map_or(0., |w| w.frame().size.height);
+                out.push((
+                    name,
+                    NSRect::new(
+                        NSPoint::new(r.origin.x, top - r.origin.y - r.size.height),
+                        r.size,
+                    ),
+                ));
+                return;
+            }
+            for child in view.subviews().to_vec() {
+                controls(&child, skip, out);
+            }
+        }
+        let (window, gpui) = (self.window.clone(), self.gpui.clone());
+        let read = move || {
+            let mut out = vec![];
+            if let Some(content) = window.contentView() {
+                controls(&content, &gpui, &mut out);
+            }
+            out
+        };
+        let window = self.window.clone();
+        let state = Rc::new(RefCell::new((0usize, read(), String::new(), 0f64)));
+        let step = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
+            let mut s = state.borrow_mut();
+            let settled = read();
+            if s.0 > 0 {
+                // The same control in both readings (a list that changed
+                // between them is not compared).
+                for ((name, at), (same, now)) in s.1.clone().iter().zip(&settled) {
+                    if name != same {
+                        continue;
+                    }
+                    let off = (at.origin.x - now.origin.x)
+                        .abs()
+                        .max((at.origin.y - now.origin.y).abs())
+                        .max((at.size.width - now.size.width).abs());
+                    s.3 = s.3.max(off);
+                    if off > 0.01 {
+                        let line = format!("step {} {name}: {off:.1} pt behind\n", s.0);
+                        s.2.push_str(&line);
+                    }
+                }
+            }
+            if s.0 == STEPS {
+                unsafe { timer.as_ref().invalidate() };
+                let report = format!(
+                    "{} controls, {STEPS} steps of ({:.1}, {:.1}) pt, worst {:.1} pt\n{}",
+                    settled.len(),
+                    dw / STEPS as f64,
+                    dh / STEPS as f64,
+                    s.3,
+                    s.2
+                );
+                if let Ok(dir) = std::env::var("PM_NATIVE_REVIEW_SAVE_DIR") {
+                    let _ = std::fs::write(std::path::Path::new(&dir).join("resize.txt"), report);
+                }
+                return;
+            }
+            s.0 += 1;
+            let mut frame = window.frame();
+            frame.size.width += dw / STEPS as f64;
+            frame.size.height += dh / STEPS as f64;
+            frame.origin.y -= dh / STEPS as f64;
+            drop(s);
+            window.setFrame_display(frame, true);
+            state.borrow_mut().1 = read();
+        });
+        let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(1. / 30., true, &step) };
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+    }
+    #[cfg(debug_assertions)]
+    pub fn review_popup(&self, action: &str, value: &str) {
+        for popup in [&self.palette, &self.fields] {
+            let mut p = popup.borrow_mut();
+            if !p.model.open {
+                continue;
+            }
+            match action {
+                "hover" | "leave" => {
+                    if p.model.point(value.parse().ok()) {
+                        p.light(true);
+                    }
+                }
+                "type" => {
+                    p.search.setStringValue(&NSString::from_str(value));
+                    p.searched();
+                }
+                "key" => p.key(value, false),
+                _ => {}
+            }
+        }
+    }
     #[cfg(debug_assertions)]
     pub fn review_tab(&self, action: &str, index: usize) {
         let windows = tab_windows(&self.window);
@@ -2782,12 +2972,7 @@ impl Host {
             return;
         };
         match action {
-            "select" => unsafe {
-                let group: *mut AnyObject = msg_send![&**window, tabGroup];
-                if !group.is_null() {
-                    let _: () = msg_send![group, setSelectedWindow: &**window];
-                }
-            },
+            "select" => show_in_tab_group(window),
             "close" => request_close(window),
             // The tab at `index` of the strip as the pointer over it.
             "hover" => {
@@ -3214,30 +3399,31 @@ impl Host {
             if open && !crate::layout::closable(id) {
                 continue;
             }
-            choices.push(Choice {
-                label: format!("{} {title}", if open { "Hide" } else { "Show" }),
-                command: format!("panel:toggle:{id}"),
-            });
+            choices.push(
+                Choice::new(
+                    format!("{} {title}", if open { "Hide" } else { "Show" }),
+                    format!("panel:toggle:{id}"),
+                )
+                .within("Panels"),
+            );
         }
-        choices.extend(self.contributed_choices.iter().cloned());
+        choices.extend(self.contributed_choices.iter().cloned().map(|c| {
+            if c.category.is_empty() {
+                c.within("Extensions")
+            } else {
+                c
+            }
+        }));
         for (id, name, _) in &state.workspaces {
-            choices.push(Choice {
-                label: format!("Workspace: {name}"),
-                command: format!("workspace:{id}"),
-            });
+            choices.push(Choice::new(name.clone(), format!("workspace:{id}")).within("Workspace"));
         }
-        choices.push(Choice {
-            label: "Edit Workspace JSON…".into(),
-            command: "layout:edit".into(),
-        });
-        choices.push(Choice {
-            label: "Save Workspace…".into(),
-            command: "layout:save".into(),
-        });
-        choices.push(Choice {
-            label: "Reset Workspace".into(),
-            command: "layout:reset".into(),
-        });
+        for (label, command) in [
+            ("Edit Workspace JSON…", "layout:edit"),
+            ("Save Workspace…", "layout:save"),
+            ("Reset Workspace", "layout:reset"),
+        ] {
+            choices.push(Choice::new(label, command).within("Workspace"));
+        }
         if self.fields.borrow().model.open {
             self.fields.borrow_mut().hide();
         }
@@ -3536,15 +3722,20 @@ define_class!(
         #[unsafe(method(controlTextDidChange:))]
         fn changed(&self, _: &objc2_foundation::NSNotification) {
             if let Some(p) = self.ivars().upgrade() {
-                let mut p = p.borrow_mut();
-                let q = p.search.stringValue().to_string();
-                p.model.search(q);
-                p.refresh();
+                p.borrow_mut().searched();
             }
         }
     }
     unsafe impl NSTextFieldDelegate for PopupTarget {}
     impl PopupTarget {
+        #[unsafe(method(searched:))]
+        fn searched(&self, _: &NSControl) {
+            if let Some(p) = self.ivars().upgrade()
+                && let Ok(mut p) = p.try_borrow_mut()
+            {
+                p.searched();
+            }
+        }
         #[unsafe(method(pick:))]
         fn pick(&self, sender: &NSControl) {
             if let Some(p) = self.ivars().upgrade() {
@@ -3558,6 +3749,68 @@ define_class!(
         }
     }
 );
+define_class!(
+    /// The rows of a palette or menu: the scrolling list, top row first,
+    /// that follows the pointer over them.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMShellPopupList"]
+    #[ivars = RefCell<std::rc::Weak<RefCell<Popup>>>]
+    struct PopupList;
+    impl PopupList {
+        #[unsafe(method(isFlipped))]
+        fn flipped(&self) -> bool { true }
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), updateTrackingAreas];
+            }
+            for area in self.trackingAreas().to_vec() {
+                self.removeTrackingArea(&area);
+            }
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    <NSTrackingArea as objc2::AllocAnyThread>::alloc(),
+                    self.bounds(),
+                    NSTrackingAreaOptions::MouseMoved
+                        | NSTrackingAreaOptions::MouseEnteredAndExited
+                        | NSTrackingAreaOptions::ActiveAlways
+                        | NSTrackingAreaOptions::InVisibleRect,
+                    Some(self),
+                    None,
+                )
+            };
+            self.addTrackingArea(&area);
+        }
+        // Nothing lights as the menu opens under a resting pointer: only a
+        // move does.
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.point(Some(event));
+        }
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _: &NSEvent) {
+            self.point(None);
+        }
+        // The rows move under a resting pointer.
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            unsafe {
+                let _: () = msg_send![super(self), scrollWheel: event];
+            }
+            self.point(Some(event));
+        }
+    }
+);
+impl PopupList {
+    fn point(&self, event: Option<&NSEvent>) {
+        if let Some(popup) = self.ivars().borrow().upgrade()
+            && let Ok(mut popup) = popup.try_borrow_mut()
+        {
+            popup.point(event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None)));
+        }
+    }
+}
 define_class!(
     /// Sheet buttons: end the sheet they sit in with OK (Save) or Cancel.
     #[unsafe(super(NSObject))]
@@ -3922,21 +4175,135 @@ impl Sheet {
         self.window.makeFirstResponder(Some(view));
     }
 }
+/// One row of a palette or menu: its place in the filtered list, its frame
+/// in the list and the control that takes its press.
+struct PopupRow {
+    place: usize,
+    rect: NSRect,
+    button: Retained<NSButton>,
+}
+/// The shape a palette or menu is built on. Rows stand `inset` inside the
+/// surface, so a row's corner is the surface's less that inset.
+#[derive(Clone, Copy)]
+struct PopupShape {
+    radius: f32,
+    inset: f32,
+    row: f32,
+    heading: f32,
+}
+fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
+    if surface == Surface::Palette {
+        PopupShape {
+            radius: t.radius.xl,
+            inset: t.space.sm,
+            row: t.metrics.menu_row,
+            heading: t.metrics.menu_row - t.space.xs,
+        }
+    } else {
+        PopupShape {
+            radius: t.radius.lg,
+            inset: t.space.xs,
+            row: t.metrics.row,
+            heading: t.metrics.row - t.space.xs,
+        }
+    }
+}
+/// The surface of a palette or menu, in the menu's own corner: glass where
+/// the system has it, with the floating colour laid under the rows
+/// (`translucency.glass_menu`). Glass alone takes its value from what is
+/// behind it, and a tint does not hold it: over a dark viewer in the light
+/// appearance the rows would be dark ink on dark glass.
+fn popup_material(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    t: &Tokens,
+    surface: Surface,
+) -> Retained<NSView> {
+    let view = material(mtm, frame, t, surface);
+    let radius = popup_shape(t, surface).radius as f64;
+    if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
+        glass.setCornerRadius(radius);
+        let under = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::new(NSPoint::ZERO, frame.size));
+        under.setBoxType(NSBoxType::Custom);
+        under.setBorderWidth(0.);
+        under.setCornerRadius(radius);
+        under.setFillColor(
+            &native_color(t.colors.floating)
+                .colorWithAlphaComponent(t.translucency.glass_menu as f64),
+        );
+        under.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        contents(&view).addSubview(&under);
+    } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
+        solid.setCornerRadius(radius);
+    }
+    view
+}
+/// The lit row: the ink as a wash, so it reads on glass over any content.
+fn popup_highlight(t: &Tokens) -> Retained<NSColor> {
+    native_color(t.colors.text).colorWithAlphaComponent(t.translucency.selected as f64)
+}
+fn popup_label(text: &str, size: f32, ink: u32, mtm: MainThreadMarker) -> Retained<NSTextField> {
+    let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    label.setFont(Some(&NSFont::systemFontOfSize(size as f64)));
+    label.setTextColor(Some(&native_color(ink)));
+    label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    // The row's button speaks for it.
+    label.setAccessibilityElement(false);
+    label
+}
+/// Development builds: `PM_NATIVE_REVIEW_SLOW=8` runs a menu's motion that
+/// many times slower, so a capture can catch it on the way.
+fn review_slow() -> f64 {
+    static SLOW: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SLOW.get_or_init(|| {
+        std::env::var("PM_NATIVE_REVIEW_SLOW")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v >= 1.)
+            .unwrap_or(1.)
+    })
+}
+/// Fades `view` to `alpha` over `seconds`.
+fn fade(view: &NSView, alpha: f64, seconds: f64) {
+    unsafe {
+        let context = objc2::class!(NSAnimationContext);
+        let _: () = msg_send![context, beginGrouping];
+        let current: *mut AnyObject = msg_send![context, currentContext];
+        let _: () = msg_send![current, setDuration: seconds];
+        let proxy: *mut AnyObject = msg_send![view, animator];
+        let _: () = msg_send![proxy, setAlphaValue: alpha];
+        let _: () = msg_send![context, endGrouping];
+    }
+}
+/// The command palette and the menus a button of ours opens: a search field
+/// over quiet rows in sections, on glass. Nothing is lit when it opens; one
+/// highlight follows the pointer and the keyboard, gliding between rows on
+/// the layout spring, and leaves with the pointer.
 pub struct Popup {
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
-    search: Retained<NSTextField>,
-    /// The magnifying glass before the query, and the hairline under them.
-    glyph: Retained<NSImageView>,
-    rule: Retained<NSBox>,
+    surface: Surface,
+    search: Retained<NSSearchField>,
+    scroll: Retained<NSScrollView>,
+    list: Retained<PopupList>,
     body: Retained<NSView>,
     spring: Option<(std::time::Instant, pm_design::motion::Analytic)>,
-    rows: Vec<Retained<NSButton>>,
-    /// Right-aligned shortcut labels for the visible rows.
-    hints: Vec<Retained<NSTextField>>,
+    rows: Vec<PopupRow>,
+    /// Headings, titles, checks and shortcut hints of the rows.
+    parts: Vec<Retained<NSView>>,
     /// command → shortcut glyphs shown beside palette rows.
     shortcuts: HashMap<String, String>,
     glider: Retained<NSBox>,
+    /// The highlight is on a row (it fades in where it lands, then glides).
+    lit: bool,
+    /// The highlight's travel to its row, and the timer that draws it.
+    glide: Option<(std::time::Instant, pm_design::motion::Analytic)>,
+    timer: Option<Retained<objc2_foundation::NSTimer>>,
+    me: std::rc::Weak<RefCell<Popup>>,
     target: Option<Retained<PopupTarget>>,
     model: Picker,
     sender: async_channel::Sender<Command>,
@@ -3979,59 +4346,66 @@ impl Popup {
         window.setHasShadow(true);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         appearance(&window, t);
-        let mat = material(mtm, frame, t, surface);
+        let mat = popup_material(mtm, frame, t, surface);
         let body = contents(&mat);
         window.setContentView(Some(&mat));
         mat.setWantsLayer(true);
         if let Some(layer) = mat.layer() {
             layer.setOpacity(0.);
         }
-        let search = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
+        // The system's search field: its own magnifier and clear button. It
+        // is the menu's only input and always has the keyboard, so no ring
+        // (owner rule: no accent focus rings).
+        let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
         search.setPlaceholderString(Some(&NSString::from_str(if surface == Surface::Palette {
-            "Search commands…"
+            "Search commands"
         } else {
-            "Search fields…"
+            "Search fields"
         })));
-        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.heading as f64)));
-        // The field is the menu's only input and always focused: no ring (owner rule:
-        // no accent focus rings) and no bezel; a quiet query row over a hairline,
-        // as Spotlight's (v1's palette too).
+        search.setControlSize(NSControlSize::Large);
+        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
         search.setFocusRingType(NSFocusRingType::None);
-        search.setBezeled(false);
-        search.setBordered(false);
-        search.setDrawsBackground(false);
         search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
         body.addSubview(&search);
-        let glyph = NSImageView::imageViewWithImage(&symbol("magnifyingglass", "Search"), mtm);
-        glyph.setSymbolConfiguration(Some(
-            &NSImageSymbolConfiguration::configurationWithPointSize_weight(
-                t.typography.heading as f64,
-                unsafe { NSFontWeightRegular },
-            ),
-        ));
-        glyph.setContentTintColor(Some(&native_color(t.colors.muted)));
-        body.addSubview(&glyph);
-        let rule = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
-        rule.setBoxType(NSBoxType::Separator);
-        body.addSubview(&rule);
+        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), NSRect::ZERO);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(true);
+        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setAutohidesScrollers(true);
+        scroll.setAutomaticallyAdjustsContentInsets(false);
+        let list: Retained<PopupList> = unsafe {
+            msg_send![
+                super(PopupList::alloc(mtm).set_ivars(RefCell::new(std::rc::Weak::new()))),
+                initWithFrame: NSRect::ZERO
+            ]
+        };
+        scroll.setDocumentView(Some(&list));
+        body.addSubview(&scroll);
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
-        glider.setFillColor(&native_color(t.colors.selected_fill));
+        glider.setFillColor(&popup_highlight(t));
         glider.setBorderWidth(0.);
-        glider.setCornerRadius(m.control_radius as f64);
-        body.addSubview(&glider);
+        let shape = popup_shape(t, surface);
+        glider.setCornerRadius(t.radius.nested(shape.radius, shape.inset) as f64);
+        glider.setAlphaValue(0.);
+        list.addSubview(&glider);
         let popup = Rc::new(RefCell::new(Self {
             window,
             parent: unsafe { Retained::retain(parent as *const _ as *mut _).unwrap() },
+            surface,
             search,
-            glyph,
-            rule,
+            scroll,
+            list,
             body,
             spring: None,
             rows: vec![],
-            hints: vec![],
+            parts: vec![],
             shortcuts: HashMap::new(),
             glider,
+            lit: false,
+            glide: None,
+            timer: None,
+            me: std::rc::Weak::new(),
             target: None,
             model: Picker {
                 choices,
@@ -4050,163 +4424,343 @@ impl Popup {
             ]
         };
         unsafe {
-            popup
-                .borrow()
-                .search
-                .setDelegate(Some(ProtocolObject::from_ref(&*target)));
+            let p = popup.borrow();
+            let _: () = msg_send![&*p.search, setDelegate: &*target];
+            // The clear button empties the field without an edit.
+            p.search.setTarget(Some(&target));
+            p.search.setAction(Some(sel!(searched:)));
+            *p.list.ivars().borrow_mut() = Rc::downgrade(&popup);
         }
+        popup.borrow_mut().me = Rc::downgrade(&popup);
         popup.borrow_mut().target = Some(target);
         popup.borrow_mut().refresh();
         popup
     }
     fn update_tokens(&mut self, t: &Tokens, surface: Surface) {
         self.tokens = t.clone();
+        self.surface = surface;
         appearance(&self.window, t);
         let frame = NSRect::new(NSPoint::ZERO, self.window.frame().size);
-        let mat = material(MainThreadMarker::new().unwrap(), frame, t, surface);
+        let mat = popup_material(MainThreadMarker::new().unwrap(), frame, t, surface);
         let body = contents(&mat);
         self.search.removeFromSuperview();
-        self.glyph.removeFromSuperview();
-        self.rule.removeFromSuperview();
-        self.glider.removeFromSuperview();
+        self.scroll.removeFromSuperview();
         body.addSubview(&self.search);
-        body.addSubview(&self.glyph);
-        body.addSubview(&self.rule);
-        body.addSubview(&self.glider);
-        self.glyph
-            .setContentTintColor(Some(&native_color(t.colors.muted)));
-        self.glider
-            .setFillColor(&native_color(t.colors.selected_fill));
+        body.addSubview(&self.scroll);
+        self.glider.setFillColor(&popup_highlight(t));
         self.window.setContentView(Some(&mat));
         self.body = body;
         self.refresh();
     }
+    /// Lays the rows out again for the query: sections under their headings,
+    /// the panel as tall as its results (to `max_height`), its top edge kept.
     fn refresh(&mut self) {
+        for part in self.parts.drain(..) {
+            part.removeFromSuperview();
+        }
         for row in self.rows.drain(..) {
-            row.removeFromSuperview();
+            row.button.removeFromSuperview();
         }
-        for hint in self.hints.drain(..) {
-            hint.removeFromSuperview();
+        let mtm = MainThreadMarker::new().unwrap();
+        let t = self.tokens.clone();
+        let (m, shape) = (t.metrics, popup_shape(&t, self.surface));
+        let chosen: Vec<(usize, Choice)> = self
+            .model
+            .filtered()
+            .into_iter()
+            .map(|i| (i, self.model.choices[i].clone()))
+            .collect();
+        let width = self.window.frame().size.width;
+        let (inset, row_h) = (shape.inset as f64, shape.row as f64);
+        let checks = chosen.iter().any(|(_, c)| c.checked.is_some());
+        let sections = chosen.iter().any(|(_, c)| !c.category.is_empty());
+        let edge = inset + t.space.md as f64;
+        let lead = edge
+            + if checks {
+                (m.symbol_inline + t.space.sm) as f64
+            } else {
+                0.
+            };
+        let caption = t.text(pm_design::Text::Caption).size;
+        let mut y = 0.;
+        let mut category: Option<String> = None;
+        let centred = |view: &NSView, x: f64, top: f64, height: f64, width: f64| {
+            let h = view.fittingSize().height.ceil();
+            view.setFrame(NSRect::new(
+                NSPoint::new(x, top + ((height - h) / 2.).floor()),
+                NSSize::new(width, h),
+            ));
+        };
+        for (place, (index, c)) in chosen.iter().enumerate() {
+            if sections && category.as_deref() != Some(c.category.as_str()) {
+                category = Some(c.category.clone());
+                if c.category.is_empty() {
+                    y += if place > 0 { t.space.sm as f64 } else { 0. };
+                } else {
+                    // A heading sits low in its band, nearer its own rows.
+                    let heading = popup_label(&c.category, caption, t.colors.muted, mtm);
+                    let h = heading.fittingSize().height.ceil();
+                    heading.setFrame(NSRect::new(
+                        NSPoint::new(edge, y + shape.heading as f64 - h - t.space.xs as f64),
+                        NSSize::new(width - edge * 2., h),
+                    ));
+                    self.list.addSubview(&heading);
+                    self.parts
+                        .push(Retained::into_super(Retained::into_super(heading)));
+                    y += shape.heading as f64;
+                }
+            }
+            let rect = NSRect::new(
+                NSPoint::new(inset, y),
+                NSSize::new(width - inset * 2., row_h),
+            );
+            let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
+            if let Some(glyphs) = self.shortcuts.get(&c.command) {
+                let hint = popup_label(glyphs, caption, t.colors.faint, mtm);
+                hint.setAlignment(NSTextAlignment::Right);
+                let w = hint.fittingSize().width.ceil();
+                centred(&hint, trailing - w, y, row_h, w);
+                trailing -= w + t.space.lg as f64;
+                self.list.addSubview(&hint);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(hint)));
+            }
+            if c.checked == Some(true) {
+                let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
+                mark.setSymbolConfiguration(Some(
+                    &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        (m.symbol_inline - 2.) as f64,
+                        unsafe { NSFontWeightSemibold },
+                    ),
+                ));
+                mark.setContentTintColor(Some(&native_color(t.colors.text)));
+                mark.setAccessibilityElement(false);
+                centred(&mark, edge, y, row_h, m.symbol_inline as f64);
+                self.list.addSubview(&mark);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(mark)));
+            }
+            let title = popup_label(&c.label, t.typography.body, t.colors.text, mtm);
+            centred(&title, lead, y, row_h, (trailing - lead).max(0.));
+            self.list.addSubview(&title);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(title)));
+            // The whole row takes the press; it draws nothing itself.
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(""),
+                    self.target.as_deref().map(|t| t as &AnyObject),
+                    Some(sel!(pick:)),
+                    mtm,
+                )
+            };
+            button.setTransparent(true);
+            button.setAccessibilityLabel(Some(&NSString::from_str(&c.label)));
+            button.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
+                "shell.palette.{}",
+                c.command
+            ))));
+            if let Some(glyphs) = self.shortcuts.get(&c.command) {
+                button.setAccessibilityHelp(Some(&NSString::from_str(glyphs)));
+            }
+            button.setTag(*index as isize);
+            button.setFrame(rect);
+            self.list.addSubview(&button);
+            self.rows.push(PopupRow {
+                place,
+                rect,
+                button,
+            });
+            y += row_h;
         }
-        let m = self.tokens.metrics;
-        let ids = self.model.filtered();
-        // The panel shrinks to its results (max `max_height`), keeping its top edge.
-        let chrome = m.menu_inset * 3. + m.control;
-        let max_rows = ((self.max_height - chrome) / m.menu_row).floor().max(1.) as usize;
-        let height = (chrome + ids.len().clamp(1, max_rows) as f32 * m.menu_row) as f64;
+        if chosen.is_empty() {
+            let none = popup_label("No Results", t.typography.body, t.colors.muted, mtm);
+            none.setAlignment(NSTextAlignment::Center);
+            centred(&none, inset, 0., row_h, width - inset * 2.);
+            self.list.addSubview(&none);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(none)));
+            y = row_h;
+        }
+        let field_h = self.search.fittingSize().height.ceil();
+        let above = inset * 2. + field_h;
+        let shown = y.min(self.max_height as f64 - above - inset).max(row_h);
+        let height = above + shown + inset;
         let mut frame = self.window.frame();
         if (frame.size.height - height).abs() > 0.5 {
             frame.origin.y += frame.size.height - height;
             frame.size.height = height;
             self.window.setFrame_display(frame, self.model.open);
         }
-        let size = frame.size;
-        // The query row: glyph in a control-square at the rows' text inset,
-        // the field after it, the text centred on the row.
-        let (row_y, control) = (
-            size.height - (m.menu_inset + m.control) as f64,
-            m.control as f64,
-        );
-        // The glyph's ink, not its square, starts at the rows' text inset.
-        let glyph_x = (m.menu_inset + m.gap) as f64
-            - ((control - self.tokens.typography.heading as f64) / 2.).floor();
-        self.glyph.setFrame(NSRect::new(
-            NSPoint::new(glyph_x, row_y),
-            NSSize::new(control, control),
-        ));
-        let text_h = self.search.fittingSize().height.ceil();
-        let field_x = glyph_x + control + m.gap as f64;
         self.search.setFrame(NSRect::new(
-            NSPoint::new(field_x, row_y + ((control - text_h) / 2.).round()),
-            NSSize::new(size.width - field_x - m.menu_inset as f64, text_h),
+            NSPoint::new(inset, height - inset - field_h),
+            NSSize::new(width - inset * 2., field_h),
         ));
-        self.rule.setFrame(NSRect::new(
-            NSPoint::new(
-                0.,
-                (size.height - (m.menu_inset * 1.5 + m.control) as f64).round(),
-            ),
-            NSSize::new(size.width, 1.),
+        self.scroll.setFrame(NSRect::new(
+            NSPoint::new(0., inset),
+            NSSize::new(width, shown),
         ));
-        let visible = max_rows;
-        let start = self
-            .model
-            .selected
-            .saturating_sub(visible.saturating_sub(1));
-        let mtm = MainThreadMarker::new().unwrap();
-        self.glider.setHidden(ids.is_empty());
-        for (i, index) in ids.into_iter().enumerate().skip(start).take(visible) {
-            let c = &self.model.choices[index];
-            let b = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(&c.label),
-                    self.target.as_deref().map(|t| t as &AnyObject),
-                    Some(sel!(pick:)),
-                    mtm,
+        self.list
+            .setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, y)));
+        self.list.scrollPoint(NSPoint::ZERO);
+        self.light(false);
+    }
+    /// Puts the highlight on the lit row. It appears where it lands when
+    /// nothing was lit, glides there on the layout spring when `glide` (the
+    /// pointer, or one key press), and fades when nothing is lit any more.
+    fn light(&mut self, glide: bool) {
+        let lit = self.model.lit();
+        for row in &self.rows {
+            unsafe {
+                row.button.setAccessibilityValue(Some(&NSString::from_str(
+                    if Some(row.place) == lit {
+                        "Selected"
+                    } else {
+                        ""
+                    },
+                )));
+            }
+        }
+        let (reduce, spring) = (
+            self.tokens.accessibility.reduce_motion,
+            pm_design::motion::Preset::Layout.spring(&self.tokens.motion),
+        );
+        let quick = if reduce {
+            self.tokens.motion.reduced
+        } else {
+            self.tokens.motion.interaction
+        };
+        let Some(rect) = lit.and_then(|lit| {
+            self.rows
+                .iter()
+                .find(|row| row.place == lit)
+                .map(|row| row.rect)
+        }) else {
+            self.rest();
+            if self.lit {
+                fade(&self.glider, 0., quick);
+            }
+            self.lit = false;
+            return;
+        };
+        if !self.lit || !glide || reduce {
+            self.rest();
+            self.glider.setFrame(rect);
+            if !self.lit {
+                fade(&self.glider, 1., quick);
+            }
+            self.lit = true;
+            return;
+        }
+        // Retargeted from where it is, with the speed it has.
+        let velocity = self.glide.map_or(0., |(start, spring)| {
+            spring
+                .sample(start.elapsed().as_secs_f64() / review_slow())
+                .1
+        });
+        let mut from = self.glider.frame();
+        self.glide = Some((
+            std::time::Instant::now(),
+            pm_design::motion::Analytic {
+                from: from.origin.y,
+                velocity,
+                target: rect.origin.y,
+                mass: 1.,
+                stiffness: spring.stiffness as f64,
+                damping: spring.damping as f64,
+            },
+        ));
+        // Rows share a width and a height: only the place along the list moves.
+        from.origin.x = rect.origin.x;
+        from.size = rect.size;
+        self.glider.setFrame(from);
+        if self.timer.is_none() {
+            let me = self.me.clone();
+            let step =
+                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    if let Some(popup) = me.upgrade()
+                        && let Ok(mut popup) = popup.try_borrow_mut()
+                    {
+                        popup.step();
+                    }
+                });
+            // In the common modes, so it keeps moving while a scroll tracks.
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+                    1. / 120.,
+                    true,
+                    &step,
                 )
             };
-            b.setAccessibilityLabel(Some(&NSString::from_str(&c.label)));
-            b.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
-                "shell.palette.{}",
-                c.command
-            ))));
             unsafe {
-                b.setAccessibilityValue(Some(&NSString::from_str(if i == self.model.selected {
-                    "Selected"
-                } else {
-                    ""
-                })));
-            }
-            b.setBordered(false);
-            b.setAlignment(NSTextAlignment::Left);
-            b.setFont(Some(&NSFont::systemFontOfSize(
-                self.tokens.typography.body as f64,
-            )));
-            b.setContentTintColor(Some(&native_color(self.tokens.colors.text)));
-            b.setTag(index as isize);
-            let r = NSRect::new(
-                NSPoint::new(
-                    m.menu_inset as f64,
-                    size.height
-                        - (m.menu_inset * 2. + m.control + (i - start + 1) as f32 * m.menu_row)
-                            as f64,
-                ),
-                NSSize::new(size.width - m.menu_inset as f64 * 2., m.menu_row as f64),
-            );
-            // The glider spans the row; the title sits `gap` inside it.
-            b.setFrame(NSRect::new(
-                NSPoint::new(r.origin.x + m.gap as f64, r.origin.y),
-                NSSize::new(r.size.width - m.gap as f64 * 2., r.size.height),
-            ));
-            if i == self.model.selected {
-                self.glider.setFrame(r);
-            }
-            self.body.addSubview(&b);
-            if let Some(glyphs) = self.shortcuts.get(&c.command) {
-                let hint = NSTextField::labelWithString(&NSString::from_str(glyphs), mtm);
-                hint.setFont(Some(&NSFont::systemFontOfSize(
-                    self.tokens.typography.body as f64,
-                )));
-                hint.setTextColor(Some(&native_color(self.tokens.colors.muted)));
-                hint.setAlignment(NSTextAlignment::Right);
-                // Fixed trailing column, `menu_inset` from the row's right edge.
-                let column = (m.menu_row * 4.) as f64;
-                let text_h = hint.fittingSize().height;
-                let hr = NSRect::new(
-                    NSPoint::new(
-                        r.origin.x + r.size.width - m.menu_inset as f64 - column,
-                        r.origin.y + ((r.size.height - text_h) / 2.).floor(),
-                    ),
-                    NSSize::new(column, text_h),
-                );
-                hint.setFrame(hr);
-                b.setAccessibilityHelp(Some(&NSString::from_str(glyphs)));
-                self.body.addSubview(&hint);
-                self.hints.push(hint);
-            }
-            if self.row_focus && i == self.model.selected {
-                self.window.makeFirstResponder(Some(&b));
-            }
-            self.rows.push(b);
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+            };
+            self.timer = Some(timer);
+        }
+    }
+    /// One frame of the highlight's travel.
+    fn step(&mut self) {
+        let Some((start, spring)) = self.glide else {
+            self.rest();
+            return;
+        };
+        let (y, velocity) = spring.sample(start.elapsed().as_secs_f64() / review_slow());
+        let there = (y - spring.target).abs() < 0.2 && velocity.abs() < 2.;
+        let mut origin = self.glider.frame().origin;
+        origin.y = if there { spring.target } else { y };
+        self.glider.setFrameOrigin(origin);
+        if there {
+            self.rest();
+        }
+    }
+    fn rest(&mut self) {
+        self.glide = None;
+        if let Some(timer) = self.timer.take() {
+            timer.invalidate();
+        }
+    }
+    /// The pointer is at `at` in the list, or has left it.
+    fn point(&mut self, at: Option<NSPoint>) {
+        let row = at.and_then(|at| {
+            self.rows
+                .iter()
+                .find(|row| {
+                    at.x >= row.rect.origin.x
+                        && at.x < row.rect.origin.x + row.rect.size.width
+                        && at.y >= row.rect.origin.y
+                        && at.y < row.rect.origin.y + row.rect.size.height
+                })
+                .map(|row| row.place)
+        });
+        if self.model.point(row) {
+            self.light(true);
+        }
+    }
+    /// Scrolls the keyboard's row into sight (the first row with its heading).
+    fn reveal(&self) {
+        let Some(row) = self
+            .model
+            .lit()
+            .and_then(|lit| self.rows.iter().find(|row| row.place == lit))
+        else {
+            return;
+        };
+        let mut rect = row.rect;
+        if row.place == 0 {
+            rect.size.height += rect.origin.y;
+            rect.origin.y = 0.;
+        }
+        self.list.scrollRectToVisible(rect);
+        if self.row_focus {
+            self.window.makeFirstResponder(Some(&row.button));
+        }
+    }
+    fn searched(&mut self) {
+        let q = self.search.stringValue().to_string();
+        if q != self.model.query {
+            self.model.search(q);
+            self.refresh();
         }
     }
     fn toggle(&mut self) {
@@ -4219,6 +4773,8 @@ impl Popup {
         self.model.search(String::new());
         self.search.setStringValue(&NSString::from_str(""));
         self.previous = self.parent.firstResponder();
+        self.lit = false;
+        self.glider.setAlphaValue(0.);
         self.refresh();
         let p = self.parent.frame();
         let s = self.window.frame().size;
@@ -4232,11 +4788,14 @@ impl Popup {
         gpui_macos::child_window::attach(&self.window, &self.parent);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
+        #[cfg(debug_assertions)]
+        gpui_macos::child_window::review_show(&self.window, &self.parent);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);
     }
     fn hide(&mut self) {
         self.model.open = false;
+        self.rest();
         gpui_macos::child_window::forget(&self.window);
         let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
         unsafe {
@@ -4265,29 +4824,31 @@ impl Popup {
             objc2_foundation::NSOperationQueue::mainQueue().addOperationWithBlock(&restore);
         }
     }
-    fn key(&mut self, key: &str) {
+    /// A key the menu owns. One press glides the highlight a row; a held
+    /// key steps it without the glide.
+    fn key(&mut self, key: &str, repeat: bool) {
         if matches!(key, "tab" | "shift+tab") {
-            let n = self.model.filtered().len();
+            let n = self.rows.len();
             if n == 0 {
                 return;
             }
             let reverse = key == "shift+tab";
-            if !self.row_focus {
-                self.row_focus = true;
-                self.model.selected = if reverse { n - 1 } else { 0 };
-            } else if (!reverse && self.model.selected + 1 == n)
-                || (reverse && self.model.selected == 0)
-            {
-                self.row_focus = false;
-            } else if reverse {
-                self.model.selected -= 1;
+            // Tab walks the rows and comes back to the field past either end.
+            let next = match self.model.lit().filter(|_| self.row_focus) {
+                None => Some(if reverse { n - 1 } else { 0 }),
+                Some(0) if reverse => None,
+                Some(i) if !reverse && i + 1 >= n => None,
+                Some(i) => Some(if reverse { i - 1 } else { i + 1 }),
+            };
+            self.row_focus = next.is_some();
+            if next.is_some() {
+                self.model.keyed = next;
+                self.model.hover = None;
             } else {
-                self.model.selected += 1;
-            }
-            self.refresh();
-            if !self.row_focus {
                 self.window.makeFirstResponder(Some(&self.search));
             }
+            self.light(false);
+            self.reveal();
             return;
         }
         let key = if key == "space" && self.row_focus {
@@ -4297,6 +4858,7 @@ impl Popup {
         } else {
             key
         };
+        let before = self.model.lit();
         if let Some(name) = self.model.navigate(key) {
             let _ = self.sender.try_send(Command {
                 name,
@@ -4306,8 +4868,9 @@ impl Popup {
         }
         if !self.model.open {
             self.hide();
-        } else {
-            self.refresh();
+        } else if self.model.lit() != before {
+            self.light(!repeat);
+            self.reveal();
         }
     }
 }
@@ -4323,7 +4886,7 @@ fn animate(
         t.motion.enter
     } else {
         t.motion.exit
-    };
+    } * review_slow();
     if let Some(v) = w.contentView() {
         v.setWantsLayer(true);
         if let Some(layer) = v.layer() {
@@ -4388,6 +4951,7 @@ fn animate(
                     let _: () = msg_send![&*spring,setToValue:to];
                     let settling: f64 = msg_send![&*spring, settlingDuration];
                     let _: () = msg_send![&*spring,setDuration:settling];
+                    let _: () = msg_send![&*spring,setSpeed:(1. / review_slow()) as f32];
                     let _: () = msg_send![&*layer,addAnimation:&*spring,forKey:&*NSString::from_str("pm.shell.scale")];
                 }
             }

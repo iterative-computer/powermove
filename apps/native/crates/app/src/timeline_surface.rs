@@ -143,8 +143,8 @@ struct Built {
     scene: Arc<Scene>,
     graph: Option<Arc<Graph>>,
     model: Arc<TimelineModel>,
-    /// Audio files whose waveforms the scene drew as still reading.
-    wanted: Vec<PathBuf>,
+    /// Audio clips whose waveforms the scene drew as still reading.
+    wanted: Vec<crate::waveforms::Key>,
 }
 /// Audio originals by asset id, for waveforms.
 type Sources = Arc<BTreeMap<String, PathBuf>>;
@@ -189,7 +189,7 @@ pub struct TimelineSurface {
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     /// Waveform files being read for this timeline.
-    reading: BTreeSet<PathBuf>,
+    reading: BTreeSet<crate::waveforms::Key>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     graph: Option<Arc<Graph>>,
@@ -549,18 +549,18 @@ impl TimelineSurface {
         let Some(built) = built else {
             return;
         };
-        for path in built.wanted {
-            if self.reading.insert(path.clone()) {
+        for key in built.wanted {
+            if self.reading.insert(key.clone()) {
                 // Peaks are a full decode: a background task, then one rebuild.
                 cx.spawn(async move |this, cx| {
-                    let read = path.clone();
+                    let read = key.clone();
                     let wait = cx
                         .background_executor()
                         .spawn(async move { crate::waveforms::read(&read) })
                         .await;
                     let _ = wait.recv().await;
                     let _ = this.update(cx, |s, cx| {
-                        s.reading.remove(&path);
+                        s.reading.remove(&key);
                         s.published(cx);
                     });
                 })
@@ -1904,7 +1904,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
 struct Presenter {
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
-    wanted: RefCell<Vec<PathBuf>>,
+    wanted: RefCell<Vec<crate::waveforms::Key>>,
     published: Arc<Published>,
 }
 impl ModelPresenter for Presenter {
@@ -1935,15 +1935,23 @@ impl ModelPresenter for Presenter {
         if layer.kind != "audio" {
             return None;
         }
-        let path = self.sources.get(layer.asset.as_ref()?)?;
-        Some(match crate::waveforms::lookup(path)? {
+        let asset = layer.asset.as_ref()?;
+        let path = self.sources.get(asset)?;
+        // The clip as its asset plays it: the streams heard, its timing.
+        let record = self
+            .published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets")?.get(asset));
+        let key = crate::waveforms::Key::of(path.clone(), record);
+        Some(match crate::waveforms::lookup(&key)? {
             Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
                 peaks,
                 rate,
                 trim: layer.trim,
             }),
             None => {
-                self.wanted.borrow_mut().push(path.clone());
+                self.wanted.borrow_mut().push(key);
                 None
             }
         })

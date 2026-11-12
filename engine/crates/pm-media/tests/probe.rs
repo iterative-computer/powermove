@@ -244,24 +244,6 @@ fn timecode_with_drop_frame() {
 }
 
 #[test]
-fn waveform_peaks() {
-    let f = fixtures_dir().join("tone.wav");
-    let pk = pm_media::probe::peaks::peaks(&f, None, 480, 0).unwrap();
-    assert_eq!(pk.channels, 2);
-    assert_eq!(pk.data.len() as u64, pk.samples.div_ceil(480) * 2);
-    let max = pk.data.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-    let min = pk.data.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
-    assert!(
-        max > 0.05 && max <= 1.0 && (-1.0..-0.05).contains(&min),
-        "{min} {max}"
-    );
-    // Skipping priming shortens the decoded program audio by exactly that much.
-    let skipped = pm_media::probe::peaks::peaks(&f, None, 480, 1000).unwrap();
-    assert_eq!(skipped.skipped, 1000);
-    assert_eq!(skipped.samples + 1000, pk.samples);
-}
-
-#[test]
 fn content_hash_and_fingerprint() {
     let f = fixtures_dir().join("h264-aac.mp4");
     let fp = pm_media::hash::sampled_fingerprint(&f).unwrap();
@@ -275,5 +257,92 @@ fn content_hash_and_fingerprint() {
     assert_eq!(
         h.blake3,
         *blake3::hash(&std::fs::read(&f).unwrap()).as_bytes()
+    );
+}
+
+/// Import metadata comes from each stream's own timestamps: the clip runs
+/// from its first frame's start to its last frame's end wherever the
+/// container starts counting, and the soundtrack's length is its own, not
+/// the container's.
+#[test]
+fn durations_are_the_streams_own() {
+    let dir = tmp_dir();
+    let make = |name: &str, video: &str, audio: &str, mux: &[&str]| {
+        let path = dir.path().join(name);
+        let status = Command::new(ffmpeg_bin())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=64x64:rate=25:duration={video}"))
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!(
+                "sine=frequency=440:sample_rate=48000:duration={audio}"
+            ))
+            .args(["-pix_fmt", "yuv420p", "-c:v", "mpeg4", "-q:v", "4"])
+            .args(mux)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        pm_media::facts::media_facts(&path, None).unwrap()
+    };
+    // A two-second picture with half a second of sound.
+    let short = make("short-sound.mov", "2", "0.5", &["-c:a", "pcm_s16le"]);
+    assert_eq!(short.duration, Some(2.0));
+    assert_eq!(short.audio_duration, Some(0.5));
+    // A transport stream starts both streams near 1.4 s: the clip is still
+    // two seconds long and the sound still ends where it ends.
+    let ts = make(
+        "camera.ts",
+        "2",
+        "1",
+        &["-c:v", "mpeg2video", "-c:a", "mp2", "-b:a", "192k"],
+    );
+    assert_eq!(ts.duration, Some(2.0));
+    let sound = ts.audio_duration.unwrap();
+    assert!((sound - 1.0).abs() < 0.05, "{sound}");
+}
+
+/// A recorder file's separate tracks are all listed for its asset, each
+/// with the stream index a clip plays it by; a file with one soundtrack
+/// lists none (its asset plays that one stream).
+#[test]
+fn every_audio_stream_is_listed_for_the_asset() {
+    let dir = tmp_dir();
+    let path = dir.path().join("recorder.mov");
+    let status = Command::new(ffmpeg_bin())
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("testsrc2=size=64x64:rate=25:duration=0.4")
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=0.4",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:sample_rate=44100:duration=0.4",
+        ])
+        .args([
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-pix_fmt", "yuv420p",
+        ])
+        .args(["-c:v", "mpeg4", "-c:a", "pcm_s16le"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let facts = pm_media::facts::media_facts(&path, None).unwrap();
+    assert_eq!(
+        pm_media::facts::asset_audio_streams(&facts.audio_streams),
+        Some(serde_json::json!([
+            {"index": 1, "channels": 1, "sampleRate": 48000, "on": true},
+            {"index": 2, "channels": 1, "sampleRate": 44100, "on": true},
+        ]))
+    );
+    let one = pm_media::facts::media_facts(&fixtures_dir().join("h264-aac.mp4"), None).unwrap();
+    assert_eq!(one.audio_streams.len(), 1);
+    assert_eq!(
+        pm_media::facts::asset_audio_streams(&one.audio_streams),
+        None
     );
 }

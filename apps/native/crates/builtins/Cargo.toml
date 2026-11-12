@@ -40,3 +40,6 @@ pm-export = { path = "../../../../engine/crates/pm-export" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
