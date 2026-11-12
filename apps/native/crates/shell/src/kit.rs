@@ -473,7 +473,7 @@ impl Kit {
         let (t, id) = (&self.t, id.into());
         let c = &t.colors;
         let k = key(&id);
-        let (w, h, pad) = (36., 19., 2.);
+        let (w, h, pad): (f32, f32, f32) = (36., 19., 2.);
         let at = animate(&self.values, k, f32::from(on), t.spring(Preset::Layout)).clamp(-0.1, 1.1);
         let values = self.values.clone();
         // The system knob is a capsule about 0.6 of the track wide.
