@@ -504,6 +504,9 @@ mod sys {
 pub struct PublishHooks {
     /// The volume has no atomic exchange (exFAT, HFS+, most network shares).
     pub no_exchange: bool,
+    /// The volume answers the exchange with success but only renames the
+    /// first name over the second (a FAT32 volume on macOS 27).
+    pub exchange_renames: bool,
 }
 
 /// `swapFiles`: `Ok(true)` when exchanged, `Ok(false)` when the volume or
@@ -511,6 +514,10 @@ pub struct PublishHooks {
 fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
     if hooks.no_exchange {
         return Ok(false);
+    }
+    if hooks.exchange_renames {
+        fs::rename(a, b).map_err(|e| io_err(b, e))?;
+        return Ok(true);
     }
     #[cfg(target_os = "macos")]
     {
@@ -532,6 +539,77 @@ fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectI
         let _ = (a, b);
         Ok(false)
     }
+}
+
+/// The volume a folder is on, as far as one mount of it can be told from
+/// another: its device, filesystem type and mount point.
+fn volume_of(dir: &Path) -> Option<(u64, String)> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let dev = fs::metadata(dir).ok()?.dev();
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: a valid C path and output storage, read only on success.
+    let stat = unsafe {
+        if libc::statfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stat.assume_init()
+    };
+    // SAFETY: both are NUL-terminated arrays the system filled.
+    let text = |chars: &[libc::c_char]| unsafe {
+        std::ffi::CStr::from_ptr(chars.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    };
+    #[cfg(target_os = "macos")]
+    let mounted = format!("{} {}", text(&stat.f_fstypename), text(&stat.f_mntonname));
+    #[cfg(not(target_os = "macos"))]
+    let mounted = {
+        let _ = (&stat, &text);
+        String::new()
+    };
+    Some((dev, mounted))
+}
+
+/// Whether the volume `destination` is on really exchanges two names
+/// atomically, proven by doing it: two empty staging files are exchanged and
+/// each must come back under the other's name. The call's own answer is not
+/// proof. One filesystem driver answers it with success and renames instead,
+/// which destroys whatever was at the destination (measured on a FAT32
+/// volume). A volume proven once is not probed again while it stays mounted.
+/// An error is the staging files' own (a folder that cannot be written).
+pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    static PROVEN: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+    let simulated = hooks.no_exchange || hooks.exchange_renames;
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let volume = volume_of(if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    });
+    if !simulated
+        && let Some(volume) = &volume
+        && PROVEN.lock().unwrap().contains(volume)
+    {
+        return Ok(true);
+    }
+    let (a, _) = TempFile::create(destination)?;
+    let (b, _) = TempFile::create(destination)?;
+    let identity = |path: &Path| lstat_file(path).ok().flatten().map(|s| (s.dev, s.ino));
+    let (first, second) = (identity(&a.path), identity(&b.path));
+    let works = first.is_some()
+        && second.is_some()
+        && first != second
+        && swap_files(&a.path, &b.path, hooks)?
+        && identity(&a.path) == second
+        && identity(&b.path) == first;
+    if works
+        && !simulated
+        && let Some(volume) = volume
+    {
+        PROVEN.lock().unwrap().push(volume);
+    }
+    Ok(works)
 }
 
 /// `installFile`: exclusive rename where supported. `Ok(false)` to fall back.
@@ -595,7 +673,7 @@ fn preserve_conflict(temp: TempFile, destination: &Path, message: &str) -> Proje
 ///
 /// An existing file is replaced only by the atomic exchange, which takes
 /// whatever is at the path at that instant and hands it back to be judged.
-/// Where the volume has none, nothing is replaced
+/// Where the volume has none (see [`exchanges`]), nothing is replaced
 /// ([`ProjectIoError::NoSafeReplace`]): checking the file and then renaming
 /// over it would destroy a version that arrived in between, unread.
 pub(crate) fn publish(
@@ -614,7 +692,7 @@ pub(crate) fn publish(
     let incoming = lstat_file(&temp.path)?.ok_or(ProjectIoError::ChangedOnDisk)?;
     match expected {
         Some(expected) => {
-            if swap_files(&temp.path, destination, hooks)? {
+            if exchanges(destination, hooks)? && swap_files(&temp.path, destination, hooks)? {
                 // `temp.path` now names the displaced file. Verify it is the
                 // version we were allowed to replace.
                 let displaced = FileVersion::read(&temp.path).ok().flatten();

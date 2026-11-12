@@ -628,6 +628,12 @@ impl SavePlan {
                 Publish::CreateNew
             }
         };
+        // A disk that cannot replace a file conditionally is refused before
+        // anything is staged beside the project or copied to its backups.
+        if matches!(publish, Publish::Replace(_)) && !durable::exchanges(dest, &self.options.hooks)?
+        {
+            return Err(ProjectIoError::NoSafeReplace);
+        }
         let previous = match &publish {
             Publish::Replace(v) => Some(v),
             Publish::CreateNew => None,

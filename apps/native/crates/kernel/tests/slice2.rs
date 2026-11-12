@@ -787,7 +787,10 @@ fn a_save_never_replaces_a_file_on_a_disk_without_an_atomic_exchange() {
     fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
     let original = fs::read(&file).unwrap();
     let mut k = kernel(&dir.path("native"));
-    k.set_publish_hooks(pm_kernel::project_io::PublishHooks { no_exchange: true });
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        ..Default::default()
+    });
     let (session, decision) = open_file(&mut k, &file);
     assert_eq!(decision, OpenDecision::Writable);
     rename_comp(&mut k, "P", "One");
@@ -836,6 +839,43 @@ fn a_save_never_replaces_a_file_on_a_disk_without_an_atomic_exchange() {
         Some("Two — Recovered"),
         "the copy holds the newest work"
     );
+}
+/// The exchange's own answer is not trusted. One filesystem driver answers
+/// it with success and renames the staged file over the project instead (a
+/// FAT32 volume on macOS 27), destroying whatever was there, unread. The
+/// save proves the exchange on two staging files first: where it does not
+/// really exchange, the project file is never touched.
+#[test]
+fn a_save_never_trusts_an_exchange_that_only_renames() {
+    let dir = common::TempDir::new("renaming-exchange");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        exchange_renames: true,
+        ..Default::default()
+    });
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let refused = k
+        .finish_session_save(plan.run())
+        .expect_err("nothing may be replaced by a rename");
+    assert_eq!(fs::read(&file).unwrap(), original, "the file is untouched");
+    assert!(
+        refused.to_string().contains("cannot replace a file safely"),
+        "{refused}"
+    );
+    let left: Vec<_> = fs::read_dir(dir.path("job"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "no staging file is left: {left:?}");
 }
 /// Unsaved work is found by the file, not by its path: the file is renamed
 /// while it has unsaved changes and the app ends without a save; opening the
