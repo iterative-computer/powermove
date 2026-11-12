@@ -1214,3 +1214,88 @@ fn constant_scene_channels_match_the_expression_evaluator_with_animation() {
         assert!((object["material"]["p"]["roughness"]["v"].as_f64().expect("numeric roughness")-(0.2+t*0.1)).abs()<1e-6,"{object}");
     }
 }
+
+#[test]
+fn enabling_untouched_legacy_landscape_fog_migrates_with_undo_and_reopen() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"set_world","id":"world"}));
+    apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
+    let before = project(&s);
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("world", "world.fogDensity", 0.004, 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let p = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+    assert_eq!(p["fogHeightFalloff"]["v"], 0.06);
+    assert_eq!(p["fogDistance"]["v"], 400.);
+    let enabled = project(&s);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), enabled);
+    let mut dir = common::TempDir::new("legacy-fog");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("fog.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), project(&s));
+    reopened.undo().unwrap();
+    assert_eq!(project(&reopened), before);
+}
+#[test]
+fn authored_or_active_legacy_fog_and_non_landscapes_are_preserved() {
+    for (channels, terrain) in [
+        (json!({"fogDensity":0.002}), true),
+        (json!({"fogHeightFalloff":0.03}), true),
+        (json!({"fogBaseHeight":5}), true),
+        (
+            json!({"fogDistance":{"v":10000,"kf":[{"t":0,"v":10000}],"expr":null}}),
+            true,
+        ),
+        (
+            json!({"fogHeightFalloff":{"v":0,"kf":[],"expr":"time*0"}}),
+            true,
+        ),
+        (json!({}), false),
+    ] {
+        let mut s = store();
+        apply(
+            &mut s,
+            json!({"operation":"set_world","id":"world","world":{"p":channels}}),
+        );
+        if terrain {
+            apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
+        }
+        let before = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        s.execute(
+            PropertyCommand::Set(SetProperty::new("world", "world.fogDensity", 0.004, 0.)).into(),
+            Origin::Mcp,
+        )
+        .unwrap();
+        let after = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        for key in ["fogBaseHeight", "fogHeightFalloff", "fogDistance"] {
+            assert_eq!(after[key], before[key]);
+        }
+    }
+}
+
+#[test]
+fn world_density_migration_respects_an_explicit_shape_patch() {
+    for explicit in [false, true] {
+        let mut s = store();
+        apply(&mut s, json!({"operation":"set_world","id":"world"}));
+        apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
+        let mut p = json!({"fogDensity":0.004});
+        if explicit {
+            p["fogDistance"] = json!(10000);
+            p["fogHeightFalloff"] = json!(0);
+        }
+        apply(&mut s, json!({"operation":"set_world","patch":{"p":p}}));
+        let p = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        assert_eq!(p["fogDistance"]["v"], if explicit { 10000. } else { 400. });
+        assert_eq!(p["fogHeightFalloff"]["v"], if explicit { 0. } else { 0.06 });
+    }
+}

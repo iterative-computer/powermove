@@ -2145,3 +2145,19 @@ radiance 0.444341 while Quality was black. Both are below 0.005 after applying
 analytic medium transmittance to that fill. All 21 transport tests passed in
 the engineering working tree, including both traversal energy tests and this
 reproduction. The committed fog change leaves the experimental samplers out.
+
+#### Conservative legacy landscape fog migration
+
+When fog is first enabled by a normal density edit in a terrain composition,
+an inactive legacy World (density 0, base height 0, falloff 0, distance 10000)
+adopts falloff 0.06 and distance 400. All four channels must be unanimated,
+expression-free and without a preserved hand edit. An explicit shape patch,
+active fog, authored shape or a composition without terrain is preserved.
+Adding terrain now applies the same inactive/default safety checks.
+
+Migration runs through the kernel's existing edit, save and undo machinery;
+opening a document does not silently rewrite it or its journal baseline. The
+old behavior was reproduced at the falloff assertion (0 versus 0.06). All
+**35 kernel Studio tests and six panel tests pass**, including density
+activation, explicit-shape preservation and save/reopen/undo coverage. Existing World fields and commands
+supply the UI; no controls or layout were added.

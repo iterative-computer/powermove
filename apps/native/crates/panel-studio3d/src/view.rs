@@ -1114,7 +1114,10 @@ fn landscape_fog(layers: &[Value]) -> Option<Value> {
                 && c["kf"].as_array().is_none_or(Vec::is_empty)
                 && c["expr"].is_null())
     };
-    if !untouched("fogHeightFalloff", 0.) || !untouched("fogDistance", 10000.) {
+    if !untouched("fogDensity", 0.) || !untouched("fogBaseHeight", 0.)
+        || !untouched("fogHeightFalloff", 0.) || !untouched("fogDistance", 10000.)
+        || ["fogDensity", "fogBaseHeight", "fogHeightFalloff", "fogDistance"].iter()
+            .any(|key| !world["locked_intent"][format!("world.{key}")].is_null()) {
         return None;
     }
     Some(json!({"operation":"set_world","id":world["id"],"world":{"p":{
@@ -1262,6 +1265,8 @@ mod landscape_fog_tests {
         assert!(landscape_fog(&[world(stored)]).is_some());
         let keyed = json!({"fogDistance":{"expr":null,"kf":[[0,10000]],"v":10000}});
         assert!(landscape_fog(&[world(keyed)]).is_none());
+        assert!(landscape_fog(&[world(json!({"fogDensity":0.003}))]).is_none());
+        assert!(landscape_fog(&[world(json!({"fogBaseHeight":3}))]).is_none());
         assert!(landscape_fog(&[]).is_none());
         // A new landscape sky carries the shape from the start.
         let sky = landscape_sky(&[], "t1").unwrap();

@@ -5,7 +5,7 @@ use super::{
     channels::{self, Step, key},
     layers::{LayerCommand, LayerPatch, ParentChange},
     new_id,
-    properties::{self, KeyMode, PropertyCommand, SetProperty},
+    properties::{self, KeyMode, SetProperty},
     values,
 };
 use crate::error::CommandError;
@@ -343,7 +343,7 @@ fn apply(
                     if autokey {
                         p.mode = KeyMode::Keyframe;
                     }
-                    PropertyCommand::Set(p).plan(cx)?;
+                    properties::set_scene_property(cx, &p)?;
                 }
             }
             Action::Metadata { id, patch } => {

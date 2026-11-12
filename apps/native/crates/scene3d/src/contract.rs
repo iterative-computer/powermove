@@ -271,6 +271,40 @@ pub fn channels(object: &Value) -> Vec<(String, &Value)> {
     out
 }
 
+/// An inactive, unanimated legacy default may adopt the landscape atmosphere.
+/// Called only by an explicit density edit, never by document deserialization.
+pub fn inactive_legacy_landscape_fog(comp: &Value, layer: &Value) -> bool {
+    let world = &layer["d"]["data"]["object"]["world"];
+    if !world.is_object() {
+        return false;
+    }
+    for (key, default) in [
+        ("fogDensity", 0.),
+        ("fogBaseHeight", 0.),
+        ("fogHeightFalloff", 0.),
+        ("fogDistance", 10000.),
+    ] {
+        let intent = &layer["locked_intent"][format!("world.{key}")];
+        if !intent.is_null() && intent != &Value::Bool(false) {
+            return false;
+        }
+        let c = &world["p"][key];
+        let untouched = c.is_null()
+            || c.as_f64() == Some(default)
+            || (c["v"].as_f64() == Some(default)
+                && c["kf"].as_array().is_none_or(Vec::is_empty)
+                && c["expr"].is_null());
+        if !untouched {
+            return false;
+        }
+    }
+    comp["layers"].as_array().is_some_and(|layers| {
+        layers
+            .iter()
+            .any(|l| l["d"]["data"]["object"].get("terrain").is_some())
+    })
+}
+
 /// Typed actor plan for environment layers and composition quality.
 pub fn plan(
     comp: &Value,
@@ -367,6 +401,12 @@ pub fn plan(
             p[key] = value.clone();
         }
         patch["p"] = p;
+    }
+    if kind == "world" && patch["p"]["fogDensity"].as_f64().is_some_and(|v|v>0.)
+        && ["fogBaseHeight","fogHeightFalloff","fogDistance"].iter().all(|k| patch["p"].get(*k).is_none())
+        && existing.is_some_and(|l| inactive_legacy_landscape_fog(comp,l)) {
+        patch["p"]["fogHeightFalloff"]=json!(0.06);
+        patch["p"]["fogDistance"]=json!(400.);
     }
     if adding {
         let id = args["id"]
