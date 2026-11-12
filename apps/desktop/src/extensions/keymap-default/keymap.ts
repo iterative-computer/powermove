@@ -173,6 +173,12 @@ for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);
   bind(`shift+${chord}`, command);
 }
+/* AE camera navigation; fields retain their normal number/text input. */
+for(const [index,mode] of ['Orbit','Pan','Dolly'].entries()){
+  bind(String(index+1),`tool3d${mode}`);
+  bind(`shift+${index+1}`,`tool3d${mode}`,false,[true]);
+}
+bind('c','tool3dCycle');
 const PROPERTY_SHORTCUTS = ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l'] as const;
 for (const key of PROPERTY_SHORTCUTS) {
   const command = `timeline.revealProperty:${key}`;

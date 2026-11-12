@@ -182,7 +182,8 @@ export function appMenuTemplate(
             { id: 'newAdjustment', label: 'Adjustment Layer', click: () => send('newAdjustment') },
             { type: 'separator' },
             { id: '3d.add-camera', label: 'Camera', click: () => send('3d.add-camera') },
-            { id: '3d.add-light', label: 'Light', click: () => send('3d.add-light') }
+            { id: '3d.add-light', label: 'Light', click: () => send('3d.add-light') },
+            { id: '3d.environment', label: 'Environment Light', click: () => send('3d.environment') }
           ]
         },
         { type: 'separator' },

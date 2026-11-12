@@ -16,7 +16,7 @@ export function addPrimitive(api:PowermoveAPI,primitive:Primitive='box',_layerId
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
 export function addLight(api:PowermoveAPI,type:LightType='point',_layerId?:unknown):string|null {
-  const name=`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
+  const name=type==='environment'?'Environment Light':`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
   const result=run(api,{operation:'add_light',light:{type,name}},`Add ${name}`);
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }

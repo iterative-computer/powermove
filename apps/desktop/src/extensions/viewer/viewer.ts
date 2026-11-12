@@ -1776,9 +1776,8 @@ function bindStage(stage: any, inner: any): () => void {
   };
   listen(stage,'pointerdown',guarded((event:any)=>{
     if(sceneGizmo?.active())return;
-    /* Orbit, pan and dolly move only the Free View. In the Active Camera
-       view a middle-drag pans and the wheel scrolls exactly as in a 2D
-       composition, so no gesture ever switches the view by itself. */
+    /* Shot camera tools are captured by the navigation controller before
+       layer handlers. Free View navigation is dispatched here. */
     if(freeView()&&sceneNavigation?.pointerDown(event))return;
     /* A light marker sits on the gizmo's centre: pressing it selects the
        light and drags it freely; the gizmo's arrows still constrain. */

@@ -1,3 +1,4 @@
+import { installEnvironmentFiltering } from './environment-filtering';
 import { extrusionEligible, EXTRUSION_SURFACES } from './extrusion-data';
 import { readSurfaceProperties } from './extrusion-operations';
 import * as THREE from 'three';
@@ -54,6 +55,7 @@ export function applyMaterialProperties(material:any,values:Partial<MaterialProp
   if(material.transparent!==transparent)material.needsUpdate=true;
   material.transparent=transparent;material.depthWrite=(values.opacity!=null && material.opacity<1 || material.map?.userData?.materialHasAlpha===true)?false:original.depthWrite;
   if(material.isMeshStandardMaterial){
+    installEnvironmentFiltering(material);
     material.roughness=values.roughness ?? original.roughness;material.metalness=values.metallic ?? original.metalness;
     if(values.emissionColor!=null)material.emissive.set(values.emissionColor);
     if(values.emissionIntensity!=null)material.emissiveIntensity=values.emissionIntensity;

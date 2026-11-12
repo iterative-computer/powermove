@@ -30,6 +30,7 @@ function scanReferences(PM:any,comp:any,scan:ReferenceScan):void {
     if(!(i in layers))continue; // flatMap snapshots length and skips sparse holes.
     const layer=layers[i];
     localCount=0;
+    append(layer?.d?.data?.environment?.map);append(layer?.d?.data?.light?.map);
     const node=layer?.d?.data?.object;if(!node){
       if(isShared3DPlane(comp,layer))append(layer.d?.asset);
       for(const surface of Object.values<any>(layer?.d?.extrusion?.surfaces || {}))for(const map of Object.values<any>(surface.maps || {})){const id=mapImageId(map);if(id)append(id);}
@@ -99,6 +100,13 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
       const role=layer3DRole(l),node=role==='light'?runtime.objects.get(l.id):comp.layers.find((c:any)=>layer3DRole(c)==='camera' && PM.active(c,time))===l?runtime.camera:null;
       if(!node || !role)continue;
       node.position.setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,time)));
+      if(role==='light' && l.d.data.light.type==='environment'){
+        if(runtime.environmentLightId===l.id){
+          const matrix=new THREE.Matrix4().fromArray(world3D(PM,l,time)),rotation=new THREE.Matrix4().extractRotation(matrix);
+          runtime.scene.environmentRotation.setFromRotationMatrix(rotation,'ZYX');
+        }
+        continue;
+      }
       const p=l.d.data[role].p,ev=(key:string)=>PM.evP(l,p[key],time,`${role}.${key}`);
       const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time));
       const target=new THREE.Vector3(ev('targetX'),ev('targetY'),ev('targetZ')).applyMatrix4(parent);

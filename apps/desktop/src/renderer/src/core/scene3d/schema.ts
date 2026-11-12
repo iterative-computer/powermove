@@ -2,7 +2,7 @@ import { validateExtrusionChannel } from './extrusion-data';
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
 import { MATERIAL_SLOTS, objectMapSets, mapImageId } from './material-maps';
-import { PART_KEY, PART_PATH } from './model-parts';
+import { GROUP_PART_KEY, PART_KEY, PART_PATH } from './model-parts';
 
 /** The scene is project data, never executable code or a live Three.js object. */
 export const SCENE3D_DEFINITION = 'powermove.3d.scene';
@@ -69,7 +69,10 @@ export const intrinsicPropertiesSchema = z.object({
 export const partTransformSchema = p({ x:[num(),0], y:[num(),0], z:[num(),0],
   rx:[num(-360_000,360_000),0], ry:[num(-360_000,360_000),0], rz:[num(-360_000,360_000),0],
   scale:[num(0,10000),100], visible:[z.boolean(),true] });
-export const partSchema = z.object({ name: z.string().min(1).max(160).default('Part'), p: partTransformSchema.default({} as any) }).strict();
+export const partSchema = z.object({ name: z.string().min(1).max(160).default('Part'), p: partTransformSchema.default({} as any),
+  members: z.array(z.string().regex(PART_KEY)).min(1).max(4096).optional(), parent: z.string().regex(PART_KEY).nullable().optional(),
+  pivot: z.tuple([num(),num(),num()]).optional(), matrix: z.array(num(-1e12,1e12)).length(16).optional()
+}).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
@@ -81,8 +84,9 @@ export const objectSchema = z.object({
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
-  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot']).default('sun'),
-  p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
+  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','environment']).default('sun'),
+  map: z.string().min(1).max(160).nullable().default(null),
+  p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], rx:[num(-360_000,360_000),0], ry:[num(-360_000,360_000),0], rz:[num(-360_000,360_000),0], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
     color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
     angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true] }).default({} as any),
   castShadow: z.boolean().default(true)
@@ -93,7 +97,8 @@ export const cameraSchema = z.object({
     fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
-  p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),
+  p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1], intensity:[num(0,100),1], rotation:[num(-360_000,360_000),0] }).default({} as any),
+  map: z.string().min(1).max(160).nullable().default(null),
   background: color.nullable().default(null), shadows: z.boolean().default(true)
 }).strict();
 const schema = z.object({
@@ -125,6 +130,23 @@ export function parseScene(raw: unknown): Scene3D {
   }
   const byId = new Map(scene.objects.map(o => [o.id,o]));
   for (const object of scene.objects) {
+    const owners = new Map<string,string>();
+    for (const [key, part] of Object.entries(object.parts)) {
+      if (GROUP_PART_KEY.test(key) !== !!part.members || part.members && !part.pivot) throw new Error('Invalid model part group');
+      for (const member of part.members || []) {
+        if (owners.has(member) || member === key || GROUP_PART_KEY.test(member) && !object.parts[member]?.members) throw new Error('Invalid model part group membership');
+        owners.set(member,key);
+      }
+    }
+    for (const [key, part] of Object.entries(object.parts)) if (part.members) {
+      const seen = new Set([key]); let parent = owners.get(key) ?? part.parent;
+      while (parent) {
+        if (seen.has(parent)) throw new Error('Model part groups contain a cycle'); seen.add(parent);
+        if(seen.size>64)throw new Error('Model part groups are too deeply nested');
+        if (GROUP_PART_KEY.test(parent) && !object.parts[parent]?.members) throw new Error('Missing model part group parent');
+        parent = owners.get(parent) ?? object.parts[parent]?.parent;
+      }
+    }
     const chain = new Set([object.id]);
     let parent = object.parent;
     while (parent) {
@@ -156,7 +178,7 @@ export function createObject(id: string, source: SceneSource = {primitive:'box'}
   return parseScene({objects:[{id,source,name}]}).objects[0]!;
 }
 export function createLight(id: string, type: SceneLight['type'] = 'sun', name = 'Light'): SceneLight {
-  return parseScene({lights:[{id,type,name}]}).lights[0]!;
+  return parseScene({lights:[{id,type,name,...(type==='environment'?{p:{intensity:100,x:0,y:0,z:0}}:{})}]}).lights[0]!;
 }
 export function createScene(): Scene3D {
   return parseScene({ lights:[{ id:'key', name:'Sun', type:'sun' }] });
@@ -198,5 +220,5 @@ export function validateSceneChannel(path:string,property:unknown):void {
 }
 
 export function sceneAssetIds(scene: Scene3D): string[] {
-  return [...new Set(scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x)))];
+  return [...new Set([...(scene.environment.map?[scene.environment.map]:[]),...scene.lights.flatMap(light=>light.map?[light.map]:[]),...scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x))])];
 }

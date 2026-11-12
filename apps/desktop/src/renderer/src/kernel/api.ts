@@ -417,6 +417,17 @@ export interface Scene3DAPI {
   /** The part the viewer gizmo and Properties are editing, per model layer. */
   getActivePart(layerId:string):string|null;
   setActivePart(layerId:string,key:string|null):void;
+  getSelectedParts(layerId:string):string[];
+  setSelectedParts(layerId:string,keys:readonly string[]):void;
+  /** Group siblings inside one model, with a shared pivot and keyframeable offsets. */
+  groupParts(layerId:string,keys:readonly string[],name?:string):EditResult;
+  /** Ungroup a static controller while preserving member placement and animation. */
+  ungroupParts(layerId:string,key:string):EditResult;
+  /** Plan an anchor edit for a native control gesture without changing position/rotation keys. */
+  partGroupAnchorCommands(layerId:string,group:string,patch:Partial<Record<'x'|'y'|'z',number>>):EditCommand[];
+  /** Move parts into an existing group, or back to their file level, retaining their current pose. */
+  moveParts(layerId:string,keys:readonly string[],group:string|null):EditResult;
+  renamePartGroup(layerId:string,key:string,name:string):EditResult;
   onActivePartChange(listener:()=>void):Disposable;
   /** The part under a composition point (double-click: outer part first, then deeper). */
   pickPart(layerId:string,x:number,y:number):string|null;
@@ -426,6 +437,8 @@ export interface Scene3DAPI {
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
   onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
+  getNavigationVariant(tool:import('../core/scene3d/navigation').NavigationTool):import('../core/scene3d/navigation').NavigationVariant;
+  setNavigationVariant(tool:import('../core/scene3d/navigation').NavigationTool,variant:import('../core/scene3d/navigation').NavigationVariant):void;
   createNavigation(element:HTMLElement):{
     update(rect:{width:number;height:number},selection:string[]):void;
     pointerDown(event:PointerEvent):boolean;

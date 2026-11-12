@@ -19,7 +19,8 @@ export const PRIMITIVES: ReadonlyArray<{ id: Primitive; label: string }> = [
 export const LIGHT_TYPES: ReadonlyArray<{ id: LightType; label: string }> = [
   { id: 'sun', label: 'Sun' },
   { id: 'point', label: 'Point' },
-  { id: 'spot', label: 'Spot' }
+  { id: 'spot', label: 'Spot' },
+  { id: 'environment', label: 'Environment' }
 ];
 
 export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
@@ -52,6 +53,7 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
 ];
 
 export function lightFields(type: LightType): FieldSpec[] {
+  if(type==='environment')return [{key:'intensity',label:'Intensity',kind:'num',step:1,min:0,unit:'%'}];
   const fields: FieldSpec[] = [
     { key: 'color', label: 'Color', kind: 'color' },
     { key: 'intensity', label: 'Intensity', kind: 'num', step: 0.05, min: 0 },

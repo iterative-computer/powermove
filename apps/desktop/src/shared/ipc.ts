@@ -646,6 +646,7 @@ export type MenuCommand =
   | 'newAdjustment'
   | '3d.add-camera'
   | '3d.add-light'
+  | '3d.environment'
   | 'save'
   | 'saveAs'
   | 'open'

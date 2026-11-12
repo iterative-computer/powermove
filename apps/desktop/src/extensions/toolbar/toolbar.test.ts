@@ -14,7 +14,15 @@ describe('toolbar', () => {
     const run = vi.fn();
     const menu = vi.fn();
     const invalidate = vi.fn();
+    let navigation='select';
+    const variants:Record<string,string>={orbit:'cursor',pan:'cursor',dolly:'towards-cursor'};
+    const listeners=new Set<()=>void>();
+    const commands=new Map<string,any>();
+    const setView=vi.fn();
     const api = {
+      scene3d:{getNavigationMode:()=>navigation,setNavigationMode:(mode:string)=>{navigation=mode;listeners.forEach(fn=>fn());},
+        getNavigationVariant:(mode:string)=>variants[mode],setNavigationVariant:(mode:string,variant:string)=>{variants[mode]=variant;listeners.forEach(fn=>fn());},
+        setView,onNavigationChange:(fn:()=>void)=>{listeners.add(fn);return {dispose:()=>listeners.delete(fn)};}},
       services: {
         register: vi.fn((_name: string, implementation: ToolService) => {
           toolService = implementation;
@@ -22,14 +30,14 @@ describe('toolbar', () => {
         })
       },
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) },
-      commands: { run },
+      commands: { run, register:(definition:any)=>commands.set(definition.id,definition) },
       transport: { invalidate },
       ui: { menu, icon: (name: string) => `<svg data-icon="${name}"></svg>` }
     } as unknown as PowermoveAPI;
 
     activate(api);
     const body = document.createElement('div');
-    panel?.build?.(body, { spec: {} });
+    const dispose=panel?.build?.(body, { spec: {} });
 
     expect(panel).toMatchObject({ id: 'toolbar', title: 'Tools', headless: true, flush: true, size: 40, noscroll: true });
     expect([...body.querySelectorAll<HTMLButtonElement>('button[data-tool]')].map((button) => button.dataset.tool))
@@ -63,5 +71,21 @@ describe('toolbar', () => {
     expect(toolService).toMatchObject({ tool: 'shape', toolShape: 'star' });
     body.querySelector('[data-tool="shape"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
     expect(menu).toHaveBeenCalledTimes(2);
+    expect([...body.querySelectorAll<HTMLElement>('[data-navigation]')].map(button=>button.dataset.navigation)).toEqual(['orbit','pan','dolly']);
+    body.querySelector<HTMLButtonElement>('[data-navigation="orbit"]')!.click();
+    expect(navigation).toBe('orbit');expect(setView).not.toHaveBeenCalled();
+    expect(body.querySelector('[data-navigation="orbit"]')?.getAttribute('aria-pressed')).toBe('true');
+    expect(body.querySelector('[data-tool="shape"]')?.getAttribute('aria-pressed')).toBe('false');
+    body.querySelector<HTMLButtonElement>('[aria-label="Orbit tools"]')!.click();
+    const orbitMenu=menu.mock.lastCall![1] as ToolbarMenuItem[];
+    expect(orbitMenu.map(item=>item.label)).toEqual(['Orbit Around Cursor','Orbit Around Scene','Orbit Around Camera POI']);
+    orbitMenu[1]!.run?.();expect(variants.orbit).toBe('scene');
+    commands.get('tool3dOrbit').run(true);expect(variants.orbit).toBe('poi');
+    commands.get('tool3dCycle').run();expect(navigation).toBe('pan');
+    toolService!.setTool('select');expect(navigation).toBe('select');
+    expect(body.querySelector('[data-navigation="pan"]')?.getAttribute('aria-pressed')).toBe('false');
+    expect(body.querySelector('[data-tool="select"]')?.getAttribute('aria-pressed')).toBe('true');
+    if(typeof dispose==='function')dispose();expect(listeners.size).toBe(0);
+
   });
 });

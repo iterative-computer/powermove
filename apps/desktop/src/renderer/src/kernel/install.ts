@@ -989,7 +989,8 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       { label: 'Adjustment Layer', kb: '⌘⌥Y', run: () => PM.cmd('newAdjustment') },
       ...(has('3d.add-camera') ? ['-' as const,
         { label: 'Camera', icon: 'cam', run: () => PM.cmd('3d.add-camera') },
-        ...(has('3d.add-light') ? [{ label: 'Light', icon: 'sun', run: () => PM.cmd('3d.add-light') }] : [])] : []),
+        ...(has('3d.add-light') ? [{ label: 'Light', icon: 'sun', run: () => PM.cmd('3d.add-light') }] : []),
+        ...(has('3d.environment') ? [{ label: 'Environment Light', icon: 'sun', run: () => PM.cmd('3d.environment') }] : [])] : []),
       '-',
       { label: 'Composition…', icon: 'layers', kb: '⌘N', run: () => PM.cmd('newComposition') }
     ];

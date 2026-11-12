@@ -11,7 +11,8 @@ export function partChannel(layer: Layer | null | undefined, key: string, field:
 /** Moved, turned, scaled, hidden or animated: anything Reset would undo. */
 export function partEdited(layer: Layer | null | undefined, key: string): boolean {
   const part = partData(layer, key);
-  return !!part && Object.entries<any>(part.p || {}).some(([field, channel]) => channel?.kf?.length || channel?.expr || channel?.v !== NEUTRAL[field as PartField]);
+  return !!part && (!!part.matrix?.some((value:number,index:number)=>Math.abs(value-(index%5===0?1:0))>1e-9)
+    || Object.entries<any>(part.p || {}).some(([field, channel]) => channel?.kf?.length || channel?.expr || channel?.v !== NEUTRAL[field as PartField]));
 }
 export function installPart(api: PowermoveAPI, layerId: string, key: string): void {
   const result = api.scene3d.setPart(layerId, key, {}, { label: 'Edit model part', origin: 'inspector' });

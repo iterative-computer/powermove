@@ -72,6 +72,7 @@ export function nullViewerState(PM:any,layerId:string,time:number,rect:Scene3DVi
 export function lightViewerState(PM: any, layerId: string, time: number, rect: Scene3DViewerRect, view: LightViewCamera='viewer'): LightViewerState | null {
   const layer=PM.L(layerId);
   if(layer3DRole(layer)!=='light' || !Number.isFinite(time) || !validRect(rect))return null;
+  if(layer.d.data.light.type==='environment')return null;
   const camera=cameraFor(PM,time,view),position=new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,time)));
   const local=position.clone().applyMatrix4(camera.matrixWorldInverse),ndc=position.clone().project(camera);
   const inFront=local.z<0,projectable=[ndc.x,ndc.y,ndc.z].every(Number.isFinite) && Math.abs(local.z)>1e-10;

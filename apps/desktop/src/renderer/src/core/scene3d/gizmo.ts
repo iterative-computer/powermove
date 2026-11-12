@@ -6,7 +6,7 @@ import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import { nativeSceneBridge, nativeTransformValues } from './native-transform';
 import { parent3D,world3D } from '../../legacy/core/space-3d';
 import { themeColor } from './theme';
-import { getActivePart, onActivePartChange, partNode, partOffsetsForLocal, partPath, partsRoot } from './model-parts';
+import { getActivePart, getSelectedParts, onActivePartChange, partNode, partOffsetsForLocal, partPath, partsRoot } from './model-parts';
 import { sceneCommands } from './operations';
 import type { SceneRuntime } from './runtime';
 
@@ -59,7 +59,7 @@ export function onGizmoState(listener:(state:GizmoState)=>void):()=>void {stateL
 export function gizmoModes(role:Layer3DRole,lightType?:string):GizmoMode[] {
   if(role==='object')return ['translate','rotate','scale'];
   if(role==='camera')return ['translate','rotate'];
-  return lightType==='sun'?['rotate']:lightType==='point'?['translate']:['translate','rotate'];
+  return lightType==='sun'||lightType==='environment'?['rotate']:lightType==='point'?['translate']:['translate','rotate'];
 }
 
 const LABEL:Record<GizmoMode,[string,string]>={translate:['Move 3D layer','Move 3D layers'],rotate:['Rotate 3D layer','Rotate 3D layers'],scale:['Scale 3D layer','Scale 3D layers']};
@@ -141,7 +141,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
   // so even a failed control constructor leaves no callbacks on the canvas.
   const controls=new TransformControls(camera as THREE.PerspectiveCamera);
   controls.domElement=canvas;
-  const outlines=new Map<string,THREE.BoxHelper>();
+  const outlines=new Map<string,THREE.BoxHelper|THREE.Box3Helper>();
   const cleanup:(()=>void)[]=[];
   let offState=()=>{},frame=0;
   try {
@@ -177,6 +177,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       parentInverse:parentWorld.invert(),position:node.getWorldPosition(new THREE.Vector3()),target:null,orientation:new THREE.Vector3(),order:'XYZ'};
   }
   function resolveTargets(runtimeWorld:SceneRuntime|null):Target[] {
+    if(ids.length===1 && getSelectedParts(PM,ids[0]!).length>1)return [];
     const part=partTarget(runtimeWorld);if(part)return [part];
     const out:Target[]=[],active=activeCamera();
     for(const id of ids) {
@@ -191,11 +192,11 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       const position=role==='object'||nativeArtwork?object!.getWorldPosition(new THREE.Vector3())
         :new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
       const content=role==='light'?l.d?.data?.light?.p:role==='camera'?l.d?.data?.camera?.p:null,prefix=role==='light'?'light':'camera';
-      const target=content?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;
+      const target=content && lightType!=='environment'?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;
       let world=new THREE.Matrix4();
       if(native)world.copy(bridge).multiply(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
       else if(object){object.updateWorldMatrix(true,false);world=object.matrixWorld.clone();}
-      else if(role==='group')world.fromArray(world3D(PM,l,PM.time));
+      else if(role==='group'||lightType==='environment')world.fromArray(world3D(PM,l,PM.time));
       else {
         // A light or camera's frame looks from its position toward its target.
         const look=new THREE.Matrix4().lookAt(position,target&&target.distanceToSquared(position)>1e-12?target:position.clone().add(new THREE.Vector3(0,0,-1)),new THREE.Vector3(0,1,0));
@@ -252,8 +253,10 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       const object=key?partNode(partsRoot(world?.objects.get(id)),key) ?? world?.objects.get(id):world?.objects.get(id);if(!object||(layer3DRole(layer(id))!=='object' && !isExtrudedLayer(layer(id))))continue;
       wanted.add(id);
       let outline=outlines.get(id);
-      if(!outline){outline=new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}
-      else{outline.setFromObject(object);(outline.material as THREE.LineBasicMaterial).color.copy(accent);}
+      const groupBounds=object.userData.partBounds as THREE.Box3|undefined;
+      if(outline && !!groupBounds!==(outline instanceof THREE.Box3Helper)){outline.removeFromParent();outline.dispose();outlines.delete(id);outline=undefined;}
+      if(!outline){outline=groupBounds?new THREE.Box3Helper(groupBounds.clone(),accent):new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}
+      else{if(outline instanceof THREE.Box3Helper)outline.box.copy(groupBounds!);else outline.setFromObject(object);(outline.material as THREE.LineBasicMaterial).color.copy(accent);}
     }
     for(const [id,outline] of outlines)if(!wanted.has(id)){outline.removeFromParent();outline.dispose();outlines.delete(id);}
   }
@@ -286,7 +289,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
         for(const field of fields)commands.push(command(t.id,partPath(t.part!,field),values[field]));
         continue;
       }
-      if(t.role==='object' || t.role==='group' || t.native) {
+      if(t.role==='object' || t.role==='group' || t.native || t.layer.d?.data?.light?.type==='environment') {
         const local=t.parentInverse.clone().multiply(delta.clone().multiply(t.world));
         if(t.native && gesture.mode!=='translate'){
           try{

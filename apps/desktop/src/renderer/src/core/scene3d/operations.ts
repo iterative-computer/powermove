@@ -3,17 +3,19 @@ import { extrusionCommands } from './extrusion-operations';
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
 import { intrinsicPropertiesSchema, partTransformSchema } from './schema';
 import { PART_DEFAULTS, PART_FIELDS, PART_KEY, listLayerParts, partPath, type PartField } from './model-parts';
+import { editPartGroup } from './part-groups';
 import { canAssignMaterialMap,listModelMaterials } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
-import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
+import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS, compositionScene } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part';
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|'group_parts'|'ungroup_parts'|'rename_part_group'|'move_parts'|'set_part_group_anchor';
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
   /** set_part: the part's key from listParts; patch null removes its offsets. */
   part?:string;
+  parts?:string[];
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -32,7 +34,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
-  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
+  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part','parts']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
@@ -48,8 +50,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       if(visibility.kf.length || visibility.expr)throw new Error('Animated visibility is not supported; use layer opacity');
       visible=visibility.v;
     }else if(role==='light'){
-      const parsed=parseScene({lights:[{...node,id}]}).lights[0]!;
-      const {x,y,z,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,p,castShadow:parsed.castShadow}};props=nativeProperties({x,y,z});
+      const parsed=parseScene({lights:[{...node,id,...(node.type==='environment'?{p:{x:0,y:0,z:0,intensity:100,...node.p}}:{})}]}).lights[0]!;
+      const {x,y,z,rx,ry,rz,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,map:parsed.map,p,castShadow:parsed.castShadow}};props=nativeProperties({x,y,z,rx,ry,rz});
       if(visibility!.kf.length || visibility!.expr)throw new Error('Animated visibility is not supported; use light intensity');
       visible=visibility!.v;
     }else{
@@ -57,7 +59,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       const parsed=parseScene({camera:{...camera,p:{x:0,y:0,z:6,...camera.p}},environment:node.environment});
       const {x,y,z,...p}=parsed.camera.p;data={camera:{projection:parsed.camera.projection,p},environment:parsed.environment};props=nativeProperties({x,y,z});
     }
-    commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?'Light':'Camera'),
+    commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?(node.type==='environment'?'Environment Light':'Light'):'Camera'),
       content:{definition:LAYER3D_DEFINITIONS[role],data:parseLayer3DData(role,data)},properties:props,
       visible,
       ...(role==='object'&&node.parent?{parent:node.parent}:{}),select:true});
@@ -75,6 +77,11 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     const cameraId=add('camera',{camera:scene.camera,environment:scene.environment});first ||= cameraId;
     return {commands,id:first};
   }
+  const environmentMap=args.operation==='add_light'?args.light?.map:args.operation==='set_environment' || args.operation==='update_light'?args.patch?.map:null;
+  if(environmentMap != null){
+    const asset=PM.proj.assets?.[environmentMap];
+    if(!asset || asset.kind!=='image' || !/^(hdr|exr)$/i.test(asset.format || asset.name?.split('.').pop() || ''))throw new Error('Choose an HDR or EXR environment image');
+  }
   if(args.operation==='add_object')return {commands,id:add('object',args.object || {source:{primitive:'box'}},args.object?.id || args.id)};
   if(args.operation==='add_light')return {commands,id:add('light',args.light || {},args.light?.id || args.id)};
   if(args.operation==='add_camera')return {commands,id:add('camera',args.camera || args.patch || {},args.id)};
@@ -87,7 +94,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   }
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);
-    if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:{},environment:args.patch || {}});return {commands,id};}
+    if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:compositionScene(PM,PM.time || 0).camera,environment:args.patch || {}});return {commands,id};}
   }
   if(layer && extrusionEligible(layer) && ['set_extrusion','set_surface_material_map','set_surface_material_properties','set_material_map','set_material_properties'].includes(args.operation)){
     if(layer.lock || (PM.groupAncestors?.(layer) || []).some((g:any)=>g.lock))throw new Error('Unlock the 3D layer before editing it');
@@ -165,7 +172,11 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       const key=String(args.part ?? '');
       if(!PART_KEY.test(key))throw new Error('Choose a part of the model');
       const parts=(content.object.parts ||= {});
-      if(args.patch===null){delete parts[key];break;}
+      if(args.patch===null){
+        if(parts[key]?.members){const {matrix,p,...group}=parts[key];parts[key]={...group,p:Object.fromEntries(PART_FIELDS.map(field=>[field,{v:PART_DEFAULTS[field],kf:[],expr:null}]))};}
+        else delete parts[key];
+        break;
+      }
       const info=listLayerParts(PM,layer).find(part=>part.key===key);
       if(!info && !parts[key])throw new Error('That part is not in this model');
       if(Object.keys(patch).some(field=>!(PART_FIELDS as readonly string[]).includes(field)))throw new Error('Unknown part property');
@@ -181,6 +192,10 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
         }else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
       }
       break;
+    }
+    case 'group_parts':case 'ungroup_parts':case 'rename_part_group':case 'move_parts':case 'set_part_group_anchor':{
+      if(role!=='object')throw new Error('Choose a model layer');
+      editPartGroup(PM,layer,content,args);break;
     }
     case 'remove':
       if(meta.origin==='agent' && Object.keys(layer.locked_intent || {}).length)throw new Error('Preserved hand-edited 3D layer');
