@@ -588,6 +588,8 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
+            // A composer's panel draws the surface it is written on.
+            field.set_bare(kind == TextKind::Composer);
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field
@@ -1452,17 +1454,20 @@ impl SurfaceView {
         {
             return None;
         }
-        let value = self
-            .publication
-            .surface
-            .node(node.id)?
-            .props
-            .get("value")
-            .filter(|v| !v.is_null())?;
+        let props = &self.publication.surface.node(node.id)?.props;
+        let value = props.get("value").filter(|v| !v.is_null())?;
         let text = match (node.number, value.as_f64()) {
             (Some(number), Some(n)) => number.text(n),
             _ => value_text(value),
         };
+        // An empty one still says what it is for.
+        if text.is_empty() {
+            return props
+                .get("metadata")
+                .and_then(|m| m.get("placeholder"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
         Some(match &node.unit {
             Some(unit) if !text.is_empty() => format!("{text} {unit}"),
             _ => text,

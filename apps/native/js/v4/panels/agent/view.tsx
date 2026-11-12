@@ -480,6 +480,8 @@ export function AgentView({
     : s.settings.access === "editor"
       ? "Your ideas. Editable motion."
       : "Create, research, and build with your project.";
+  const popover = n.presentation === "popover";
+  const ground = t(popover ? "colors.floating" : "colors.panel");
   return (
     <div
       id="agent-panel"
@@ -494,24 +496,17 @@ export function AgentView({
       style={{
         display: "flex",
         flexDirection: "column",
-        ...(n.presentation === "popover"
-          ? { width: t("metrics.agent_width") }
-          : {}),
-        background: t(
-          n.presentation === "popover" ? "colors.floating" : "colors.panel",
-        ),
+        ...(popover ? { width: t("metrics.agent_width") } : {}),
+        background: ground,
         borderRadius: t("metrics.panel_radius"),
       }}
     >
       <div
         id="agent-header"
+        data-pm-slot="header"
         role="group"
         label="Agent"
-        title={
-          n.presentation === "popover"
-            ? "Drag to move or pin to workspace"
-            : undefined
-        }
+        title={popover ? "Drag to move or pin to workspace" : undefined}
         metadata={{ apiGap: "shell" }}
         style={{
           display: "flex",
@@ -520,12 +515,13 @@ export function AgentView({
           justifyContent: "space-between",
           height: t("metrics.header"),
           paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.gap"),
+          paddingRight: t("metrics.inset"),
         }}
       >
         <text style={title}>Agent</text>
         <div
           style={{
+            ...keep,
             display: "flex",
             flexDirection: "row",
             alignItems: "center",
@@ -552,27 +548,22 @@ export function AgentView({
             id="agent-new"
             label="New Thread"
             title="New Thread"
-            metadata={{ symbol: "plus" }}
+            metadata={{ symbol: "square.and.pencil" }}
             style={{ symbolSize: t("metrics.symbol_panel") }}
             onClick={() => {
               if (!s.composerDisabled) send({ type: "newThread" });
             }}
           />
-          <UI.ToolbarItem
-            id="agent-presentation"
-            label={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
-            title={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
-            metadata={{
-              symbol: n.presentation === "popover" ? "pin" : "xmark",
-            }}
-            style={{ symbolSize: t("metrics.symbol_panel") }}
-            onClick={() =>
-              send({
-                type: "shell",
-                action: n.presentation === "popover" ? "pin" : "close",
-              })
-            }
-          />
+          {popover && (
+            <UI.ToolbarItem
+              id="agent-presentation"
+              label="Pin to Workspace"
+              title="Pin to Workspace"
+              metadata={{ symbol: "pin" }}
+              style={{ symbolSize: t("metrics.symbol_panel") }}
+              onClick={() => send({ type: "shell", action: "pin" })}
+            />
+          )}
         </div>
       </div>
       <div
@@ -689,104 +680,154 @@ export function AgentView({
         state={{ dropTarget: n.dropTarget }}
         title="Return to send · Shift-Return for a new line · / for shortcuts"
         style={{
-          ...vertical,
+          display: "flex",
+          flexDirection: "column",
+          // Two concentric surfaces, as v1: a quiet tray holding the field
+          // (the draft with attach and send) over the run's options.
           background: t(n.dropTarget ? "colors.accent_wash" : "colors.field"),
-          borderRadius: t("metrics.control_radius"),
-          minHeight: t("metrics.hit"),
+          borderRadius: t("metrics.panel_radius"),
           minWidth: t("metrics.hit"),
           margin: t("metrics.inset"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
+          padding: t("metrics.gap"),
         }}
       >
-        {s.attachments.map((a) => (
+        <div
+          id="agent-field"
+          style={{
+            ...vertical,
+            background: ground,
+            borderRadius: t("metrics.inner_radius"),
+            minHeight: t("metrics.hit"),
+            paddingLeft: t("metrics.gap"),
+            paddingRight: t("metrics.gap"),
+          }}
+        >
+          {s.attachments.map((a) => (
+            <div
+              key={a.id}
+              role="group"
+              label={`${a.name}, attachment`}
+              metadata={{ apiGap: "composer", armed: s.draft.armed === a.id }}
+            >
+              <UI.ToolbarItem
+                label={`${a.name}, attachment`}
+                onClick={() => send({ type: "openAttachment", id: a.id })}
+              >
+                {a.name}
+              </UI.ToolbarItem>
+              <UI.ToolbarItem
+                label={`Remove ${a.name}`}
+                title={`Remove ${a.name}`}
+                onClick={() => send({ type: "removeAttachment", id: a.id })}
+              />
+            </div>
+          ))}
+          {n.dropTarget ? (
+            <text style={{ ...body, color: t("colors.accent_text") }}>
+              Drop to attach
+            </text>
+          ) : (
+            <UI.TextField
+              multiline
+              id="agent-composer-text"
+              label="Message Powermove agent"
+              value={s.draft.text}
+              disabled={disabled}
+              metadata={{ placeholder, submitOnReturn: true }}
+              state={{ keyboardFocus: n.keyboardFocus === "composer" }}
+              tabIndex={0}
+              onInput={(event) => {
+                const text = String(event.value ?? "");
+                send({
+                  type: "draft",
+                  text,
+                  selection: [text.length, text.length],
+                  base: s.draft.text,
+                });
+              }}
+              onChange={(event) => {
+                // The native editor reports the text as it is typed, so Send
+                // follows the draft.
+                const text = String(event.value ?? "");
+                if (text !== s.draft.text)
+                  send({
+                    type: "draft",
+                    text,
+                    selection: [text.length, text.length],
+                    base: s.draft.text,
+                  });
+              }}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                send(composerKey(event));
+              }}
+              style={{
+                ...reading,
+                background: ground,
+                borderRadius: t("metrics.inner_radius"),
+                height: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+              }}
+            />
+          )}
           <div
-            key={a.id}
-            role="group"
-            label={`${a.name}, attachment`}
-            metadata={{ apiGap: "composer", armed: s.draft.armed === a.id }}
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              height: t("metrics.hit"),
+            }}
           >
             <UI.ToolbarItem
-              label={`${a.name}, attachment`}
-              onClick={() => send({ type: "openAttachment", id: a.id })}
-            >
-              {a.name}
-            </UI.ToolbarItem>
-            <UI.ToolbarItem
-              label={`Remove ${a.name}`}
-              title={`Remove ${a.name}`}
-              onClick={() => send({ type: "removeAttachment", id: a.id })}
+              id="agent-attach"
+              style={keep}
+              label="Add Attachments"
+              attr={{ symbol: "plus" }}
+              title="Add Attachments"
+              disabled={s.composerDisabled || s.attachments.length >= 6}
+              onClick={() => send({ type: "attach" })}
             />
+            {working ? (
+              <UI.ToolbarItem
+                id="agent-stop"
+                label="Stop current run"
+                title="Stop Current Run"
+                metadata={{ symbol: "stop.circle.fill" }}
+                style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
+                disabled={s.stopping}
+                onClick={() => {
+                  if (!s.stopping) send({ type: "stop" });
+                }}
+              />
+            ) : (
+              <UI.ToolbarItem
+                id="agent-send"
+                label="Send"
+                title="Send"
+                metadata={{ symbol: "arrow.up.circle.fill" }}
+                style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
+                disabled={disabled || !s.sendable}
+                onClick={() => {
+                  if (!disabled && s.sendable) send({ type: "submit" });
+                }}
+              />
+            )}
           </div>
-        ))}
-        {n.dropTarget ? (
-          <text style={{ ...body, color: t("colors.accent_text") }}>
-            Drop to attach
-          </text>
-        ) : (
-          <textarea
-            id="agent-composer-text"
-            label="Message Powermove agent"
-            value={s.draft.text}
-            disabled={disabled}
-            metadata={{ placeholder, submitOnReturn: true }}
-            state={{ keyboardFocus: n.keyboardFocus === "composer" }}
-            tabIndex={0}
-            onInput={(event) => {
-              const text = String(event.value ?? "");
-              send({
-                type: "draft",
-                text,
-                selection: [text.length, text.length],
-                base: s.draft.text,
-              });
-            }}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-              send(composerKey(event));
-            }}
-            style={{
-              ...reading,
-              flexGrow: 1,
-              minHeight: t("metrics.hit"),
-              minWidth: t("metrics.hit"),
-            }}
-          />
-        )}
+        </div>
         <div
+          id="agent-options"
           style={{
             display: "flex",
             flexDirection: "row",
+            // A narrow dock wraps the access choice under the model, as v1;
+            // a pop-up truncates only when it alone is wider than the tray.
+            flexWrap: "wrap",
             alignItems: "center",
-            height: t("metrics.hit"),
+            minHeight: t("metrics.hit"),
+            paddingTop: t("metrics.pill_inset"),
           }}
         >
-          <UI.ToolbarItem
-            id="agent-attach"
-            style={keep}
-            label="Add Attachments"
-            attr={{ symbol: "plus" }}
-            title="Add Attachments"
-            disabled={s.composerDisabled || s.attachments.length >= 6}
-            onClick={() => send({ type: "attach" })}
-          />
-          <UI.PopUpButton
-            data-pm-variant="inline"
-            style={shrink}
-            id="agent-access"
-            label={`Agent access, ${copy[s.settings.access]}`}
-            value={s.settings.access}
-            binding={n.bindings.access}
-            disabled={working || s.composerDisabled}
-            metadata={{ apiGap: "accessMenu" }}
-            onChange={(e) =>
-              send({ type: "setAccess", access: e.value as Access })
-            }
-            options={accessChoices(s.settings.access).map((v) => ({
-              v,
-              label: copy[v],
-            }))}
-          />
           <UI.PopUpButton
             data-pm-variant="inline"
             style={shrink}
@@ -839,31 +880,24 @@ export function AgentView({
               }))}
             />
           )}
-          {working ? (
-            <UI.ToolbarItem
-              id="agent-stop"
-              label="Stop current run"
-              title="Stop Current Run"
-              metadata={{ symbol: "stop.circle.fill" }}
-              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
-              disabled={s.stopping}
-              onClick={() => {
-                if (!s.stopping) send({ type: "stop" });
-              }}
-            />
-          ) : (
-            <UI.ToolbarItem
-              id="agent-send"
-              label="Send"
-              title="Send"
-              metadata={{ symbol: "arrow.up.circle.fill" }}
-              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
-              disabled={disabled || !s.sendable}
-              onClick={() => {
-                if (!disabled && s.sendable) send({ type: "submit" });
-              }}
-            />
-          )}
+          <div style={{ flexGrow: 1 }} />
+          <UI.PopUpButton
+            data-pm-variant="inline"
+            style={shrink}
+            id="agent-access"
+            label={`Agent access, ${copy[s.settings.access]}`}
+            value={s.settings.access}
+            binding={n.bindings.access}
+            disabled={working || s.composerDisabled}
+            metadata={{ apiGap: "accessMenu" }}
+            onChange={(e) =>
+              send({ type: "setAccess", access: e.value as Access })
+            }
+            options={accessChoices(s.settings.access).map((v) => ({
+              v,
+              label: copy[v],
+            }))}
+          />
         </div>
         {s.slash.visible && (
           <Placeholder gap="composer" label="Shortcuts">
