@@ -154,6 +154,15 @@ fn metadata(path: &Path, kind: &str, size: u64) -> Result<Value, String> {
         asset["hasAudio"] = json!(facts.audio.is_some());
         asset["audioDur"] = json!(facts.audio_duration.unwrap_or(0.));
     }
+    // A file with several audio streams (camera and recorder tracks) lists
+    // them all, each on: every one is heard until it is switched off.
+    if facts.audio_streams.len() > 1 {
+        asset["audioStreams"] = facts
+            .audio_streams
+            .iter()
+            .map(|s| json!({"index": s.index, "channels": s.channels, "sampleRate": s.sample_rate, "on": true}))
+            .collect();
+    }
     if kind == "image" {
         asset["format"] = json!(extension(path));
     }

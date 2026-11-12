@@ -11,7 +11,7 @@ use crate::probe::color::HdrFormat;
 use crate::probe::{FieldOrder, MediaProbe, StreamKind, VideoProbe};
 use pm_protocol::color::{AlphaMode, Subsampling};
 use pm_protocol::media::{
-    AudioFacts, FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind,
+    AudioFacts, AudioStreamFacts, FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -163,6 +163,21 @@ fn audio_duration(p: &MediaProbe) -> Option<f64> {
         v.start_pts as f64 * v.timebase[0] as f64 / v.timebase[1] as f64
     });
     Some((start - origin + length).max(0.0))
+}
+
+/// Every audio stream of the file that can be described, in file order.
+fn audio_streams(p: &MediaProbe) -> Vec<AudioStreamFacts> {
+    p.streams
+        .iter()
+        .filter_map(|stream| {
+            let audio = stream.audio.as_ref()?;
+            Some(AudioStreamFacts {
+                index: stream.index.try_into().ok()?,
+                sample_rate: audio.sample_rate.try_into().ok().filter(|r| *r > 0)?,
+                channels: audio.channels.try_into().ok().filter(|c| *c > 0)?,
+            })
+        })
+        .collect()
 }
 
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
@@ -349,6 +364,7 @@ fn video_facts(
         display_size: Some([w, h]),
         duration,
         audio_duration: audio_duration(p),
+        audio_streams: audio_streams(p),
     }
 }
 
@@ -422,6 +438,7 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
         display_size: Some([w, h]),
         duration: None,
         audio_duration: None,
+        audio_streams: vec![],
     })
 }
 
@@ -449,6 +466,7 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
         display_size: None,
         duration: p.duration_us.map(|d| d as f64 / 1e6),
         audio_duration: audio_duration(p),
+        audio_streams: audio_streams(p),
     }
 }
 

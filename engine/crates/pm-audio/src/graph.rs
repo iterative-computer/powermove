@@ -45,6 +45,27 @@ use crate::conform::{self, Pitch};
 use crate::error::{AudioError, Result};
 use crate::source::{Source, SourceCache};
 
+/// The audio streams of its file an asset plays, as FFmpeg stream indexes.
+///
+/// An asset imported with every stream listed (`audioStreams`: one entry
+/// per audio stream of the file, in file order, each with its `index`)
+/// plays every entry whose `on` is not false, each folded by its own
+/// channel layout and summed: what an editor does with a camera or recorder
+/// file's separate tracks. An asset without the member (every project made
+/// before streams were listed) plays the file's best stream alone, as it
+/// always has, so it sounds the same. `None` is that best stream.
+fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
+    let Some(list) = node::array(node::member(record, "audioStreams")) else {
+        return vec![None];
+    };
+    list.iter()
+        .filter(|entry| !is_false(node::member(Some(entry), "on")))
+        .filter_map(|entry| node::number(node::member(Some(entry), "index")))
+        .filter(|index| index.is_finite() && *index >= 0.0 && index.fract() == 0.0)
+        .map(|index| Some(index as usize))
+        .collect()
+}
+
 /// Nesting limit (`MAX_PRECOMP_DEPTH`).
 pub const MAX_PRECOMP_DEPTH: usize = 8;
 /// The legacy walk drops windows shorter than this (seconds).
@@ -514,7 +535,56 @@ impl<'d> Walk<'_, 'd> {
                 .push((name, asset, "the media is missing".into()));
             return Ok(());
         };
-        let source = match cache.open(&file, None) {
+        // One voice per audio stream the asset plays: the first keeps the
+        // layer's voice id, the others add their stream index.
+        let record = node::member(node::member(Some(self.root), "assets"), asset.as_str());
+        for (nth, stream) in selected_streams(record).into_iter().enumerate() {
+            let id = match (nth, stream) {
+                (1.., Some(index)) => format!("{id}:stream-{index}"),
+                _ => id.clone(),
+            };
+            self.stream_voice(
+                comp,
+                layer,
+                kind,
+                id,
+                strip.clone(),
+                asset.clone(),
+                path,
+                level.clone(),
+                window,
+                from,
+                linear,
+                dynamic,
+                name.clone(),
+                (cache, &file, stream),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The voice of one audio stream of a clip's file (`stream` is the
+    /// FFmpeg stream index; `None` is the file's best stream).
+    #[allow(clippy::too_many_arguments)]
+    fn stream_voice(
+        &mut self,
+        comp: &Comp<'d>,
+        layer: &'d Node,
+        kind: VoiceKind,
+        id: String,
+        strip: String,
+        asset: String,
+        path: &PathState,
+        level: Level,
+        window: (f64, f64),
+        from: f64,
+        linear: bool,
+        dynamic: bool,
+        name: String,
+        (cache, file, stream): (&SourceCache, &std::path::Path, Option<usize>),
+    ) -> Result<()> {
+        let file = file.to_path_buf();
+        let source = match cache.open(&file, stream) {
             Ok(s) => s,
             // A video without a soundtrack has nothing to play.
             Err(AudioError::Media(pm_media::MediaError::Invalid(m)))

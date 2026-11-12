@@ -101,6 +101,16 @@ pub struct AudioFacts {
     pub channels: u32,
 }
 
+/// One audio stream of a file. `index` is its stream index in the file,
+/// which is how a clip names the streams it plays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStreamFacts {
+    pub index: u32,
+    pub sample_rate: u32,
+    pub channels: u32,
+}
+
 /// The job engine's answer to [`ProbeMedia`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,6 +136,10 @@ pub struct MediaFacts {
     /// start, not the container's duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_duration: Option<f64>,
+    /// Every audio stream of the file, in file order: the asset's
+    /// `audioStreams` when there is more than one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_streams: Vec<AudioStreamFacts>,
 }
 
 impl Validate for MediaFacts {
