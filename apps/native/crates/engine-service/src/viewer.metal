@@ -49,25 +49,29 @@ float4 tap(texture2d<half> src,float2 uv,float4 o) {
 }
 // A reduced-resolution frame scales to the drawable once, here; a full one is
 // read pixel for pixel, so paused frames equal the export.
-// A source larger than the drawable (a paused frame rendered at the
-// composition's size) is averaged over each drawable pixel's footprint:
-// up to 6×6 bilinear taps, premultiplied. A smaller one is sampled once.
-float4 scaled(texture2d<half> src,float2 p,float2 drawable,float4 o) {
-    float2 ratio=float2(src.get_width(),src.get_height())/drawable;
+// The source covers `extent` drawable pixels and `p` is the pixel's centre in
+// them. A source larger than that (a paused frame rendered at the
+// composition's size, or a rendered frame from disk) is averaged over each
+// drawable pixel's footprint: up to 6×6 bilinear taps, premultiplied. A
+// smaller one is sampled once.
+float4 scaled(texture2d<half> src,float2 p,float2 extent,float4 o) {
+    float2 ratio=float2(src.get_width(),src.get_height())/extent;
     int2 k=int2(clamp(ceil(ratio),float2(1.0),float2(6.0)));
-    if(k.x==1&&k.y==1) return tap(src,p/drawable,o);
+    if(k.x==1&&k.y==1) return tap(src,p/extent,o);
     float2 corner=p-0.5;
     float4 sum=float4(0);
     for(int j=0;j<k.y;j++) for(int i=0;i<k.x;i++) {
         float2 q=corner+(float2(i,j)+0.5)/float2(k);
-        sum+=tap(src,q/drawable,o);
+        sum+=tap(src,q/extent,o);
     }
     return sum/float(k.x*k.y);
 }
 fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], constant Params& u [[buffer(0)]]) {
-    // A rendered (disk cache) frame is the whole composition: the drawable
-    // samples its window of the canvas.
-    float4 c=u.whole!=0 ? tap(src,(u.canvas.xy+p.xy)/u.canvas.zw,u.output)
+    // A source that is the whole composition (a rendered frame from disk, a
+    // paused frame drawn at the composition's size) covers the canvas: the
+    // drawable shows its window of it, through the same footprint filter as
+    // any other reduced source, so the picture is the same whichever it is.
+    float4 c=u.whole!=0 ? scaled(src,u.canvas.xy+p.xy,u.canvas.zw,u.output)
         : u.reduced!=0 ? scaled(src,p.xy,u.drawable,u.output) : deliver(float4(src.read(uint2(p.xy))),u.output);
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
     v=float3(dec(v.r),dec(v.g),dec(v.b));

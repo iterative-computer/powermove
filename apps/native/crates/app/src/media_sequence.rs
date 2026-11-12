@@ -294,8 +294,7 @@ fn sheet(
     use objc2_foundation::NSString;
     let mtm = objc2::MainThreadMarker::new().expect("sheets open on the main thread");
     let warning = choice.warning();
-    let rows = 6 + if warning.is_some() { 2 } else { 0 };
-    let mut sheet = Sheet::new(TITLE, rows, tokens, false, mtm);
+    let mut sheet = Sheet::new(TITLE, tokens, false, mtm);
     let (body, minimum) = (
         f64::from(tokens.typography.body),
         f64::from(tokens.typography.minimum),
@@ -304,7 +303,7 @@ fn sheet(
     sheet.line(&choice.count(), body, tokens.colors.text);
     sheet.line(&choice.files(), minimum, tokens.colors.muted);
     sheet.number("fps", "Frame rate", fps, "fps", true);
-    sheet.line("1–240 fps", minimum, tokens.colors.muted);
+    sheet.note("1–240 fps", "1–240 fps", tokens.colors.muted);
     let duration = NSTextField::labelWithString(&NSString::from_str(&choice.duration(fps)), mtm);
     duration.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
         body, 0.,

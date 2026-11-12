@@ -18,10 +18,13 @@
 //!
 //! Anything that can couple a frame to inputs it does not name makes every
 //! frame depend on the whole document ([`Inputs::Whole`]): a solo switch,
-//! an expression that can address another layer or composition, or (the
-//! caller's `whole`) extension raster overrides, whose reads of the
-//! document are not tracked. A key that missed an input would play a stale
-//! frame; re-rendering is the lesser cost.
+//! an expression whose code reads `comp` or calls `sample` or `motionPath`
+//! (another layer's channels, whatever its span), one that does not compile
+//! ([`Reads`], from the renderer's own expression engine), or (the caller's
+//! `whole`) extension raster overrides, whose reads of the document are not
+//! tracked. An expression reading `idx` adds its layer's index to the
+//! frames it draws in. A key that missed an input would play a stale frame;
+//! re-rendering is the lesser cost.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -71,7 +74,8 @@ pub(crate) fn frame_digests(
     // Motion-blur samples reach half the shutter each side; one frame more
     // for rounding.
     let margin = (pm_render::motion::shutter_frames(node) / 2. + 1.) * frame;
-    if whole || matches!(inputs(layers, root), Inputs::Whole) {
+    let mut reads = Reads::default();
+    if whole || matches!(inputs(layers, root, &mut reads), Inputs::Whole) {
         // Every frame reads every layer, composition and asset.
         base.update(b"whole");
         base.update(&fields_digest(root, &BOOKKEEPING));
@@ -87,6 +91,9 @@ pub(crate) fn frame_digests(
         .iter()
         .map(pm_model::hash::canonical_digest)
         .collect();
+    // `idx` is the layer's position among all the composition's layers:
+    // a layer added, removed or moved before it changes what it draws.
+    let indexed: Vec<bool> = layers.iter().map(|l| reads.of(l).index).collect();
     let mut out = Vec::with_capacity(count.max(0) as usize);
     let mut last: Option<(Vec<usize>, [u8; 32])> = None;
     for n in 0..count {
@@ -103,6 +110,10 @@ pub(crate) fn frame_digests(
         let (mut comps, mut assets) = (BTreeSet::new(), BTreeSet::new());
         for &i in &drawn {
             hash.update(&digests[i]);
+            if indexed[i] {
+                hash.update(b"idx");
+                hash.update(&(i as u64).to_le_bytes());
+            }
             comps.extend(index.comps[i].iter().cloned());
             assets.extend(index.assets[i].iter().cloned());
         }
@@ -132,30 +143,90 @@ enum Inputs {
 }
 
 /// Whether the layers' frames can read layers they don't name.
-fn inputs(layers: &[Node], root: &Node) -> Inputs {
+fn inputs(layers: &[Node], root: &Node, reads: &mut Reads) -> Inputs {
     let solo = layers
         .iter()
         .any(|l| matches!(l.get("solo").map(Node::kind), Some(NodeKind::Bool(true))));
     let comps = root.get("comps").into_iter();
-    if solo || layers.iter().chain(comps).any(addresses_others) {
+    if solo || layers.iter().chain(comps).any(|n| reads.of(n).others) {
         Inputs::Whole
     } else {
         Inputs::Named
     }
 }
 
-/// An expression anywhere in `node` that can address another layer or a
-/// composition (`thisComp`, `comp(…)`, `thisLayer`, `layer(…)`).
-fn addresses_others(node: &Node) -> bool {
-    match node.kind() {
-        NodeKind::Object(map) => map.iter().any(|(key, value)| {
-            let expression = key.as_str() == Some("expr")
-                && matches!(value.kind(), NodeKind::String(s)
-                    if { let s = s.to_string_lossy().to_lowercase(); s.contains("comp") || s.contains("layer") });
-            expression || addresses_others(value)
-        }),
-        NodeKind::Array(items) => items.iter().any(addresses_others),
-        _ => false,
+/// What the expressions of a subtree read beyond their own layer.
+#[derive(Clone, Copy, Default)]
+struct Reach {
+    /// Other layers or compositions, or nothing that can be proved.
+    others: bool,
+    /// `idx`.
+    index: bool,
+}
+
+/// Expression sources compiled once each, as the renderer compiles them
+/// (`pm_render::expr::PmExprEngine`): what a frame reads is what the
+/// program's code can reach, never a guess from its text.
+#[derive(Default)]
+struct Reads {
+    sources: HashMap<pm_model::JsString, Reach>,
+}
+impl Reads {
+    /// Every `expr` in `node`'s subtree. A string that does not compile, or
+    /// any other value the evaluator takes for an expression (truthy), reads
+    /// nothing that can be proved.
+    fn of(&mut self, node: &Node) -> Reach {
+        let mut reach = Reach::default();
+        self.walk(node, &mut reach);
+        reach
+    }
+    fn walk(&mut self, node: &Node, reach: &mut Reach) {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                for (key, value) in map.iter() {
+                    if key.as_str() == Some("expr") {
+                        let own = self.expression(value);
+                        reach.others |= own.others;
+                        reach.index |= own.index;
+                    }
+                    self.walk(value, reach);
+                }
+            }
+            NodeKind::Array(items) => items.iter().for_each(|n| self.walk(n, reach)),
+            _ => {}
+        }
+    }
+    fn expression(&mut self, value: &Node) -> Reach {
+        use pm_eval::ExpressionEngine as _;
+        const UNKNOWN: Reach = Reach {
+            others: true,
+            index: true,
+        };
+        let NodeKind::String(source) = value.kind() else {
+            return if pm_eval::node::truthy(Some(value)) {
+                UNKNOWN
+            } else {
+                Reach::default()
+            };
+        };
+        if let Some(known) = self.sources.get(source) {
+            return *known;
+        }
+        let reach = if source.as_bytes().is_empty() {
+            Reach::default()
+        } else {
+            pm_render::expr::PmExprEngine
+                .compile(source)
+                .map_or(UNKNOWN, |compiled| {
+                    let deps = compiled.dependencies();
+                    Reach {
+                        others: deps.comp || deps.document,
+                        index: deps.index || compiled.needs_idx(),
+                    }
+                })
+        };
+        self.sources.insert(source.clone(), reach);
+        reach
     }
 }
 
@@ -482,10 +553,23 @@ mod tests {
         b["bg"] = "#ffffff".into();
         assert_eq!(changed(&a, &b).len(), 120);
         let mut expr = a.clone();
-        expr["layers"][0]["p"]["opacity"]["expr"] = "thisComp.layer('L2').opacity".into();
+        expr["layers"][0]["p"]["opacity"]["expr"] = "comp.layers[1].p.opacity.v".into();
         let mut edited = expr.clone();
         edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
         assert_eq!(changed(&expr, &edited).len(), 120);
+        // An expression that does not compile proves nothing.
+        let mut broken = a.clone();
+        broken["layers"][0]["p"]["opacity"]["expr"] = "value +".into();
+        let mut edited = broken.clone();
+        edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
+        assert_eq!(changed(&broken, &edited).len(), 120);
+        // One reading its own layer and the composition's parameters keeps
+        // edits local (the layer and the composition's fields are inputs).
+        let mut own = a.clone();
+        own["layers"][0]["p"]["opacity"]["expr"] = "layer.from + param('speed') * t".into();
+        let mut edited = own.clone();
+        edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
+        assert_eq!(changed(&own, &edited), frames(58..92));
         // A time-only expression keeps edits local.
         let mut wiggle = a.clone();
         wiggle["layers"][0]["p"]["opacity"]["expr"] = "wiggle(2, 10)".into();
@@ -497,6 +581,46 @@ mod tests {
         let mut edited = solo.clone();
         edited["layers"][1]["p"]["opacity"]["v"] = 10.into();
         assert_eq!(changed(&solo, &edited).len(), 120);
+    }
+
+    /// `sample` and `motionPath` read another layer's channels whatever its
+    /// span, and name it inside the expression's text: an edit to a layer
+    /// that is not drawn at a frame changes the frame that samples it.
+    #[test]
+    fn a_sampled_layer_changes_the_frames_that_sample_it() {
+        for source in [
+            "sample('L2', 'opacity', 0)",
+            "t > 9 ? 0 : motionPath('L2', 'position.x', 0.5, 0, 1)",
+        ] {
+            let mut a = project(serde_json::json!([
+                layer("L1", 0., 1.),
+                layer("L2", 3., 1.)
+            ]));
+            a["layers"][0]["p"]["opacity"]["expr"] = source.into();
+            let mut b = a.clone();
+            b["layers"][1]["p"]["opacity"]["v"] = 10.into();
+            assert!(changed(&a, &b).contains(&0), "{source}");
+        }
+    }
+
+    /// `idx` is the layer's position among all layers: one added before it,
+    /// drawn at the frame or not, changes the frames it draws in, and only
+    /// those of layers that read it.
+    #[test]
+    fn a_layer_index_is_an_input_where_idx_is_read() {
+        let mut a = project(serde_json::json!([
+            layer("L1", 0., 1.),
+            layer("L2", 2., 1.)
+        ]));
+        a["layers"][0]["p"]["opacity"]["expr"] = "idx * 100".into();
+        let mut b = a.clone();
+        b["layers"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, layer("L0", 3., 1.));
+        let moved = changed(&a, &b);
+        assert!(moved.contains(&0), "L1's index changed: {moved:?}");
+        assert!(!moved.contains(&70), "L2 reads no index: {moved:?}");
     }
 
     /// A group's transitions time from all its members: moving a member

@@ -56,3 +56,7 @@ pm-audio = { path = "../../../../engine/crates/pm-audio", features = ["test-hook
 # Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
 pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
 tempfile = "3"
+
+[[test]]
+name = "fonts"
+harness = false

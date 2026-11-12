@@ -2,14 +2,6 @@
 use super::model::Failure;
 use pm_builtins::RESOLUTIONS;
 
-pub const FORM_ROWS: &[&str] = &[
-    "Name",
-    "Resolution",
-    "Size",
-    "Frame Rate",
-    "Duration",
-    "Background",
-];
 pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
 pub const FPS_ERROR: &str = "Enter a frame rate from 1 to 240 fps.";

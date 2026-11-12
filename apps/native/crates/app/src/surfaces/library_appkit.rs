@@ -33,24 +33,10 @@ pub fn new_project_sheet(
     use super::{form::*, sheet_layout::native::Sheet};
     use objc2_app_kit::*;
     let errors = form.validation();
-    let mut sheet = Sheet::new(
-        SHEET_TITLE,
-        FORM_ROWS.len()
-            + [errors.name, errors.size, errors.fps, errors.duration]
-                .iter()
-                .filter(|e| e.is_some())
-                .count(),
-        tokens,
-        false,
-        mtm,
-    );
+    let mut sheet = Sheet::new(SHEET_TITLE, tokens, false, mtm);
     sheet.text("name", "Name", &form.name, false, !form.submitting);
     if let Some(error) = errors.name {
-        sheet.line(
-            error,
-            tokens.typography.minimum.into(),
-            tokens.colors.danger,
-        );
+        sheet.note(error, error, tokens.colors.danger);
     }
     let popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
@@ -98,20 +84,12 @@ pub fn new_project_sheet(
     show_link(&link, form);
     sheet.trailing(&link);
     if let Some(error) = errors.size {
-        sheet.line(
-            error,
-            tokens.typography.minimum.into(),
-            tokens.colors.danger,
-        );
+        sheet.note(error, error, tokens.colors.danger);
     }
 
     sheet.number("fps", "Frame Rate", &form.fps, "fps", !form.submitting);
     if let Some(error) = errors.fps {
-        sheet.line(
-            error,
-            tokens.typography.minimum.into(),
-            tokens.colors.danger,
-        );
+        sheet.note(error, error, tokens.colors.danger);
     }
     sheet.number(
         "duration",
@@ -121,11 +99,7 @@ pub fn new_project_sheet(
         !form.submitting,
     );
     if let Some(error) = errors.duration {
-        sheet.line(
-            error,
-            tokens.typography.minimum.into(),
-            tokens.colors.danger,
-        );
+        sheet.note(error, error, tokens.colors.danger);
     }
     let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), objc2_foundation::NSRect::ZERO);
     well.setEnabled(!form.submitting);
