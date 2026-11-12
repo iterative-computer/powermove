@@ -10,6 +10,11 @@ pub struct ResourceSnapshot {
     /// this generation so a frame or export job never sees a later registration.
     #[serde(default)]
     pub definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
+    /// Extensions are still loading: an effect `definitions` lacks may yet be
+    /// registered. A frame that would bypass it is not drawn, cached or
+    /// exported until a settled snapshot arrives.
+    #[serde(default)]
+    pub pending: bool,
 }
 impl ResourceSnapshot {
     pub fn validate(&self) -> anyhow::Result<()> {

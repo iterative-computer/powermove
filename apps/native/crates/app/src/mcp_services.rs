@@ -38,6 +38,10 @@ type Resources = Arc<pm_engine_service::resources::ResourceSnapshot>;
 /// Each open document's extension definitions (its window's), for the
 /// captures and exports agents start; a request copies them when it starts.
 static RESOURCES: Mutex<Option<HashMap<u64, Resources>>> = Mutex::new(None);
+static SETTLED: std::sync::Condvar = std::sync::Condvar::new();
+/// How long a capture or export waits for its window's extensions to load
+/// before it goes ahead with what is registered (and says what is missing).
+const EXTENSIONS_WAIT: Duration = Duration::from_secs(120);
 /// Document `doc_id`'s definitions now (none: its window has no extensions).
 pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
     let mut all = RESOURCES.lock().unwrap();
@@ -46,9 +50,23 @@ pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
         Some(resources) => all.insert(doc_id, resources),
         None => all.remove(&doc_id),
     };
+    SETTLED.notify_all();
 }
-fn resources_of(doc_id: u64) -> Option<Resources> {
-    RESOURCES.lock().unwrap().as_ref()?.get(&doc_id).cloned()
+/// Document `doc_id`'s definitions once its extensions have loaded: an
+/// effect still loading is never exported or captured as not installed.
+/// `wait: false` (an extension's own capture, which its realm may be loading
+/// for) takes them as they are.
+fn resources_of(doc_id: u64, wait: bool) -> Option<Resources> {
+    let deadline = Instant::now() + EXTENSIONS_WAIT;
+    let mut all = RESOURCES.lock().unwrap();
+    loop {
+        let resources = all.as_ref()?.get(&doc_id).cloned()?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !wait || !resources.pending || left.is_zero() {
+            return Some(resources);
+        }
+        all = SETTLED.wait_timeout(all, left).unwrap().0;
+    }
 }
 /// Install the production engine hosts. Call on a worker before serving.
 pub fn connect_engine(
@@ -202,6 +220,7 @@ impl EngineJobs {
         destination: PathBuf,
         look: bool,
         preview: bool,
+        wait: bool,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -223,7 +242,7 @@ impl EngineJobs {
         )?;
         request.preview = preview;
         // An agent's capture draws the effects its project's window defines.
-        if let Some(resources) = resources_of(published.snapshot.doc_id) {
+        if let Some(resources) = resources_of(published.snapshot.doc_id, wait) {
             request.resources = (*resources).clone();
         }
         // A capture shows the project as the viewer does; a video is a delivery.
@@ -321,7 +340,7 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let handle = match self.start(&published, settings, destination, false, false) {
+        let handle = match self.start(&published, settings, destination, false, false, true) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -527,6 +546,7 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
+        capture != Capture::ExtensionSnapshot,
     )?;
     while matches!(
         handle.status().state,
@@ -1165,4 +1185,36 @@ fn seconds(micros: Option<i64>) -> Option<f64> {
 }
 fn decibels(level: f64) -> f64 {
     (20. * level.max(1e-9).log10() * 10.).round() / 10.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_engine_service::resources::ResourceSnapshot;
+    fn snapshot(generation: u64, pending: bool) -> Option<Resources> {
+        Some(Arc::new(ResourceSnapshot {
+            generation,
+            pending,
+            ..Default::default()
+        }))
+    }
+    /// An export, poster or agent still of a document whose window is still
+    /// loading extensions waits for them; an extension's own capture (its
+    /// realm may be the one loading) takes what is registered.
+    #[test]
+    fn captures_wait_for_their_window_extensions_to_load() {
+        let doc = 0x5e77_1ed0;
+        set_resources(doc, snapshot(1, true));
+        assert_eq!(resources_of(doc, false).map(|r| r.pending), Some(true));
+        let waiter = std::thread::spawn(move || resources_of(doc, true).map(|r| r.generation));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!waiter.is_finished(), "a capture went ahead while loading");
+        set_resources(doc, snapshot(2, true));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished(), "still loading");
+        set_resources(doc, snapshot(3, false));
+        assert_eq!(waiter.join().unwrap(), Some(3));
+        set_resources(doc, None);
+        assert!(resources_of(doc, true).is_none());
+    }
 }

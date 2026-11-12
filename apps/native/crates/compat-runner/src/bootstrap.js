@@ -1116,20 +1116,30 @@ globalThis.__compat = {
       this.realm.PM.Fonts.setSystemFamilies(runtime.engine("fonts.families", {}));
       void this.projectFonts();
     });
+    this.loading += 1;
     this.loader
       .boot(this.trusted(records))
       .catch((error) => this.reportFailure(error))
       .finally(() => {
+        this.loading -= 1;
         this.publishContributions();
         runtime.engine("extensions.ready", {});
       });
   },
+  /** Load passes running: until none is, a definition the project uses may
+   * still be registered, so nothing may treat it as not installed. */
+  loading: 0,
   trusted: (records) => records.filter((record) => record.trust !== "store"),
   update(records, ids, reason) {
+    this.loading += 1;
+    this.publishContributions();
     this.loader
       .update(this.trusted(records), ids, reason)
       .catch((error) => this.reportFailure(error))
-      .finally(() => this.publishContributions());
+      .finally(() => {
+        this.loading -= 1;
+        this.publishContributions();
+      });
   },
   reportFailure(error) {
     runtime.engine("ui.toast", {
@@ -1261,6 +1271,7 @@ globalThis.__compat = {
       theme: kernel.theme.activeId,
       nativeTheme: this.nativeTheme(),
       definitions: this.definitions(),
+      settled: this.loading === 0,
     };
   },
   /** The active theme as native token patches (translator in this realm). */

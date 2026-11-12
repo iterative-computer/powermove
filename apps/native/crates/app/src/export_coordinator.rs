@@ -219,6 +219,18 @@ impl Controller {
                 });
                 return;
             };
+            // A delivery started while the window's extensions load waits for
+            // them: an effect still loading is never refused as not installed.
+            let mut resources = resources;
+            while resources.pending {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                match this.update(cx, |v, _| v.extensions.resources.clone()) {
+                    Ok(now) => resources = now,
+                    Err(_) => return,
+                }
+            }
             let frozen = Frozen {
                 publication: p,
                 options: typed,

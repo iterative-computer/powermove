@@ -54,6 +54,8 @@ thread_local! {
     /// shows this again.
     static V1_THEME: std::cell::RefCell<Option<(String, Patches)>> = const { std::cell::RefCell::new(None) };
 }
+/// A document, its revision and a resource generation.
+type AwaitKey = (u64, u64, u64);
 /// A theme's patches for dark and for light windows.
 type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
@@ -201,6 +203,12 @@ pub struct Extensions {
     presented: Option<u64>,
     /// `inspector.focusText`'s layer, for Properties once its view exists.
     pub(crate) focus_text: Option<String>,
+    /// The project whose open waits for effects its extensions are loading,
+    /// once its panels have mounted (`Controller::settled`).
+    pub(crate) settle_after: Option<String>,
+    /// Whether the open composition waits on such effects, for a document
+    /// revision and resource generation.
+    awaiting: std::cell::Cell<Option<(AwaitKey, bool)>>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -242,12 +250,19 @@ impl Default for Extensions {
             booted: false,
             unresponsive: None,
             stopped_for_quit: false,
-            resources: Arc::default(),
+            // Until the host says its first load pass is over, an effect the
+            // project uses may still be registered.
+            resources: Arc::new(ResourceSnapshot {
+                pending: true,
+                ..Default::default()
+            }),
             stage: Rc::default(),
             stage_used: false,
             stage_sent: None,
             presented: None,
             focus_text: None,
+            settle_after: None,
+            awaiting: Default::default(),
         }
     }
 }
@@ -289,6 +304,18 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions-shared"),
         profile.join("extensions"),
     ]
+}
+/// Effect types the engine draws without any extension.
+fn builtin_effects() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
 }
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
@@ -337,9 +364,11 @@ impl Controller {
         let generation = self.extensions.resources.generation;
         self.extensions = Extensions::default();
         self.extensions.resources = Arc::new(ResourceSnapshot {
-            generation,
+            generation: generation + 1,
+            pending: true,
             ..Default::default()
         });
+        self.apply_extension_resources();
     }
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
@@ -388,6 +417,10 @@ impl Controller {
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
+        if let Some(doc_id) = doc_id {
+            // Captures and exports of this document wait for its extensions.
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
         self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
         self.wire_effect_desk();
@@ -469,6 +502,9 @@ impl Controller {
                 .and_then(|h| h.contributions())
             {
                 self.apply_contributions(&contributions, cx);
+            } else {
+                // No extension to run: settled with no definitions.
+                self.pin_definitions(vec![]);
             }
         }
         self.present_page();
@@ -1101,17 +1137,7 @@ impl Controller {
             .flatten()
             .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
             .collect();
-        if definitions != self.extensions.resources.definitions {
-            self.extensions.resources = Arc::new(ResourceSnapshot {
-                generation: self.extensions.resources.generation + 1,
-                definitions,
-                ..Default::default()
-            });
-            if let Some(doc_id) = self.extensions.doc_id {
-                crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
-            }
-            self.apply_extension_resources();
-        }
+        self.pin_definitions(definitions);
         self.apply_v1_theme(&value["nativeTheme"], cx);
         self.update_builtins(cx);
         cx.notify();
@@ -1151,6 +1177,72 @@ impl Controller {
             }
             Err(message) => self.errors.borrow_mut().tell("Theme", &message),
         }
+    }
+    /// The contributed definitions every viewer, capture and export of this
+    /// window draws with, and whether a load pass is still running (an effect
+    /// the project uses may yet arrive: `ResourceSnapshot::pending`).
+    fn pin_definitions(&mut self, definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>) {
+        let pending = self
+            .extensions
+            .host
+            .as_ref()
+            .is_some_and(|host| !host.definitions_settled());
+        let current = &self.extensions.resources;
+        if definitions == current.definitions && pending == current.pending {
+            return;
+        }
+        if current.pending && !pending {
+            crate::diag::line(json!({"extensions": "settled", "definitions": definitions.len()}));
+        }
+        self.extensions.resources = Arc::new(ResourceSnapshot {
+            generation: current.generation + 1,
+            definitions,
+            pending,
+            ..Default::default()
+        });
+        if let Some(doc_id) = self.extensions.doc_id {
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
+        self.apply_extension_resources();
+        if let Some(project) = self.extensions.settle_after.take() {
+            self.settled(&project);
+        }
+    }
+    /// The open composition uses an effect no definition provides yet while
+    /// this window's extensions load: the viewer shows the open as still
+    /// loading, and nothing renders it, until they register it or fail.
+    pub(crate) fn awaiting_extension_effects(&self) -> bool {
+        let resources = &self.extensions.resources;
+        let Some(p) = self.published.as_ref().filter(|_| resources.pending) else {
+            return false;
+        };
+        let key = (p.snapshot.doc_id, p.snapshot.revision, resources.generation);
+        if let Some((at, awaiting)) = self.extensions.awaiting.get()
+            && at == key
+        {
+            return awaiting;
+        }
+        let effect = |d: &&pm_protocol::definitions::DefinitionSnapshot| {
+            d.kind == pm_protocol::definitions::DefinitionKind::Effect
+        };
+        let defined: BTreeSet<&str> = resources
+            .definitions
+            .iter()
+            .filter(effect)
+            .map(|d| d.id.as_str())
+            .collect();
+        let builtin = builtin_effects();
+        let unavailable = |ty: &str, _: Option<&pm_model::Node>| {
+            (!builtin.contains(ty) && !defined.contains(ty)).then_some(None)
+        };
+        let awaiting = !pm_render::effects::versions::missing_effects(
+            &p.snapshot.document,
+            &p.snapshot.render_comp(),
+            &unavailable,
+        )
+        .is_empty();
+        self.extensions.awaiting.set(Some((key, awaiting)));
+        awaiting
     }
     /// Every live viewer renders the same contributed definitions.
     pub fn apply_extension_resources(&mut self) {

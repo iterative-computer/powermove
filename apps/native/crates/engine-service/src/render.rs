@@ -221,6 +221,20 @@ impl std::fmt::Display for FontsPending {
     }
 }
 impl std::error::Error for FontsPending {}
+/// The frame uses effects no definition provides yet while extensions are
+/// still loading: it waits for them instead of drawing them bypassed.
+#[derive(Debug)]
+pub(crate) struct DefinitionsPending(String);
+impl std::fmt::Display for DefinitionsPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the extensions this project uses are loading ({})",
+            self.0
+        )
+    }
+}
+impl std::error::Error for DefinitionsPending {}
 /// Every compiler slot was taken while definitions were installing. Nothing is
 /// wrong with the shader; a sticky error here would stick to a healthy project.
 #[derive(Debug)]
@@ -246,6 +260,7 @@ impl std::fmt::Display for DiskFramePending {
 impl std::error::Error for DiskFramePending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<FontsPending>()
+        || error.is::<DefinitionsPending>()
         || error.is::<CompilerBusy>()
         || error.is::<DiskFramePending>()
         || matches!(
@@ -839,6 +854,10 @@ impl Engine {
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
         &self.resources.definitions
     }
+    /// Extensions are still loading (`ResourceSnapshot::pending`).
+    pub(crate) fn definitions_pending(&self) -> bool {
+        self.resources.pending
+    }
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
             self.resources = resources;
@@ -865,8 +884,23 @@ impl Engine {
             if failures.iter().any(|failure| busy(&failure.message)) {
                 return Err(anyhow::Error::new(CompilerBusy));
             }
-            self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
+            // Not installed only once extensions have settled; until then the
+            // frame waits (and is drawn again when the next snapshot lands).
+            if self.resources.pending {
+                let loading: Vec<&str> = self
+                    .missing_effects
+                    .iter()
+                    .filter(|missing| missing.revision.is_none())
+                    .map(|missing| missing.effect.as_str())
+                    .collect();
+                if !loading.is_empty() {
+                    let loading = loading.join(", ");
+                    self.missing_effects.clear();
+                    return Err(DefinitionsPending(loading).into());
+                }
+            }
+            self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
             // A document's first frame compiles the frame and text pipelines

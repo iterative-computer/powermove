@@ -592,6 +592,19 @@ impl RasterInbox {
     }
 }
 
+/// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
+/// this process's first trace line.
+fn trace(value: Value) {
+    static ON: std::sync::LazyLock<Option<std::time::Instant>> = std::sync::LazyLock::new(|| {
+        (std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1")).then(std::time::Instant::now)
+    });
+    if let Some(start) = *ON {
+        let mut value = value;
+        value["s"] = json!((start.elapsed().as_secs_f64() * 1000.).round() / 1000.);
+        eprintln!("PM_EXT {value}");
+    }
+}
+
 pub struct ExtensionHost {
     inbox: Sender<Input>,
     shared: Arc<Shared>,
@@ -674,6 +687,16 @@ impl ExtensionHost {
     }
     pub fn is_ready(&self) -> bool {
         self.shared.published.lock().unwrap().ready
+    }
+    /// No load pass is running: every extension has registered what it
+    /// registers, or has failed. Until then an effect the project uses that no
+    /// definition provides yet may still arrive, so it is not "not installed".
+    pub fn definitions_settled(&self) -> bool {
+        let published = self.shared.published.lock().unwrap();
+        match &published.contributions {
+            Some(contributions) => contributions["settled"] != false,
+            None => published.ready,
+        }
     }
     /// The realm generation drawing now, 0 with none. A page belongs to one
     /// generation: when this moves, that page is finished.
@@ -1541,6 +1564,7 @@ impl Owner {
         });
     }
     fn set_health(&mut self, id: &str, health: Value) {
+        trace(json!({"extension": id, "health": health["state"]}));
         for record in &mut self.records {
             if record["id"] == id {
                 record["health"] = health.clone();
@@ -1984,6 +2008,7 @@ impl Owner {
         Ok(())
     }
     fn boot(&mut self) {
+        trace(json!({"extensions": "boot"}));
         let found = discovery::scan(&self.config.roots);
         self.folders = found
             .iter()
@@ -1995,8 +2020,10 @@ impl Owner {
             self.shared.update(|p| p.ready = true);
             return;
         }
+        // A realm that cannot start has definitively failed: nothing is loading.
         if let Err(error) = self.start_realm(None) {
             self.shared.update(|p| {
+                p.ready = true;
                 p.toasts
                     .push(format!("Extensions could not start: {error}"))
             });
@@ -2007,6 +2034,7 @@ impl Owner {
             Ok(compiler) => compiler,
             Err(error) => {
                 self.shared.update(|p| {
+                    p.ready = true;
                     p.toasts
                         .push(format!("Extensions could not compile: {error}"))
                 });
@@ -2014,8 +2042,10 @@ impl Owner {
             }
         };
         self.confined.clear();
+        trace(json!({"extensions": "compile", "found": found.len()}));
         self.records = found.iter().map(|f| self.compile(&compiler, f)).collect();
         compiler.realm().close();
+        trace(json!({"extensions": "compiled"}));
         self.sync_stores();
         self.publish_records();
         self.publish_store();
@@ -2761,6 +2791,69 @@ mod tests {
             glsl.source.lines().nth(glsl.body_line_offset as usize),
             Some("o = src(v_uv) * u_amount;")
         );
+    }
+    /// While a load pass runs, a definition the project uses may still arrive:
+    /// the published contributions say so until every extension has registered
+    /// what it registers (or failed), so nothing calls it not installed.
+    #[test]
+    fn contributions_stay_unsettled_until_a_slow_extension_has_registered() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-fast",
+            &[(
+                "index.ts",
+                &format!("export default function(api){{{}}}", effect("fast.tint")),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-slow",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default async function(api){{await new Promise(r=>setTimeout(r,1500));{}}}",
+                    effect("slow.tint")
+                ),
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |c: &Value, id: &str| {
+            c["definitions"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut partial = false;
+        loop {
+            let settled = fixture.host.definitions_settled();
+            match fixture.host.contributions() {
+                Some(c) if has(&c, "slow.tint") && settled => break,
+                Some(c) => {
+                    partial |= has(&c, "fast.tint");
+                    assert!(!settled, "settled without slow.tint: {}", c["definitions"]);
+                }
+                None => assert!(!settled, "settled before anything activated"),
+            }
+            assert!(Instant::now() < deadline, "slow.tint never registered");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(partial, "the fast extension's effect was published first");
+    }
+    /// A project with no extensions has nothing to wait for.
+    #[test]
+    fn no_extensions_settle_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("extensions")).unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("an empty boot settles", |host| host.definitions_settled());
+        assert!(fixture.host.contributions().is_none());
     }
     #[test]
     fn a_store_install_runs_confined_and_contributes_like_a_local_one() {

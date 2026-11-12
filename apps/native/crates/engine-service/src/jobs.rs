@@ -989,6 +989,12 @@ pub fn run_child() -> Result<()> {
                     "{} version {revision} was saved by a newer Powermove ({uses}{others}). Export it there, or turn the effect off, then export again.",
                     missing.effect
                 ),
+                // The app waits for extensions before it starts a delivery;
+                // one sent early is never told an effect is missing.
+                None if request.resources.pending => anyhow::bail!(
+                    "{} is still loading ({uses}{others}). Export again once the project's extensions have loaded.",
+                    missing.effect
+                ),
                 None => anyhow::bail!(
                     "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
                     missing.effect

@@ -2371,15 +2371,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 media: rendered_media,
                 ..scene.clone()
             };
-            if shared.disk.observe(
-                &rendered,
-                engine.definitions(),
-                overrides,
-                engine.tone_identity(),
-                fonts,
-                stamp.doc_id,
-                spec.time,
-            ) {
+            // Partial definitions while extensions load are never a fill's
+            // source: its frames would be drawn without their effects.
+            if !engine.definitions_pending()
+                && shared.disk.observe(
+                    &rendered,
+                    engine.definitions(),
+                    overrides,
+                    engine.tone_identity(),
+                    fonts,
+                    stamp.doc_id,
+                    spec.time,
+                )
+            {
                 // A frame uploaded ahead is of the state before.
                 engine.drop_upload_ahead();
                 if let Some(recorder) = &recorder {

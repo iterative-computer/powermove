@@ -533,6 +533,83 @@ fn extension_effects_from_the_resource_snapshot_render_natively() {
     );
 }
 
+/// While the window's extensions load (a pending snapshot), a frame whose
+/// effect no definition provides yet is not drawn bypassed and the effect is
+/// never called not installed: the viewer waits, then draws it with the effect
+/// once its extension registers it. Only a settled snapshot without it bypasses.
+#[test]
+fn an_effect_still_loading_is_waited_for_never_bypassed() {
+    let tinted = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("effects-loading");
+    let v = service
+        .viewer(config(tinted, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    let snapshot = |generation, definitions, pending| {
+        Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            definitions,
+            pending,
+            ..Default::default()
+        })
+    };
+    v.resources(snapshot(1, vec![], true)).unwrap();
+    v.capture_next().unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(1500) {
+        let status = v.status();
+        assert!(
+            status.frame.is_none() && status.missing_effects.is_empty(),
+            "nothing is drawn or called not installed while it loads: {status:?}"
+        );
+        assert!(
+            status.notice().is_none_or(|n| !n.contains("not installed")),
+            "{status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut invert = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    invert.id = "ext.invert".into();
+    invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    // Registered while others still load: drawn with it at once.
+    v.resources(snapshot(2, vec![invert], true)).unwrap();
+    let drawn = wait(&v, "the effect registered", |s| {
+        s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+    });
+    assert!(
+        drawn.missing_effects.is_empty() && drawn.error.is_none(),
+        "{drawn:?}"
+    );
+    let centre = drawn.frame.unwrap().pixels.unwrap()[90 * 320 + 160];
+    assert!(centre[0] < 0.25 && centre[1] > 0.9, "inverted: {centre:?}");
+    // Loading over and the effect really absent: bypassed and named.
+    v.resources(snapshot(3, vec![], false)).unwrap();
+    v.capture_next().unwrap();
+    let stamp = v.stamp().unwrap();
+    let bypassed = wait(&v, "settled without it", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+    });
+    assert!(
+        bypassed
+            .missing_effects
+            .iter()
+            .any(|m| m.effect == "ext.invert"),
+        "{bypassed:?}"
+    );
+}
+
 /// A project saved by the shipped app at current main
 /// (`pm-kernel/tests/fixtures/main-current`) draws in the viewer: no error and
 /// no hang, frames at several times, and what this build can't draw yet is
