@@ -1209,3 +1209,115 @@ fn effect_pixels_are_composition_pixels_at_any_render_scale() {
         }
     }
 }
+
+/// The effect pixel contract in final output: an effect without an owner
+/// binding is drawn on the composition's own pixel grid at any output size,
+/// so a resized export (half or twice the composition) shows the 1:1
+/// export's picture resampled, whatever idiom its shader uses: a radius in
+/// `u_texel`, a physical neighbour step, a half-texel tile clamp, or
+/// `texelFetch` from `gl_FragCoord`. A viewer frame does the same for a
+/// shader that addresses physical texels.
+#[test]
+fn resized_frames_draw_effects_on_the_composition_grid() {
+    let _gpu = gpu();
+    let program = |body: &str| {
+        format!(
+            "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform vec2 u_res;\nout vec4 o;\nvoid main(){{ {body} }}\n"
+        )
+    };
+    let shaders = [
+        (
+            "acme.radius",
+            program("o = texture(u_tex, v_st - vec2(8.0 * u_texel.x, 0.0));"),
+        ),
+        (
+            "acme.neighbours",
+            program(
+                "o = 0.5 * (texture(u_tex, v_st - vec2(u_texel.x, 0.0)) + texture(u_tex, v_st + vec2(u_texel.x, 0.0)));",
+            ),
+        ),
+        (
+            "acme.tile",
+            program(
+                "o = texture(u_tex, vec2(clamp(v_st.x * 0.5, 0.5 * u_texel.x, 0.5 - 0.5 * u_texel.x), v_st.y));",
+            ),
+        ),
+        (
+            "acme.fetch",
+            program(
+                "ivec2 at = clamp(ivec2(gl_FragCoord.xy) - ivec2(4, 0), ivec2(0), textureSize(u_tex, 0) - 1); o = texelFetch(u_tex, at, 0);",
+            ),
+        ),
+    ];
+    let mut set = builtin_definitions();
+    for (id, source) in &shaders {
+        set.definitions
+            .push(raw_effect(id, source, json!([]), false));
+    }
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (w, h) = (64u32, 32u32);
+    let frame = |px: &[f32], width: usize, x: usize, y: usize| px[(y * width + x) * 4];
+    for (id, _) in &shaders {
+        // A white solid from column 20 to 60 over every row (the anchor is its
+        // top-left corner), the effect on it, on black.
+        let mut plate = layer(
+            "plate",
+            "solid",
+            json!({ "color": "#FFFFFF", "w": 40, "h": h }),
+            20.0,
+            0.0,
+            1.0,
+        );
+        plate["fx"] = json!([fx("e", id, json!({}))]);
+        let doc = load(&project(w, h, 1.0, solid_fill("#000000"), vec![plate]));
+        let res = MapResolver::default();
+        let at = |r: &mut Renderer, scale: f64, final_output: bool| {
+            let req = RenderRequest {
+                export: final_output,
+                output_kind: if final_output {
+                    pm_render::OutputKind::Final
+                } else {
+                    pm_render::OutputKind::Preview
+                },
+                ..RenderRequest::at_scale(Size::new(w, h), scale, Precision::Float16)
+            };
+            let width = req.output_size.width as usize;
+            (render(r, &doc, &res, 0.0, &req).unwrap(), width)
+        };
+        let (one, _) = at(&mut r, 1.0, true);
+        // Compare along the middle row, in composition pixels: each output
+        // sample against the 1:1 frame at the same composition position
+        // (linear between its pixels).
+        let compare = |px: &[f32], width: usize, scale: f64, label: &str| {
+            let y = (f64::from(h) * scale / 2.0) as usize;
+            let mut worst = (0.0f32, 0usize);
+            let mut sum = 0.0f32;
+            for x in 0..width {
+                let cx = ((x as f64 + 0.5) / scale - 0.5).clamp(0.0, f64::from(w) - 1.0);
+                let (x0, t) = (cx.floor() as usize, (cx - cx.floor()) as f32);
+                let x1 = (x0 + 1).min(w as usize - 1);
+                let want = frame(&one, w as usize, x0, h as usize / 2) * (1.0 - t)
+                    + frame(&one, w as usize, x1, h as usize / 2) * t;
+                let d = (frame(px, width, x, y) - want).abs();
+                sum += d;
+                if d > worst.0 {
+                    worst = (d, x);
+                }
+            }
+            let mean = sum / width as f32;
+            assert!(
+                mean < 0.03 && worst.0 < 0.55,
+                "{id} {label}: off the 1:1 frame resampled by mean {mean}, worst {worst:?}"
+            );
+        };
+        for scale in [0.5, 2.0] {
+            let (px, width) = at(&mut r, scale, true);
+            compare(&px, width, scale, &format!("export at {scale}x"));
+        }
+        if *id == "acme.fetch" {
+            let (px, width) = at(&mut r, 2.0, false);
+            compare(&px, width, 2.0, "viewer at 2x");
+        }
+    }
+}

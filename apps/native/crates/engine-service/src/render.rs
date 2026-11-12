@@ -142,6 +142,11 @@ impl FrameSpec {
             MotionBlurKind::PreviewPaused
         });
         request.sampling = self.sampling();
+        // A capture reads the exact picture: final output, as an export
+        // (effects at the composition's density, `pm_render::plan`).
+        if self.exact {
+            request.output_kind = pm_render::OutputKind::Final;
+        }
         #[cfg(test)]
         SAMPLED
             .lock()

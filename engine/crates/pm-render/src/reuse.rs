@@ -90,6 +90,9 @@ pub(crate) struct BuildKey {
     /// The output origin (bits): every draw of the top level and its
     /// groups moves with it.
     pub origin: Option<(u64, u64)>,
+    /// Final output plans levels at the composition's density where their
+    /// effects need it (`crate::plan::comp_pass`).
+    pub final_output: bool,
 }
 
 /// Which document the entries belong to.
