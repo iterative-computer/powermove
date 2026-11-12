@@ -519,6 +519,40 @@ pub fn down_mix(bus: &[Vec<f32>], out: &mut [Vec<f32>], at: usize, n: usize) {
     }
 }
 
+/// [`down_mix`] of `n` channels as a matrix (rows L, R).
+pub fn down_mix_matrix(n: usize) -> Vec<Vec<f32>> {
+    let mut m = vec![vec![0f32; n]; 2];
+    for j in 0..n {
+        let bus: Vec<Vec<f32>> = (0..n).map(|c| vec![f32::from(c == j)]).collect();
+        let mut out = vec![vec![0f32; 1]; 2];
+        down_mix(&bus, &mut out, 0, 1);
+        m[0][j] = out[0][0];
+        m[1][j] = out[1][0];
+    }
+    m
+}
+
+/// Where a stereo signal goes on a bus that `fold` (rows L, R) folds to
+/// stereo, so that the fold gives it back unchanged: each side on the bus
+/// channel that feeds that side alone, most strongly, scaled by its
+/// inverse (rows: bus channels; columns: L, R). `None` when some side has
+/// no such channel.
+pub fn unfolded_placement(fold: &[Vec<f32>]) -> Option<Vec<Vec<f32>>> {
+    let n = fold.first()?.len();
+    let mut place = vec![vec![0f32; 2]; n];
+    for side in 0..2 {
+        let (j, g) = (0..n)
+            .filter(|&j| fold[1 - side][j] == 0.0 && fold[side][j] > 0.0)
+            .map(|j| (j, fold[side][j]))
+            .fold(None, |best: Option<(usize, f32)>, (j, g)| match best {
+                Some((_, b)) if b >= g => best,
+                _ => Some((j, g)),
+            })?;
+        place[j][side] = 1.0 / g;
+    }
+    Some(place)
+}
+
 impl Default for Range {
     fn default() -> Self {
         Range {

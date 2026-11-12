@@ -201,3 +201,61 @@ fn a_silent_surround_stream_does_not_change_a_mono_stream() {
         );
     }
 }
+
+/// A clip that lists its streams is folded on its own, whatever else plays:
+/// an older clip without a list on another layer that widens the shared
+/// bus (quad, 5.1, three channels) leaves a listed mono click at its level,
+/// and that older clip still folds through the shared bus as it always did.
+#[test]
+fn an_unlisted_wide_clip_does_not_change_a_listed_stream() {
+    let dir = temp_dir("audio-streams-shared-bus");
+    let click = dir.join("click.wav");
+    write_wav(&click, SR, &[clicks(SR as usize, &[CLICKS[0]], 0.9)]);
+    let silent = dir.join("silent.wav");
+    write_wav(&silent, SR, &[vec![0.0; SR as usize]]);
+    let listed = dir.join("listed.mov");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&click)
+        .arg("-i")
+        .arg(&silent)
+        .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+        .arg(&listed)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for (name, wide) in [("quad", 4), ("5.1", 6), ("three", 3)] {
+        // The older clip: its first channel clicks later, the rest silent.
+        let older = dir.join(format!("{name}.wav"));
+        let mut channels = vec![vec![0.0; SR as usize]; wide];
+        channels[0] = clicks(SR as usize, &[CLICKS[2]], 0.9);
+        write_wav(&older, SR, &channels);
+        let rig = Rig::new(&[("m", &listed), ("q", &older)]);
+        let render = |layers: &[String]| {
+            let text = format!(
+                r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":1,"layers":[{}],"comps":{{}},"assets":{{"m":{{"kind":"audio","audioStreams":[{{"index":0,"channels":1,"sampleRate":48000,"on":true}},{{"index":1,"channels":1,"sampleRate":48000,"on":true}}]}},"q":{{"kind":"audio"}}}},"params":{{}}}}"#,
+                layers.join(",")
+            );
+            let doc = Document::new(Some(parse(&text).unwrap()), 1);
+            let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+            rig.render(&mut mixer, 0, SR as i64, 4096)
+        };
+        let a = audio("A", "m", 0.0, 1.0, "", "");
+        let b = audio("B", "q", 0.0, 1.0, "", "");
+        let both = render(&[a.clone(), b.clone()]);
+        for side in &both[..2] {
+            assert!(
+                (side[CLICKS[0]] - 0.9).abs() < 1e-4,
+                "{name}: the listed click is {}",
+                side[CLICKS[0]]
+            );
+        }
+        // The older clip sounds exactly as it does alone.
+        let alone = render(&[b]);
+        assert_eq!(
+            [both[0][CLICKS[2]], both[1][CLICKS[2]]],
+            [alone[0][CLICKS[2]], alone[1][CLICKS[2]]],
+            "{name}"
+        );
+    }
+}

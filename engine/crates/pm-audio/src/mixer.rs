@@ -2029,16 +2029,34 @@ impl Mixer {
             "one output vector per bus channel"
         );
         self.bus = bus;
+        // Web Audio defines the stereo fold of 1, 2, 4 and 6 channels
+        // (kept as today). Other counts it folds discretely, dropping
+        // every channel past the first two; that loses content (a 7.1
+        // file's center), so they fold by their layout instead
+        // (decision LAYOUT-1, `today::stereo_fold`).
+        let fold = (bus > 2 && !matches!(bus, 4 | 6))
+            .then_some(self.bus_lead)
+            .flatten()
+            .and_then(|vi| self.graph.voices.get(vi))
+            .map(|plan| crate::today::stereo_fold(&plan.source.info.speakers, bus));
         if bus > 2 {
+            // A listed stream folds on its own, as if summed after the
+            // bus's fold: its stereo fold goes where that fold returns it
+            // unchanged. Only an unlisted clip takes the shared bus's fold.
+            let place = crate::today::unfolded_placement(
+                &fold
+                    .clone()
+                    .unwrap_or_else(|| crate::today::down_mix_matrix(bus)),
+            )
+            .unwrap_or_else(|| crate::today::up_mix(2, bus));
             for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices) {
                 voice.bus_matrix = if plan.folded {
-                    // Its own stereo fold, placed on the bus's front pair.
-                    let fold = layout::matrix(&plan.source.info.speakers, &layout::stereo());
-                    crate::today::up_mix(2, bus)
+                    let own = layout::matrix(&plan.source.info.speakers, &layout::stereo());
+                    place
                         .iter()
                         .map(|row| {
                             (0..plan.source.channels())
-                                .map(|src| row[0] * fold[0][src] + row[1] * fold[1][src])
+                                .map(|src| row[0] * own[0][src] + row[1] * own[1][src])
                                 .collect()
                         })
                         .collect()
@@ -2061,16 +2079,6 @@ impl Mixer {
                 c.clear();
                 c.resize(frames, 0.0);
             }
-            // Web Audio defines the stereo fold of 1, 2, 4 and 6 channels
-            // (kept as today). Other counts it folds discretely, dropping
-            // every channel past the first two; that loses content (a 7.1
-            // file's center), so they fold by their layout instead
-            // (decision LAYOUT-1, `today::stereo_fold`).
-            let fold = (!matches!(bus, 1 | 2 | 4 | 6))
-                .then_some(self.bus_lead)
-                .flatten()
-                .and_then(|vi| self.graph.voices.get(vi))
-                .map(|plan| crate::today::stereo_fold(&plan.source.info.speakers, bus));
             let fold_into = |bus: &[Vec<f32>], out: &mut [Vec<f32>]| match &fold {
                 Some(m) => crate::today::matrix_fold(bus, m, out, frames),
                 None => crate::today::down_mix(bus, out, 0, frames),
