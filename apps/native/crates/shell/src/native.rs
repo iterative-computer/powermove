@@ -408,7 +408,7 @@ define_class!(
             let number: isize = unsafe { msg_send![sender, tag] };
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
-                window.performClose(None);
+                request_close(&window);
             }
         }
         #[unsafe(method(closeOtherTabs:))]
@@ -418,7 +418,7 @@ define_class!(
             if let Some(window) = app.windowWithWindowNumber(number) {
                 for other in tab_windows(&window) {
                     if other.windowNumber() != number {
-                        other.performClose(None);
+                        request_close(&other);
                     }
                 }
             }
@@ -794,6 +794,20 @@ fn tab_windows(window: &NSWindow) -> Vec<Retained<NSWindow>> {
         .unwrap_or_else(|| {
             vec![unsafe { Retained::retain(window as *const _ as *mut NSWindow).unwrap() }]
         })
+}
+/// Asks `window` to close on the next turn of the run loop, as its close
+/// button does. Never `performClose` directly: inside a GPUI update the
+/// should-close handler cannot run, so the window would close without its
+/// save question and GPUI's close callback would abort the app.
+pub fn request_close(window: &NSWindow) {
+    unsafe {
+        let _: () = msg_send![
+            window,
+            performSelector: sel!(performClose:),
+            withObject: std::ptr::null::<AnyObject>(),
+            afterDelay: 0.0f64
+        ];
+    }
 }
 /// Moves `window` `by` places along its tab group and keeps it selected.
 fn move_tab(window: &NSWindow, by: isize) {
@@ -1991,7 +2005,7 @@ impl Host {
                     let _: () = msg_send![group, setSelectedWindow: &**window];
                 }
             },
-            "close" => window.performClose(None),
+            "close" => request_close(window),
             "left" => move_tab(window, -1),
             "right" => move_tab(window, 1),
             "out" => window.moveTabToNewWindow(None),
@@ -2541,7 +2555,7 @@ impl Host {
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         match name {
             "quit" => app.terminate(None),
-            "closeWindow" | "closeTab" => self.window.performClose(None),
+            "closeWindow" | "closeTab" => request_close(&self.window),
             "nextTab" => unsafe {
                 let _: () = msg_send![&*self.window,selectNextTab:std::ptr::null::<AnyObject>()];
             },
