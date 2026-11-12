@@ -18,6 +18,11 @@ pub enum Stage {
     /// In the shared history budget, right after a record of some project
     /// (not necessarily the call's own) was trimmed.
     InHistoryTrim,
+    /// In a save, after the file or library slot is written and before the
+    /// journal is rebased on it.
+    InSave,
+    /// In a close, after its save and before the project is released.
+    InClose,
 }
 
 #[cfg(any(test, feature = "fault-injection"))]

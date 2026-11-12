@@ -373,6 +373,103 @@ fn a_panic_in_one_projects_open_leaves_the_others_editable() {
     shell(&kernel, ShellCall::Save(session)).unwrap();
 }
 
+/// A panic inside one project's save or close (its file or slot already
+/// written, its journal not yet rebased or released) stops that project
+/// only. The other open project keeps taking edits and saves; the stopped
+/// one refuses edits, closes without writing, and reopens with all its
+/// acknowledged work.
+fn panic_in_a_shell_call(stage: Stage) {
+    let root = Temp::new(&format!("shell-{stage:?}").to_lowercase());
+    let (_actor, kernel, working) = fixture(&root.0, "working");
+    let stopped = opened(shell(
+        &kernel,
+        ShellCall::Open {
+            id: "stopped".into(),
+            source: SessionSource::New(project("stopped")),
+            electron_profile: None,
+        },
+    ));
+    kernel
+        .call_blocking("stopped", Request::new(Caller::native(), opacity(70.0)))
+        .unwrap();
+    kernel.arm_fault(stage, "stopped");
+    let call = match stage {
+        Stage::InSave => ShellCall::Save(stopped.clone()),
+        _ => ShellCall::Close(stopped.clone()),
+    };
+    assert!(
+        kernel.shell(call).wait().is_none(),
+        "{stage:?}: the interrupted call has no answer"
+    );
+    assert!(kernel.published("working").unwrap().fault.is_none());
+    let ack = kernel
+        .call_blocking("working", Request::new(Caller::native(), opacity(5.0)))
+        .expect("the other project still takes edits");
+    assert_eq!(
+        kernel.published("working").unwrap().revision(),
+        ack.revision
+    );
+    shell(&kernel, ShellCall::Save(working)).unwrap();
+    assert!(
+        kernel.published("stopped").unwrap().fault.is_some(),
+        "{stage:?}: the project whose call panicked is stopped"
+    );
+    assert!(refused(kernel.call_blocking(
+        "stopped",
+        Request::new(Caller::native(), opacity(10.0))
+    )));
+    assert!(matches!(
+        shell(&kernel, ShellCall::Close(stopped)),
+        Ok(ShellReply::Closed {
+            recovery_copy: None
+        })
+    ));
+    // Reopened, asked or not: all of its acknowledged work is there.
+    let reply = shell(
+        &kernel,
+        ShellCall::PrepareOpen {
+            id: "stopped".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "stopped".into(),
+            },
+            electron_profile: None,
+        },
+    );
+    match reply {
+        Ok(ShellReply::RecoveryRequired { ticket, .. }) => {
+            opened(shell(
+                &kernel,
+                ShellCall::DecideRecovery {
+                    ticket,
+                    decision: RecoveryDecision::Recover,
+                },
+            ));
+        }
+        Ok(ShellReply::Opened { .. }) => {}
+        other => panic!("{stage:?}: {other:?}"),
+    }
+    assert!(kernel.published("stopped").unwrap().fault.is_none());
+    assert_eq!(
+        layer_opacity(&document(&kernel, "stopped")),
+        70.0,
+        "{stage:?}"
+    );
+    kernel
+        .call_blocking("stopped", Request::new(Caller::native(), opacity(20.0)))
+        .expect("it edits normally again");
+}
+
+#[test]
+fn a_panic_in_one_projects_save_leaves_the_others_editable_and_its_work_whole() {
+    panic_in_a_shell_call(Stage::InSave);
+}
+
+#[test]
+fn a_panic_in_one_projects_close_leaves_the_others_editable_and_its_work_whole() {
+    panic_in_a_shell_call(Stage::InClose);
+}
+
 /// Undo memory is one budget across projects: opening a project can trim
 /// the history of another that is already open. A panic right after such a
 /// trim stops only the project being opened. The other project is whole: it

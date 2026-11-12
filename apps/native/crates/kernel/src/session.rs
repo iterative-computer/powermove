@@ -621,6 +621,7 @@ impl Kernel {
                     }
                     recovery_copy
                 };
+                crate::fault_injection::hit(crate::fault_injection::Stage::InClose);
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
                 let journals = self.project_dir(&handle.project);
@@ -1997,6 +1998,7 @@ impl Kernel {
         if matches!(self.sessions[id].destination, Destination::File(_)) && self.library.is_some() {
             self.save_library_slot(id, id, false)?;
         }
+        crate::fault_injection::hit(crate::fault_injection::Stage::InSave);
         self.rebase_journal(id)?;
         Ok(ShellReply::Saved {
             session: handle.clone(),
