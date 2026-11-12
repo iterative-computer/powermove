@@ -98,6 +98,134 @@ impl ImageSequence {
     }
 }
 
+/// A sequence read in place: the folder, the numbering pattern and the
+/// first and last number. It is a small file an asset retains as its
+/// original; frame `n` of the clip is file number `first + n`, read as a
+/// still at its own depth. A number with no file is a missing frame, never
+/// another one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Manifest {
+    /// Format version (first, so the bytes start with [`MANIFEST_MAGIC`]).
+    pub powermove_image_sequence: u32,
+    pub dir: PathBuf,
+    pub prefix: String,
+    pub suffix: String,
+    /// Digits numbers are zero-padded to; 0 when they are not padded.
+    pub padding: usize,
+    pub first: i64,
+    pub last: i64,
+}
+
+/// How a manifest's bytes begin.
+pub const MANIFEST_MAGIC: &[u8] = b"{\"powermoveImageSequence\":";
+
+impl Manifest {
+    /// The pattern of explicitly chosen frames. Every chosen file must be
+    /// the one its number names under one padding, so that the pattern
+    /// finds exactly them (and frames rendered into a gap later).
+    pub fn of(sequence: &ImageSequence) -> Result<Self> {
+        let names: Vec<(&str, &str, &str)> = sequence
+            .frames
+            .iter()
+            .map(|(_, path)| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(split)
+                    .ok_or_else(|| MediaError::invalid("sequence images must end in frame numbers"))
+            })
+            .collect::<Result<_>>()?;
+        let (prefix, _, suffix) = names[0];
+        let padded = names
+            .iter()
+            .any(|(_, d, _)| d.len() > 1 && d.starts_with('0'));
+        let padding = if padded {
+            names.iter().map(|(_, d, _)| d.len()).min().unwrap_or(0)
+        } else {
+            0
+        };
+        let manifest = Manifest {
+            powermove_image_sequence: 1,
+            dir: sequence.dir.clone(),
+            prefix: prefix.into(),
+            suffix: suffix.into(),
+            padding,
+            first: sequence.first(),
+            last: sequence.last(),
+        };
+        for ((number, path), (p, _, s)) in sequence.frames.iter().zip(&names) {
+            if *p != prefix || *s != suffix || manifest.file(*number) != *path {
+                return Err(MediaError::invalid(
+                    "sequence images must be numbered the same way (for example frame_0001.png)",
+                ));
+            }
+        }
+        Ok(manifest)
+    }
+
+    /// The file of frame number `number`.
+    pub fn file(&self, number: i64) -> PathBuf {
+        let digits = format!("{:0width$}", number, width = self.padding);
+        self.dir
+            .join(format!("{}{}{}", self.prefix, digits, self.suffix))
+    }
+
+    /// Frames from the first number to the last, gaps included.
+    pub fn frames(&self) -> u64 {
+        (self.last - self.first + 1).max(0) as u64
+    }
+
+    /// Numbers in the range with no file now, as inclusive ranges.
+    pub fn missing(&self) -> Vec<(i64, i64)> {
+        let mut out: Vec<(i64, i64)> = Vec::new();
+        for n in self.first..=self.last {
+            if self.file(n).is_file() {
+                continue;
+            }
+            match out.last_mut() {
+                Some((_, end)) if *end + 1 == n => *end = n,
+                _ => out.push((n, n)),
+            }
+        }
+        out
+    }
+
+    /// How the sequence is named in the Project panel:
+    /// `shot.[0001-0048].png`.
+    pub fn name(&self) -> String {
+        let n = |v: i64| format!("{:0width$}", v, width = self.padding);
+        format!(
+            "{}[{}-{}]{}",
+            self.prefix,
+            n(self.first),
+            n(self.last),
+            self.suffix
+        )
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a manifest serializes")
+    }
+
+    /// The manifest `path` holds, or `None` when the file is not one.
+    pub fn read(path: &Path) -> Result<Option<Self>> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut head = [0u8; MANIFEST_MAGIC.len()];
+        if file.read_exact(&mut head).is_err() || head != MANIFEST_MAGIC {
+            return Ok(None);
+        }
+        let mut bytes = head.to_vec();
+        file.take(64 << 10).read_to_end(&mut bytes)?;
+        let manifest: Manifest = serde_json::from_slice(&bytes)
+            .map_err(|e| MediaError::invalid(format!("image sequence: {e}")))?;
+        if manifest.powermove_image_sequence != 1 || manifest.last < manifest.first {
+            return Err(MediaError::invalid("image sequence: unknown format"));
+        }
+        Ok(Some(manifest))
+    }
+}
+
 /// Splits a file name into prefix, digits, suffix around the last run of
 /// digits before the extension.
 fn split(name: &str) -> Option<(&str, &str, &str)> {
@@ -207,5 +335,40 @@ mod tests {
         assert_eq!(s.padding, 4);
         assert_eq!(s.file_for(5).unwrap().file_name().unwrap(), "shot.0003.png");
         assert_eq!(s.file_for(0), None);
+    }
+
+    #[test]
+    fn a_manifest_names_every_number_by_one_pattern() {
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-seq-")
+            .tempdir()
+            .unwrap();
+        let paths: Vec<_> = [9, 10, 12]
+            .iter()
+            .map(|n| {
+                let path = dir.path().join(format!("Shot_v2.{n:03}.EXR"));
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect();
+        let m = Manifest::of(&ImageSequence::from_paths(&paths).unwrap()).unwrap();
+        assert_eq!((m.padding, m.first, m.last, m.frames()), (3, 9, 12, 4));
+        assert_eq!(m.file(11), dir.path().join("Shot_v2.011.EXR"));
+        assert_eq!(m.name(), "Shot_v2.[009-012].EXR");
+        assert_eq!(m.missing(), vec![(11, 11)]);
+        let file = dir.path().join("sequence.json");
+        std::fs::write(&file, m.to_bytes()).unwrap();
+        assert_eq!(Manifest::read(&file).unwrap(), Some(m));
+        assert_eq!(Manifest::read(&paths[0]).unwrap(), None);
+        // Mixed padding has no one pattern: never guess a file's name.
+        let mixed: Vec<_> = ["f_1.png", "f_02.png"]
+            .iter()
+            .map(|n| {
+                let path = dir.path().join(n);
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect();
+        assert!(Manifest::of(&ImageSequence::from_paths(&mixed).unwrap()).is_err());
     }
 }

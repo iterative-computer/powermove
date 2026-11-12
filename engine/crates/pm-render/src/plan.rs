@@ -1535,43 +1535,17 @@ fn native_content_quad<'d>(
                         js::member_string(record, "name").unwrap_or_else(|| asset_id.clone());
                     let bw = js::or_number(js::get(&d, "w"), wf);
                     let bh = js::or_number(js::get(&d, "h"), hf);
-                    let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-                    let playback = b.sampling == crate::sampling::Sampling::Playback;
-                    let world = vector_world(scope, b, layer, time, scale)?;
-                    // The box's height on screen picks how much the card says.
-                    let device_h = bh * world[2].hypot(world[3]);
-                    let tier = crate::offline_card::Tier::for_height(device_h);
-                    if let Ok(card) = crate::offline_card::path(&file, bw, bh, tier) {
-                        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                            Ok(crate::vector::svg::plan_svg(
-                                &card,
-                                bw,
-                                bh,
-                                [0.0, 0.0, 1.0, 1.0],
-                                world,
-                                target,
-                                playback,
-                            )
-                            .ok()
-                            .flatten()
-                            .map(|q| *q))
-                        };
-                        if scope.is_3d_layer(layer)? {
-                            return local_level2(
-                                scope, layer, time, scale, b.origin, target, &mut plan,
-                            );
-                        }
-                        if let Ok(quad) = crate::vector::svg::plan_svg(
-                            &card,
-                            bw,
-                            bh,
-                            [0.0, 0.0, 1.0, 1.0],
-                            &world,
-                            target,
-                            playback,
-                        ) {
-                            return Ok(quad.map(|q| device_quad(*q)));
-                        }
+                    if let Some(card) = offline_card(
+                        scope,
+                        b,
+                        layer,
+                        time,
+                        scale,
+                        (width, height),
+                        (bw, bh),
+                        &file,
+                    )? {
+                        return Ok(card);
                     }
                 }
                 b.failures.push(LayerFailure {
@@ -1651,6 +1625,23 @@ fn native_content_quad<'d>(
                         Ok(None)
                     }
                 };
+            }
+            if ty == "video"
+                && let Some(manifest) = crate::media::native_sequence(&path)
+            {
+                return sequence_frame(
+                    scope,
+                    b,
+                    layer,
+                    time,
+                    scale,
+                    (width, height),
+                    (wf, hf),
+                    &d,
+                    record,
+                    asset_id,
+                    &manifest,
+                );
             }
             let sequence = crate::footage::is_sequence(record);
             if sequence {
@@ -2184,6 +2175,134 @@ fn shader_quad(
 
 /// The world matrix of a vector layer in target pixels, including the size
 /// anchor offset `contentQuad` applies to its quad.
+/// The frame number an image sequence shows at `seconds` of its source:
+/// frame `n` of the clip is number `first + n`, `n` counted at `fps` from
+/// source time 0, the ends held.
+pub fn sequence_number(
+    manifest: &pm_media::image::sequence::Manifest,
+    fps: f64,
+    seconds: f64,
+) -> i64 {
+    let last = manifest.frames().saturating_sub(1) as f64;
+    // A composition frame lands on its source frame's start up to
+    // floating-point error in `seconds`: never the frame before it.
+    let n = (seconds * fps + 1e-6).floor();
+    manifest.first + n.clamp(0.0, last) as i64
+}
+
+/// An image sequence read in place: the frame its source time selects,
+/// drawn as a still (at the file's depth, with its alpha, tags and
+/// profile). A number with no file is that frame's Media Offline card
+/// where frames isolate failing layers, and a named failure elsewhere.
+#[allow(clippy::too_many_arguments)]
+fn sequence_frame<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    size: (u32, u32),
+    (wf, hf): (f64, f64),
+    d: &pm_eval::Content,
+    record: &Node,
+    asset: String,
+    manifest: &pm_media::image::sequence::Manifest,
+) -> JsResult<Option<Quad>> {
+    let interpret = crate::footage::interpretation(record);
+    let fps = interpret
+        .as_ref()
+        .and_then(|i| i.frame_rate)
+        .map(|r| r.to_f64())
+        .or_else(|| {
+            let sequence = node::member(Some(record), "imageSequence");
+            node::number(node::member(sequence, "fps"))
+        })
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(30.0);
+    // A rate typed or stored as 23.976 is 24000/1001: frames stay on the
+    // composition's grid however long the clip runs.
+    let fps = pm_time::SUPPORTED_RATES
+        .iter()
+        .map(|r| r.to_f64())
+        .find(|r| (r - fps).abs() < 1e-3)
+        .unwrap_or(fps);
+    // Inside motion-blur samples the center time's frame, as for video.
+    let at = b.video_center.unwrap_or(time);
+    let seconds = scope.source_time(layer, at, Some(&mut b.retime))?;
+    let number = sequence_number(manifest, fps, seconds);
+    let path = manifest.file(number);
+    let bw = js::or_number(js::get(d, "w"), wf);
+    let bh = js::or_number(js::get(d, "h"), hf);
+    if crate::media::stamp(&path).is_none() {
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if b.offline_cards
+            && let Some(card) = offline_card(scope, b, layer, time, scale, size, (bw, bh), &file)?
+        {
+            return Ok(card);
+        }
+        b.failures.push(LayerFailure {
+            composition: scope.comp.id().to_string_lossy(),
+            layer: js::layer_id(layer),
+            message: format!("frame {number} of the image sequence is missing: {file}"),
+        });
+        return Ok(None);
+    }
+    let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
+    let sw = js::or_number(&rec("w"), 1.0);
+    let sh = js::or_number(&rec("h"), 1.0);
+    let uv = fit_uv(&js::string(js::get(d, "fit")), sw, sh, bw, bh);
+    Ok(Some(Quad::Texture {
+        source: Source::Image {
+            asset,
+            path,
+            interpret,
+        },
+        w: bw,
+        h: bh,
+        ax: bw / 2.0,
+        ay: bh / 2.0,
+        uv,
+    }))
+}
+
+/// The Media Offline card in a layer's `bw`×`bh` box naming `file`, as
+/// frames that isolate failing layers draw it; None when it cannot be drawn.
+#[allow(clippy::too_many_arguments)]
+fn offline_card<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    (width, height): (u32, u32),
+    (bw, bh): (f64, f64),
+    file: &str,
+) -> JsResult<Option<Option<Quad>>> {
+    let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+    let playback = b.sampling == crate::sampling::Sampling::Playback;
+    let world = vector_world(scope, b, layer, time, scale)?;
+    // The box's height on screen picks how much the card says.
+    let device_h = bh * world[2].hypot(world[3]);
+    let tier = crate::offline_card::Tier::for_height(device_h);
+    let Ok(card) = crate::offline_card::path(file, bw, bh, tier) else {
+        return Ok(None);
+    };
+    let svg = |world: &Mat2d, target| {
+        crate::vector::svg::plan_svg(&card, bw, bh, [0.0, 0.0, 1.0, 1.0], world, target, playback)
+    };
+    if scope.is_3d_layer(layer)? {
+        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+            Ok(svg(world, target).ok().flatten().map(|q| *q))
+        };
+        return local_level2(scope, layer, time, scale, b.origin, target, &mut plan).map(Some);
+    }
+    Ok(svg(&world, target)
+        .ok()
+        .map(|quad| quad.map(|q| device_quad(*q))))
+}
+
 fn vector_world<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &Build<'_>,

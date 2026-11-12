@@ -627,6 +627,21 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
     .unwrap_or_else(|| Err(offline(path)))
 }
 
+/// The image sequence `path` reads in place (the manifest a sequence asset
+/// retains, [`pm_media::image::sequence::Manifest`]), or None for any other
+/// file. Its frames are stills: each is drawn through the still path at its
+/// own depth, with its alpha, tags and profile.
+pub fn native_sequence(path: &Path) -> Option<Arc<pm_media::image::sequence::Manifest>> {
+    static CACHE: StampCache<Option<Arc<pm_media::image::sequence::Manifest>>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        pm_media::image::sequence::Manifest::read(path)
+            .ok()
+            .flatten()
+            .map(Arc::new)
+    })
+    .flatten()
+}
+
 /// Whether a video file can be drawn: it opens and indexes and the renderer
 /// has a reading for it ([`video_drawable`]). Every SDR, HDR, wide-gamut,
 /// interlaced (bwdif, [`crate::footage::Timing`]), anamorphic and cropped

@@ -1,5 +1,5 @@
 //! File ▸ Import Image Sequence… and numbered stills picked or dropped as
-//! media: today's `chooseSequence` sheet, then an import that encodes the
+//! media: today's `chooseSequence` sheet, then an import that reads the
 //! frames into one clip on the import worker (`pm_builtins::media_import`).
 use crate::{platform, session::Controller, sheets::OpenSheet};
 use gpui::Context;
@@ -10,8 +10,7 @@ use std::{path::PathBuf, rc::Rc};
 pub const ACCEPT: [&str; 5] = ["png", "jpg", "jpeg", "webp", "bmp"];
 const TITLE: &str = "Import Image Sequence";
 const INTRO: &str = "Turn your numbered images into one clip.";
-const SKIPPED: &str =
-    "You can still import. Available images will play consecutively, skipping the missing frames.";
+const SKIPPED: &str = "You can still import. Missing frames show as Media Offline until they are rendered into the folder.";
 
 /// `sequenceCandidate`: two or more files sharing a name and image extension,
 /// each ending in a frame number.

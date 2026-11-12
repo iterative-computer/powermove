@@ -216,7 +216,7 @@ pub struct ImportRequest {
     pub models: bool,
     /// The layer definition an extension asked its asset to place as.
     pub layer_definition: Option<String>,
-    /// Import Image Sequence: `paths` are the frames, encoded into one clip.
+    /// Import Image Sequence: `paths` are the frames of one clip.
     pub sequence: Option<SequenceImport>,
     /// The placed layer's name and fitted size, instead of the file's.
     pub placed_as: Option<PlacedAs>,
@@ -239,7 +239,7 @@ pub struct SequenceImport {
     pub progress: Arc<Mutex<String>>,
 }
 /// `chooseSequence`'s ordering, in today's words: frame-number order, gaps
-/// skipped (the available images play consecutively).
+/// reported (a missing number shows as Media Offline, never another frame).
 pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     use pm_media::image::sequence::ImageSequence;
     if paths.len() < 2 {
@@ -258,66 +258,97 @@ pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         }
     }
 }
-/// `<prefix> sequence.webm`, the clip's name in the Project panel.
-pub fn sequence_name(first: &Path) -> String {
-    let name = first
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let stem = name
-        .rsplit_once('.')
-        .map_or(name.as_str(), |(stem, _)| stem);
-    let prefix = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-    let prefix = prefix.trim_end_matches(['-', '_', '.', ' ']);
-    format!(
-        "{} sequence.webm",
-        if prefix.is_empty() { "Image" } else { prefix }
-    )
-}
-/// The frames encoded into a scratch WebM (removed when dropped), and the
-/// asset facts today's importer adds to it.
-struct EncodedSequence {
+/// The type a sequence's retained manifest is kept as.
+const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
+/// Chosen frames as a sequence read in place: a manifest in scratch
+/// (removed when dropped) that the asset retains as its original, and the
+/// asset record. Frames are never transcoded: each is read as a still at
+/// its own depth when it is drawn.
+struct ChosenSequence {
     _dir: tempfile::TempDir,
     path: PathBuf,
-    fps: f64,
-    frames: u64,
+    asset: serde_json::Value,
+    /// Numbers in the range with no file, as the status line says them.
+    missing: Option<String>,
 }
-fn encode_sequence(
-    paths: &[PathBuf],
-    sequence: &SequenceImport,
-    cancel: &AtomicBool,
-) -> Result<EncodedSequence, String> {
-    use pm_export::stills::{Stage, encode_still_sequence};
-    let frames = order_sequence(paths)?;
+fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<ChosenSequence, String> {
+    use pm_media::image::sequence::{ImageSequence, Manifest};
+    order_sequence(paths)?;
+    let chosen = ImageSequence::from_paths(paths).map_err(|e| e.to_string())?;
+    let manifest = Manifest::of(&chosen).map_err(|_| {
+        "Choose frames numbered the same way (for example frame_0001.png)".to_owned()
+    })?;
+    if let Ok(mut progress) = sequence.progress.lock() {
+        *progress = "Importing image sequence…".into();
+    }
+    // The first frame proves the format reads; it gives the clip its size.
+    let first = &chosen.frames[0].1;
+    decodes(first, "image")?;
+    let facts =
+        pm_media::facts::media_facts_as(first, None, pm_media::clip::ClipTiming::Presentation)
+            .map_err(|e| e.to_string())?;
+    let [w, h] = facts.display_size.unwrap_or([0, 0]);
+    let size: u64 = chosen
+        .frames
+        .iter()
+        .filter_map(|(_, p)| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let frames = manifest.frames();
+    // 23.976 is 24000/1001: the clip's length and frames stay on the grid.
+    let fps = pm_time::SUPPORTED_RATES
+        .iter()
+        .map(|r| r.to_f64())
+        .find(|r| (r - sequence.fps).abs() < 1e-3)
+        .unwrap_or(sequence.fps);
+    let asset = json!({
+        "name": manifest.name(),
+        "kind": "video",
+        "size": size,
+        "dur": frames as f64 / fps,
+        "w": w,
+        "h": h,
+        "channels": 0,
+        "sampleRate": 0,
+        "playbackProxy": false,
+        "playbackProxyVersion": 0,
+        "persisted": true,
+        "hasAudio": false,
+        "audioDur": 0,
+        "format": extension(first),
+        "fps": fps,
+        "imageSequence": {"fps": fps, "frames": frames, "first": manifest.first, "last": manifest.last},
+    });
+    let missing = manifest.missing();
+    let missing = (!missing.is_empty()).then(|| {
+        let ranges: Vec<String> = missing
+            .iter()
+            .map(|(a, b)| {
+                if a == b {
+                    a.to_string()
+                } else {
+                    format!("{a}–{b}")
+                }
+            })
+            .collect();
+        let single = missing.len() == 1 && missing[0].0 == missing[0].1;
+        format!(
+            "{} {} missing",
+            if single { "frame" } else { "frames" },
+            ranges.join(", ")
+        )
+    });
     let dir = tempfile::Builder::new()
         .prefix("powermove-image-sequence-")
         .tempdir()
         .map_err(|e| e.to_string())?;
-    let path = dir.path().join(sequence_name(&frames[0]));
-    let say = |line: String| {
-        if let Ok(mut progress) = sequence.progress.lock() {
-            *progress = line;
-        }
-    };
-    let encoded = encode_still_sequence(&frames, sequence.fps, &path, cancel, &mut |stage| {
-        say(match stage {
-            Stage::Checking { done, total } => format!("Checking frames · {done} of {total}"),
-            Stage::Creating { done, total } => {
-                format!("Creating sequence · {done} of {total} frames")
-            }
-        })
-    })
-    .map_err(|error| match error {
-        pm_export::Error::InvalidFrame(why) | pm_export::Error::InvalidSpec(why) => why,
-        pm_export::Error::Io(why) => why,
-        pm_export::Error::Cancelled => "Import cancelled".into(),
-        other => format!("Could not create the image sequence: {other}"),
-    })?;
-    say("Importing image sequence…".into());
-    Ok(EncodedSequence {
+    let path = dir.path().join("sequence.json");
+    std::fs::write(&path, manifest.to_bytes()).map_err(|e| e.to_string())?;
+    Ok(ChosenSequence {
         _dir: dir,
         path,
-        fps: sequence.fps,
-        frames: encoded.frames,
+        asset,
+        missing,
     })
 }
 /// A 3D model's type, for imports that take models.
@@ -336,6 +367,8 @@ pub struct Outcome {
     pub assets: Vec<String>,
     /// File name and reason, in the panel's words.
     pub failed: Vec<(String, String)>,
+    /// What else a person should know (frames missing from a sequence).
+    pub notes: Vec<String>,
     pub cancelled: bool,
 }
 impl Outcome {
@@ -346,6 +379,7 @@ impl Outcome {
             1 => parts.push(format!("Imported {}", self.imported[0])),
             n => parts.push(format!("Imported {n} files")),
         }
+        parts.extend(self.notes.iter().cloned());
         parts.extend(
             self.failed
                 .iter()
@@ -381,19 +415,13 @@ impl Builtins {
         let archive = Archive::open(profile).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
         let mut items = vec![];
-        let encoded = match &request.sequence {
-            Some(sequence) => match encode_sequence(&request.paths, sequence, cancel) {
-                Ok(encoded) => Some(encoded),
-                Err(_) if cancel.load(Ordering::Acquire) => {
-                    outcome.cancelled = true;
-                    return Ok(outcome);
-                }
-                Err(error) => return Err(error),
-            },
-            None => None,
-        };
-        let paths = match &encoded {
-            Some(encoded) => vec![encoded.path.clone()],
+        let sequence = request
+            .sequence
+            .as_ref()
+            .map(|sequence| choose_sequence(&request.paths, sequence))
+            .transpose()?;
+        let paths = match &sequence {
+            Some(sequence) => vec![sequence.path.clone()],
             None => expand(request.paths),
         };
         // A relink retains the old bytes and reads which of the old file's
@@ -427,46 +455,54 @@ impl Builtins {
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let model = request.models.then(|| model_mime(&path)).flatten();
-            let Some(kind) = kind(&path).or(model.map(|_| "model")) else {
+            let kind = match &sequence {
+                Some(_) => Some("video"),
+                None => kind(&path).or(model.map(|_| "model")),
+            };
+            let Some(kind) = kind else {
                 outcome.failed.push((name, "Unsupported file".into()));
                 continue;
             };
-            let type_ = model.map_or_else(|| mime(&path, kind), str::to_owned);
-            let retained = (if model.is_some() {
+            let type_ = match (&sequence, model) {
+                (Some(_), _) => SEQUENCE_MIME.to_owned(),
+                (None, Some(model)) => model.to_owned(),
+                (None, None) => mime(&path, kind),
+            };
+            // A sequence's first frame was read when it was chosen.
+            let retained = (if model.is_some() || sequence.is_some() {
                 Ok(())
             } else {
                 decodes(&path, kind)
             })
             .and_then(|()| {
                 let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                let (mut asset, streams) = match model {
-                    // A model has no media facts; the scene system reads its bytes.
-                    Some(_) => (
-                        json!({"name":name,"kind":"model","size":size,"persisted":true,
+                let (mut asset, streams) = if let Some(sequence) = &sequence {
+                    (sequence.asset.clone(), vec![])
+                } else {
+                    match model {
+                        // A model has no media facts; the scene system reads its bytes.
+                        Some(_) => (
+                            json!({"name":name,"kind":"model","size":size,"persisted":true,
                             "sourcePath":path.to_string_lossy()}),
-                        vec![],
-                    ),
-                    None => {
-                        let (asset, streams) = metadata(&path, kind, size, timing)?;
-                        (crate::data::wire(&asset), streams)
+                            vec![],
+                        ),
+                        None => {
+                            let (asset, streams) = metadata(&path, kind, size, timing)?;
+                            (crate::data::wire(&asset), streams)
+                        }
                     }
                 };
                 // A new clip's times address the file's presentation. A
                 // relinked asset keeps the reading its edits were made with:
                 // the merge leaves its `timing` member (or its absence) alone.
-                if request.replace.is_none() && matches!(kind, "video" | "audio") {
+                if request.replace.is_none()
+                    && sequence.is_none()
+                    && matches!(kind, "video" | "audio")
+                {
                     asset["timing"] = json!(pm_media::clip::ClipTiming::imported());
                 }
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
-                }
-                if let Some(encoded) = &encoded {
-                    // Generated in scratch: no source file to relink to.
-                    if let Some(asset) = asset.as_object_mut() {
-                        asset.remove("sourcePath");
-                    }
-                    asset["fps"] = json!(encoded.fps);
-                    asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
                 Ok((asset, streams))
             })
@@ -569,6 +605,7 @@ impl Builtins {
         }
         outcome.imported = names;
         outcome.assets = assets;
+        outcome.notes.extend(sequence.and_then(|s| s.missing));
         Ok(outcome)
     }
 }
@@ -812,68 +849,220 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_image_sequence_becomes_one_lossless_webm_clip_skipping_missing_numbers() {
-        let f = fixture();
-        // Frames 1, 2, 3, 5 (4 missing), chosen out of order with mixed padding.
-        let frames: Vec<_> = ["shot_005.png", "shot_1.png", "shot_003.png", "shot_02.png"]
-            .iter()
-            .map(|name| write(&f.root, name, PNG))
-            .collect();
-        let progress = Arc::new(Mutex::new(String::new()));
-        let outcome = f
-            .runtime
-            .import_media(
-                document(&f),
-                &f.root,
-                ImportRequest {
-                    paths: frames.clone(),
-                    place_at: Some(1.),
-                    sequence: Some(SequenceImport {
-                        fps: 12.,
-                        progress: progress.clone(),
-                    }),
-                    ..Default::default()
-                },
-                &AtomicBool::new(false),
-            )
-            .unwrap();
-        assert_eq!(outcome.imported, ["shot sequence.webm"], "{outcome:?}");
-        assert_eq!(*progress.lock().unwrap(), "Importing image sequence…");
-        for frame in &frames {
-            std::fs::remove_file(frame).unwrap();
+    /// A 16-bit RGBA PNG of `w`×`h` samples `pixel(x, y)`.
+    fn png16(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u16; 4]) -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for b in bytes {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xedb8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
         }
-        let published = f.actor.handle().published("p").unwrap();
-        let root = published.snapshot.root().unwrap().to_value();
-        let ids = pm_kernel::asset_order::keys(&root);
-        assert_eq!(ids.len(), 1);
-        let asset = root.get("assets").unwrap().get(&ids[0]).unwrap();
-        let field = |key: &str| asset.get(key).and_then(Value::as_f64);
-        assert_eq!(asset.get("kind").unwrap().as_str(), Some("video"));
-        assert_eq!(field("w"), Some(2.));
-        assert_eq!(field("fps"), Some(12.));
-        let sequence = asset.get("imageSequence").unwrap();
-        assert_eq!(sequence.get("fps").and_then(Value::as_f64), Some(12.));
-        // Four images, not five numbers: missing numbers are skipped.
-        assert_eq!(sequence.get("frames").and_then(Value::as_f64), Some(4.));
-        assert!((field("dur").unwrap() - 4. / 12.).abs() < 0.01);
-        assert!(asset.get("sourcePath").is_none());
-        let copied = f.root.join("copied.webm");
-        published
-            .media
-            .get(&ids[0])
-            .unwrap()
-            .copy_to(&copied)
-            .unwrap();
-        assert_eq!(&std::fs::read(&copied).unwrap()[..4], b"\x1a\x45\xdf\xa3");
-        let open = published.snapshot.open_comp();
-        let composition =
-            pm_kernel::model::comp_node(published.snapshot.root().unwrap(), open.as_deref())
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend((data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend(kind);
+            out.extend(data);
+            let sum = crc(&out[start..]);
+            out.extend(sum.to_be_bytes());
+        }
+        let mut raw = vec![];
+        for y in 0..h {
+            raw.push(0);
+            for x in 0..w {
+                for v in pixel(x, y) {
+                    raw.extend(v.to_be_bytes());
+                }
+            }
+        }
+        let mut z = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::fast());
+        std::io::Write::write_all(&mut z, &raw).unwrap();
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = vec![];
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([16, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z.finish().unwrap());
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// Frame `number`'s samples: a red ramp far finer than 8 bits, green
+    /// coding the frame number, and rows of full, partial and no alpha.
+    fn coded(number: u32, x: u32, y: u32) -> [u16; 4] {
+        let alpha = [65535, 40000, 0, 65535][y as usize];
+        [
+            30000 + x as u16 * 37,
+            number as u16 * 9000,
+            65535 - x as u16 * 500,
+            alpha,
+        ]
+    }
+
+    #[test]
+    fn an_image_sequence_is_read_in_place_at_its_depth_with_its_alpha() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        for (depth, precision) in [(16, Precision::Float16), (32, Precision::Float32)] {
+            let (f, _session) = opened(&format!(
+                r##"{{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":23.976,"dur":10,"bg":"#000000","colorDepth":{depth},"assets":{{}},"comps":{{}},"layers":[]}}"##,
+            ));
+            // Numbers 1 to 6 at 23.976 with 4 never rendered.
+            let frames: Vec<_> = [6, 1, 3, 2, 5]
+                .iter()
+                .map(|&n| {
+                    write(
+                        &f.root,
+                        &format!("shot.{n:04}.png"),
+                        &png16(64, 4, |x, y| coded(n, x, y)),
+                    )
+                })
+                .collect();
+            let progress = Arc::new(Mutex::new(String::new()));
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: frames.clone(),
+                        place_at: Some(0.),
+                        sequence: Some(SequenceImport {
+                            fps: 23.976,
+                            progress: progress.clone(),
+                        }),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, ["shot.[0001-0006].png"], "{outcome:?}");
+            assert_eq!(
+                outcome.summary(),
+                "Imported shot.[0001-0006].png · frame 4 missing"
+            );
+            let published = f.actor.handle().published("p").unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            let id = pm_kernel::asset_order::keys(&root).remove(0);
+            let asset = root.get("assets").unwrap().get(&id).unwrap();
+            let field = |key: &str| asset.get(key).and_then(Value::as_f64);
+            assert_eq!(asset.get("kind").unwrap().as_str(), Some("video"));
+            assert_eq!((field("w"), field("h")), (Some(64.), Some(4.)));
+            assert_eq!(asset.get("hasAudio").unwrap().as_bool(), Some(false));
+            let sequence = asset.get("imageSequence").unwrap();
+            let number = |key: &str| sequence.get(key).and_then(Value::as_f64);
+            assert_eq!(
+                (number("first"), number("last"), number("frames")),
+                (Some(1.), Some(6.), Some(6.))
+            );
+            assert!((field("dur").unwrap() - 6. * 1001. / 24000.).abs() < 1e-9);
+            // The asset retains the reference, not the pixels.
+            let manifest = f.root.join("retained.json");
+            published
+                .media
+                .get(&id)
                 .unwrap()
-                .to_value();
-        let layer = &composition.get("layers").unwrap().as_array().unwrap()[0];
-        assert_eq!(layer.get("type").unwrap().as_str(), Some("video"));
-        assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.));
+                .copy_to(&manifest)
+                .unwrap();
+            assert!(std::fs::metadata(&manifest).unwrap().len() < 4096);
+
+            // A frame rendered into the hole later is picked up; one deleted
+            // after import is missing, never another frame.
+            write(
+                &f.root,
+                "shot.0004.png",
+                &png16(64, 4, |x, y| coded(4, x, y)),
+            );
+            std::fs::remove_file(f.root.join("shot.0005.png")).unwrap();
+            let mut resolver = MapResolver::default();
+            resolver.paths.insert(id.clone(), manifest);
+            let document = &published.snapshot.document;
+            let comp = published.snapshot.open_comp().unwrap();
+            {
+                let mut renderer = Renderer::headless().unwrap();
+                // At 16 bits a sample is within half a half-float step; an
+                // 8-bit read would be off by up to 1/510.
+                let tolerance = if precision == Precision::Float16 {
+                    3e-4
+                } else {
+                    2e-6
+                };
+                for k in 0..6u32 {
+                    // Composition frame k starts at k × 1001/24000 s exactly.
+                    let time = Ticks::new(i64::from(k) * 29_429_400).unwrap();
+                    // No background: the frame keeps the files' alpha.
+                    let mut request = RenderRequest::sized(Size::new(64, 4), precision);
+                    request.background = false;
+                    let frame = renderer
+                        .render(document, &comp, time, &request, &resolver)
+                        .unwrap();
+                    let shown = k + 1;
+                    if shown == 5 {
+                        assert_eq!(frame.failures.len(), 1, "{:?}", frame.failures);
+                        assert!(
+                            frame.failures[0].message.contains(
+                                "frame 5 of the image sequence is missing: shot.0005.png"
+                            ),
+                            "{:?}",
+                            frame.failures
+                        );
+                        continue;
+                    }
+                    assert!(
+                        frame.failures.is_empty(),
+                        "{precision:?} frame {k}: {:?}",
+                        frame.failures
+                    );
+                    let pixels = renderer.read_rgba(&frame).unwrap();
+                    let mut reds = std::collections::BTreeSet::new();
+                    for y in 0..4 {
+                        for x in 0..64 {
+                            let want = coded(shown, x, y).map(|v| f32::from(v) / 65535.);
+                            let at = ((y * 64 + x) * 4) as usize;
+                            let got = &pixels[at..at + 4];
+                            // Premultiplied, as the frame is read back.
+                            let want = [
+                                want[0] * want[3],
+                                want[1] * want[3],
+                                want[2] * want[3],
+                                want[3],
+                            ];
+                            for c in 0..4 {
+                                assert!(
+                                    (got[c] - want[c]).abs() <= tolerance,
+                                    "{precision:?} comp frame {k} (file {shown}) pixel {x},{y} channel {c}: {} vs {}",
+                                    got[c],
+                                    want[c]
+                                );
+                            }
+                            if y == 0 {
+                                reds.insert(got[0].to_bits());
+                            }
+                        }
+                    }
+                    // 64 reds within nine 8-bit codes stay apart.
+                    let apart = if precision == Precision::Float16 {
+                        40
+                    } else {
+                        64
+                    };
+                    assert!(
+                        reds.len() >= apart,
+                        "{precision:?}: {} distinct reds",
+                        reds.len()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -895,14 +1084,6 @@ mod tests {
             order_sequence(&p(&["/a/f_1.png", "/a/g_2.png"]))
                 .unwrap_err()
                 .starts_with("Choose images with the same name and extension")
-        );
-        assert_eq!(
-            sequence_name(Path::new("/a/render_v2-0001.png")),
-            "render_v2 sequence.webm"
-        );
-        assert_eq!(
-            sequence_name(Path::new("/a/0001.png")),
-            "Image sequence.webm"
         );
     }
 

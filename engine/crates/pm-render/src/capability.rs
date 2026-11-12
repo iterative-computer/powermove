@@ -669,6 +669,15 @@ fn check_media(
         // unreadable documents are handled at execution.
         return;
     }
+    // A sequence read in place draws stills; each frame's file is checked
+    // when it is drawn.
+    if ty == "video"
+        && assets
+            .and_then(|a| a.path(&asset_id, Some(record)))
+            .is_some_and(|path| crate::media::native_sequence(&path).is_some())
+    {
+        return;
+    }
     if ty == "video"
         && (node::member(Some(record), "imageSequence").is_some_and(|s| node::truthy(Some(s)))
             || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"))
