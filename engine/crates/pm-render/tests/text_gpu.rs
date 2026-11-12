@@ -232,10 +232,87 @@ fn main() {
     level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
     half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
+    unchanged_text_is_uploaded_once_across_viewer_frames(&mut fresh(), &mut failures);
     for f in &failures {
         println!("FAILED {f}");
     }
     assert!(failures.is_empty());
+}
+
+/// A text-heavy layer (large glyphs of many shapes and color emoji, more
+/// than the raster cache keeps as one raster) drawn again after each
+/// submitted viewer frame resolves and uploads its glyphs once: later frames
+/// read the glyph caches, which stay within their own byte caps.
+#[cfg(target_os = "macos")]
+fn unchanged_text_is_uploaded_once_across_viewer_frames(
+    renderer: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use support::doc::{layer, no_fill, project};
+    let d = serde_json::json!({
+        "text": "ABCDEFGHIJKLM\nNOPQRSTUVWXYZ\nabcdefghijklm\nnopqrstuvwxyz\n0123456789&@#\n😀😎🥳🤖👻🎃🚀🌈🍕🎸🐙🦊",
+        "font": "SF Pro Display", "weight": 700, "size": 150, "leading": 1.1,
+        "color": "#F2F2F2", "align": "left"
+    });
+    let v = project(
+        3840,
+        2160,
+        10.0,
+        no_fill(),
+        vec![layer("l", "text", d, 1920.0, 1080.0, 10.0)],
+    );
+    let doc = pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+    renderer.text_gpu().clear();
+    let frame = |renderer: &mut pm_render::Renderer| {
+        let before = renderer.text_gpu().stats;
+        let raster = renderer
+            .text_raster(&doc, "Ptest-root", "l", 0.0, 2.0, Precision::Float16)
+            .unwrap()
+            .unwrap();
+        // What the viewer does once a frame's commands are submitted.
+        renderer.trim_submitted_frame_caches();
+        let after = renderer.text_gpu().stats;
+        (
+            after.glyph_uploads - before.glyph_uploads,
+            after.image_uploads - before.image_uploads,
+            after.cache_hits - before.cache_hits,
+            raster.pixels,
+        )
+    };
+    let (glyphs, images, _, first) = frame(renderer);
+    let cached = renderer.text_gpu().cached_bytes();
+    println!(
+        "text-heavy layer: first frame uploaded {glyphs} glyph outlines and {images} color images; {cached} bytes held after the frame"
+    );
+    if glyphs < 60 || images < 10 {
+        failures.push(format!(
+            "the text-heavy layer is not text-heavy: {glyphs} glyphs, {images} images"
+        ));
+    }
+    for n in 2..=6 {
+        let (glyphs, images, hits, pixels) = frame(renderer);
+        if hits != 0 {
+            failures.push(
+                "the text-heavy raster fits the raster cache: the test proves nothing".into(),
+            );
+        }
+        if glyphs != 0 || images != 0 {
+            failures.push(format!(
+                "frame {n} of unchanged text uploaded {glyphs} glyph outlines and {images} color images again"
+            ));
+        }
+        if pixels != first {
+            failures.push(format!("frame {n} of unchanged text drew other pixels"));
+        }
+    }
+    // Every text cache has a byte cap: rasters 4 MiB (and as much idle in
+    // their pool), color images 8 MiB, glyph outlines 8 MiB, free outline
+    // textures 2 MiB, coverage storage 8 MiB.
+    let held = renderer.text_gpu().cached_bytes();
+    if held > 34 * 1024 * 1024 {
+        failures.push(format!("text caches hold {held} bytes after six frames"));
+    }
 }
 
 /// Text paint into an RGBA16F raster stores the nearest half of each

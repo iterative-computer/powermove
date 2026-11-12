@@ -1561,7 +1561,7 @@ impl Renderer {
     /// Command buffers own the resources their GPU work still needs.
     pub fn trim_submitted_frame_caches(&mut self) {
         self.vector.trim(self.vector.max_bytes());
-        self.text_gpu.trim(crate::text::gpu::CACHE_BYTES);
+        self.text_gpu.end_frame();
     }
 
     /// A document closed. Release content caches and worker ownership,

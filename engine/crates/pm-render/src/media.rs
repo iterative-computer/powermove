@@ -189,6 +189,22 @@ struct StillFacts {
 }
 
 impl StillFacts {
+    /// Whether a viewer frame reads a preview of this still (decoded no
+    /// larger than it is drawn) instead of the whole of it. Only ordinary
+    /// SDR is subsampled: deep, HDR, custom gamma or profile and interpreted
+    /// sources keep their native reader and float storage.
+    fn previewed(&self, interpreted: bool) -> bool {
+        !self.deep
+            && !self.planar
+            && self.color.gamma.is_none()
+            && self.color.cicp.is_none()
+            && self.color.chromaticities.is_none()
+            && matches!(
+                self.color.icc_class,
+                None | Some(pm_media::image::icc::IccClass::Srgb)
+            )
+            && !interpreted
+    }
     fn of(still: &pm_media::image::StillImage) -> StillFacts {
         StillFacts {
             color: still.color.clone(),
@@ -330,6 +346,7 @@ fn still_facts(path: &Path) -> Result<StillFacts, ProbeIssue> {
         }
         crate::stills::rejected(path).map_err(ProbeIssue::Unreadable)?;
         let pool = FramePool::new(0);
+        pm_perf::bump(pm_perf::Counter::StillDecodes);
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
         crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
@@ -1275,28 +1292,24 @@ impl MediaCache {
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
         probe_interpreted_image(path, interp).map_err(issue)?;
-        // Subsample only ordinary SDR. Deep, HDR, custom gamma/profile and
-        // interpreted sources retain their native reader and float storage.
         let facts = still_facts(path).map_err(issue)?;
-        let simple = !facts.deep
-            && !facts.planar
-            && facts.color.gamma.is_none()
-            && facts.color.cicp.is_none()
-            && facts.color.chromaticities.is_none()
-            && matches!(
-                facts.color.icc_class,
-                None | Some(pm_media::image::icc::IccClass::Srgb)
-            )
-            && interpret.is_none();
-        let preview = edge.filter(|_| simple);
-        let mut still = match preview {
-            Some(edge) => pm_media::image::imageio::read_preview(path, &self.pool, edge)
-                .or_else(|_| pm_media::image::read(path, &self.pool))
-                .map_err(failed)?,
-            None => match self.stills.take(path, (len, modified)) {
-                Some(still) => still,
-                None => pm_media::image::read(path, &self.pool).map_err(failed)?,
-            },
+        let ask = stills::StillAsk {
+            edge,
+            interpreted: interpret.is_some(),
+        };
+        let preview = edge.filter(|_| facts.previewed(ask.interpreted));
+        // Decoded ahead by the worker as this frame reads it, or here.
+        let mut still = match self.stills.take(path, (len, modified), ask, preview) {
+            Some(still) => still,
+            None => {
+                pm_perf::bump(pm_perf::Counter::StillDecodes);
+                match preview {
+                    Some(edge) => pm_media::image::imageio::read_preview(path, &self.pool, edge)
+                        .or_else(|_| pm_media::image::read(path, &self.pool)),
+                    None => pm_media::image::read(path, &self.pool),
+                }
+                .map_err(failed)?
+            }
         };
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {
@@ -1404,23 +1417,29 @@ impl MediaCache {
 
     /// Decodes the still at `path` on a worker when no converted texture of
     /// it is cached, so the frame that first draws it does not (see
-    /// `media/stills.rs`).
-    pub(crate) fn prepare_image(&mut self, path: &Path) {
-        // Avoid a full-resolution prefetch defeating the viewer's thumbnail.
-        if self.preview_media {
-            return;
-        }
+    /// `media/stills.rs`). `edge` is the edge its draw reads it at
+    /// (`exec::source_edge`): a viewer frame's still is decoded as a preview
+    /// of that size, never whole (the decode a preview exists to avoid).
+    pub(crate) fn prepare_image(&mut self, path: &Path, edge: Option<u32>, interpreted: bool) {
+        let edge = edge.filter(|_| self.preview_media);
         let Some((len, modified)) = stamp(path) else {
             return;
         };
         if self
             .images
             .keys()
-            .any(|k| k.path == path && k.len == len && k.modified == modified)
+            .any(|k| k.path == path && k.len == len && k.modified == modified && k.edge == edge)
         {
             return;
         }
-        self.stills.request(path, (len, modified), &self.pool);
+        let ask = stills::StillAsk { edge, interpreted };
+        self.stills.request(path, (len, modified), ask, &self.pool);
+    }
+
+    /// Waits for the stills asked for ahead (headless tests and performance
+    /// runs; a frame never waits).
+    pub(crate) fn wait_for_stills(&mut self) {
+        self.stills.settle();
     }
 
     /// Drops the converted texture of `path` at `precision` and `working`
