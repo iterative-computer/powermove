@@ -15,6 +15,8 @@ use std::{collections::VecDeque, path::PathBuf};
 /// What a new editor window opens instead of restoring its last project.
 pub enum Pending {
     File(PathBuf),
+    /// A project in the library, by id (a copy offered from its file's window).
+    Library(String),
     /// A project an agent opened while its window showed another: already
     /// open in the kernel, this window shows it.
     Session(pm_kernel::session::SessionHandle),

@@ -173,8 +173,9 @@ pub struct Controller {
 /// How long arrow keys rest before a run of nudges becomes its undo step.
 const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
 
-/// Why a project opened as a copy, in user language (never the enum name).
-/// A banner with a lock badge replaces this status copy in P3.
+/// Why a project opened as a copy, in user language (never the enum name):
+/// said when it opens. The window's subtitle keeps saying it
+/// ([`copy_subtitle`]).
 pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static str> {
     use pm_kernel::locks::{CopyReason::*, OpenDecision};
     let OpenDecision::AsCopy(reason) = decision else {
@@ -184,13 +185,76 @@ pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static
         ForeignLibrary => "Opened as a copy because the project belongs to another library.",
         ChangedOnDisk => "Opened as a copy because the file changed on disk.",
         OfflineFile => "Opened as a copy because the file isn’t downloaded.",
-        ReadOnly => "Opened as a copy because the file is read-only.",
-        OlderElectron => "Opened as a copy because an earlier version of Powermove saved it.",
-        Locked => "Opened as a copy because the project is open somewhere else.",
+        ReadOnly => {
+            "This is a copy: the file is read-only, so changes are kept in your projects. Use Save As to write a file."
+        }
+        OlderElectron => {
+            "This is a copy: the original Powermove app is running, so changes are kept in your projects. Use Save As to write a file."
+        }
+        Locked => {
+            "This is a copy: the file is open somewhere else, so changes are kept in your projects. Use Save As to write a file."
+        }
         UncertainLock => {
-            "Opened as a copy because Powermove couldn’t confirm the project isn’t open elsewhere."
+            "This is a copy: Powermove couldn’t confirm the file isn’t open elsewhere, so changes are kept in your projects. Use Save As to write a file."
         }
     })
+}
+
+/// The window subtitle of a project: its save state, and for a copy that
+/// stands in for a file (the entry's `copyOf`), which file and why, for as
+/// long as the window shows it.
+pub fn copy_subtitle(session: Option<&pm_model::Value>, state: &'static str) -> String {
+    let copy = session.and_then(|meta| meta.get("copyOf"));
+    let Some(file) = copy
+        .and_then(|c| c.get("path"))
+        .and_then(pm_model::Value::as_str)
+        .and_then(|path| std::path::Path::new(path).file_name())
+    else {
+        return state.to_owned();
+    };
+    let why = match copy
+        .and_then(|c| c.get("reason"))
+        .and_then(pm_model::Value::as_str)
+    {
+        Some("ReadOnly") => "the file is read-only",
+        Some("OlderElectron") => "the original app is running",
+        Some("Locked") => "the file is open elsewhere",
+        _ => "the file couldn’t be locked",
+    };
+    let copy = format!("Copy of {} ({why})", file.to_string_lossy());
+    if state.is_empty() {
+        copy
+    } else {
+        format!("{copy} — {state}")
+    }
+}
+
+/// The offer when a file that opens in place has copies in the library that
+/// hold work for it (earlier builds opened files in syncing folders as
+/// copies named "… — Native"). `true` opens the copy.
+fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, which) = match copies {
+        [one] => (
+            format!("Your projects hold a copy of “{file}” with work that isn’t in this file."),
+            format!("“{one}”"),
+        ),
+        [first, rest @ ..] => (
+            format!("Your projects hold copies of “{file}” with work that isn’t in this file."),
+            format!("“{first}” and {} more", rest.len()),
+        ),
+        [] => (String::new(), String::new()),
+    };
+    Alert::new(
+        message,
+        format!(
+            "An earlier version of Powermove opened this file as a copy and saved your changes there instead of in the file: {which}. The file now opens and saves in place. The copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Open the Copy", true).default(),
+            Button::new("Keep Working in This File", false).key(Key::Escape),
+        ],
+    )
 }
 
 pub struct Bridge(pub Entity<Controller>);
@@ -580,6 +644,14 @@ impl Controller {
             .detach();
         match opening {
             Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
+            Some(crate::entry::Pending::Library(project)) => self.open_named(
+                SessionSource::Library {
+                    profile: self.profile.clone(),
+                    project,
+                },
+                None,
+                cx,
+            ),
             Some(crate::entry::Pending::Session(session)) => {
                 // Gone before this window took it: nothing to show.
                 if self.kernel.published(&session.project).is_some() {
@@ -765,7 +837,10 @@ impl Controller {
             .unwrap_or("Untitled");
         self.host.borrow().set_document_metadata(
             title,
-            pm_shell::document_subtitle(p.dirty, saving),
+            &copy_subtitle(
+                p.session.as_ref().map(|s| &s.metadata),
+                pm_shell::document_subtitle(p.dirty, saving),
+            ),
             p.dirty,
             self.path.as_deref(),
         );
@@ -1361,9 +1436,13 @@ impl Controller {
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
+                        let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
                         v.load_recent(cx);
+                        if in_place {
+                            v.offer_stranded_copies(cx);
+                        }
                     }
                     // Already open in a window: that window comes forward.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
@@ -1382,6 +1461,52 @@ impl Controller {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+    /// A file that opened in place: if the library holds copies with work
+    /// for it that the person hasn't been told about, say so once and offer
+    /// the newest (it opens as a tab; the file stays open here).
+    fn offer_stranded_copies(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::CopiesOf(session));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Copies(rows))) = asked.await else {
+                return;
+            };
+            let field = |row: &pm_model::Value, key: &str| {
+                row.get(key).and_then(pm_model::Value::as_str).map(str::to_owned)
+            };
+            let names: Vec<String> = rows.iter().filter_map(|r| field(r, "name")).collect();
+            let Some(newest) = rows.first().and_then(|r| field(r, "id")) else {
+                return;
+            };
+            let Ok(answer) = this.update(cx, |v, _| {
+                let file = v
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!(
+                        "Your projects hold a copy of “{file}” with work that isn’t in the file: “{}”.",
+                        names.join("”, “")
+                    ),
+                );
+                stranded_copies_alert(&file, &names).sheet(&v.host.borrow().window)
+            }) else {
+                return;
+            };
+            if answer.recv().await.ok().flatten() == Some(true) {
+                let _ = this.update(cx, |v, cx| {
+                    let leader = v.shell_window_id(cx);
+                    crate::entry::open_in_new_tab(crate::entry::Pending::Library(newest), leader, cx);
+                });
+            }
         })
         .detach();
     }
@@ -2287,6 +2412,38 @@ pub(crate) fn sync_render_storage(
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn a_copy_says_what_it_is_for_as_long_as_its_window_shows_it() {
+        let meta = pm_model::json::parse(
+            r#"{"copyOf":{"path":"/Volumes/Share/job/cut.pmv","reason":"ReadOnly"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            copy_subtitle(Some(&meta), ""),
+            "Copy of cut.pmv (the file is read-only)"
+        );
+        assert_eq!(
+            copy_subtitle(Some(&meta), "Edited"),
+            "Copy of cut.pmv (the file is read-only) — Edited"
+        );
+        let plain = pm_model::json::parse("{}").unwrap();
+        assert_eq!(copy_subtitle(Some(&plain), "Edited"), "Edited");
+        assert_eq!(copy_subtitle(None, ""), "");
+    }
+    #[::core::prelude::v1::test]
+    fn a_file_with_stranded_copies_offers_the_copy_and_keeps_the_file() {
+        let alert = stranded_copies_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(
+            alert.labels(),
+            ["Open the Copy", "Keep Working in This File"]
+        );
+        assert!(alert.buttons[0].default && alert.buttons[0].action);
+        assert!(!alert.buttons[1].action);
+        assert!(alert.message.contains("a copy of “cut.pmv”"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        let two = stranded_copies_alert("cut.pmv", &["a".to_owned(), "b".to_owned()]);
+        assert!(two.message.contains("copies of") && two.informative.contains("“a” and 1 more"));
+    }
     #[::core::prelude::v1::test]
     fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
         // A viewer that reported a clock is where it says (playing included).
