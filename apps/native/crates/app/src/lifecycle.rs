@@ -270,10 +270,12 @@ async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp)
 /// answered), so the person is never left with a quit that only refuses.
 fn quit_failed_alert(reason: &str) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button, Key};
+    // The kernel's account chooses the sentence and goes to the Error Log.
+    let why = crate::surfaces::documents::WriteFailure::of(reason).sentence();
     Alert::new(
         "Powermove couldn’t finish saving before quitting.",
         format!(
-            "{reason}. If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them."
+            "{why} If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them. Window ▸ Error Log has the details."
         ),
         vec![
             Button::new("Cancel", false).default().key(Key::Escape),
@@ -352,6 +354,10 @@ fn finish_quit(cx: &mut App) {
             other => {
                 let reason = reason(other);
                 eprintln!("Couldn’t quit: {reason}. Your work is kept.");
+                crate::error_log::shared(cx).borrow_mut().push(
+                    "Quit",
+                    &format!("The project library couldn’t be written before quitting: {reason}"),
+                );
                 let q = cx.global::<QuitCoordinator>();
                 let kernel = q.host.kernel.clone();
                 let window = q
@@ -450,7 +456,7 @@ fn expect_closed(
     }
 }
 /// A person-readable reason for a kernel reply that wasn't the expected one.
-fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
+pub(crate) fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
     match reply {
         Some(Err(e)) => e.to_string(),
         Some(Ok(ShellReply::Closed {
@@ -918,15 +924,16 @@ mod tests {
     /// what happens to unsaved work.
     #[test]
     fn a_quit_the_library_refuses_offers_to_quit_anyway() {
-        let alert = quit_failed_alert("The disk is full");
+        let alert = quit_failed_alert("Permission denied (os error 13)");
         assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(
             alert
                 .informative
-                .starts_with("The disk is full. If you quit anyway")
+                .starts_with("Powermove isn’t allowed to write there. If you quit anyway")
         );
+        assert!(!alert.informative.contains("os error"));
         assert!(alert.informative.contains("offers to recover"));
     }
     use std::{

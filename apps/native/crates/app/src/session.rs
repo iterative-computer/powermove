@@ -139,6 +139,9 @@ pub struct Controller {
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// A change could not be written to the recovery data and no save has
+    /// succeeded since: said in a sheet once, and in the subtitle until then.
+    unprotected: bool,
     /// What this window's close (or the app's quit) is waiting for, once
     /// the person has answered: shown in the status line over any other
     /// message, and named by a second Quit's prompt.
@@ -490,15 +493,17 @@ impl Controller {
                         for e in events {
                             match e {
                                 KernelEvent::Durability { message } => {
-                                    v.message = format!("Recovery warning: {message}");
+                                    v.message = "Powermove couldn’t write recovery data for recent changes. Save your projects now.".into();
                                     v.errors.borrow_mut().push("Recovery", &message);
                                 }
                                 KernelEvent::Fault { message, .. } => {
                                     v.message = "Something went wrong; see the Error Log.".into();
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
-                                KernelEvent::Notice { notice, .. } => {
-                                    v.message = format!("Kernel notice: {notice:?}")
+                                KernelEvent::Notice { project, notice } => {
+                                    if v.session.as_ref().is_some_and(|s| s.project == project) {
+                                        v.notice(notice, cx);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -614,6 +619,7 @@ impl Controller {
             job_overrides: Default::default(),
             window_key: 0,
             close_pending: false,
+            unprotected: false,
             closing_note: None,
             close_window: None,
             close_operation: None,
@@ -839,7 +845,11 @@ impl Controller {
             title,
             &copy_subtitle(
                 p.session.as_ref().map(|s| &s.metadata),
-                pm_shell::document_subtitle(p.dirty, saving),
+                if self.unprotected && !saving {
+                    "Not protected: save now"
+                } else {
+                    pm_shell::document_subtitle(p.dirty, saving)
+                },
             ),
             p.dirty,
             self.path.as_deref(),
@@ -950,7 +960,7 @@ impl Controller {
                             v.message = e.to_string();
                         }
                     }
-                    other => v.message = format!("Edit failed: {other:?}"),
+                    other => v.edit_failed(other.and_then(Result::err)),
                 }
                 v.refresh(cx);
             });
@@ -1139,7 +1149,7 @@ impl Controller {
                         v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
                     }
                 }
-                other => v.message = format!("Edit failed: {other:?}"),
+                other => v.edit_failed(other.and_then(Result::err)),
             });
         })
         .detach();
@@ -1457,7 +1467,16 @@ impl Controller {
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
-                    other => v.message = format!("Open failed: {other:?}"),
+                    other => {
+                        v.message = format!("“{name}” couldn’t be opened.");
+                        v.errors.borrow_mut().push(
+                            "Project",
+                            &format!(
+                                "“{name}” couldn’t be opened: {}",
+                                crate::lifecycle::reason(other)
+                            ),
+                        );
+                    }
                 }
                 cx.notify();
             });
@@ -1885,12 +1904,13 @@ impl Controller {
                         if as_path.is_some() {
                             v.path = as_path;
                         }
+                        v.unprotected = false;
                         v.message = recovery_copy.map_or(String::new(), |_| {
-                            "Saved to a recovery copy; original was not overwritten".into()
+                            "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
                         v.load_recent(cx);
                     }
-                    other => v.message = format!("Save failed; recovery data retained: {other:?}"),
+                    other => v.save_failed(&crate::lifecycle::reason(other), cx),
                 }
                 v.refresh(cx);
                 if let Some(intent) = close {
@@ -1903,6 +1923,108 @@ impl Controller {
             });
         })
         .detach();
+    }
+    fn project_name(&self) -> String {
+        self.published
+            .as_ref()
+            .and_then(|p| p.snapshot.document.root())
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned()
+    }
+    /// A save that did not happen is a sheet in plain words (S5): Save As
+    /// and Show in Finder are one press away, and the kernel's own account
+    /// is an Error Log row, never copy.
+    fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, WriteFailure, save_failed};
+        let name = self.project_name();
+        self.message = format!("“{name}” couldn’t be saved.");
+        self.errors
+            .borrow_mut()
+            .push("Save", &format!("“{name}” couldn’t be saved: {detail}"));
+        let path = self.path.clone().filter(|p| p.exists());
+        let answer = save_failed(&name, WriteFailure::of(detail), path.is_some())
+            .sheet(&self.host.borrow().window);
+        cx.spawn(
+            async move |this, cx| match answer.recv().await.ok().flatten() {
+                Some(Action::SaveAs) => {
+                    let _ = this.update(cx, |v, cx| v.save_dialog(cx));
+                }
+                Some(Action::ShowInFinder) => {
+                    if let Some(path) = path {
+                        platform::reveal(&path);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+    }
+    /// An edit the kernel refused or could not answer: plain words in the
+    /// status bar, the kernel's account in the Error Log.
+    fn edit_failed(&mut self, error: Option<KernelFailure>) {
+        self.message = "That change couldn’t be made.".into();
+        let detail =
+            error.map_or_else(|| "the project didn’t answer".to_owned(), |e| e.to_string());
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("A change couldn’t be made: {detail}"));
+    }
+    /// What the kernel says about this window's project, in the person's
+    /// words. A change that could not be written to the recovery data is the
+    /// one moment unsaved work isn't protected: a sheet, an Error Log row,
+    /// and the subtitle until a save succeeds.
+    fn notice(&mut self, notice: pm_kernel::Notice, cx: &mut Context<Self>) {
+        use pm_kernel::Notice::*;
+        match notice {
+            NotDurable { message } => {
+                use crate::surfaces::documents::{Action, WriteFailure, not_protected};
+                let name = self.project_name();
+                self.errors.borrow_mut().push(
+                    "Recovery",
+                    &format!(
+                        "A change to “{name}” couldn’t be written to its recovery data: {message}"
+                    ),
+                );
+                self.message =
+                    format!("Powermove couldn’t protect your latest change to “{name}”. Save now.");
+                if std::mem::replace(&mut self.unprotected, true) {
+                    // Already said, and still showing in the subtitle.
+                    return;
+                }
+                let answer = not_protected(&name, WriteFailure::of(&message))
+                    .sheet(&self.host.borrow().window);
+                cx.spawn(async move |this, cx| {
+                    if answer.recv().await.ok().flatten() == Some(Action::Save) {
+                        let _ = this.update(cx, |v, cx| v.save(None, cx));
+                    }
+                })
+                .detach();
+            }
+            CommitWithNotice { label, reason } => {
+                self.message =
+                    format!("“{label}” was kept: cancelling it would have removed later work.");
+                self.errors
+                    .borrow_mut()
+                    .push("Project", &format!("“{label}” was kept: {reason}"));
+            }
+            ForeignSplit { label, writes } => {
+                self.message = format!(
+                    "“{label}” was cancelled. {writes} change{} made meanwhile by something else {} kept as a separate undo step.",
+                    if writes == 1 { "" } else { "s" },
+                    if writes == 1 { "was" } else { "were" }
+                );
+            }
+            Sealed { label, .. } => {
+                self.message = format!("“{label}” was finished for an extension that stopped.");
+            }
+            Barrier { label } => {
+                self.message = format!(
+                    "Undo stopped at “{label}”: the extension that made it is no longer running."
+                );
+            }
+        }
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         let rx = platform::paths(&self.host.borrow().window, true);
