@@ -40,10 +40,15 @@ const field = (role) => {
   const m = new RegExp(`\\[(\\d+)\\] ${role} "Current time"(?: = "([^"]*)")?`).exec(t.tree_markdown);
   return m ? { token: `${t.snapshot_id}:${m[1]}`, value: m[2] ?? '' } : null;
 };
-// The time button reads "13 seconds, 11 frames" (total seconds).
+// The time button reads "13 seconds, 11 frames" (total seconds; the
+// wording of the units is not relied on).
 const spoken = (t) => {
-  const f = Math.round(t * fps), s = Math.floor(f / fps), ff = f - s * fps;
-  return `${s} second${s === 1 ? "" : "s"}, ${ff} frame${ff === 1 ? "" : "s"}`;
+  const f = Math.round(t * fps), s = Math.floor(f / fps);
+  return `${s}:${f - s * fps}`;
+};
+const reads = (value) => {
+  const m = /(\d+) seconds?, (\d+) frames?$/.exec(value);
+  return m ? `${Number(m[1])}:${Number(m[2])}` : null;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const timecode = (t) => {
@@ -65,7 +70,7 @@ for (const s of wanted) {
   // The playhead is there once the time button reads the target.
   for (let tries = 0; ; tries++) {
     const now = field('AXButton');
-    if (now && (now.value === spoken(s.time) || now.value.endsWith(`, ${spoken(s.time)}`))) break;
+    if (now && reads(now.value) === spoken(s.time)) break;
     if (tries > 40) throw new Error(`the playhead did not reach ${timecode(s.time)} (reads ${now?.value})`);
     await sleep(250);
   }

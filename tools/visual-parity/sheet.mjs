@@ -96,14 +96,40 @@ function lab(src) {
   }
   return out;
 }
+// Area average to W × H (each output pixel the mean of the source area
+// under it, partial pixels weighted): how a view shows a larger frame.
+function areaResize(src, w, h, W, H) {
+  const sx = w / W, sy = h / H;
+  const out = new Float32Array(W * H * 3);
+  for (let Y = 0; Y < H; Y++) {
+    const y0 = Y * sy, y1 = y0 + sy;
+    for (let X = 0; X < W; X++) {
+      const x0 = X * sx, x1 = x0 + sx;
+      let r = 0, g = 0, b = 0;
+      for (let y = Math.floor(y0); y < Math.min(h, Math.ceil(y1)); y++) {
+        const wy = Math.min(y + 1, y1) - Math.max(y, y0);
+        for (let x = Math.floor(x0); x < Math.min(w, Math.ceil(x1)); x++) {
+          const wt = (Math.min(x + 1, x1) - Math.max(x, x0)) * wy, i = (y * w + x) * 3;
+          r += src[i] * wt; g += src[i + 1] * wt; b += src[i + 2] * wt;
+        }
+      }
+      const o = (Y * W + X) * 3, n = sx * sy;
+      out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n;
+    }
+  }
+  return out;
+}
 const cache = new Map();
-function prepared(file) {
-  if (cache.has(file)) return cache.get(file);
+// A frame's measures, at its own size or area-scaled to `size` ([w, h]).
+function prepared(file, size) {
+  const key = size ? `${file}@${size.join('x')}` : file;
+  if (cache.has(key)) return cache.get(key);
   const img = decodePng(path.join(dir, file));
-  const rgb = rgbOf(img);
-  const p = { w: img.width, h: img.height, visible: boxBlur3(rgb, img.width, img.height, 3), lab: lab(boxBlur3(half(rgb, img.width, img.height), img.width >> 1, img.height >> 1, 3)) };
+  let rgb = rgbOf(img), w = img.width, h = img.height;
+  if (size && (size[0] !== w || size[1] !== h)) { rgb = areaResize(rgb, w, h, size[0], size[1]); [w, h] = size; }
+  const p = { w, h, visible: boxBlur3(rgb, w, h, 3), lab: lab(boxBlur3(half(rgb, w, h), w >> 1, h >> 1, 3)) };
   if (cache.size > 8) cache.delete(cache.keys().next().value);
-  cache.set(file, p);
+  cache.set(key, p);
   return p;
 }
 function heat(v) {
@@ -116,8 +142,9 @@ function heat(v) {
 }
 // Perceptible and visible difference of two frames; writes the ΔE heat map
 // (at half size) when `diff` is given.
-function compare(fileA, fileB, diff) {
-  const a = prepared(fileA), b = prepared(fileB);
+// `fit`: B is area-scaled to A's size first (a viewer frame against the export).
+function compare(fileA, fileB, diff, fit = false) {
+  const a = prepared(fileA), b = prepared(fileB, fit ? [a.w, a.h] : undefined);
   if (a.w !== b.w || a.h !== b.h) return { error: `size ${a.w}x${a.h} vs ${b.w}x${b.h}` };
   let visible = 0;
   for (let i = 0; i < a.visible.length; i += 3) {
@@ -150,7 +177,17 @@ for (const s of v1?.samples ?? v2.samples) {
   const result = compare(base, row.v2, `diff/${label}.png`);
   if (result.error) { row.missing = result.error; rows.push(row); continue; }
   Object.assign(row, result, { diff: `diff/${label}.png` });
-  if (row.ref && row.v1) row.v1vs = compare(row.ref, row.v1).perceptible;
+  if (row.ref && row.v1) {
+    row.v1vs = compare(row.ref, row.v1).perceptible;
+    // V2 against v1 on the same Mac: a difference only V2 has.
+    row.v2v1 = compare(row.v1, row.v2, `diff/${label}-v1.png`).perceptible;
+    row.v1Diff = `diff/${label}-v1.png`;
+  }
+  // The paused viewer against this build's export, scaled to the view.
+  if (row.viewer) {
+    const r = compare(row.viewer, row.v2, `diff/${label}-viewer.png`, true);
+    if (!r.error) { row.viewerVs = r.perceptible; row.viewerDiff = `diff/${label}-viewer.png`; }
+  }
   // Timing: the neighbouring video frames.
   const around = [[-1, prevByTime.get(key)], [1, nextByTime.get(key)]].filter(([, f]) => f);
   for (const [shift, file] of around) {
@@ -168,7 +205,7 @@ const fps = project.fps;
 const ranked = rows.filter((r) => r.perceptible !== undefined).sort((x, y) => y.perceptible - x.perceptible);
 const BAD = 0.002;
 const timingNote = (r) => (r.timing ? `Closer to the video frame ${r.timing.shift > 0 ? 'after' : 'before'} (${pct(r.timing.perceptible)}): timing. ` : '');
-const columns = [ref && 'Delivered video', v1 && 'v1.2.0', 'V2 export', viewer && 'V2 viewer, paused (screen)', 'Difference'].filter(Boolean);
+const columns = [ref && 'Delivered video', v1 && 'v1.2.0', 'V2 export', viewer && 'V2 viewer, paused (screen)', 'Difference', ref && v1 && 'V2 vs v1', viewer && 'Viewer vs export'].filter(Boolean);
 const img = (src, alt) => `<td class="img">${src ? `<a href="${src}"><img loading="lazy" src="${src}" alt="${esc(alt)}"></a>` : ''}</td>`;
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} parity</title>
@@ -184,18 +221,18 @@ th{font-weight:600;color:var(--muted)}img{width:100%;display:block;cursor:zoom-i
 </style></head><body>
 <h1>${esc(title)}: ${columns.slice(0, -1).map(esc).join(' | ')}</h1>
 <p>${esc(project.w)}×${esc(project.h)} at ${esc(fps)} fps, ${rows.length} samples. ${ref ? `Reference: ${esc(ref.source)}; the heat map is V2 against it. ` : ''}${v1 ? `v1: ${esc(v1.source)}. ` : ''}V2: ${esc(v2.source ?? 'missing')}.
-Perceptible = share of pixels whose colour, averaged over 2×2 then 3×3 (compression noise and anti-aliasing go), differs by ΔE76 > ${DELTA_E}; visible = 3×3 averaged, a channel off by more than ${THRESHOLD}/255. Rows over ${pct(BAD)} perceptible are red. Heat (half size): black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` ${esc(viewer.source)}: for looking, not measured.` : ''}</p>
+Perceptible = share of pixels whose colour, averaged over 2×2 then 3×3 (compression noise and anti-aliasing go), differs by ΔE76 > ${DELTA_E}; visible = 3×3 averaged, a channel off by more than ${THRESHOLD}/255. Rows over ${pct(BAD)} perceptible are red. Heat (half size): black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` ${esc(viewer.source)}; it is scored against this build's export area-scaled to the view (same measure, last column).` : ''}</p>
 ${summary.map((p) => `<p class="summary">${esc(p)}</p>`).join('\n')}
 <h2>Ranked by perceptible difference</h2>
-<table><tr><th>Time</th><th>Perceptible${ref ? ' (V2 vs video)' : ''}</th><th>Visible</th>${ref && v1 ? '<th>v1 vs video</th>' : ''}<th>Mean ΔE</th><th>Cause or accepted reason</th></tr>
-${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.perceptible > BAD ? 'bad' : 'ok'}">${pct(r.perceptible)}</td><td class="num">${pct(r.visible)}</td>${ref && v1 ? `<td class="num">${pct(r.v1vs)}</td>` : ''}<td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(timingNote(r) + (r.note ?? ''))}</td></tr>`).join('\n')}
+<table><tr><th>Time</th><th>Perceptible${ref ? ' (V2 vs video)' : ''}</th><th>Visible</th>${ref && v1 ? '<th>v1 vs video</th><th>V2 vs v1</th>' : ''}${viewer ? '<th>Viewer vs export</th>' : ''}<th>Mean ΔE</th><th>Cause or accepted reason</th></tr>
+${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.perceptible > BAD ? 'bad' : 'ok'}">${pct(r.perceptible)}</td><td class="num">${pct(r.visible)}</td>${ref && v1 ? `<td class="num">${pct(r.v1vs)}</td><td class="num ${r.v2v1 > BAD ? 'bad' : ''}">${pct(r.v2v1)}</td>` : ''}${viewer ? `<td class="num ${r.viewerVs > BAD ? 'bad' : ''}">${pct(r.viewerVs)}</td>` : ''}<td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(timingNote(r) + (r.note ?? ''))}</td></tr>`).join('\n')}
 ${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="5">${esc(r.missing)}</td></tr>`).join('\n')}
 </table>
 <h2>Frames</h2>
 <table class="cols"><tr><th>Time</th>${columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>
 ${rows.map((r) => `<tr id="${r.label}"><td class="num">${tc(r.time, fps)}<br>${r.time.toFixed(3)} s<br><span class="${r.perceptible > BAD ? 'bad' : 'ok'}">${pct(r.perceptible)}</span><div class="note">${esc(timingNote(r) + (r.note ?? r.missing ?? ''))}</div></td>
-${ref ? img(r.ref, `video ${r.time}`) : ''}${v1 ? img(r.v1, `v1 ${r.time}`) : ''}${img(r.v2, `V2 ${r.time}`)}${viewer ? img(r.viewer, `V2 viewer ${r.time}`) : ''}${img(r.diff, `difference ${r.time}`)}</tr>`).join('\n')}
+${ref ? img(r.ref, `video ${r.time}`) : ''}${v1 ? img(r.v1, `v1 ${r.time}`) : ''}${img(r.v2, `V2 ${r.time}`)}${viewer ? img(r.viewer, `V2 viewer ${r.time}`) : ''}${img(r.diff, `difference ${r.time}`)}${ref && v1 ? img(r.v1Diff, `V2 against v1 ${r.time}`) : ''}${viewer ? img(r.viewerDiff, `viewer against export ${r.time}`) : ''}</tr>`).join('\n')}
 </table></body></html>`;
 writeFileSync(path.join(dir, 'index.html'), html);
-writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, perceptible, visible, v1vs, mean, timing, note }) => ({ time, label, perceptible, visible, v1vs, mean, timing, note })), null, 1));
+writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, perceptible, visible, v1vs, v2v1, viewerVs, mean, timing, note }) => ({ time, label, perceptible, visible, v1vs, v2v1, viewerVs, mean, timing, note })), null, 1));
 console.log(path.join(dir, 'index.html'));
