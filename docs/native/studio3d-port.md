@@ -2254,3 +2254,83 @@ Run `python3 apps/native/scripts/studio3d-export-perf.py --exe <snapshot>
 30 --sample-counts`; unbundled snapshots may supply `--library-dir <ffmpeg-lib>`.
 `--fixed-spp 32 --bounces 8` is diagnostic only. Evidence stays outside Git.
 All generation/build/render commands require the shared lock and storage floor.
+
+
+#### Round 1 trials: speed gains are conditional on the image gates
+
+These remain development-build experiments. Trial A uses a 16-sample floor,
+128 ceiling, 6% pre-denoise convergence, 2× edge floor and per-kind limits
+of four diffuse, four glossy and eight transmission bounces. Each speed row
+uses 30 animated-camera frames through the real video-export path.
+
+| Scene | Round 0 CPU s/frame | Trial A CPU s/frame | Reduction | Accepted? |
+|---|---:|---:|---:|---|
+| Bottle product shot | 10.361 | 5.707 | 44.9% | Image acceptance incomplete |
+| Hero | 4.587 | 2.565 | 44.1% | Image acceptance incomplete |
+| Chrome set | 27.779 | 14.240 | 48.7% | Above the 8 s complex-scene budget |
+| Environment | 72.524 | — | — | Not rerun in this trial |
+
+The bottle averages 36.58 actual spp; tracing takes 4577 ms/frame and CPU
+OIDN 827 ms/frame. A further explicit diagnostic override (8-sample floor,
+9% convergence, otherwise Trial A) reaches **4.282 s/frame**, 19.79 mean spp,
+3149 ms tracing and 841 ms CPU OIDN over 30 frames. This precedes the new
+rare-path guard and is not accepted as a default or a quality-certified result.
+The profiler records explicit `--quality-patch` overrides in its output.
+
+All 36 kernel Studio tests pass, including optional sampler controls, undo,
+save/reopen and preservation of legacy quality objects. Both baseline and
+Trial A pass the four small-image tests, including the new direct flicker
+check. Full-HD validation is essential: Trial A fails on glass despite those
+small-image passes.
+
+| Trial A, full-HD object region | RMS <0.02 | Noise <0.006 | Bias p95 <0.012 | Flicker <0.006 |
+|---|---:|---:|---:|---:|
+| Teapot | 0.002330 | 0.001273 | 0.002981 | 0.001405 |
+| Glass | **0.025701** | 0.004001 | 0.009987 | 0.003919 |
+| Chrome | 0.005251 | 0.002234 | 0.003415 | 0.001770 |
+
+Increasing Trial A's glass ceiling to 256 does not repair it: object RMS
+is 0.025923 and bias p95 0.012613. The old policy, on the **same retained
+4096-spp Monte Carlo reference**, passes with RMS 0.010996, noise 0.003899,
+bias 0.004731 and flicker 0.003538. This isolates a policy regression rather
+than a reference change. Early variance stopping and the glossy limit are
+being tested independently; the limits and reference remain fixed. A candidate
+rare-path floor preserves observations of glass and narrow coats, with edge
+classification retaining that floor. It is unaccepted until these tests pass.
+
+The command/state contract adds optional `perceptualNoise`,
+`edgeSamplesMultiplier`, `diffuseBounces`, `glossyBounces` and
+`transmissionBounces`. They use the existing per-composition quality operation,
+per-export override, undo journal and save path. Legacy objects omit them and
+retain the old total-bounce/convergence behavior. The UI can read the resolved
+quality object and call `set_render_quality`; no controls or layout are added
+by this lane. The perceptual candidate weights chroma errors by their luma
+contribution; it does not claim to evaluate variance after tone mapping.
+
+#### Round 2 candidate: Metal OIDN binding and deployment blocker
+
+The candidate explicitly requests Metal device type 5, uses OIDN-owned device
+buffers, and retains explicit CPU device type 1 fallback. It never binds Rust
+Vec memory to the Metal device. GPU results are published only after all
+layers succeed, so fallback cannot accidentally denoise a partially modified
+input twice. Buffers and filter handles survive frames; alpha and extra
+channels remain intact. The native application and the five-library development
+bundle compile with OIDN 2.5.1.
+
+Two device tests pass: cancelled-frame recovery and CPU/Metal picture tolerance
+across dimensions, padded channels, guide scales and filter qualities. The
+three measured display-compressed RGB RMS differences are 0.000232,
+0.000233 and 0.000276 (limit 0.003); p99 differences are below 0.000833
+(limit 0.01). These are binding tests, not full-HD native export acceptance.
+First-use filtering at the tested small dimensions costs 0.70–2.06 s on Metal;
+its warm full-HD application cost and graph/filter reuse still need measurement.
+The diagnostic log reports actual backend, fallback, guide scale and individual
+filter/upload/download times. The profiler can request `--oidn-device cpu` or
+`metal` for controlled runs.
+
+**Shipping blocker:** the development TBB library declares macOS 27.0, while
+the app's Info.plist and linker target require macOS 14.0. The bundle helper
+reports this mismatch. Rebuild TBB/OIDN with a macOS 14 deployment target and
+repeat relocation/fallback verification before distributing it. No minimum OS
+increase, release or notarization is performed here. The candidate remains
+unshipped pending native timing, image gates and the 15% real-export stop rule.
