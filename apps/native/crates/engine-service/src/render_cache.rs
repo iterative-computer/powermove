@@ -57,6 +57,15 @@ const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
 const AHEAD: i64 = 6;
 const READY_FRAMES: usize = 8;
+/// Frames kept read at a paused playhead, so a play starts from them.
+const WARM: i64 = 3;
+/// How long a playing frame waits for its frame on disk to be read. A
+/// frame is on disk because drawing it takes longer than its interval, so
+/// a short wait for the reader always beats drawing it again.
+pub(crate) const PATIENCE: Duration = Duration::from_millis(40);
+/// Playing frames in a row that give way to the reader before one is drawn
+/// after all (a disk too slow to play from must not freeze the viewer).
+pub(crate) const LATE_AT_MOST: u32 = 6;
 /// Background rendering judges and renders the composition in chunks of
 /// about this long.
 const CHUNK_SECONDS: f64 = 0.5;
@@ -525,14 +534,16 @@ fn snapshot(state: &State) -> RenderBars {
 }
 
 impl DiskFrames {
-    /// Drop CPU read-ahead while stopped, fencing queued/in-flight reads
-    /// with an empty wanted range. Authored/kept files and scene identity stay.
+    /// Drop CPU read-ahead while stopped, except the few frames at the
+    /// paused playhead a play starts from ([`WARM`]); queued and in-flight
+    /// reads beyond them are fenced by the wanted range. Authored/kept
+    /// files and scene identity stay.
     pub(crate) fn release_idle_reads(&self) {
-        let generation = self.with(|s| {
-            s.last_read = None;
-            (s.generation, false)
-        });
-        self.inner.reader.clear(generation);
+        let (generation, at) = self.with(|s| ((s.generation, s.last_read), false));
+        match at {
+            Some(n) => self.inner.reader.keep(generation, n, n + WARM - 1),
+            None => self.inner.reader.clear(generation),
+        }
     }
 
     pub(crate) fn ready_bytes(&self) -> u64 {
@@ -1188,7 +1199,48 @@ impl DiskFrames {
 
     /// A frame on disk for `scene` at `time` that the reader has loaded, and
     /// the next frames asked of it. Never waits on disk.
+    #[cfg(test)]
     pub(crate) fn read(&self, scene: &Scene, time: Ticks) -> Option<(Size, Arc<Vec<u8>>)> {
+        match self.read_within(scene, time, Duration::ZERO) {
+            Read::Frame(size, bytes) => Some((size, bytes)),
+            Read::Late(_) | Read::Absent => None,
+        }
+    }
+
+    /// [`Self::read`], waiting up to `patience` for the frame when it is on
+    /// disk and still being read (a playing frame: [`PATIENCE`]).
+    pub(crate) fn read_within(&self, scene: &Scene, time: Ticks, patience: Duration) -> Read {
+        let Some((size, generation, n, found)) = self.ask_ahead(scene, time, AHEAD, false) else {
+            return Read::Absent;
+        };
+        match found {
+            Some(bytes) => Read::Frame(size, bytes),
+            None => match self.inner.reader.wait(generation, n, patience) {
+                Ok(Some(bytes)) => Read::Frame(size, bytes),
+                Ok(None) => Read::Absent,
+                Err(Late) => Read::Late(size),
+            },
+        }
+    }
+
+    /// The paused playhead is at `time`: its frame and the next few are
+    /// read ([`WARM`]), so a play from here starts on frames already read.
+    pub(crate) fn warm(&self, scene: &Scene, time: Ticks) {
+        self.ask_ahead(scene, time, WARM, true);
+    }
+
+    /// Asks the reader for the frame at `time` and the `ahead - 1` after it
+    /// in the direction of motion (forward when `still`: a play starts
+    /// forward): the stored size, the generation and index asked at, and
+    /// the frame if it is read already.
+    #[allow(clippy::type_complexity)]
+    fn ask_ahead(
+        &self,
+        scene: &Scene,
+        time: Ticks,
+        ahead: i64,
+        still: bool,
+    ) -> Option<(Size, u64, i64, Option<Arc<Vec<u8>>>)> {
         let mut state = self.inner.state.lock().unwrap();
         let state = &mut *state;
         let frames = state.frames.as_ref()?;
@@ -1201,19 +1253,20 @@ impl DiskFrames {
         {
             state.backward = n < last;
         }
+        state.backward &= !still;
         let size = frames.size;
         // The frame, then the next ones in the direction of motion.
         let window = if state.backward {
-            (n - AHEAD + 1).max(0)..=n
+            (n - ahead + 1).max(0)..=n
         } else {
-            n..=(n + AHEAD - 1).min(frames.count - 1)
+            n..=(n + ahead - 1).min(frames.count - 1)
         };
         let order: Vec<i64> = if state.backward {
             window.clone().rev().collect()
         } else {
             window.clone().collect()
         };
-        let ahead: Vec<(i64, RenderKey)> = order
+        let asks: Vec<(i64, RenderKey)> = order
             .into_iter()
             .filter(|k| frames.present.contains(k))
             .filter_map(|k| Some((k, frames.key(k)?)))
@@ -1223,10 +1276,10 @@ impl DiskFrames {
         self.inner
             .reader
             .want(generation, *window.start(), *window.end());
-        for (k, key) in ahead {
+        for (k, key) in asks {
             self.inner.reader.ask(generation, k, key, &cache, size);
         }
-        found.map(|bytes| (size, bytes))
+        Some((size, generation, n, found))
     }
 }
 
@@ -1534,9 +1587,23 @@ fn run_fill(
 }
 
 /// Reads frames on a thread of its own, ahead of the playhead.
+/// What [`DiskFrames::read_within`] found.
+pub(crate) enum Read {
+    /// The frame, at its stored size.
+    Frame(Size, Arc<Vec<u8>>),
+    /// On disk at this size, and still being read when the patience ran
+    /// out.
+    Late(Size),
+    /// Not on disk for this state.
+    Absent,
+}
+/// A frame still being read when the wait for it ended.
+struct Late;
 struct Reader {
     asks: std::sync::mpsc::SyncSender<Ask>,
     ready: Arc<Mutex<Ready>>,
+    /// Signalled whenever a read ends ([`Reader::wait`]).
+    ended: Arc<std::sync::Condvar>,
 }
 struct Ask {
     id: (u64, i64),
@@ -1561,6 +1628,8 @@ impl Reader {
         let (asks, rx) = std::sync::mpsc::sync_channel::<Ask>(2 * AHEAD as usize);
         let ready = Arc::new(Mutex::new(Ready::default()));
         let shared = ready.clone();
+        let ended = Arc::new(std::sync::Condvar::new());
+        let end = ended.clone();
         std::thread::Builder::new()
             .name("pm-render-cache-read".into())
             .spawn(move || {
@@ -1577,6 +1646,7 @@ impl Reader {
                         stale
                     };
                     if stale {
+                        end.notify_all();
                         continue;
                     }
                     // Stored as the viewer's surface holds it.
@@ -1589,6 +1659,7 @@ impl Reader {
                     }
                     let mut ready = shared.lock().unwrap();
                     ready.asked.remove(&ask.id);
+                    end.notify_all();
                     if ready.wanted.is_some_and(|(g, first, last)| {
                         ask.id.0 != g || ask.id.1 < first || ask.id.1 > last
                     }) {
@@ -1603,7 +1674,43 @@ impl Reader {
                 }
             })
             .expect("render cache reader thread");
-        Self { asks, ready }
+        Self { asks, ready, ended }
+    }
+    /// Frame `n` asked at `generation`, waiting up to `patience` while it
+    /// is being read: [`Late`] when it is still being read after that,
+    /// `None` at once when nobody is reading it (it is not on disk, or its
+    /// read was dropped).
+    fn wait(
+        &self,
+        generation: u64,
+        n: i64,
+        patience: Duration,
+    ) -> Result<Option<Arc<Vec<u8>>>, Late> {
+        let id = (generation, n);
+        let until = Instant::now() + patience;
+        let mut ready = self.ready.lock().unwrap();
+        loop {
+            if let Some((_, bytes)) = ready.frames.iter().find(|(i, _)| *i == id) {
+                return Ok(Some(bytes.clone()));
+            }
+            if !ready.asked.contains(&id) {
+                return Ok(None);
+            }
+            let left = until
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or(Late)?;
+            ready = self.ended.wait_timeout(ready, left).unwrap().0;
+        }
+    }
+    /// Keeps only the read frames `first..=last` of `generation`, and
+    /// fences reads beyond them.
+    fn keep(&self, generation: u64, first: i64, last: i64) {
+        let mut ready = self.ready.lock().unwrap();
+        ready
+            .frames
+            .retain(|((g, n), _)| *g == generation && (first..=last).contains(n));
+        ready.wanted = Some((generation, first, last));
     }
     fn take(&self, generation: u64, n: i64) -> Option<Arc<Vec<u8>>> {
         let ready = self.ready.lock().unwrap();
@@ -2042,6 +2149,87 @@ mod tests {
         let wanted = disk.inner.reader.ready.lock().unwrap().wanted;
         let generation = disk.inner.state.lock().unwrap().generation;
         assert_eq!(wanted, Some((generation, 34 - AHEAD + 1, 34)));
+    }
+
+    /// A playing frame gets its frame from disk on the first ask, waiting
+    /// for the reader (a frame is on disk because it can't be drawn in
+    /// time; never waiting, playback drew it again, fell behind, and the
+    /// reader then read frames the playhead had already passed). A frame
+    /// that is not on disk is not waited for.
+    #[test]
+    fn a_playing_frame_waits_for_its_frame_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
+        // Each frame as playback meets it: asked once, a skip of five
+        // frames at a time (what drawing a slow frame costs). The patience
+        // here is a slow test build's, not playback's.
+        let patience = Duration::from_secs(10);
+        for n in [10usize, 15, 20, 25] {
+            assert!(
+                matches!(
+                    disk.read_within(&scene, times[n - 10], patience),
+                    Read::Frame(..)
+                ),
+                "frame {n} on the first ask"
+            );
+        }
+        let absent = Ticks::new(Rate::FPS_30.frame_start(60).unwrap()).unwrap();
+        let asked = Instant::now();
+        assert!(matches!(
+            disk.read_within(&scene, absent, patience),
+            Read::Absent
+        ));
+        assert!(asked.elapsed() < patience / 4, "nothing to wait for");
+        // Still being read when the patience ran out: late, not absent, so
+        // playback gives way a tick instead of drawing the frame again.
+        let late = (0..200).any(|k| {
+            let n = 10 + (k * 7) % 31;
+            disk.release_idle_reads();
+            disk.inner
+                .reader
+                .clear(disk.inner.state.lock().unwrap().generation);
+            matches!(
+                disk.read_within(&scene, times[n - 10], Duration::ZERO),
+                Read::Late(_)
+            )
+        });
+        assert!(late, "a frame asked and not yet read is late");
+    }
+
+    /// A paused playhead keeps the frames a play starts from read, through
+    /// the idle release too, so the first playing frames don't wait on disk.
+    #[test]
+    fn a_paused_playhead_keeps_the_frames_a_play_starts_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..=40).map(|n| write_frame(&disk, n)).collect();
+        let generation = disk.inner.state.lock().unwrap().generation;
+        let read = |n: i64| disk.inner.reader.take(generation, n).is_some();
+        // Played to frame 25, then paused at 20.
+        read_eventually(&disk, &scene, times[15]).unwrap();
+        disk.warm(&scene, times[10]);
+        let start = Instant::now();
+        while !(20..20 + WARM).all(read) {
+            assert!(start.elapsed() < Duration::from_secs(2), "warm frames");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        disk.release_idle_reads();
+        assert!((20..20 + WARM).all(read), "kept through the idle release");
+        assert!(!read(25), "the rest is released");
+        assert_eq!(disk.ready_bytes(), WARM as u64 * 640 * 360 * 8);
+        // The play starts on a read frame, never waiting.
+        assert!(disk.read(&scene, times[10]).is_some());
     }
 
     /// The viewer's output tone and its override wrappers are part of the

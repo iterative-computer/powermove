@@ -188,9 +188,23 @@ impl std::fmt::Display for CompilerBusy {
     }
 }
 impl std::error::Error for CompilerBusy {}
+/// A playing frame is on disk and was still being read when its turn came.
+/// It gives way for a tick (the clock goes on and the reader catches up)
+/// instead of being drawn again: it is on disk because drawing it takes
+/// longer than its interval, and drawing it would leave the reader reading
+/// frames the playhead has passed.
+#[derive(Debug)]
+pub(crate) struct DiskFramePending;
+impl std::fmt::Display for DiskFramePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the rendered frame is still being read")
+    }
+}
+impl std::error::Error for DiskFramePending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<FontsPending>()
         || error.is::<CompilerBusy>()
+        || error.is::<DiskFramePending>()
         || matches!(
             error.downcast_ref::<RenderError>(),
             Some(
@@ -268,6 +282,8 @@ pub struct Engine {
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
     last_frame: Instant,
     idle_released: bool,
+    /// Playing frames in a row that gave way to the disk reader.
+    disk_late: u32,
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
@@ -611,6 +627,7 @@ impl Engine {
             disk: None,
             last_frame: Instant::now(),
             idle_released: false,
+            disk_late: 0,
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
@@ -864,11 +881,41 @@ impl Engine {
             (c.canvas_width, c.canvas_height)
         });
         let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
-        let disk = looked
-            .then(|| self.disk.as_ref()?.read(scene, time))
+        // A playing frame waits a moment for its frame on disk rather than
+        // drawing what was rendered because it can't be drawn in time.
+        let patience = if spec.moment == Moment::Playing {
+            crate::render_cache::PATIENCE
+        } else {
+            std::time::Duration::ZERO
+        };
+        let fits = |size: &Size| canvas.0 <= size.width && canvas.1 <= size.height;
+        let asked = std::time::Instant::now();
+        let disk = match looked
+            .then(|| Some(self.disk.as_ref()?.read_within(scene, time, patience)))
             .flatten()
-            .filter(|(size, _)| canvas.0 <= size.width && canvas.1 <= size.height);
+        {
+            Some(crate::render_cache::Read::Frame(size, pixels)) if fits(&size) => {
+                self.disk_late = 0;
+                Some((size, pixels))
+            }
+            Some(crate::render_cache::Read::Late(size))
+                if spec.moment == Moment::Playing
+                    && fits(&size)
+                    && self.disk_late < crate::render_cache::LATE_AT_MOST =>
+            {
+                self.disk_late += 1;
+                return Err(DiskFramePending.into());
+            }
+            _ => None,
+        };
+        // A paused playhead keeps the frames a play starts from read.
+        if spec.moment == Moment::Paused
+            && let Some(disk) = &self.disk
+        {
+            disk.warm(scene, time);
+        }
         let whole = disk.is_some();
+        trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
         trace.lock().unwrap().disk = match (looked, whole) {
             (false, _) => 0,
             (true, false) => 1,
