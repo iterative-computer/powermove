@@ -1611,15 +1611,6 @@ fn stop(running: Running) {
     let _ = running.thread.join();
 }
 
-/// The project's export default for motion blur (`exportDefaults.mblur`,
-/// on unless turned off, as the Export sheet reads it).
-fn export_motion_blur(doc: &pm_model::Document) -> bool {
-    doc.root()
-        .and_then(|r| r.get("exportDefaults"))
-        .and_then(|d| d.get("mblur"))
-        .is_none_or(|m| !matches!(m.kind(), pm_model::NodeKind::Bool(false)))
-}
-
 /// The fill child's request: the viewer's scene as an export job (png
 /// settings stand in for delivery; the child renders `fill`'s frames only).
 fn fill_request(
@@ -1640,7 +1631,7 @@ fn fill_request(
     let settings = ExportSettings {
         format: ExportFormat::PngSequence { sixteen_bit: true },
         // Cached frames are the export's: opaque (the viewer shows the
-        // background), with the project's export motion blur.
+        // background).
         alpha: AlphaOutput::None,
         quality: QualityTier::High,
         size: Size::new(fill.width, fill.height),
@@ -1651,7 +1642,11 @@ fn fill_request(
         },
         audio: false,
         audio_index_playhead: None,
-        motion_blur: export_motion_blur(&source.scene.doc),
+        // The viewer's motion blur, not the Export sheet's default: every
+        // viewer frame draws the blur of the layers that have it on, and a
+        // rendered frame is the paused viewer's picture (drawn with the
+        // export's sample count, as a paused frame is).
+        motion_blur: true,
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
@@ -2111,7 +2106,7 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
 /// (`crate::frame_inputs`).
 fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
     let parts = fingerprint_parts(source, identity);
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v5");
+    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v6");
     for (_, part) in &parts {
         hash.update(part);
     }
@@ -2155,8 +2150,6 @@ fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str,
             "composition",
             part(&|hash| {
                 hash.update(identity.comp.as_bytes());
-                // Frames are rendered as exported: with or without its motion blur.
-                hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
             }),
         ),
         (
@@ -2751,6 +2744,58 @@ mod tests {
             .zip(b)
             .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
             .fold(0., f64::max)
+    }
+
+    /// Motion blur is the same in a paused picture drawn and one read from
+    /// disk, whatever the Export sheet's default says: a thin line crossing
+    /// the frame in a fifth of a second, its layer's blur on, with the
+    /// project's export default on and off, at the composition's size and
+    /// reduced. (Before: the drawn picture had 12 samples, the rendered one
+    /// 16, or none at all with the export default off.)
+    #[test]
+    fn motion_blur_is_the_same_drawn_and_rendered() {
+        for export_default in [true, false] {
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            let layers = project["layers"].as_array_mut().unwrap();
+            let line = layers.iter_mut().find(|l| l["id"] == "L007").unwrap();
+            line["mblur"] = true.into();
+            let key = |t: f64, v: f64, id: &str| {
+                serde_json::json!({"t": t, "v": v, "i": id,
+                    "inInterp": "linear", "outInterp": "linear",
+                    "inEase": {"speed": 0, "influence": 33.333333333333336},
+                    "outEase": {"speed": 0, "influence": 33.333333333333336},
+                    "autoBezier": false, "continuous": false})
+            };
+            line["p"]["position.y"]["kf"] =
+                serde_json::json!([key(0.9, 20., "kfast1"), key(1.1, 340., "kfast2")]);
+            project["exportDefaults"] = serde_json::json!({ "mblur": export_default });
+            let scene = scene_from(&project.to_string());
+            let (_dir, disk) = filled(&scene);
+            for drawable in [(640, 360), (320, 180)] {
+                let (_, drawn) = paused_picture(None, &scene, drawable);
+                let (from_disk, rendered) = paused_picture(Some(&disk), &scene, drawable);
+                assert!(from_disk, "{drawable:?}: the frame on disk is shown");
+                assert_eq!(
+                    apart(&rendered, &drawn),
+                    0.,
+                    "export default {export_default}, {drawable:?}: the blur differs"
+                );
+            }
+            // The blur is there: the same frame with the layer's switch off
+            // is another picture.
+            let line = project["layers"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|l| l["id"] == "L007")
+                .unwrap();
+            line["mblur"] = false.into();
+            let sharp = scene_from(&project.to_string());
+            let (_, blurred) = paused_picture(None, &scene, (640, 360));
+            let (_, unblurred) = paused_picture(None, &sharp, (640, 360));
+            assert!(apart(&blurred, &unblurred) > 0.05);
+        }
     }
 
     /// A paused picture is the same whether its frame is rendered on disk

@@ -158,11 +158,17 @@ impl FrameSpec {
                 f64::from(crop.y) * self.scale,
             ));
         }
-        // Today's viewer: 6 motion samples while playing, 12 stopped.
-        request.motion_blur = pm_render::motion::MotionBlur::Kind(if playing {
+        // Playing and dragged frames are previews: 6 motion samples playing,
+        // 12 dragged. A paused frame and a capture are the picture a
+        // delivery draws, and the one a rendered frame on disk holds: the
+        // export's count (16, or the composition's own), so a paused
+        // picture is the same drawn or read from disk.
+        request.motion_blur = pm_render::motion::MotionBlur::Kind(if playing && !self.exact {
             MotionBlurKind::PreviewPlaying
-        } else {
+        } else if self.moment == Moment::Scrub && !self.exact {
             MotionBlurKind::PreviewPaused
+        } else {
+            MotionBlurKind::Export
         });
         request.sampling = self.sampling();
         // A capture reads the exact picture: final output, as an export
