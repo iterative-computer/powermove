@@ -751,6 +751,9 @@ struct TabIvars {
     hovered: Cell<bool>,
     /// Carried along the strip by the pointer.
     lifted: Cell<bool>,
+    /// One of the strip's own buttons (every project, a new one): quieter
+    /// ink than a tab's.
+    tool: Cell<bool>,
 }
 define_class!(
     /// One cell of the toolbar's project strip: a project tab (its title,
@@ -825,6 +828,7 @@ impl TabView {
                     selected: Cell::new(selected),
                     hovered: Cell::new(false),
                     lifted: Cell::new(false),
+                    tool: Cell::new(false),
                 })),
                 initWithFrame: frame
             ]
@@ -876,7 +880,11 @@ impl TabView {
         } else if let Some(button) = label.downcast_ref::<NSButton>() {
             // A glyph is the toolbar's glyph ink, as New Project's beside
             // the tabs: the pill alone says Home is showing.
-            let glyph = if active { NSColor::labelColor() } else { ink };
+            let glyph = if active && !self.ivars().tool.get() {
+                NSColor::labelColor()
+            } else {
+                ink
+            };
             button.setContentTintColor(Some(&glyph));
         }
         if let Some(close) = close {
@@ -2571,16 +2579,42 @@ impl Host {
             x += width + TAB_GAP;
         }
         // The strip's own buttons, after the rule: every project, then a
-        // new one. Each is a round target of the tabs' height.
+        // new one. Each is a round target of the tabs' height in a cell of
+        // its own, so the pointer finds the strip's wash under it, never
+        // the toolbar's bezel. The cells stand in a holder: the strip's
+        // tabs are its own children only.
         let mut x = x - TAB_GAP + TAB_TOOLS_GAP;
+        let start = x;
+        let tools = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(start, 0.),
+                NSSize::new(if overflow { TAB_MORE } else { 0. } + height, height),
+            ),
+        );
+        self.tabs.addSubview(&tools);
+        let tool = |button: &NSButton, x: f64| {
+            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(height, height)));
+            let cell = TabView::new(
+                mtm,
+                NSRect::new(NSPoint::new(x - start, 0.), NSSize::new(height, height)),
+                Retained::into_super(Retained::into_super(objc2::Message::retain(button))),
+                None,
+                false,
+                false,
+            );
+            cell.ivars().tool.set(true);
+            cell.addSubview(button);
+            cell.restyle();
+            tools.addSubview(&cell);
+        };
         if overflow {
             let more = NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
                 NSRect::new(NSPoint::new(x, 0.), NSSize::new(height, height)),
                 true,
             );
-            more.setBezelStyle(NSBezelStyle::Toolbar);
-            more.setShowsBorderOnlyWhileMouseInside(true);
+            more.setBordered(false);
             more.addItemWithTitle(&NSString::from_str(""));
             // The glyph stands in the middle of the target, in place of the
             // pull-down's own arrow at its edge.
@@ -2594,7 +2628,6 @@ impl Host {
                 face.setImage(Some(&glyph("chevron.down", "All Projects", 10.)));
             }
             more.setImagePosition(NSCellImagePosition::ImageOnly);
-            more.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
             if let Some(menu) = more.menu() {
                 for tab in &tabs {
                     let row = item(&tab.title, sel!(selectTab:), tab.window);
@@ -2608,7 +2641,7 @@ impl Host {
             }
             more.setToolTip(Some(&NSString::from_str("All Projects")));
             more.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tabs.all")));
-            self.tabs.addSubview(&more);
+            tool(&more, x);
             x += TAB_MORE;
         }
         let add = unsafe {
@@ -2619,16 +2652,11 @@ impl Host {
                 mtm,
             )
         };
-        add.setBezelStyle(NSBezelStyle::Toolbar);
-        add.setShowsBorderOnlyWhileMouseInside(true);
-        add.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        add.setBordered(false);
+        add.setButtonType(NSButtonType::MomentaryChange);
         add.setToolTip(Some(&NSString::from_str("New Project")));
         add.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.newProject")));
-        add.setFrame(NSRect::new(
-            NSPoint::new(x, 0.),
-            NSSize::new(height, height),
-        ));
-        self.tabs.addSubview(&add);
+        tool(&add, x);
         self.tabs_width.setConstant(x + height + TAB_INSET);
         self.tabs.setNeedsDisplay(true);
         *self.tabs_shown.borrow_mut() = (tabs, room);
@@ -2706,7 +2734,7 @@ impl Host {
     /// Development builds: a tab action by index, through the same code the
     /// tab's buttons and menu run (`--open reviewTab:close:1`). `press` is
     /// a pointer press and release on the tab; `hover` the pointer over the
-    /// strip's tab at that place. `dragleft`
+    /// strip's tab at that place, `hovertool` over New Project. `dragleft`
     /// and `dragright` carry the tab one place along the strip with pointer
     /// events posted to this app's own queue; `holdleft` and `holdright`
     /// keep it lifted for a few seconds first, for a capture.
@@ -2728,6 +2756,22 @@ impl Host {
             "hover" => {
                 if let Some(tab) = strip_tabs(&self.tabs).get(index) {
                     tab.hover(true);
+                }
+            }
+            // The strip's last own button (New Project) as the pointer
+            // over it.
+            "hovertool" => {
+                let cell = self
+                    .tabs
+                    .subviews()
+                    .to_vec()
+                    .into_iter()
+                    .filter(|v| !v.isKindOfClass(TabView::class()))
+                    .flat_map(|holder| holder.subviews().to_vec())
+                    .filter_map(|v| v.downcast::<TabView>().ok())
+                    .last();
+                if let Some(cell) = cell {
+                    cell.hover(true);
                 }
             }
             "left" => move_tab(window, -1),
@@ -4494,13 +4538,14 @@ pub fn accent_color() -> Retained<NSColor> {
     );
     unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
 }
-/// The fill of a selected tab, segment or toolbar toggle, in place of the
-/// accent an active window gives an "on" control: selection is neutral.
-/// AppKit draws the label on a coloured bezel in white, so the fill is the
-/// system's graphite selection: mid grey on a light ground, a lift on a dark.
+/// The fill of a selected segment, in place of the accent an active window
+/// gives an "on" control: selection is neutral, the selected tab's pill
+/// (paper on a light ground, a lift of the ground on a dark one). AppKit
+/// would draw a title or template glyph white on it, so the control host
+/// gives each segment a face in the label ink (`native_control`).
 pub fn selected_color() -> Retained<NSColor> {
-    const LIGHT: (f64, f64) = (0., 0.45);
-    const DARK: (f64, f64) = (1., 0.2);
+    const LIGHT: (f64, f64) = (1., 0.96);
+    const DARK: (f64, f64) = (1., 0.16);
     let of = |(white, alpha): (f64, f64)| {
         NSColor::colorWithSRGBRed_green_blue_alpha(white, white, white, alpha)
     };

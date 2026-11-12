@@ -526,9 +526,12 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    // Bar pop-ups are borderless titles; the rest keep the bezel.
-                    inline: crate::v4_compile::variant(node) == Some("inline")
+                    // Bar pop-ups are borderless titles; the rest keep the
+                    // bezel. `quiet` is the borderless title in the
+                    // secondary ink, for an option bar under a composer.
+                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
                 },
