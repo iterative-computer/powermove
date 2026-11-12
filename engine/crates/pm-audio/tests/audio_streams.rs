@@ -259,3 +259,55 @@ fn an_unlisted_wide_clip_does_not_change_a_listed_stream() {
         );
     }
 }
+
+/// A listed MP3 stream is the stream asked for: of two MP3 streams in one
+/// file (the whole two-second tone, then its first half second), a clip
+/// that hears only the second hears half a second of tone.
+#[test]
+fn a_listed_mp3_stream_is_the_one_heard() {
+    let dir = temp_dir("audio-streams-mp3");
+    let tone = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/tone.mp3");
+    for name in ["two.mkv", "two.mov"] {
+        let file = dir.join(name);
+        let status = std::process::Command::new(ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&tone)
+            .args(["-t", "0.5", "-i"])
+            .arg(&tone)
+            .args(["-map", "0:a", "-map", "1:a", "-c:a", "copy"])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{name}");
+        let rig = Rig::new(&[("m", &file)]);
+        let streams = |on: [bool; 2]| {
+            format!(
+                r#"{{"m":{{"kind":"audio","audioStreams":[{{"index":0,"channels":2,"sampleRate":48000,"on":{}}},{{"index":1,"channels":2,"sampleRate":48000,"on":{}}}]}}}}"#,
+                on[0], on[1]
+            )
+        };
+        let heard_for = |on: [bool; 2]| {
+            let doc = layer_document(&streams(on), 2.0);
+            let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, 2 * SR as i64, 4096);
+            let last = out[0].iter().rposition(|v| v.abs() > 0.01).unwrap_or(0);
+            last as f64 / f64::from(SR)
+        };
+        let first = heard_for([true, false]);
+        let second = heard_for([false, true]);
+        assert!(first > 1.9, "{name}: the first stream lasts {first} s");
+        assert!(
+            (0.4..0.6).contains(&second),
+            "{name}: the second stream lasts {second} s"
+        );
+    }
+}
+
+/// [`document`] with an audio layer `dur` seconds long.
+fn layer_document(assets: &str, dur: f64) -> Document {
+    let layer = audio("A", "m", 0.0, dur, "", "");
+    let text = format!(
+        r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":{dur},"layers":[{layer}],"comps":{{}},"assets":{assets},"params":{{}}}}"#
+    );
+    Document::new(Some(parse(&text).unwrap()), 1)
+}

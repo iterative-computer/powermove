@@ -535,8 +535,9 @@ impl SourceCache {
         let decoder = AudioDecoder::open(path, stream)?;
         let mut info = decoder.info().clone();
         // The FFmpeg probe gives the stream's facts (layout, length, priming);
-        // MP3 samples come from today's decoder.
-        let decoder = if info.codec == "mp3" {
+        // MP3 samples come from today's decoder, which reads a file's
+        // default track only: a stream asked for by index is FFmpeg's.
+        let decoder = if info.codec == "mp3" && stream.is_none() {
             match crate::mp3::Mp3Decoder::open(path, info.channels()) {
                 Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
                 Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
