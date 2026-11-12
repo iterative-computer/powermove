@@ -1507,3 +1507,54 @@ fn builtin_costs_at_uhd() {
         );
     }
 }
+
+/// An effect's pixel-sized values are composition pixels at any render
+/// scale: `v_px` counts them and `u_texel` is one of them, so a frame drawn
+/// at half scale (a playing viewer, a reduced quality) shows the effect at
+/// the size the 1:1 export does. A full-frame solid paints red from
+/// `v_px.x = 40` and green from `40 × u_texel.x` in its own UV.
+#[test]
+fn effect_pixels_are_composition_pixels_at_any_render_scale() {
+    let _gpu = gpu();
+    const EDGE: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform float u_edge;\nout vec4 o;\nvoid main(){ o = vec4(step(u_edge, v_px.x), step(u_edge * u_texel.x, v_st.x), 0.0, 1.0); }\n";
+    let mut set = builtin_definitions();
+    set.definitions.push(raw_effect(
+        "acme.edge",
+        EDGE,
+        json!([{ "type": "number", "key": "edge", "default": 40, "min": 0, "max": 1000, "step": null }]),
+        false,
+    ));
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let (w, h) = (128u32, 64u32);
+    let mut plate = layer(
+        "plate",
+        "solid",
+        json!({ "color": "#000000", "w": w, "h": h }),
+        64.0,
+        32.0,
+        1.0,
+    );
+    plate["fx"] = json!([fx("e", "acme.edge", json!({}))]);
+    let doc = load(&project(w, h, 1.0, solid_fill("#000000"), vec![plate]));
+    let res = MapResolver::default();
+    // The first column at or past half intensity in channel `c` of the middle row.
+    let edge = |px: &[f32], width: u32, c: usize| {
+        let y = (px.len() / 4 / width as usize) / 2;
+        (0..width as usize)
+            .find(|x| px[(y * width as usize + x) * 4 + c] >= 0.5)
+            .map(|x| x as f64)
+    };
+    for scale in [1.0, 0.5] {
+        let size = Size::new((f64::from(w) * scale) as u32, (f64::from(h) * scale) as u32);
+        let req = RenderRequest::at_scale(size, scale, Precision::Float16);
+        let px = render(&mut r, &doc, &res, 0.0, &req).unwrap();
+        for (c, what) in [(0, "v_px"), (1, "u_texel")] {
+            let at = edge(&px, size.width, c).map(|x| x / scale);
+            assert!(
+                at.is_some_and(|x| (x - 40.0).abs() <= 1.0 / scale),
+                "{what} at scale {scale}: edge at composition x {at:?}, not 40"
+            );
+        }
+    }
+}

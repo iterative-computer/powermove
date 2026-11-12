@@ -116,6 +116,11 @@ pub fn begin_quit(cx: &mut App) {
         .filter_map(|weak| weak.upgrade())
         .filter(|entity| entity.read(cx).dirty())
         .collect();
+    let asked: Vec<_> = dirty.iter().map(Entity::entity_id).collect();
+    let q = cx.global_mut::<QuitCoordinator>();
+    q.queue = questions_first(std::mem::take(&mut q.queue), |weak| {
+        asked.contains(&weak.entity_id())
+    });
     let [first, _, ..] = &dirty[..] else {
         return next_quit(cx);
     };
@@ -134,6 +139,14 @@ pub fn begin_quit(cx: &mut App) {
         });
     })
     .detach();
+}
+/// The order a quit takes its windows in (from the end of the list): those
+/// with unsaved changes before any clean one. Their Save question is then on
+/// screen at once instead of after every clean project has closed, and
+/// Cancel leaves every window as it was.
+fn questions_first<T>(windows: Vec<T>, unsaved: impl Fn(&T) -> bool) -> Vec<T> {
+    let (asked, clean): (Vec<T>, Vec<T>) = windows.into_iter().partition(|w| unsaved(w));
+    clean.into_iter().chain(asked).collect()
 }
 fn next_quit(cx: &mut App) {
     while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
@@ -563,8 +576,17 @@ impl Controller {
         if p.is_none() {
             self.session = None;
         }
-        let asking =
-            self.recovery_pending || !crate::alert::dismiss_notice(&self.host.borrow().window);
+        // A second Quit's own prompt on this window (Quit Now, while the
+        // quit waits) is not a question that holds the close: it goes once
+        // there is nothing left to wait for.
+        let quit_now_here = intent == Intent::Quit
+            && cx
+                .global::<QuitCoordinator>()
+                .asking_now
+                .as_ref()
+                .is_some_and(|(window, _)| **window == *self.host.borrow().window);
+        let asking = self.recovery_pending
+            || (!quit_now_here && !crate::alert::dismiss_notice(&self.host.borrow().window));
         let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
@@ -588,6 +610,11 @@ impl Controller {
             })
             .detach();
             return;
+        }
+        if quit_now_here
+            && let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
+        {
+            window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
         }
         match state {
             CloseState::Saving => {
@@ -874,6 +901,17 @@ mod tests {
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
         assert_eq!(quit_waits_for(Dirty, false, false, false), None);
+    }
+    /// A quit asks every window with unsaved changes before it closes a
+    /// clean one (windows are taken from the end).
+    #[test]
+    fn a_quit_asks_about_unsaved_work_before_closing_clean_windows() {
+        let unsaved = |w: &&str| w.ends_with('*');
+        assert_eq!(
+            questions_first(vec!["a*", "b", "c", "d*"], unsaved),
+            ["b", "c", "a*", "d*"]
+        );
+        assert_eq!(questions_first(vec!["a", "b"], unsaved), ["a", "b"]);
     }
     /// A quit the project library refuses is asked about, never only
     /// refused: Cancel is the default, and quitting anyway is offered with

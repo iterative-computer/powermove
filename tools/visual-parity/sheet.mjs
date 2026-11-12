@@ -2,11 +2,19 @@
 //
 //   node tools/visual-parity/sheet.mjs --dir <out> [--title Paper] [--notes notes.json] [--summary summary.txt]
 //
-// Reads <dir>/v1/manifest.json and <dir>/v2/manifest.json, writes a heat map
-// per sample to <dir>/diff/ and <dir>/index.html: rows are times, columns are
-// v1 | V2 | difference, then every frame ranked by visible difference.
-// "Visible" ignores anti-aliasing: each image is box-filtered over 3x3 first,
-// and a pixel counts when a channel still differs by more than 16/255.
+// Reads <dir>/v2/manifest.json and, when present, the delivered video's frames
+// (ref/, with ref-prev/ and ref-next/), v1's (v1/) and the paused viewer's
+// (v2viewer/). Writes a heat map per sample to <dir>/diff/ and <dir>/index.html:
+// rows are times, columns are video | v1 | V2 | V2 viewer | difference, then
+// every frame ranked by perceptible difference. V2 is judged against the
+// video when there is one, else against v1.
+//
+// Perceptible: both frames are averaged over 2×2 then 3×3 (compression noise
+// and anti-aliasing go), converted to CIELAB, and a pixel counts when ΔE76 >
+// 6. "Visible" (the older measure: 3×3 averaged, a channel off by more than
+// 16/255) is kept beside it. Timing: V2 is also compared with the video's
+// frames one before and one after; when one of them is clearly closer, the row
+// says so (a timing difference, not a content one).
 // notes.json maps a time label ("t13_458") to the cause or the accepted reason.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -20,86 +28,185 @@ const title = opt.title ?? path.basename(dir);
 const notes = opt.notes && existsSync(opt.notes) ? JSON.parse(readFileSync(opt.notes, 'utf8')) : {};
 // Paragraphs (blank-line separated) shown under the title: the findings.
 const summary = opt.summary && existsSync(opt.summary) ? readFileSync(opt.summary, 'utf8').trim().split(/\n\s*\n/) : [];
-const v1 = JSON.parse(readFileSync(path.join(dir, 'v1/manifest.json'), 'utf8'));
-const v2 = existsSync(path.join(dir, 'v2/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'v2/manifest.json'), 'utf8')) : { samples: [] };
-const viewer = existsSync(path.join(dir, 'v2viewer/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'v2viewer/manifest.json'), 'utf8')) : null;
-const viewerByTime = new Map((viewer?.samples ?? []).map((s) => [s.time.toFixed(3), `v2viewer/${s.file}`]));
+const manifest = (name) => (existsSync(path.join(dir, name, 'manifest.json')) ? JSON.parse(readFileSync(path.join(dir, name, 'manifest.json'), 'utf8')) : null);
+const v1 = manifest('v1');
+const v2 = manifest('v2') ?? { samples: [] };
+const viewer = manifest('v2viewer');
+const ref = manifest('ref');
+const prev = manifest('ref-prev');
+const next = manifest('ref-next');
+const byTime = (m, dirName) => new Map((m?.samples ?? []).map((s) => [s.time.toFixed(3), `${dirName}/${s.file}`]));
+const viewerByTime = byTime(viewer, 'v2viewer');
+const refByTime = byTime(ref, 'ref');
+const prevByTime = byTime(prev, 'ref-prev');
+const nextByTime = byTime(next, 'ref-next');
+const v1ByTime = byTime(v1, 'v1');
+const project = (v1 ?? v2).project;
 mkdirSync(path.join(dir, 'diff'), { recursive: true });
 
 const THRESHOLD = 16;
-function blur3(img) {
-  const { width: w, height: h, rgba } = img;
-  const out = new Float32Array(w * h * 3);
+const DELTA_E = 6;
+function boxBlur3(src, w, h, channels) {
+  const out = new Float32Array(w * h * channels);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    let r = 0, g = 0, b = 0, n = 0;
+    const acc = new Float32Array(channels);
+    let n = 0;
     for (let dy = -1; dy <= 1; dy++) {
       const yy = y + dy;
       if (yy < 0 || yy >= h) continue;
       for (let dx = -1; dx <= 1; dx++) {
         const xx = x + dx;
         if (xx < 0 || xx >= w) continue;
-        const i = (yy * w + xx) * 4;
-        r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; n++;
+        const i = (yy * w + xx) * channels;
+        for (let c = 0; c < channels; c++) acc[c] += src[i + c];
+        n++;
       }
     }
-    const o = (y * w + x) * 3;
-    out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n;
+    const o = (y * w + x) * channels;
+    for (let c = 0; c < channels; c++) out[o + c] = acc[c] / n;
   }
   return out;
 }
+const rgbOf = (img) => {
+  const { width: w, height: h, rgba } = img;
+  const out = new Float32Array(w * h * 3);
+  for (let i = 0, j = 0; j < out.length; i += 4, j += 3) { out[j] = rgba[i]; out[j + 1] = rgba[i + 1]; out[j + 2] = rgba[i + 2]; }
+  return out;
+};
+function half(src, w, h) {
+  const hw = w >> 1, hh = h >> 1;
+  const out = new Float32Array(hw * hh * 3);
+  for (let y = 0; y < hh; y++) for (let x = 0; x < hw; x++) for (let c = 0; c < 3; c++) {
+    const at = (xx, yy) => src[((y * 2 + yy) * w + x * 2 + xx) * 3 + c];
+    out[(y * hw + x) * 3 + c] = (at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1)) / 4;
+  }
+  return out;
+}
+const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+const fLab = (t) => (t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+function lab(src) {
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i += 3) {
+    const r = lin(src[i]), g = lin(src[i + 1]), b = lin(src[i + 2]);
+    const x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+    const fx = fLab(x), fy = fLab(y), fz = fLab(z);
+    out[i] = 116 * fy - 16; out[i + 1] = 500 * (fx - fy); out[i + 2] = 200 * (fy - fz);
+  }
+  return out;
+}
+// Area average to W × H (each output pixel the mean of the source area
+// under it, partial pixels weighted): how a view shows a larger frame.
+function areaResize(src, w, h, W, H) {
+  const sx = w / W, sy = h / H;
+  const out = new Float32Array(W * H * 3);
+  for (let Y = 0; Y < H; Y++) {
+    const y0 = Y * sy, y1 = y0 + sy;
+    for (let X = 0; X < W; X++) {
+      const x0 = X * sx, x1 = x0 + sx;
+      let r = 0, g = 0, b = 0;
+      for (let y = Math.floor(y0); y < Math.min(h, Math.ceil(y1)); y++) {
+        const wy = Math.min(y + 1, y1) - Math.max(y, y0);
+        for (let x = Math.floor(x0); x < Math.min(w, Math.ceil(x1)); x++) {
+          const wt = (Math.min(x + 1, x1) - Math.max(x, x0)) * wy, i = (y * w + x) * 3;
+          r += src[i] * wt; g += src[i + 1] * wt; b += src[i + 2] * wt;
+        }
+      }
+      const o = (Y * W + X) * 3, n = sx * sy;
+      out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n;
+    }
+  }
+  return out;
+}
+const cache = new Map();
+// A frame's measures, at its own size or area-scaled to `size` ([w, h]).
+function prepared(file, size) {
+  const key = size ? `${file}@${size.join('x')}` : file;
+  if (cache.has(key)) return cache.get(key);
+  const img = decodePng(path.join(dir, file));
+  let rgb = rgbOf(img), w = img.width, h = img.height;
+  if (size && (size[0] !== w || size[1] !== h)) { rgb = areaResize(rgb, w, h, size[0], size[1]); [w, h] = size; }
+  const p = { w, h, visible: boxBlur3(rgb, w, h, 3), lab: lab(boxBlur3(half(rgb, w, h), w >> 1, h >> 1, 3)) };
+  if (cache.size > 8) cache.delete(cache.keys().next().value);
+  cache.set(key, p);
+  return p;
+}
 function heat(v) {
   // black under the threshold, then blue -> red -> yellow -> white
-  if (v <= THRESHOLD) return [v * 2, v * 2, v * 2];
-  const t = Math.min(1, (v - THRESHOLD) / 96);
+  if (v <= DELTA_E) return [v * 4, v * 4, v * 4];
+  const t = Math.min(1, (v - DELTA_E) / 30);
   if (t < 1 / 3) return [255 * t * 3, 0, 255 * (1 - t * 3) + 64 * t * 3];
   if (t < 2 / 3) return [255, 255 * (t - 1 / 3) * 3, 0];
   return [255, 255, 255 * (t - 2 / 3) * 3];
 }
-
-// Visible difference of two frames; writes the heat map when `diff` is given.
-function compare(fileA, fileB, diff) {
-  const a = decodePng(fileA), b = decodePng(fileB);
-  if (a.width !== b.width || a.height !== b.height) return { error: `size ${a.width}x${a.height} vs ${b.width}x${b.height}` };
-  const fa = blur3(a), fb = blur3(b);
-  const px = diff ? Buffer.alloc(a.width * a.height * 4) : null;
-  let visible = 0, sum = 0, max = 0;
-  for (let i = 0, j = 0; i < fa.length; i += 3, j += 4) {
-    const d = Math.max(Math.abs(fa[i] - fb[i]), Math.abs(fa[i + 1] - fb[i + 1]), Math.abs(fa[i + 2] - fb[i + 2]));
-    sum += d; if (d > max) max = d; if (d > THRESHOLD) visible++;
+// Perceptible and visible difference of two frames; writes the ΔE heat map
+// (at half size) when `diff` is given.
+// `fit`: B is area-scaled to A's size first (a viewer frame against the export).
+function compare(fileA, fileB, diff, fit = false) {
+  const a = prepared(fileA), b = prepared(fileB, fit ? [a.w, a.h] : undefined);
+  if (a.w !== b.w || a.h !== b.h) return { error: `size ${a.w}x${a.h} vs ${b.w}x${b.h}` };
+  let visible = 0;
+  for (let i = 0; i < a.visible.length; i += 3) {
+    const d = Math.max(Math.abs(a.visible[i] - b.visible[i]), Math.abs(a.visible[i + 1] - b.visible[i + 1]), Math.abs(a.visible[i + 2] - b.visible[i + 2]));
+    if (d > THRESHOLD) visible++;
+  }
+  const hw = a.w >> 1, hh = a.h >> 1;
+  const px = diff ? Buffer.alloc(hw * hh * 4) : null;
+  let perceptible = 0, sum = 0;
+  for (let i = 0, j = 0; i < a.lab.length; i += 3, j += 4) {
+    const d = Math.hypot(a.lab[i] - b.lab[i], a.lab[i + 1] - b.lab[i + 1], a.lab[i + 2] - b.lab[i + 2]);
+    sum += d; if (d > DELTA_E) perceptible++;
     if (px) { const [r, g, bb] = heat(d); px[j] = r; px[j + 1] = g; px[j + 2] = bb; px[j + 3] = 255; }
   }
-  if (px) writeFileSync(diff, encodePng(a.width, a.height, px));
-  return { visible: visible / (a.width * a.height), mean: sum / (a.width * a.height), max };
+  if (px) writeFileSync(path.join(dir, diff), encodePng(hw, hh, px));
+  return { perceptible: perceptible / (hw * hh), visible: visible / (a.w * a.h), mean: sum / (hw * hh) };
 }
 
-// With a delivered reference (ref/, ref-frames.mjs) both apps are judged
-// against it and the heat map is V2's; without one, V2 against v1.
-const ref = existsSync(path.join(dir, 'ref/manifest.json')) ? JSON.parse(readFileSync(path.join(dir, 'ref/manifest.json'), 'utf8')) : null;
-const refByTime = new Map((ref?.samples ?? []).map((s) => [s.time.toFixed(3), `ref/${s.file}`]));
 const rows = [];
 const v2ByTime = new Map(v2.samples.map((s) => [s.time.toFixed(3), s]));
-for (const s of v1.samples) {
+for (const s of v1?.samples ?? v2.samples) {
   const key = s.time.toFixed(3);
   if (ref && !refByTime.has(key)) continue;
-  const label = s.file.replace(/\.png$/, '');
-  const row = { time: s.time, label, v1: `v1/${s.file}`, ref: refByTime.get(key), viewer: viewerByTime.get(key), note: notes[label] };
+  const label = s.file.replace(/^.*\//, '').replace(/\.png$/, '');
+  const row = { time: s.time, label, v1: v1ByTime.get(key), ref: refByTime.get(key), viewer: viewerByTime.get(key), note: notes[label] };
   const other = v2ByTime.get(key);
   if (!other) { row.missing = 'no V2 frame'; rows.push(row); continue; }
   row.v2 = `v2/${other.file}`;
   const base = row.ref ?? row.v1;
-  const result = compare(path.join(dir, base), path.join(dir, row.v2), path.join(dir, `diff/${label}.png`));
+  const result = compare(base, row.v2, `diff/${label}.png`);
   if (result.error) { row.missing = result.error; rows.push(row); continue; }
   Object.assign(row, result, { diff: `diff/${label}.png` });
-  if (row.ref) row.v1vs = compare(path.join(dir, row.ref), path.join(dir, row.v1)).visible;
+  if (row.ref && row.v1) {
+    row.v1vs = compare(row.ref, row.v1).perceptible;
+    // V2 against v1 on the same Mac: a difference only V2 has.
+    row.v2v1 = compare(row.v1, row.v2, `diff/${label}-v1.png`).perceptible;
+    row.v1Diff = `diff/${label}-v1.png`;
+  }
+  // The paused viewer against this build's export, scaled to the view.
+  if (row.viewer) {
+    const r = compare(row.viewer, row.v2, `diff/${label}-viewer.png`, true);
+    if (!r.error) { row.viewerVs = r.perceptible; row.viewerDiff = `diff/${label}-viewer.png`; }
+  }
+  // Timing: the neighbouring video frames.
+  const around = [[-1, prevByTime.get(key)], [1, nextByTime.get(key)]].filter(([, f]) => f);
+  for (const [shift, file] of around) {
+    const p = compare(file, row.v2).perceptible;
+    if (p < 0.7 * row.perceptible && row.perceptible - p > 0.001 && (row.timing === undefined || p < row.timing.perceptible)) row.timing = { shift, perceptible: p };
+  }
   rows.push(row);
-  console.log(`${label} V2 visible ${(row.visible * 100).toFixed(2)}%${row.ref ? ` (v1 ${(row.v1vs * 100).toFixed(2)}%)` : ''} mean ${row.mean.toFixed(2)} max ${row.max.toFixed(0)}`);
+  console.log(`${label} perceptible ${(row.perceptible * 100).toFixed(2)}% visible ${(row.visible * 100).toFixed(2)}%${row.timing ? ` (video frame ${row.timing.shift > 0 ? '+' : ''}${row.timing.shift}: ${(row.timing.perceptible * 100).toFixed(2)}%)` : ''}`);
 }
 
 const pct = (v) => (v === undefined ? '—' : `${(v * 100).toFixed(2)} %`);
 const esc = (t) => String(t ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const tc = (t, fps) => `${Math.floor(t + 1e-6)}:${String(Math.round((t - Math.floor(t + 1e-6)) * fps)).padStart(2, '0')}`;
-const fps = v1.project.fps;
-const ranked = rows.filter((r) => r.visible !== undefined).sort((x, y) => y.visible - x.visible);
+const fps = project.fps;
+const ranked = rows.filter((r) => r.perceptible !== undefined).sort((x, y) => y.perceptible - x.perceptible);
+const BAD = 0.002;
+const timingNote = (r) => (r.timing ? `Closer to the video frame ${r.timing.shift > 0 ? 'after' : 'before'} (${pct(r.timing.perceptible)}): timing. ` : '');
+const columns = [ref && 'Delivered video', v1 && 'v1.2.0', 'V2 export', viewer && 'V2 viewer, paused (screen)', 'Difference', ref && v1 && 'V2 vs v1', viewer && 'Viewer vs export'].filter(Boolean);
+const img = (src, alt) => `<td class="img">${src ? `<a href="${src}"><img loading="lazy" src="${src}" alt="${esc(alt)}"></a>` : ''}</td>`;
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} parity</title>
 <style>
@@ -109,25 +216,23 @@ body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:13px/1.4 -a
 h1{font-size:20px;margin:0 0 4px}p{margin:0 0 12px;color:var(--muted)}
 table{border-collapse:collapse;width:100%}td,th{border-top:1px solid var(--line);padding:6px;vertical-align:top;text-align:left}
 th{font-weight:600;color:var(--muted)}img{width:100%;display:block;cursor:zoom-in}
-.cols td.img{width:${Math.floor(92 / (3 + (ref ? 1 : 0) + (viewer ? 1 : 0)))}%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
+.cols td.img{width:${Math.floor(92 / columns.length)}%}.num{white-space:nowrap;font-variant-numeric:tabular-nums}.bad{color:var(--bad)}.ok{color:var(--ok)}
 .note{color:var(--muted);max-width:40ch}.summary{color:var(--fg);max-width:90ch}
 </style></head><body>
-<h1>${esc(title)}: ${ref ? 'delivered video | ' : ''}v1.2.0 | V2</h1>
-<p>${esc(v1.project.w)}×${esc(v1.project.h)} at ${esc(fps)} fps, ${rows.length} samples. ${ref ? `Reference: ${esc(ref.source)}; the heat map is V2 against it, and v1 is scored against it too. ` : ''}v1: ${esc(v1.source)}. V2: ${esc(v2.source ?? 'missing')}.
-Visible = share of pixels whose 3×3-averaged colour still differs by more than ${THRESHOLD}/255 in a channel. Heat: black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` The last column is ${esc(viewer.source)}: for looking, not measured.` : ''}</p>
+<h1>${esc(title)}: ${columns.slice(0, -1).map(esc).join(' | ')}</h1>
+<p>${esc(project.w)}×${esc(project.h)} at ${esc(fps)} fps, ${rows.length} samples. ${ref ? `Reference: ${esc(ref.source)}; the heat map is V2 against it. ` : ''}${v1 ? `v1: ${esc(v1.source)}. ` : ''}V2: ${esc(v2.source ?? 'missing')}.
+Perceptible = share of pixels whose colour, averaged over 2×2 then 3×3 (compression noise and anti-aliasing go), differs by ΔE76 > ${DELTA_E}; visible = 3×3 averaged, a channel off by more than ${THRESHOLD}/255. Rows over ${pct(BAD)} perceptible are red. Heat (half size): black = same, blue → red → yellow = larger. Click an image for full size.${viewer ? ` ${esc(viewer.source)}; it is scored against this build's export area-scaled to the view (same measure, last column).` : ''}</p>
 ${summary.map((p) => `<p class="summary">${esc(p)}</p>`).join('\n')}
-<h2>Ranked by visible difference</h2>
-<table><tr><th>Time</th><th>Visible${ref ? ' (V2 vs video)' : ''}</th>${ref ? '<th>v1 vs video</th>' : ''}<th>Mean</th><th>Cause or accepted reason</th></tr>
-${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</td>${ref ? `<td class="num">${pct(r.v1vs)}</td>` : ''}<td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(r.note ?? '')}</td></tr>`).join('\n')}
-${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="${ref ? 4 : 3}">${esc(r.missing)}</td></tr>`).join('\n')}
+<h2>Ranked by perceptible difference</h2>
+<table><tr><th>Time</th><th>Perceptible${ref ? ' (V2 vs video)' : ''}</th><th>Visible</th>${ref && v1 ? '<th>v1 vs video</th><th>V2 vs v1</th>' : ''}${viewer ? '<th>Viewer vs export</th>' : ''}<th>Mean ΔE</th><th>Cause or accepted reason</th></tr>
+${ranked.map((r) => `<tr><td class="num"><a href="#${r.label}">${tc(r.time, fps)} (${r.time.toFixed(3)} s)</a></td><td class="num ${r.perceptible > BAD ? 'bad' : 'ok'}">${pct(r.perceptible)}</td><td class="num">${pct(r.visible)}</td>${ref && v1 ? `<td class="num">${pct(r.v1vs)}</td><td class="num ${r.v2v1 > BAD ? 'bad' : ''}">${pct(r.v2v1)}</td>` : ''}${viewer ? `<td class="num ${r.viewerVs > BAD ? 'bad' : ''}">${pct(r.viewerVs)}</td>` : ''}<td class="num">${r.mean.toFixed(2)}</td><td class="note">${esc(timingNote(r) + (r.note ?? ''))}</td></tr>`).join('\n')}
+${rows.filter((r) => r.missing).map((r) => `<tr><td class="num">${r.time.toFixed(3)} s</td><td class="bad" colspan="5">${esc(r.missing)}</td></tr>`).join('\n')}
 </table>
 <h2>Frames</h2>
-<table class="cols"><tr><th>Time</th>${ref ? '<th>Delivered video</th>' : ''}<th>v1.2.0</th><th>V2</th><th>Difference</th>${viewer ? '<th>V2 viewer, paused (screen)</th>' : ''}</tr>
-${rows.map((r) => `<tr id="${r.label}"><td class="num">${tc(r.time, fps)}<br>${r.time.toFixed(3)} s<br><span class="${r.visible > 0.002 ? 'bad' : 'ok'}">${pct(r.visible)}</span><div class="note">${esc(r.note ?? r.missing ?? '')}</div></td>
-${ref ? `<td class="img"><a href="${r.ref}"><img loading="lazy" src="${r.ref}" alt="video ${r.time}"></a></td>` : ''}<td class="img"><a href="${r.v1}"><img loading="lazy" src="${r.v1}" alt="v1 ${r.time}"></a></td>
-<td class="img">${r.v2 ? `<a href="${r.v2}"><img loading="lazy" src="${r.v2}" alt="V2 ${r.time}"></a>` : ''}</td>
-<td class="img">${r.diff ? `<a href="${r.diff}"><img loading="lazy" src="${r.diff}" alt="difference ${r.time}"></a>` : ''}</td>${viewer ? `<td class="img">${r.viewer ? `<a href="${r.viewer}"><img loading="lazy" src="${r.viewer}" alt="V2 viewer ${r.time}"></a>` : ''}</td>` : ''}</tr>`).join('\n')}
+<table class="cols"><tr><th>Time</th>${columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>
+${rows.map((r) => `<tr id="${r.label}"><td class="num">${tc(r.time, fps)}<br>${r.time.toFixed(3)} s<br><span class="${r.perceptible > BAD ? 'bad' : 'ok'}">${pct(r.perceptible)}</span><div class="note">${esc(timingNote(r) + (r.note ?? r.missing ?? ''))}</div></td>
+${ref ? img(r.ref, `video ${r.time}`) : ''}${v1 ? img(r.v1, `v1 ${r.time}`) : ''}${img(r.v2, `V2 ${r.time}`)}${viewer ? img(r.viewer, `V2 viewer ${r.time}`) : ''}${img(r.diff, `difference ${r.time}`)}${ref && v1 ? img(r.v1Diff, `V2 against v1 ${r.time}`) : ''}${viewer ? img(r.viewerDiff, `viewer against export ${r.time}`) : ''}</tr>`).join('\n')}
 </table></body></html>`;
 writeFileSync(path.join(dir, 'index.html'), html);
-writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, visible, v1vs, mean, max, note }) => ({ time, label, visible, v1vs, mean, max, note })), null, 1));
+writeFileSync(path.join(dir, 'ranked.json'), JSON.stringify(ranked.map(({ time, label, perceptible, visible, v1vs, v2v1, viewerVs, mean, timing, note }) => ({ time, label, perceptible, visible, v1vs, v2v1, viewerVs, mean, timing, note })), null, 1));
 console.log(path.join(dir, 'index.html'));
