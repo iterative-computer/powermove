@@ -1974,13 +1974,32 @@ impl Render for Editor {
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
             let key_divider = d.clone();
+            // The whole gap takes the pointer; what shows is a thin grip
+            // centred in it, on hover and while it has keyboard focus.
+            let group: SharedString = format!("splitter-{i}").into();
+            let dragged = matches!(&self.gesture, Some(Gesture::Resize(g, ..))
+                if (g.dock, g.group, g.horizontal) == (d.dock, d.group, d.horizontal));
+            let (grip_ink, grip_alpha) = (c.text, if dragged { 0.4 } else { 0.22 });
+            let grip = div()
+                .rounded_full()
+                .when(d.horizontal, |g| g.h(px(m.border * 2.)).w_full())
+                .when(!d.horizontal, |g| g.w(px(m.border * 2.)).h_full())
+                .when(dragged, |g| g.bg(tint(grip_ink, grip_alpha)))
+                .group_hover_style(group.clone(), move |s| s.bg(tint(grip_ink, grip_alpha)));
             root = root.child(
                 positioned(d.rect)
                     .id(format!("splitter-{i}"))
+                    .group(group)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(d.horizontal, |s| s.px(px(m.panel_radius)))
+                    .when(!d.horizontal, |s| s.py(px(m.panel_radius)))
+                    .child(grip)
                     .role(Role::Splitter)
                     .aria_label("Resize dock")
                     .tab_index(1000 + i as isize)
-                    .focus_style(|s| s.bg(rgb(c.focus)))
+                    .focus_style(|s| s.bg(tint(c.focus, 0.5)))
                     .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
                         let delta = match e.keystroke.key.as_str() {
                             "left" | "up" => -this.tokens.metrics.keyboard_step,
@@ -2002,7 +2021,6 @@ impl Render for Editor {
                     } else {
                         CursorStyle::ResizeLeftRight
                     })
-                    .hover_style(|s| s.bg(rgb(c.separator)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {

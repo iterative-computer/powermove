@@ -1,89 +1,22 @@
 # Powermove Native design tokens
 
 `apps/native/crates/design` (pm-design) is the single source of every colour,
-metric, type size and motion value in Powermove Native. Views read
-`pm_design::Tokens`; they never write a literal. This page explains the
-tokens; the table at the end is **generated** from the crate and checked by
-`apps/native/crates/design/tests/spec.rs`, so it cannot drift.
+size, type value and motion value. The system they encode is
+[language.md](language.md); this page is the value table.
 
-The language behind these values is [language.md](language.md). The gate a UI
-lane must pass is [review-checklist.md](review-checklist.md).
+- `colors.*` come from `Colors::of`: seven OKLCH roles per appearance, the rest
+  ink over a ground at an alpha step. Derived steps (`fill`, `fill_strong`,
+  `hairline`, `raised`, `faint`) follow a theme's colour patch.
+- `space.*` and `radius.*` are the scales; the older `metrics.*` names that
+  panels and themes use (`gap`, `inset`, `control_radius`, `panel_radius`, …)
+  are set from them.
+- Token names are the contract of built-in panels, user extensions and themes
+  (`Tokens::PATCHABLE`): add names, never rename one.
+- A theme's `metrics.gap` also sets `metrics.dock_gap` (v1 themes have one gap).
 
-## How to change a token
-
-1. Edit `Tokens::new` (or add a field) in `apps/native/crates/design/src/lib.rs`.
-2. Give a new field a role sentence in `ROLES` in `tests/spec.rs`.
-3. Regenerate this table and the JSON snapshot:
-   `PM_UPDATE_DESIGN_SNAPSHOT=1 flock /tmp/pm-build.lock cargo test -p pm-design`
-4. Run the theme pipeline tests (`cd apps/native/js/themes && npm test`) if the
-   field is theme-patchable, and regenerate the compat editions.
-5. Explain the change in the commit and, if it changes the look, in language.md.
-
-The tests also enforce the language's rules, not only the values:
-
-| Rule | Test |
-|---|---|
-| Text ≥ 7:1, secondary and muted ≥ 4.5:1 on panel, field, floating and window; secondary ≥ 7:1 under Increase Contrast | `contrast_rules_from_language` |
-| Accent text, danger, warning, success ≥ 4.5:1 on panel | same |
-| Label on an accent fill ≥ 3:1 (13 pt semibold) and the accent mark ≥ 3:1 on panel | same |
-| Text on every label colour and on the selected row ≥ 7:1 | same |
-| Elevation order: floating > panel > window ≥ viewer (dark) | same |
-| Dark neutrals are pure grey (R = G = B) | `dark_is_neutral_grey` |
-| Radii are concentric (control = panel − gap), capsules are height ÷ 2, metrics sit on the 2 pt grid, type steps ascend | `concentric_radii_and_grid` |
-| Glass only on toolbar, floating bars, popovers, viewer overlays, sheets, menus and the palette; solid under content | `materials_follow_hig` |
-| Increase Contrast beats a theme patch; a bad patch changes nothing | `theme_patch_cannot_beat_increase_contrast` |
-| Every JS theme mapping targets a patchable pm-design field | `theme_pipeline_targets_exist` |
-
-## Fonts
-
-| Constant | Value | Use |
-|---|---|---|
-| `TEXT_FONT` | `.SystemUIFont` (SF Pro, automatic optical size) | All UI text |
-| `DISPLAY_FONT` | `SF Pro Display` | Display sizes ≥ 20 pt only |
-| `MONO_FONT` | `SF Mono` | Code, expressions, shader source, logs. **Not** numbers: values and timecode use SF Pro with tabular figures (`monospacedDigitSystemFont`). |
-
-## Theme mapping
-
-The theme pipeline (`apps/native/js/themes/tokens.mjs`) projects v1–3 theme
-tokens onto these fields. Only values a theme, workspace or extension
-**changed** from the frozen v1.2.0 foundation are projected; an untouched
-v1.2.0 value means "the default", so pm-design's native default stands. Lengths
-move relative to the native value when the host passes its current tokens
-(`environment.nativeTokens`). Translucent colours are composited over the
-theme's panel colour. Increase Contrast is re-applied after every patch
-(`Tokens::apply_patch`).
-
-| v1–3 token | pm-design field(s) |
-|---|---|
-| `--accent` | `colors.accent` |
-| `--accent-dim` | `colors.accent_wash` (composited over `--bg-panel`) |
-| `--accent-tx` | `colors.accent_text` |
-| `--on-accent` | `colors.selected_text` |
-| `--bg-window` / `--bg-panel` / `--bg-panel-2` | `colors.window` / `colors.panel` / `colors.panel_secondary` |
-| `--bg-sunken` | `colors.viewer` |
-| `--bg-field` / `--bg-float` / `--bg-row-hi` | `colors.field` / `colors.floating` / `colors.hover` |
-| `--line` | `colors.separator` (composited) |
-| `--tx` / `--tx-2` / `--tx-3` | `colors.text` / `colors.secondary` / `colors.muted` (composited) |
-| `--danger` / `--warning` / `--success` | `colors.danger` / `colors.warning` / `colors.success` |
-| `--gap` / `--pad` | `metrics.gap` / `metrics.inset` |
-| `--hdr-h` / `--row-h` / `--ctl-h` | `metrics.header` / `metrics.row` / `metrics.control` |
-| `--r-lg` / `--r-sm` / `--r-xs` | `metrics.panel_radius` / `metrics.control_radius` / `metrics.inner_radius` |
-| `--val-w` | `metrics.value_column` |
-| `--fs-xs` | `typography.minimum` |
-| `--fs-sm` | `typography.body`, `typography.label` |
-| `--fs-md` | `typography.title`, `typography.reading` |
-| `--fs-lg` | `typography.heading` |
-
-Deliberately unmapped: `--r-pill` (a capsule is a shape, height ÷ 2, not a
-radius), `--hairline` (a CSS device-pixel workaround; separator width belongs to
-pm-design and Increase Contrast), `--fs-xl` (v1.2.0's 18 px heading has no
-native role; `display` is native-only), shadows, focus-ring stacks, fonts and
-easing curves (native materials and springs replace them).
-
-## Generated table
-
-Colours are sRGB. Sizes are points. Durations are seconds. Reduce Transparency
-does not change any value; it changes `Tokens::material` to `Solid`.
+To change a value: edit `crates/design/src/lib.rs`, then regenerate the table
+and the snapshot with `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
+Every token needs a role sentence in `crates/design/tests/spec.rs`.
 
 <!-- tokens:begin -->
 | Token | Role | Light | Dark | Light, Increase Contrast | Dark, Increase Contrast |
@@ -272,31 +205,3 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
 | `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |
 <!-- tokens:end -->
-
-## Surface token additions — 2026-11-04
-
-Added the nine Opus-specified tokens in [surfaces/README.md §7](surfaces/README.md#7-new-tokens-requested-by-these-specs),
-with their exact values and roles. Decision (N1, N3): scope traces are data
-colours, identical in both schemes and drawn with dark-scheme viewer tokens as
-[colour.md](surfaces/colour.md) specifies; their contrast floor is 3:1 on that
-viewer. Decision (N3, N6): these native surface metrics and data colours do not
-extend the theme patch contract, so theme mappings and compat editions are
-unchanged. Existing values and consumers remain in place (prune rule).
-
-This adds tokens for the approved surface specs; it does not implement those
-surfaces or establish macOS visual acceptance. Actual Mac output remains
-provisional until Opus design review.
-
-## Additional surface tokens — 2026-11-04
-
-Added `metrics.viewer_3d_labels` (860 pt), `metrics.viewer_3d_collapse` (560 pt),
-`motion.tooltip_delay` (0.38 s), and `motion.tooltip_warm` (0.6 s) from the
-updated [surface token requests](surfaces/README.md#7-new-tokens-requested-by-these-specs).
-Decision (N3): preserve Opus's exact thresholds and timings from
-[3D Studio §2](surfaces/3d-studio.md#2-viewer-3d-toolbar) and
-[Tooltips §6](surfaces/main-delta-ui.md#6-tooltips-u09), including under Reduce
-Motion; these are geometry and interaction delays, not animation durations.
-Decision (N3, N6): keep these native tokens outside the theme patch contract.
-The spec test now covers all thirteen requests across both appearances and
-every accessibility combination. Mac presentation and interaction still need
-verification and Opus review.
