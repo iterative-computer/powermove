@@ -56,8 +56,10 @@ undithered (tested).
 ### Muxing
 
 - Color tags are set as VTCompressionSession properties for every codec (amendment
-  7) and as buffer attachments. 1-13-1 is "Rec.709 (QuickTime and Safari)"; 1-1-1 is
-  broadcast.
+  7) and as buffer attachments. 1-13-1 is "Rec.709 (QuickTime and Safari)" (the
+  default: QuickTime and Safari show it as the viewer does); 1-1-1 is "Rec.709", the
+  label broadcast QC and colour-managed timelines expect. Both carry the same codes:
+  the choice relabels, it never re-encodes (`tests/transfer_tags.rs`).
 - Movie and media timescales follow section 17 for all 16 rates (NTSC numerator with
   frame duration 1001, integer f × 1000 with 1000). AVAssetWriter refuses a
   non-default audio timescale; its default is the sample rate, which section 17 asks

@@ -152,7 +152,7 @@ impl EncoderInput {
 pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
-    /// Output transfer/tag; mapping always happens in sRGB E first.
+    /// Output tags; the codes are display-encoded (E) whatever the transfer tag.
     pub tags: ColorTags,
     pub dither: bool,
     /// Frame index: the dither seed.
@@ -225,12 +225,14 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
-/// Resolve output alpha and transfer while RGB is floating. With `deliver`
-/// (every SDR RGB output, 8 and 16 bit) the shared delivery rule
-/// (`pm_color::delivery`) applies to straight display-encoded Rec.709 before
-/// the transfer. SDR Y′CbCr keeps its codable headroom (superwhites and
-/// sub-blacks of untouched footage pass through, section 2's transparency
-/// bar), which players show as the same clipped picture.
+/// Resolve output alpha while RGB is floating. With `deliver` (every SDR RGB
+/// output, 8 and 16 bit) the shared delivery rule (`pm_color::delivery`)
+/// applies to straight display-encoded Rec.709. SDR Y′CbCr keeps its codable
+/// headroom (superwhites and sub-blacks of untouched footage pass through,
+/// section 2's transparency bar), which players show as the same clipped
+/// picture. The output's transfer tag is a label: Standard reads transfers 1
+/// and 13 as the same display encoding (`pm_color::cicp::output_encoding`),
+/// so every SDR output carries the same codes whichever it is tagged with.
 fn tagged_output_rgba(
     w: [f32; 4],
     working: WorkingEncoding,
@@ -238,40 +240,15 @@ fn tagged_output_rgba(
     tags: ColorTags,
     deliver: bool,
 ) -> ([f64; 3], f64) {
-    let sdr = deliver && !tags.is_hdr();
-    if alpha == AlphaOutput::Premultiplied && !tags.bt709_transfer() {
+    let (rgb, a) = output_rgba(w, working, alpha);
+    let rgb = match (deliver && !tags.is_hdr(), alpha) {
+        (false, _) => rgb,
         // The identity output transform: premultiplied values as they are,
         // each channel bounded by its coverage.
-        let (rgb, a) = output_rgba(w, working, alpha);
-        let rgb = if sdr {
-            pm_color::delivery::sdr_premultiplied(rgb, a)
-        } else {
-            rgb
-        };
-        return (rgb, a);
-    }
-    let straight_alpha = if alpha == AlphaOutput::Premultiplied {
-        AlphaOutput::Straight
-    } else {
-        alpha
+        (true, AlphaOutput::Premultiplied) => pm_color::delivery::sdr_premultiplied(rgb, a),
+        (true, _) => pm_color::delivery::sdr(rgb),
     };
-    let (rgb, a) = output_rgba(w, working, straight_alpha);
-    let rgb = if sdr {
-        pm_color::delivery::sdr(rgb)
-    } else {
-        rgb
-    };
-    let rgb = if tags.bt709_transfer() {
-        rgb.map(|v| pm_color::transfer::bt709_oetf(e_decode(v)))
-    } else {
-        rgb
-    };
-    let scale = if alpha == AlphaOutput::Premultiplied {
-        a
-    } else {
-        1.0
-    };
-    (rgb.map(|v| v * scale), a)
+    (rgb, a)
 }
 
 /// The normalized luma and chroma a Y′CbCr input format can code (its
@@ -894,52 +871,63 @@ mod tests {
     }
 
     #[test]
-    fn bt709_tags_reencode_after_the_delivery_clip() {
-        use pm_reference::color::Transfer;
-
-        let source = [0.6f32, -0.1, 0.2, 0.5];
-        let straight =
-            [source[0], source[1], source[2]].map(|v| f64::from(v) / f64::from(source[3]));
-        let mapped = delivered(straight);
-        let expected = mapped.map(|v| {
-            let linear = Transfer::Srgb.to_linear(v);
-            (Transfer::Bt709.from_linear(linear) * 255.0)
-                .round_ties_even()
-                .clamp(0.0, 255.0) as u8
-        });
-        for tags in [ColorTags::Rec709Broadcast, ColorTags::Rec709Image] {
-            let actual = rgba8_pixel(
-                source,
-                WorkingEncoding::Standard,
-                AlphaOutput::Straight,
-                tags,
-                [0.0; 3],
+    fn bt709_tags_label_the_same_codes() {
+        // Transfer 1 and transfer 13 tag the same display-encoded codes:
+        // "Rec.709 (1-1-1)" retags, it never re-encodes (code 0.5 stays 0.5).
+        for (source, alpha) in [
+            ([0.6f32, -0.1, 0.2, 0.5], AlphaOutput::Straight),
+            ([0.6, -0.1, 0.2, 0.5], AlphaOutput::Premultiplied),
+            ([0.25, 0.5, 0.75, 1.0], AlphaOutput::None),
+        ] {
+            let bytes =
+                |tags| rgba8_pixel(source, WorkingEncoding::Standard, alpha, tags, [0.0; 3]);
+            assert_eq!(bytes(ColorTags::Rec709Image), bytes(ColorTags::SrgbImage));
+            assert_eq!(
+                bytes(ColorTags::Rec709Broadcast),
+                bytes(ColorTags::Rec709QuickTime)
             );
-            for ch in 0..3 {
-                assert!(
-                    actual[ch].abs_diff(expected[ch]) <= 1,
-                    "{tags:?} channel {ch}: {actual:?} vs {expected:?}"
-                );
-            }
-            assert_eq!(actual[3], 128);
         }
-        let quicktime = rgba8_pixel(
-            [0.25, 0.5, 0.75, 1.0],
-            WorkingEncoding::Standard,
-            AlphaOutput::None,
-            ColorTags::Rec709QuickTime,
-            [0.0; 3],
+        let f = frame(4, 2, |x, _| [x as f32 / 4.0, 0.5, 0.75, 1.0]);
+        let wf = WorkingFrame {
+            width: 4,
+            height: 2,
+            rgba: &f,
+        };
+        for format in [InputFormat::V420, InputFormat::V216, InputFormat::Y416] {
+            let with = |tags| {
+                convert(
+                    &wf,
+                    format,
+                    &ConvertParams {
+                        tags,
+                        ..params(AlphaOutput::None, false)
+                    },
+                )
+                .unwrap()
+                .planes
+            };
+            assert_eq!(
+                with(ColorTags::Rec709Broadcast),
+                with(ColorTags::Rec709QuickTime)
+            );
+        }
+        let mid = convert(
+            &WorkingFrame {
+                width: 2,
+                height: 2,
+                rgba: &[0.5, 0.5, 0.5, 1.0].repeat(4),
+            },
+            InputFormat::V216,
+            &ConvertParams {
+                tags: ColorTags::Rec709Broadcast,
+                ..params(AlphaOutput::None, false)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            mid.planes[0].u16().unwrap()[1],
+            ((0.5f64 * 876.0 + 64.0).round() as u16) << 6
         );
-        let broadcast = rgba8_pixel(
-            [0.25, 0.5, 0.75, 1.0],
-            WorkingEncoding::Standard,
-            AlphaOutput::None,
-            ColorTags::Rec709Broadcast,
-            [0.0; 3],
-        );
-        assert_ne!(quicktime[..3], broadcast[..3]);
-        assert_eq!(quicktime[3], 255);
-        assert_eq!(broadcast[3], 255);
     }
 
     #[test]

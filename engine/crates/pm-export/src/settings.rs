@@ -282,6 +282,9 @@ impl InputFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ColorTags {
     /// CICP 1-1-1, limited: Rec.709 primaries, BT.709 transfer, BT.709 matrix.
+    /// "Rec.709": the same codes as 1-13-1 (Standard reads both transfers as
+    /// the display encoding), labelled as broadcast and colour-managed
+    /// timelines expect.
     Rec709Broadcast,
     /// CICP 1-13-1, limited: Rec.709 primaries, sRGB transfer, BT.709 matrix.
     /// "Rec.709 (QuickTime and Safari)": matches the viewer in QuickTime and Safari (S2).
@@ -348,11 +351,6 @@ impl ColorTags {
             Self::Rec2100Pq { metadata, .. } | Self::Rec2100Hlg { metadata, .. } => metadata,
             _ => None,
         }
-    }
-
-    /// CICP transfer 1 uses the BT.709 OETF. Transfer 13 is sRGB E.
-    pub fn bt709_transfer(self) -> bool {
-        matches!(self, Self::Rec709Broadcast | Self::Rec709Image)
     }
 
     /// (colour primaries, transfer characteristics, matrix coefficients).
