@@ -166,6 +166,14 @@ pub struct AudioStreamInfo {
     pub parametric_stereo: bool,
     /// The timebase places frames to the sample (see the module notes).
     pub sample_exact_timestamps: bool,
+    /// The container timestamp of program sample 0, as `start_pts` units of
+    /// `timebase` (num, den) seconds, before [`Self::extra_priming`].
+    pub start_pts: i64,
+    pub timebase: (i64, i64),
+    /// The file plays nothing else: no picture (a video stream that is not
+    /// cover art) and no other audio stream. Otherwise this stream sits on
+    /// the file's clip timeline at [`Self::clip_lead`].
+    pub alone: bool,
 }
 
 impl AudioStreamInfo {
@@ -176,6 +184,48 @@ impl AudioStreamInfo {
     /// The program length in seconds, when known.
     pub fn duration(&self) -> Option<f64> {
         self.length.map(|n| n as f64 / self.sample_rate as f64)
+    }
+
+    /// Where program sample 0 sits on the clip timeline of a file whose
+    /// clip time 0 is stamped `origin_pts` in `origin_timebase` (num, den)
+    /// seconds: samples after clip time 0 (negative when the sound starts
+    /// before it). Exact: one
+    /// rounding to the nearest sample, ties to even.
+    pub fn clip_lead(&self, origin_pts: i64, origin_timebase: (i64, i64)) -> i64 {
+        let (an, ad) = (self.timebase.0 as i128, self.timebase.1 as i128);
+        let (vn, vd) = (origin_timebase.0 as i128, origin_timebase.1 as i128);
+        if ad <= 0 || vd <= 0 {
+            return 0;
+        }
+        // (start·an/ad − origin·vn/vd) × rate
+        let num = (self.start_pts as i128 * an * vd - origin_pts as i128 * vn * ad)
+            * self.sample_rate as i128;
+        let den = ad * vd;
+        let (q, r) = (num.div_euclid(den), num.rem_euclid(den));
+        let up = match (2 * r).cmp(&den) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => q % 2 != 0,
+            std::cmp::Ordering::Less => false,
+        };
+        let lead = q + up as i128 + self.extra_priming as i128;
+        lead.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    }
+}
+
+/// Where program sample 0 of an open stream sits on the clip timeline an
+/// asset with `timing` addresses. An older project's source time is the
+/// program sample itself: no offset. Otherwise
+/// [`AudioStreamInfo::clip_lead`] from the file's presentation origin
+/// ([`crate::clip::Span`]); 0 for the only stream of a file without a
+/// picture (it is its own origin), and for a file whose origin cannot be
+/// read (nothing to stay in sync with).
+pub fn clip_lead(info: &AudioStreamInfo, timing: crate::clip::ClipTiming) -> i64 {
+    if timing == crate::clip::ClipTiming::Legacy || info.alone {
+        return 0;
+    }
+    match crate::probe::clip_origin(&info.path) {
+        Ok((pts, tb)) => info.clip_lead(pts, (tb.num(), tb.den())),
+        Err(_) => 0,
     }
 }
 
@@ -784,6 +834,9 @@ impl AudioDecoder {
                     preroll: 0,
                     parametric_stereo: false,
                     sample_exact_timestamps: false,
+                    start_pts: 0,
+                    timebase: (1, 1),
+                    alone: true,
                 },
                 codec_delay: 0,
                 tb: (1, 1),
@@ -882,6 +935,12 @@ impl AudioDecoder {
             let length = length.map(|n| (n - extra).max(0) as u64);
             out.tb = tb;
             out.start_pts = start_pts;
+            out.info.start_pts = start_pts;
+            out.info.timebase = tb;
+            let sounds = (0..(*out.input.fmt).nb_streams as usize)
+                .filter(|&i| out.input.media_type(i) == ff::AVMEDIA_TYPE_AUDIO)
+                .count();
+            out.info.alone = out.input.picture().is_none() && sounds <= 1;
             out.info.sample_rate = rate;
             out.info.speakers = speakers;
             out.info.layout = layout_name;

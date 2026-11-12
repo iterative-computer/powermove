@@ -76,6 +76,67 @@ pub fn legacy_peaks(path: &Path) -> Result<Vec<f32>> {
     Ok(peaks)
 }
 
+/// The envelope of what an asset's clip plays, on the clip's own timeline:
+/// per bucket of clip time (`buckets_per_second`, rounded to whole samples
+/// of the first stream), the largest magnitude over every channel of every
+/// stream in `streams`, each read from the source the mix plays, placed
+/// where the asset's `timing` places it. Returns the envelope and its exact
+/// buckets per second.
+pub fn clip_envelope(
+    path: &Path,
+    streams: &[Option<usize>],
+    timing: pm_media::clip::ClipTiming,
+    buckets_per_second: f64,
+) -> Result<(Vec<f32>, f64)> {
+    const CHUNK: usize = 1 << 15;
+    let cache = crate::source::SourceCache::new(8 << 20, 0);
+    let result = (|| {
+        let sources = streams
+            .iter()
+            .map(|&stream| cache.open_as(path, stream, timing))
+            .collect::<Result<Vec<_>>>()?;
+        let first = sources
+            .first()
+            .ok_or_else(|| AudioError::Media(pm_media::MediaError::invalid("no audio stream")))?;
+        let per = (f64::from(first.sample_rate()) / buckets_per_second)
+            .round()
+            .max(1.0);
+        let exact = f64::from(first.sample_rate()) / per;
+        let mut envelope: Vec<f32> = vec![];
+        for (&stream, source) in streams.iter().zip(&sources) {
+            let rate = f64::from(source.sample_rate());
+            let end = match source.length() {
+                Some(n) => n as i64,
+                None => {
+                    let mut d = AudioDecoder::open(path, stream)?;
+                    (count(&mut d)? as i64 + source.lead()).max(0)
+                }
+            };
+            let buckets = (end as f64 * exact / rate).ceil() as usize;
+            if envelope.len() < buckets {
+                envelope.resize(buckets, 0.0);
+            }
+            let mut scratch = vec![vec![0f32; CHUNK]; source.channels()];
+            let mut at = 0i64;
+            while at < end {
+                let len = CHUNK.min((end - at) as usize);
+                let mut out: Vec<&mut [f32]> = scratch.iter_mut().map(|c| &mut c[..]).collect();
+                cache.read(source, at, len, &mut out, true)?;
+                for i in 0..len {
+                    let bucket =
+                        (((at + i as i64) as f64 * exact / rate) as usize).min(envelope.len() - 1);
+                    let level = scratch.iter().map(|c| c[i].abs()).fold(0f32, f32::max);
+                    envelope[bucket] = envelope[bucket].max(level.min(1.0));
+                }
+                at += len as i64;
+            }
+        }
+        Ok((envelope, exact))
+    })();
+    cache.shutdown();
+    result
+}
+
 fn count(d: &mut AudioDecoder) -> Result<u64> {
     let mut buf = vec![Vec::new(); d.info().channels()];
     let mut total = 0u64;

@@ -17,6 +17,7 @@ use pm_color::ycbcr::Matrix;
 use pm_gpu::decode_in::deinterlace::{CodeSpace, Deinterlacer, FieldPass};
 use pm_gpu::decode_in::{DecodeImporter, Normalized};
 use pm_gpu::{Target, working_format};
+use pm_media::clip::ClipTiming;
 use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
 use pm_media::decode::service::{
     DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
@@ -1605,6 +1606,7 @@ impl MediaCache {
         &mut self,
         path: &Path,
         time: Ticks,
+        clip: ClipTiming,
         presentable: impl FnOnce(&MediaSource) -> bool,
     ) -> Result<Option<(Arc<MediaSource>, DecodedFrame)>, MediaFailure> {
         let source = self.source(path)?;
@@ -1615,7 +1617,7 @@ impl MediaCache {
             return Ok(None);
         }
         let frame = source
-            .select(time.get())
+            .select_as(clip, time.get())
             .ok_or_else(|| MediaFailure::Failed("No source frame at this time".into()))?;
         let fetched = self
             .source_viewer

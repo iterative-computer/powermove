@@ -205,7 +205,8 @@
       "selected": 0.07,
       "pressed": 0.1,
       "faint": 0.42,
-      "glass_tint": 0.6
+      "glass_tint": 0.6,
+      "glass_menu": 0.84
     }
   },
   {
@@ -414,7 +415,8 @@
       "selected": 0.07,
       "pressed": 0.1,
       "faint": 0.42,
-      "glass_tint": 0.6
+      "glass_tint": 0.6,
+      "glass_menu": 0.84
     }
   },
   {
@@ -623,7 +625,8 @@
       "selected": 0.12,
       "pressed": 0.16,
       "faint": 0.42,
-      "glass_tint": 0.6
+      "glass_tint": 0.6,
+      "glass_menu": 0.84
     }
   },
   {
@@ -832,7 +835,8 @@
       "selected": 0.12,
       "pressed": 0.16,
       "faint": 0.42,
-      "glass_tint": 0.6
+      "glass_tint": 0.6,
+      "glass_menu": 0.84
     }
   },
   {
@@ -1041,7 +1045,8 @@
       "selected": 0.1,
       "pressed": 0.14,
       "faint": 0.36,
-      "glass_tint": 0.9
+      "glass_tint": 0.9,
+      "glass_menu": 0.72
     }
   },
   {
@@ -1250,7 +1255,8 @@
       "selected": 0.1,
       "pressed": 0.14,
       "faint": 0.36,
-      "glass_tint": 0.9
+      "glass_tint": 0.9,
+      "glass_menu": 0.72
     }
   },
   {
@@ -1459,7 +1465,8 @@
       "selected": 0.16,
       "pressed": 0.2,
       "faint": 0.36,
-      "glass_tint": 0.9
+      "glass_tint": 0.9,
+      "glass_menu": 0.72
     }
   },
   {
@@ -1668,7 +1675,8 @@
       "selected": 0.16,
       "pressed": 0.2,
       "faint": 0.36,
-      "glass_tint": 0.9
+      "glass_tint": 0.9,
+      "glass_menu": 0.72
     }
   }
 ]

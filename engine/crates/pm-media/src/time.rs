@@ -21,6 +21,9 @@ pub enum RateMethod {
     MedianThenMean,
     /// No supported rate qualifies: (last PTS − first PTS) / (frames − 1).
     Fallback,
+    /// A single frame has no spacing to measure: the rate its own duration
+    /// (or the container's declared frame rate) states.
+    Declared,
 }
 
 /// The section 13 nominal rate of a stream.
@@ -134,6 +137,49 @@ pub fn nominal_rate(pts: &[i64], timebase: Rational) -> Option<NominalRate> {
     })
 }
 
+/// The rate of a one-frame stream, from the frame's `duration` in
+/// `timebase` units: the supported rate whose frame duration is within one
+/// unit of it (the closest when several are), otherwise exactly
+/// 1 / duration. `None` for a duration that is not positive.
+pub fn declared_rate(duration: i64, timebase: Rational) -> Option<NominalRate> {
+    if duration <= 0 || timebase.num() <= 0 {
+        return None;
+    }
+    let (tn, td) = (timebase.num() as i128, timebase.den() as i128);
+    // |r.den·tb.den − duration·r.num·tb.num| / (r.num·tb.num): the distance
+    // of a rate's frame duration from `duration`, in units.
+    let distance = |r: &Rate| {
+        let d = r.num() as i128 * tn;
+        ((r.den() as i128 * td - duration as i128 * d).abs(), d)
+    };
+    let candidates: Vec<Rate> = SUPPORTED_RATES
+        .iter()
+        .copied()
+        .filter(|r| {
+            let (a, d) = distance(r);
+            a <= d
+        })
+        .collect();
+    let rate = match candidates.iter().min_by(|x, y| {
+        let ((ax, dx), (ay, dy)) = (distance(x), distance(y));
+        (ax * dy).cmp(&(ay * dx))
+    }) {
+        Some(rate) => *rate,
+        None => {
+            let (num, den) = (td, duration as i128 * tn);
+            let g = gcd(num, den);
+            Rate::new(i64::try_from(num / g).ok()?, i64::try_from(den / g).ok()?).ok()?
+        }
+    };
+    Some(NominalRate {
+        rate,
+        method: RateMethod::Declared,
+        candidates,
+        median_duration: duration,
+        window: 1,
+    })
+}
+
 pub(crate) fn gcd(a: i128, b: i128) -> i128 {
     let (mut a, mut b) = (a.abs(), b.abs());
     while b != 0 {
@@ -222,18 +268,23 @@ pub fn ticks_of(pts: i64, timebase: Rational) -> Tick {
 }
 
 /// The composition slot of each source frame when the clip's frame 0 is its
-/// first presented frame: m_k = round((pts_k − pts_0) × tb × rate), half up.
-/// Used to state the expected frame for each composition frame independently
-/// of rule 7 (tests and verification).
+/// first presented frame: the first composition frame that starts inside
+/// it, m_k = ⌈((pts_k − pts_0) × tb − q/2) × rate⌉ with q the
+/// [`selection_quantum`] absorbing timestamp rounding. A frame starting a
+/// fraction of a frame after a composition frame first shows at the next
+/// one, as AVFoundation presents the frame covering a time. Used to state
+/// the expected frame for each composition frame (tests and verification).
 pub fn grid(pts: &[i64], timebase: Rational, rate: Rate) -> Vec<i64> {
     let Some(&p0) = pts.first() else {
         return vec![];
     };
-    let den = timebase.den() as i128 * rate.den() as i128;
+    let (q_num, q_den) = selection_quantum(timebase, rate);
+    let (tn, td) = (timebase.num() as i128, timebase.den() as i128);
+    let den = 2 * td * q_den * rate.den() as i128;
     pts.iter()
         .map(|&p| {
-            let num = (p as i128 - p0 as i128) * timebase.num() as i128 * rate.num() as i128;
-            (2 * num + den).div_euclid(2 * den) as i64
+            let num = ((p as i128 - p0 as i128) * tn * 2 * q_den - q_num * td) * rate.num() as i128;
+            -(-num).div_euclid(den) as i64
         })
         .collect()
 }
@@ -333,6 +384,32 @@ mod tests {
         }
     }
 
+    /// A head-trimming edit that starts 962 of a 1001-tick frame in leaves
+    /// the straddled frame 39 ticks at the clip start and puts every later
+    /// frame 39 ticks after its composition time. AVFoundation, asked with
+    /// zero tolerance at n·1001/30000 s, presents the frame covering that
+    /// time (the straddled one at 0, then frame n, which started 962 ticks
+    /// earlier), not the frame starting 39 ticks later.
+    #[test]
+    fn a_frame_starting_just_after_a_composition_frame_is_not_shown_there() {
+        let tb = r(1, 30000);
+        let pts: Vec<i64> = std::iter::once(0)
+            .chain((0..92).map(|k| 39 + k * 1001))
+            .collect();
+        let g = grid(&pts, tb, Rate::FPS_29_97);
+        for n in 0..pts.len() as i64 {
+            assert_eq!(
+                expected_frame(&g, n),
+                Some(n as usize),
+                "composition frame {n}"
+            );
+        }
+        assert_eq!(
+            check_selection(&pts, tb, Rate::FPS_29_97).rule7_mismatches,
+            0
+        );
+    }
+
     #[test]
     fn naive_rule_fails_on_coarse_timebases() {
         let tb = r(1, 1000);
@@ -392,6 +469,21 @@ mod tests {
         );
         assert!(nominal_rate(&[5], r(1, 1000)).is_none());
         assert!(nominal_rate(&[5, 5], r(1, 1000)).is_none());
+    }
+
+    #[test]
+    fn a_single_frame_states_its_rate_by_its_duration() {
+        let of = |duration, tb| declared_rate(duration, tb).map(|n| (n.rate, n.method));
+        assert_eq!(
+            of(1001, r(1, 30000)),
+            Some((Rate::FPS_29_97, RateMethod::Declared))
+        );
+        // 33 ms is within a unit of both 30 and 29.97 fps: 30 is closer.
+        assert_eq!(of(33, r(1, 1000)).unwrap().0, Rate::FPS_30);
+        assert_eq!(of(3600, r(1, 90000)).unwrap().0, Rate::FPS_25);
+        // No supported rate: exactly 1 / duration.
+        assert_eq!(of(80, r(1, 1000)).unwrap().0, Rate::new(25, 2).unwrap());
+        assert_eq!(of(0, r(1, 1000)), None);
     }
 
     #[test]

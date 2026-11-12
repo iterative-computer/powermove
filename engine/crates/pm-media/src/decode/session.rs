@@ -74,6 +74,10 @@ pub struct Session {
     /// multiple of `keep_stride`.
     keep_before: usize,
     keep_stride: usize,
+    /// This session replaced one whose decoder failed and has not decoded
+    /// a frame since: if it fails too, the sample is damaged, and it is
+    /// not replaced again ([`super::service::SessionGuard`]).
+    pub(super) replacement: bool,
     pub stats: SessionStats,
 }
 
@@ -117,6 +121,7 @@ impl Session {
             shown_at,
             keep_before: 0,
             keep_stride: 1,
+            replacement: false,
             skip: Disposable::for_index(&index),
             index,
             reader,
@@ -166,6 +171,17 @@ impl Session {
 
     pub fn decoder_info(&self) -> DecoderInfo {
         self.decoder.info()
+    }
+
+    /// See [`Decoder::invalidate_hardware`].
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        self.decoder.invalidate_hardware()
+    }
+
+    /// See [`super::Decoder::release_hardware`].
+    pub(super) fn release_hardware(&mut self) {
+        self.decoder.release_hardware();
     }
 
     pub fn index(&self) -> &Arc<FrameIndex> {

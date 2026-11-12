@@ -44,6 +44,7 @@ base64 = "0.22"
 pm-builtins = { path = "../builtins" }
 pm-agents = { path = "../agents" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
+pm-audio = { path = "../../../../engine/crates/pm-audio" }
 png = "0.18"
 pm-compat-runner = { path = "../compat-runner", features = ["macos-sandbox"] }
 pm-compat-host = { path = "../compat-host" }
@@ -104,8 +105,6 @@ path = "../store-host"
 version = "0.4"
 [dev-dependencies.pm-export]
 path = "../../../../engine/crates/pm-export"
-[dev-dependencies.pm-audio]
-path = "../../../../engine/crates/pm-audio"
 [dev-dependencies.pm-media]
 path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]

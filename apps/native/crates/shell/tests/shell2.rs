@@ -391,6 +391,7 @@ fn palette_ranks_prefix_word_substring_then_subsequence() {
     let c = |l: &str, cmd: &str| Choice {
         label: l.into(),
         command: cmd.into(),
+        ..Default::default()
     };
     let mut p = Picker {
         open: true,

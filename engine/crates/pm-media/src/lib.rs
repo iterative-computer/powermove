@@ -18,6 +18,7 @@
 pub mod apple;
 pub mod audio;
 pub mod cache;
+pub mod clip;
 pub mod dav1d;
 pub mod decode;
 pub mod error;

@@ -61,7 +61,7 @@ pub enum Decoder {
     Vt {
         dec: VtDecoder,
         cfg: VtConfig,
-        _permit: Option<HwPermit>,
+        permit: Option<HwPermit>,
         /// Accounts for the CoreVideo buffers this decoder outputs.
         pool: FramePool,
     },
@@ -179,6 +179,27 @@ impl Decoder {
         match self {
             Decoder::Vt { dec, .. } => std::mem::take(&mut dec.failures),
             _ => vec![],
+        }
+    }
+
+    /// Invalidates a VideoToolbox session as the system does when it
+    /// takes the hardware away; `false` for other decoders. For tests.
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        match self {
+            Decoder::Vt { dec, .. } => {
+                dec.invalidate();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Gives back a VideoToolbox decoder's hardware session permit (one
+    /// that failed: its replacement may need it).
+    pub fn release_hardware(&mut self) {
+        if let Decoder::Vt { permit, .. } = self {
+            *permit = None;
         }
     }
 
@@ -309,7 +330,7 @@ fn open_vt(
     Ok(Decoder::Vt {
         dec,
         cfg,
-        _permit: permit,
+        permit,
         pool: pool.clone(),
     })
 }
