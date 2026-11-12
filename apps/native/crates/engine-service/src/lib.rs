@@ -1607,6 +1607,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // thread's implicit pool is never drained: it kept every closed
         // project's viewer layer, and with it the layer's drawable pool.
         let _pool = LoopPool::push();
+        let mut pass = trace::Pass::start(recorder.as_ref());
         #[cfg(test)]
         if shared
             .lose_device
@@ -1632,6 +1633,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         engine.govern_memory();
         engine.poll();
         *shared.memory.lock().unwrap() = engine.memory_usage();
+        pass.mark("memory");
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
             // and draw every viewer again on the new device. A device lost
@@ -1873,6 +1875,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if state.stop {
             break;
         }
+        pass.mark("flights");
         let retired: Vec<_> = runtime
             .keys()
             .filter(|id| !state.views.contains_key(id))
@@ -1926,6 +1929,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .project_releases
                     .fetch_add(1, std::sync::atomic::Ordering::Release);
             }
+            pass.mark("release");
             continue;
         }
         // A new revision rebuilds the audio graph input, which walks the whole
@@ -1964,6 +1968,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // must not starve rendering. A revision that arrived meanwhile is
             // still caught by the in-loop check below, as before.
             state = shared.state.lock().unwrap();
+            pass.mark("audio graph");
             if state.stop {
                 break;
             }
@@ -2327,6 +2332,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if changed {
             state.notify();
         }
+        pass.mark("schedule");
         if let Some(Work {
             id,
             stamp,
@@ -2390,6 +2396,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
                 }
             }
+            pass.mark("observe");
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -2459,6 +2466,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 _ => Ok(true),
             };
+            pass.mark("refine");
             let result = match refined {
                 Ok(true) => provider
                     .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
@@ -2469,6 +2477,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Ok(false) => Ok(None),
                 Err(e) => Err(e),
             };
+            pass.mark("frame");
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;
@@ -2695,6 +2704,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             state.notify();
             drop(state);
+            pass.mark("submit");
             if spec.moment == Moment::Playing {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
                 ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
@@ -2716,6 +2726,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 engine.prepare(&scene, at, spec);
             }
+            pass.mark("ahead");
         } else {
             let waiting = runtime
                 .values()
@@ -2775,6 +2786,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 timeout
             };
+            pass.mark("scopes");
             if engine.maintain_memory() {
                 shared.disk.release_idle_reads();
                 for r in runtime.values() {
@@ -2783,6 +2795,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     }
                 }
             }
+            pass.mark("idle release");
+            // The wait is not the pass's time.
+            drop(pass);
             let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
     }
