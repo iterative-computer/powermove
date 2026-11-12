@@ -693,7 +693,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -707,10 +707,10 @@
               770.0
             ],
             "selected": true,
-            "top": 18514,
-            "bottom": 28792,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 20570,
+            "bottom": 29563,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -720,6 +720,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 2.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -741,7 +742,7 @@
             438.0,
             26.0
           ],
-          "color": 12189183,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -786,13 +787,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            44.5,
-            5.0,
-            5.0
+            328.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12189183,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -814,10 +815,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -842,10 +843,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -865,13 +866,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            44.5,
-            5.0,
-            5.0
+            568.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12189183,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -922,7 +923,7 @@
             26.0
           ],
           "color": 15132394,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -936,19 +937,20 @@
               770.0
             ],
             "selected": false,
-            "top": 3026478,
-            "bottom": 5592405,
-            "glow": 12895428,
-            "glowAlpha": 0.1599999964237213,
+            "top": 3487029,
+            "bottom": 5789784,
+            "glow": 13290186,
+            "glowAlpha": 0.3400000035762787,
             "grid": 14606046,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 14606046,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 14606046,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -1043,13 +1045,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            74.5,
-            5.0,
-            5.0
+            328.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1071,10 +1073,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -1099,10 +1101,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -1122,13 +1124,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            74.5,
-            5.0,
-            5.0
+            568.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1156,7 +1158,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -1170,19 +1172,20 @@
               770.0
             ],
             "selected": false,
-            "top": 16202,
-            "bottom": 27250,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18514,
+            "bottom": 28021,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 10153971,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 10153971,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -1204,7 +1207,7 @@
             438.0,
             26.0
           ],
-          "color": 11728633,
+          "color": 16777215,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -1226,13 +1229,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            104.5,
-            5.0,
-            5.0
+            328.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1254,10 +1257,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -1282,10 +1285,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -1305,13 +1308,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            104.5,
-            5.0,
-            5.0
+            568.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1339,7 +1342,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -1353,10 +1356,10 @@
               770.0
             ],
             "selected": false,
-            "top": 16202,
-            "bottom": 27250,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18514,
+            "bottom": 28021,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -1366,6 +1369,7 @@
             "rimTop": 14154234,
             "rimTopAlpha": 0.8500000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -1387,7 +1391,7 @@
             438.0,
             26.0
           ],
-          "color": 11728633,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -1409,13 +1413,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            134.5,
-            5.0,
-            5.0
+            328.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1437,10 +1441,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -1465,10 +1469,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -1488,13 +1492,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            134.5,
-            5.0,
-            5.0
+            568.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -1522,7 +1526,7 @@
             26.0
           ],
           "color": 12968913,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -1536,19 +1540,20 @@
               770.0
             ],
             "selected": false,
-            "top": 16651,
-            "bottom": 27447,
-            "glow": 7986344,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18708,
+            "bottom": 28218,
+            "glow": 8446894,
+            "glowAlpha": 0.3400000035762787,
             "grid": 11530187,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 11530187,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 11530187,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -1571,7 +1576,7 @@
             26.0
           ],
           "color": 8966312,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -3228,7 +3233,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -3242,10 +3247,10 @@
               770.0
             ],
             "selected": true,
-            "top": 18514,
-            "bottom": 28792,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 20570,
+            "bottom": 29563,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -3255,6 +3260,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 2.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -3276,7 +3282,7 @@
             438.0,
             26.0
           ],
-          "color": 12189183,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -3321,13 +3327,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            44.5,
-            5.0,
-            5.0
+            328.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12189183,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3349,10 +3355,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -3377,10 +3383,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -3400,13 +3406,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            44.5,
-            5.0,
-            5.0
+            568.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12189183,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3457,7 +3463,7 @@
             26.0
           ],
           "color": 15132394,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -3471,19 +3477,20 @@
               770.0
             ],
             "selected": false,
-            "top": 3026478,
-            "bottom": 5592405,
-            "glow": 12895428,
-            "glowAlpha": 0.1599999964237213,
+            "top": 3487029,
+            "bottom": 5789784,
+            "glow": 13290186,
+            "glowAlpha": 0.3400000035762787,
             "grid": 14606046,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 14606046,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 14606046,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -3578,13 +3585,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            74.5,
-            5.0,
-            5.0
+            328.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3606,10 +3613,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -3634,10 +3641,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -3657,13 +3664,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            74.5,
-            5.0,
-            5.0
+            568.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3691,7 +3698,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -3705,19 +3712,20 @@
               770.0
             ],
             "selected": false,
-            "top": 16202,
-            "bottom": 27250,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18514,
+            "bottom": 28021,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 10153971,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 10153971,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -3739,7 +3747,7 @@
             438.0,
             26.0
           ],
-          "color": 11728633,
+          "color": 16777215,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -3761,13 +3769,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            104.5,
-            5.0,
-            5.0
+            328.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3789,10 +3797,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -3817,10 +3825,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -3840,13 +3848,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            104.5,
-            5.0,
-            5.0
+            568.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3874,7 +3882,7 @@
             26.0
           ],
           "color": 12772067,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -3888,10 +3896,10 @@
               770.0
             ],
             "selected": false,
-            "top": 16202,
-            "bottom": 27250,
-            "glow": 5037281,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18514,
+            "bottom": 28021,
+            "glow": 5563112,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10153971,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -3901,6 +3909,7 @@
             "rimTop": 14154234,
             "rimTopAlpha": 0.8500000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -3922,7 +3931,7 @@
             438.0,
             26.0
           ],
-          "color": 11728633,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -3944,13 +3953,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            134.5,
-            5.0,
-            5.0
+            328.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -3972,10 +3981,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -4000,10 +4009,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 9013901,
           "opacity": 1.0,
@@ -4023,13 +4032,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            134.5,
-            5.0,
-            5.0
+            568.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11728633,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -4057,7 +4066,7 @@
             26.0
           ],
           "color": 12968913,
-          "opacity": 0.9399999976158142,
+          "opacity": 0.949999988079071,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -4071,19 +4080,20 @@
               770.0
             ],
             "selected": false,
-            "top": 16651,
-            "bottom": 27447,
-            "glow": 7986344,
-            "glowAlpha": 0.1599999964237213,
+            "top": 18708,
+            "bottom": 28218,
+            "glow": 8446894,
+            "glowAlpha": 0.3400000035762787,
             "grid": 11530187,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 11530187,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 11530187,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -4106,7 +4116,7 @@
             26.0
           ],
           "color": 8966312,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -5687,6 +5697,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 2.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -5753,13 +5764,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            43.5,
-            5.0,
-            5.0
+            328.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -5781,10 +5792,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -5809,10 +5820,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -5832,13 +5843,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            43.5,
-            5.0,
-            5.0
+            568.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -5939,6 +5950,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -6033,13 +6045,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            73.5,
-            5.0,
-            5.0
+            328.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6061,10 +6073,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -6089,10 +6101,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -6112,13 +6124,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            73.5,
-            5.0,
-            5.0
+            568.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6196,6 +6208,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -6239,13 +6252,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            103.5,
-            5.0,
-            5.0
+            328.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6267,10 +6280,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -6295,10 +6308,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -6318,13 +6331,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            103.5,
-            5.0,
-            5.0
+            568.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6402,6 +6415,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -6445,13 +6459,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            133.5,
-            5.0,
-            5.0
+            328.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6473,10 +6487,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -6501,10 +6515,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -6524,13 +6538,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            133.5,
-            5.0,
-            5.0
+            568.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -6608,6 +6622,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -6630,7 +6645,7 @@
             22.0
           ],
           "color": 16777215,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -8206,6 +8221,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 2.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -8272,13 +8288,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            43.5,
-            5.0,
-            5.0
+            328.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8300,10 +8316,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -8328,10 +8344,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -8351,13 +8367,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            43.5,
-            5.0,
-            5.0
+            568.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8458,6 +8474,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -8552,13 +8569,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            73.5,
-            5.0,
-            5.0
+            328.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8580,10 +8597,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -8608,10 +8625,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -8631,13 +8648,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            73.5,
-            5.0,
-            5.0
+            568.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8715,6 +8732,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -8758,13 +8776,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            103.5,
-            5.0,
-            5.0
+            328.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8786,10 +8804,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -8814,10 +8832,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -8837,13 +8855,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            103.5,
-            5.0,
-            5.0
+            568.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8921,6 +8939,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -8964,13 +8983,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            133.5,
-            5.0,
-            5.0
+            328.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -8992,10 +9011,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 15751180,
           "opacity": 1.0,
@@ -9020,10 +9039,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 3684927,
           "opacity": 1.0,
@@ -9043,13 +9062,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            133.5,
-            5.0,
-            5.0
+            568.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -9127,6 +9146,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -9149,7 +9169,7 @@
             22.0
           ],
           "color": 16777215,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -10801,7 +10821,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -10815,10 +10835,10 @@
               770.0
             ],
             "selected": true,
-            "top": 20071,
+            "top": 24441,
             "bottom": 33434,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -10828,6 +10848,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -10849,7 +10870,7 @@
             438.0,
             26.0
           ],
-          "color": 12451839,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -10894,13 +10915,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            44.5,
-            5.0,
-            5.0
+            328.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12451839,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -10922,10 +10943,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -10950,10 +10971,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -10973,13 +10994,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            44.5,
-            5.0,
-            5.0
+            568.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12451839,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11030,7 +11051,7 @@
             26.0
           ],
           "color": 591879,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -11044,19 +11065,20 @@
               770.0
             ],
             "selected": false,
-            "top": 3487029,
+            "top": 4539717,
             "bottom": 6908265,
-            "glow": 12895428,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 13290186,
+            "glowAlpha": 0.3400000035762787,
             "grid": 14606046,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 14606046,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 14606046,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -11151,13 +11173,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            74.5,
-            5.0,
-            5.0
+            328.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11179,10 +11201,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -11207,10 +11229,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -11230,13 +11252,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            74.5,
-            5.0,
-            5.0
+            568.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11264,7 +11286,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -11278,19 +11300,20 @@
               770.0
             ],
             "selected": false,
-            "top": 17758,
+            "top": 22128,
             "bottom": 31891,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 10219260,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 10219260,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -11312,7 +11335,7 @@
             438.0,
             26.0
           ],
-          "color": 11793919,
+          "color": 16777215,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -11334,13 +11357,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            104.5,
-            5.0,
-            5.0
+            328.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11362,10 +11385,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -11390,10 +11413,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -11413,13 +11436,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            104.5,
-            5.0,
-            5.0
+            568.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11447,7 +11470,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -11461,10 +11484,10 @@
               770.0
             ],
             "selected": false,
-            "top": 17758,
+            "top": 22128,
             "bottom": 31891,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -11474,6 +11497,7 @@
             "rimTop": 14153982,
             "rimTopAlpha": 0.8500000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -11495,7 +11519,7 @@
             438.0,
             26.0
           ],
-          "color": 11793919,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -11517,13 +11541,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            134.5,
-            5.0,
-            5.0
+            328.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11545,10 +11569,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -11573,10 +11597,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -11596,13 +11620,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            134.5,
-            5.0,
-            5.0
+            568.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -11630,7 +11654,7 @@
             26.0
           ],
           "color": 2379834,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -11644,19 +11668,20 @@
               770.0
             ],
             "selected": false,
-            "top": 18709,
+            "top": 23333,
             "bottom": 32844,
-            "glow": 7920809,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 8381359,
+            "glowAlpha": 0.3400000035762787,
             "grid": 11464651,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 11464651,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 11464651,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -11679,7 +11704,7 @@
             26.0
           ],
           "color": 8901033,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -13336,7 +13361,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -13350,10 +13375,10 @@
               770.0
             ],
             "selected": true,
-            "top": 20071,
+            "top": 24441,
             "bottom": 33434,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -13363,6 +13388,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -13384,7 +13410,7 @@
             438.0,
             26.0
           ],
-          "color": 12451839,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -13429,13 +13455,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            44.5,
-            5.0,
-            5.0
+            328.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12451839,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13457,10 +13483,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -13485,10 +13511,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            44.5,
-            5.0,
-            5.0
+            443.0,
+            46.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -13508,13 +13534,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            44.5,
-            5.0,
-            5.0
+            568.0,
+            46.5,
+            4.0,
+            4.0
           ],
-          "color": 12451839,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13565,7 +13591,7 @@
             26.0
           ],
           "color": 591879,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -13579,19 +13605,20 @@
               770.0
             ],
             "selected": false,
-            "top": 3487029,
+            "top": 4539717,
             "bottom": 6908265,
-            "glow": 12895428,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 13290186,
+            "glowAlpha": 0.3400000035762787,
             "grid": 14606046,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 14606046,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 14606046,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -13686,13 +13713,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            74.5,
-            5.0,
-            5.0
+            328.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13714,10 +13741,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -13742,10 +13769,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            74.5,
-            5.0,
-            5.0
+            443.0,
+            76.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -13765,13 +13792,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            74.5,
-            5.0,
-            5.0
+            568.0,
+            76.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13799,7 +13826,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -13813,19 +13840,20 @@
               770.0
             ],
             "selected": false,
-            "top": 17758,
+            "top": 22128,
             "bottom": 31891,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 10219260,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 10219260,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -13847,7 +13875,7 @@
             438.0,
             26.0
           ],
-          "color": 11793919,
+          "color": 16777215,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -13869,13 +13897,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            104.5,
-            5.0,
-            5.0
+            328.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13897,10 +13925,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -13925,10 +13953,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            104.5,
-            5.0,
-            5.0
+            443.0,
+            106.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -13948,13 +13976,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            104.5,
-            5.0,
-            5.0
+            568.0,
+            106.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -13982,7 +14010,7 @@
             26.0
           ],
           "color": 2050898,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -13996,10 +14024,10 @@
               770.0
             ],
             "selected": false,
-            "top": 17758,
+            "top": 22128,
             "bottom": 31891,
-            "glow": 5233134,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 5759221,
+            "glowAlpha": 0.3400000035762787,
             "grid": 10219260,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
@@ -14009,6 +14037,7 @@
             "rimTop": 14153982,
             "rimTopAlpha": 0.8500000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -14030,7 +14059,7 @@
             438.0,
             26.0
           ],
-          "color": 11793919,
+          "color": 16777215,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -14052,13 +14081,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            134.5,
-            5.0,
-            5.0
+            328.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -14080,10 +14109,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -14108,10 +14137,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            134.5,
-            5.0,
-            5.0
+            443.0,
+            136.5,
+            4.0,
+            4.0
           ],
           "color": 10131863,
           "opacity": 1.0,
@@ -14131,13 +14160,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            134.5,
-            5.0,
-            5.0
+            568.0,
+            136.5,
+            4.0,
+            4.0
           ],
-          "color": 11793919,
-          "opacity": 0.6,
+          "color": 16777215,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -14165,7 +14194,7 @@
             26.0
           ],
           "color": 2379834,
-          "opacity": 0.8999999761581421,
+          "opacity": 0.9200000166893005,
           "radius": 7.020000457763672,
           "stroke": 0.0,
           "text": null,
@@ -14179,19 +14208,20 @@
               770.0
             ],
             "selected": false,
-            "top": 18709,
+            "top": 23333,
             "bottom": 32844,
-            "glow": 7920809,
-            "glowAlpha": 0.1599999964237213,
+            "glow": 8381359,
+            "glowAlpha": 0.3400000035762787,
             "grid": 11464651,
             "gridAlpha": 0.12999999523162842,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "rim": 11464651,
-            "rimAlpha": 0.20000000298023224,
+            "rimAlpha": 0.12999999523162842,
             "rimTop": 11464651,
             "rimTopAlpha": 0.5,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -14214,7 +14244,7 @@
             26.0
           ],
           "color": 8901033,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -15795,6 +15825,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -15861,13 +15892,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            43.5,
-            5.0,
-            5.0
+            328.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -15889,10 +15920,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -15917,10 +15948,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -15940,13 +15971,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            43.5,
-            5.0,
-            5.0
+            568.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16047,6 +16078,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -16141,13 +16173,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            73.5,
-            5.0,
-            5.0
+            328.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16169,10 +16201,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -16197,10 +16229,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -16220,13 +16252,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            73.5,
-            5.0,
-            5.0
+            568.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16304,6 +16336,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -16347,13 +16380,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            103.5,
-            5.0,
-            5.0
+            328.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16375,10 +16408,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -16403,10 +16436,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -16426,13 +16459,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            103.5,
-            5.0,
-            5.0
+            568.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16510,6 +16543,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -16553,13 +16587,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            133.5,
-            5.0,
-            5.0
+            328.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16581,10 +16615,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -16609,10 +16643,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -16632,13 +16666,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            133.5,
-            5.0,
-            5.0
+            568.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -16716,6 +16750,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -16738,7 +16773,7 @@
             22.0
           ],
           "color": 16777215,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",
@@ -18314,6 +18349,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 1.0,
             "rimWidth": 2.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -18380,13 +18416,13 @@
           "id": "key:[\"selected\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            43.5,
-            5.0,
-            5.0
+            328.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -18408,10 +18444,10 @@
           "id": "key:[\"selected\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -18436,10 +18472,10 @@
           "id": "key-focus:[\"selected\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            43.5,
-            5.0,
-            5.0
+            443.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -18459,13 +18495,13 @@
           "id": "key:[\"selected\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            43.5,
-            5.0,
-            5.0
+            568.0,
+            43.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -18566,6 +18602,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -18660,13 +18697,13 @@
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            73.5,
-            5.0,
-            5.0
+            328.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -18688,10 +18725,10 @@
           "id": "key:[\"offline\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -18716,10 +18753,10 @@
           "id": "key-focus:[\"offline\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            73.5,
-            5.0,
-            5.0
+            443.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -18739,13 +18776,13 @@
           "id": "key:[\"offline\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            73.5,
-            5.0,
-            5.0
+            568.0,
+            73.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -18823,6 +18860,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -18866,13 +18904,13 @@
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            103.5,
-            5.0,
-            5.0
+            328.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -18894,10 +18932,10 @@
           "id": "key:[\"loading\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -18922,10 +18960,10 @@
           "id": "key-focus:[\"loading\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            103.5,
-            5.0,
-            5.0
+            443.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -18945,13 +18983,13 @@
           "id": "key:[\"loading\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            103.5,
-            5.0,
-            5.0
+            568.0,
+            103.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -19029,6 +19067,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -19072,13 +19111,13 @@
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
-            327.5,
-            133.5,
-            5.0,
-            5.0
+            328.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -19100,10 +19139,10 @@
           "id": "key:[\"locked\",\"ease\"]",
           "shape": "diamond",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16409360,
           "opacity": 1.0,
@@ -19128,10 +19167,10 @@
           "id": "key-focus:[\"locked\",\"ease\"]",
           "shape": "outside-ring",
           "bounds": [
-            442.5,
-            133.5,
-            5.0,
-            5.0
+            443.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 14408665,
           "opacity": 1.0,
@@ -19151,13 +19190,13 @@
           "id": "key:[\"locked\",\"hold\"]",
           "shape": "diamond",
           "bounds": [
-            567.5,
-            133.5,
-            5.0,
-            5.0
+            568.0,
+            133.0,
+            4.0,
+            4.0
           ],
           "color": 16777215,
-          "opacity": 0.6,
+          "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
@@ -19235,6 +19274,7 @@
             "rimTop": 16777215,
             "rimTopAlpha": 0.6000000238418579,
             "rimWidth": 1.0,
+            "rimInset": 0.0,
             "shadow": 0,
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
@@ -19257,7 +19297,7 @@
             22.0
           ],
           "color": 16777215,
-          "opacity": 1.0,
+          "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
           "text": "audio.mov",

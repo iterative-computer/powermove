@@ -2468,7 +2468,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     PaintQuad::new(area)
                         .background(linear_gradient(
                             180.,
-                            linear_color_stop(tint(hex("glow"), 0.), 0.42),
+                            linear_color_stop(tint(hex("glow"), 0.), pm_design::GLOW_FROM),
                             linear_color_stop(tint(hex("glow"), number("glowAlpha")), 1.),
                         ))
                         .corner_radii(radius)
@@ -2492,9 +2492,13 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     x += px(step);
                 }
             }
+            let inset = px(number("rimInset") as f32);
             strip_rim(
-                area,
-                radius,
+                Bounds::new(
+                    area.origin + point(inset, inset),
+                    size(area.size.width - inset * 2., area.size.height - inset * 2.),
+                ),
+                (radius - inset).max(px(0.)),
                 rim,
                 smoothing,
                 tint(hex("rim"), number("rimAlpha")),
@@ -2657,8 +2661,11 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     let floor = top + h - inset;
                     let mut path = PathBuilder::fill();
                     path.move_to(point(px(x0), px(floor)));
+                    // Silence draws nothing: a bar shorter than `minBar`
+                    // would run along the foot as an underline.
                     for (i, peak) in bars.iter().enumerate() {
-                        let bar = (peak.as_f64().unwrap_or(0.) as f32 * room).max(min_bar);
+                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
+                        let bar = if bar < min_bar { 0. } else { bar };
                         let x = x0 + i as f32;
                         path.line_to(point(px(x), px(floor - bar)));
                         path.line_to(point(px(x + 1.), px(floor - bar)));

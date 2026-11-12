@@ -114,8 +114,11 @@ fn strip_labels_read_on_every_layer_colour_and_state() {
             for fill in t.colors.labels.all() {
                 for state in STATES {
                     let m = t.strip(fill, state);
-                    // A translucent body is judged as it lands on the canvas.
-                    for ground in [m.top, m.bottom].map(|c| mix(t.colors.panel, c, m.opacity)) {
+                    // A translucent body is judged as it lands on the canvas,
+                    // from its top to the foot of a name's descenders: the
+                    // luminous foot below that carries no text.
+                    for ground in [m.top, m.under_label].map(|c| mix(t.colors.panel, c, m.opacity))
+                    {
                         let floor = if state == StripState::Disabled {
                             3.
                         } else {
@@ -158,6 +161,16 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     );
     assert!(hover.rim.1 > m.rim.1 && hover.rim_top.1 > m.rim_top.1);
     assert!(dark.strip(green, StripState::Dragging).shadow.1 > 0.);
+    // Selection is a white ring: at the edge on a dark canvas, inside a band
+    // of the strip's own colour on a light one, where white at the edge
+    // would vanish.
+    let light = Tokens::new(Scheme::Light, Accessibility::default());
+    for (tokens, inset) in [(&dark, 0.), (&light, 2.)] {
+        let selected = tokens.strip(green, StripState::Selected);
+        assert_eq!((selected.rim.0, selected.rim_width), (0xffffff, 2.));
+        assert_eq!(selected.rim_inset, inset);
+        assert_eq!(tokens.strip(green, StripState::Rest).rim_inset, 0.);
+    }
     assert_eq!(m.shadow.1, 0., "a resting strip has no shadow");
     let gray = dark.strip(dark.colors.labels.gray, StripState::Rest);
     assert!(
