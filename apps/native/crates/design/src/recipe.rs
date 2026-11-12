@@ -29,7 +29,9 @@ pub enum Text {
     Reading,
     /// Sheet and section headings (15, semibold).
     Heading,
-    /// A screen's title: Home, Settings (24, semibold, tight).
+    /// The title in a screen's header row: Home (17, semibold).
+    Headline,
+    /// A screen's title: Settings (24, semibold, tight).
     Display,
     /// Timecode and numeric readouts (13, medium, tabular).
     Timecode,
@@ -125,6 +127,12 @@ impl Tokens {
             Text::Reading => style(ty.reading, ty.regular_weight, 0., ty.reading_leading),
             Text::Heading => style(
                 ty.heading,
+                ty.display_weight,
+                ty.heading_tracking,
+                ty.dense_leading,
+            ),
+            Text::Headline => style(
+                17.,
                 ty.display_weight,
                 ty.heading_tracking,
                 ty.dense_leading,
