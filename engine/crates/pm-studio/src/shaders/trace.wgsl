@@ -492,9 +492,12 @@ fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   return e;
 }
 fn medium_direct_live(p:vec3f,rd:vec3f,g:f32)->vec3f {
-  // Smooth ambient fill, plus one visible practical/sun sample. The expensive
-  // environment shadow integral is reserved for Refine/Final.
-  var e=(environment(rd)+environment(vec3f(0.,1.,0.)))*0.5;
+  // Keep the inexpensive two-direction ambient approximation, but external
+  // light must traverse the same finite atmosphere as practical lights.
+  // Omitting that extinction lit the interior of an opaque 10 km fog sphere.
+  let up=vec3f(0.,1.,0.);
+  var e=(environment(rd)*medium_transmittance(p,rd,BIG)
+    +environment(up)*medium_transmittance(p,up,BIG))*0.5;
   if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
     if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
   return e;

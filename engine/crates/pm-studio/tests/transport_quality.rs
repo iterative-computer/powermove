@@ -398,6 +398,30 @@ fn finite_global_fog_has_the_same_boundary_for_camera_and_shadow_rays() {
 }
 
 #[test]
+fn live_fog_does_not_invent_ambient_light_inside_an_opaque_atmosphere() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.environment = (Vec3::splat(1.), Vec3::splat(1.));
+    scene.world.atmosphere.density = 0.4;
+    scene.world.atmosphere.color = Vec3::splat(0.7);
+    scene.world.atmosphere.distance = 10000.;
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.live = false;
+    r.trace(32, 8, true, 0);
+    let quality = r.linear_beauty();
+    r.live = true;
+    r.trace(32, 8, true, 1000000);
+    let live = r.linear_beauty();
+    let rgb_mean = |p: &[f32]| p.chunks_exact(4).map(|p|p[0]+p[1]+p[2]).sum::<f32>() / (24.*24.*3.);
+    let (a,b) = (rgb_mean(&quality),rgb_mean(&live));
+    eprintln!("opaque atmosphere quality={a:.6}, live={b:.6}");
+    assert!(a<0.005, "the reference atmosphere should block external light");
+    assert!(b<0.005, "Live adds ambient light that cannot reach the fog: {b}");
+}
+
+#[test]
 fn local_volumes_keep_their_bounds_outside_the_global_fog_radius() {
     let mut scene = receiver();
     scene.objects.clear();
