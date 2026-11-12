@@ -503,3 +503,229 @@ fn animated_corpus_projects_use_stored_renditions_within_the_video_class() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Ten 16-bit frames `shot.0001.png`… at 10 fps, read in place (the small
+/// file a sequence asset retains), each coded by its number in red.
+struct CodedSequence {
+    _dir: tempfile::TempDir,
+    frames: std::path::PathBuf,
+    retained: std::path::PathBuf,
+}
+fn coded_sequence() -> CodedSequence {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    for n in 1..=10u16 {
+        let mut bytes = Vec::new();
+        for _ in 0..16 * 16 {
+            for code in [n * 6_000, 65_535 - n * 6_000, 30_000] {
+                bytes.extend_from_slice(&code.to_be_bytes());
+            }
+        }
+        let file = std::fs::File::create(frames.join(format!("shot.{n:04}.png"))).unwrap();
+        let mut encoder = png::Encoder::new(file, 16, 16);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&bytes).unwrap();
+    }
+    let manifest = pm_media::image::sequence::Manifest {
+        powermove_image_sequence: 1,
+        dir: frames.clone(),
+        prefix: "shot.".into(),
+        suffix: ".png".into(),
+        padding: 4,
+        first: 1,
+        last: 10,
+        rate: [10, 1],
+    };
+    let retained = dir.path().join("retained");
+    std::fs::write(&retained, manifest.to_bytes()).unwrap();
+    CodedSequence {
+        _dir: dir,
+        frames,
+        retained,
+    }
+}
+/// A movie of the coded frames at 10 fps, as a proxy (ProRes 4444 in
+/// QuickTime) or an earlier build's transcoded rendition (VP9 WebM).
+fn sequence_movie(sequence: &CodedSequence, name: &str, codec: &[&str]) -> std::path::PathBuf {
+    let ffmpeg =
+        std::path::PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    let out = sequence.frames.parent().unwrap().join(name);
+    let status = std::process::Command::new(ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-framerate",
+            "10",
+            "-start_number",
+            "1",
+            "-i",
+        ])
+        .arg(sequence.frames.join("shot.%04d.png"))
+        .args(codec)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    out
+}
+/// The number of the coded file a sequence layer `d` shows at each time.
+fn shown(d: serde_json::Value, path: &std::path::Path, from: f64, times: &[f64]) -> Vec<u16> {
+    let mut source = layer("seq", "video", d, 8.0, 8.0, 10.0);
+    source["from"] = json!(from);
+    let mut doc = project(16, 16, 10.0, no_fill(), vec![source]);
+    asset(&mut doc, "clip", "video", "png", 16, 16, 1.0);
+    doc["assets"]["clip"]["imageSequence"] = json!({"fps":10,"frames":10,"first":1,"last":10});
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path.into());
+    let document = load(&doc);
+    let mut renderer = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(16, 16), 1.0, Precision::Float16);
+    times
+        .iter()
+        .map(|&t| {
+            let frame = renderer
+                .render(
+                    &document,
+                    "Ptest-root",
+                    support::ticks(t),
+                    &request,
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{t}: {:?}", frame.failures);
+            let rgba = renderer.read_rgba(&frame).unwrap();
+            let red = rgba[(8 * 16 + 8) * 4];
+            (f64::from(red) * 65_535.0 / 6_000.0).round() as u16
+        })
+        .collect()
+}
+
+/// Trim, speed other than 1, reverse and time remapping choose the exact
+/// file of a sequence read in place, as they choose a clip's frame; its
+/// proxy (a QuickTime movie of the same frames) shows the same files.
+#[test]
+fn an_in_place_sequence_is_trimmed_retimed_reversed_and_remapped_to_the_exact_file() {
+    let sequence = coded_sequence();
+    let proxy = sequence_movie(
+        &sequence,
+        "proxy.mov",
+        &[
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "4444",
+            "-pix_fmt",
+            "p416le",
+        ],
+    );
+    let base = json!({"asset":"clip","w":16,"h":16,"fit":"stretch"});
+    let with = |pairs: &[(&str, serde_json::Value)]| {
+        let mut d = base.clone();
+        for (k, v) in pairs {
+            d[*k] = v.clone();
+        }
+        d
+    };
+    // (case, d, layer start, composition times, files shown)
+    let cases = [
+        (
+            "plain",
+            base.clone(),
+            0.0,
+            vec![0.0, 0.1, 0.35, 0.99, 3.0],
+            vec![1, 2, 4, 10, 10],
+        ),
+        (
+            "start",
+            base.clone(),
+            0.5,
+            vec![0.5, 0.7, 1.45],
+            vec![1, 3, 10],
+        ),
+        (
+            "trim",
+            with(&[("trim", json!(0.2))]),
+            0.0,
+            vec![0.0, 0.1, 0.75],
+            vec![3, 4, 10],
+        ),
+        (
+            "speed 2",
+            with(&[("speed", json!(2))]),
+            0.0,
+            vec![0.0, 0.1, 0.3, 0.45],
+            vec![1, 3, 7, 10],
+        ),
+        (
+            "speed ½",
+            with(&[("speed", json!(0.5))]),
+            0.0,
+            vec![0.1, 0.2, 0.3, 1.8],
+            vec![1, 2, 2, 10],
+        ),
+        (
+            "reverse",
+            with(&[("speed", json!(-1)), ("trim", json!(1.0))]),
+            0.0,
+            vec![0.05, 0.25, 0.95],
+            vec![10, 8, 1],
+        ),
+        (
+            "remap",
+            with(&[
+                ("timeRemap", json!(true)),
+                (
+                    "sourceTime",
+                    keys(
+                        json!(0),
+                        &[(0.0, json!(0.65)), (0.5, json!(0.35)), (1.0, json!(0.05))],
+                    ),
+                ),
+            ]),
+            0.0,
+            vec![0.0, 0.5, 1.0],
+            vec![7, 4, 1],
+        ),
+    ];
+    for (case, d, from, times, files) in cases {
+        assert_eq!(
+            shown(d.clone(), &sequence.retained, from, &times),
+            files,
+            "{case}"
+        );
+        assert_eq!(
+            shown(d, &proxy, from, &times),
+            files,
+            "{case} from its proxy"
+        );
+    }
+}
+
+/// A project saved with an earlier build's sequence asset (its frames
+/// transcoded to a WebM rendition) plays exactly as before: the video path,
+/// frame k at k / fps.
+#[test]
+fn an_older_transcoded_sequence_asset_shows_the_same_frames() {
+    let sequence = coded_sequence();
+    let webm = sequence_movie(
+        &sequence,
+        "rendition.webm",
+        &[
+            "-c:v",
+            "libvpx-vp9",
+            "-lossless",
+            "1",
+            "-pix_fmt",
+            "yuv444p",
+        ],
+    );
+    let d = json!({"asset":"clip","w":16,"h":16,"fit":"stretch"});
+    assert_eq!(
+        shown(d, &webm, 0.0, &[0.0, 0.1, 0.35, 0.99, 3.0]),
+        vec![1, 2, 4, 10, 10]
+    );
+}

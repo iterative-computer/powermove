@@ -539,6 +539,34 @@ fn failure(code: TaskFailureCode, diagnostic: impl Into<String>) -> TaskFailure 
     }
 }
 
+/// An original's picture: width, height, bit depth and frames. A sequence
+/// read in place answers from its first frame on disk and its numbering.
+fn picture(path: &Path) -> Option<(u32, u32, u8, u64)> {
+    if let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) {
+        let first = (sequence.first..=sequence.last)
+            .map(|n| sequence.file(n))
+            .find(|f| f.is_file())?;
+        let still = pm_media::image::read(&first, &pm_media::pool::FramePool::new(0)).ok()?;
+        let format = still.frame.format;
+        return Some((
+            format.width as u32,
+            format.height as u32,
+            still.bit_depth,
+            sequence.frames(),
+        ));
+    }
+    let v = pm_media::probe::probe(path).ok()?.probe.video?;
+    Some((v.width, v.height, v.codec.bit_depth, v.frames as u64))
+}
+
+/// A failed generation in the task's words: a missing file names itself.
+fn reason(error: &pm_proxy::ProxyError) -> String {
+    match error {
+        pm_proxy::ProxyError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => e.to_string(),
+        error => error.to_string(),
+    }
+}
+
 fn classify(error: &pm_proxy::ProxyError) -> TaskFailureCode {
     use pm_proxy::ProxyError as E;
     match error {
@@ -1043,9 +1071,7 @@ impl Inner {
         };
         let before_source = Source::of(&source)
             .ok_or_else(|| failure(TaskFailureCode::SourceOffline, "source offline"))?;
-        if let Ok(probed) = pm_media::probe::probe(&source)
-            && let Some(frames) = probed.probe.video.map(|v| v.frames as u64)
-        {
+        if let Some((_, _, _, frames)) = picture(&source) {
             let _ = self.tasks.lock().unwrap().progress(ticket, 0, frames);
         }
         let (ffmpeg, ffprobe) = ffmpeg()
@@ -1120,7 +1146,7 @@ impl Inner {
                 on_progress: &on_progress,
             },
         })
-        .map_err(|e| failure(classify(&e), e.to_string()))?;
+        .map_err(|e| failure(classify(&e), reason(&e)))?;
         // A file changed while encoding is not this rendition's source.
         if Source::of(&source).as_ref() != Some(&before_source) {
             return Err(failure(TaskFailureCode::Unknown, "the source changed"));
@@ -1302,10 +1328,7 @@ impl ProMedia {
                         .preview_checked
                         .contains(&content);
                     if unchecked {
-                        let large = pm_media::probe::probe(path)
-                            .ok()
-                            .and_then(|p| p.probe.video)
-                            .is_some_and(|v| v.width > 1920 || v.height > 1080);
+                        let large = picture(path).is_some_and(|(w, h, ..)| w > 1920 || h > 1080);
                         let mut state = inner.state.lock().unwrap();
                         state.preview_checked.insert(content.clone());
                         if large {
@@ -1535,12 +1558,8 @@ impl ProMedia {
             let wanted: Vec<_> = assets
                 .into_iter()
                 .filter(|(_, _, path)| {
-                    pm_media::probe::probe(path)
-                        .ok()
-                        .and_then(|p| p.probe.video)
-                        .is_some_and(|v| {
-                            prefs.creates_on_import(v.width, v.height, v.codec.bit_depth)
-                        })
+                    picture(path)
+                        .is_some_and(|(w, h, depth, _)| prefs.creates_on_import(w, h, depth))
                 })
                 .collect();
             if !wanted.is_empty() {

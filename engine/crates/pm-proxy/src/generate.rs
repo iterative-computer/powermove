@@ -63,7 +63,32 @@ pub fn generate_with_disk_probe(
         return Err(ProxyError::Cancelled);
     }
     if let Some(manifest) = crate::sequence::read_manifest(request.source)? {
-        return crate::sequence::generate_sequence(request, disk_space, manifest);
+        return crate::sequence::generate_sequence(request, disk_space, manifest, false);
+    }
+    if let Some(manifest) = crate::sequence::in_place(request.source, &request.control)? {
+        // The proxy is of the frames' bytes (and rate), wherever they live.
+        let hash = manifest.content_hash()?;
+        let GenerationRequest {
+            source,
+            format,
+            size,
+            ffmpeg,
+            ffprobe,
+            store,
+            control,
+            ..
+        } = request;
+        let request = GenerationRequest {
+            source,
+            source_hash: &hash,
+            format,
+            size,
+            ffmpeg,
+            ffprobe,
+            store,
+            control,
+        };
+        return crate::sequence::generate_sequence(request, disk_space, manifest, true);
     }
     let input = probe(request.ffprobe, request.source)?;
     let native_source = pm_media::probe::probe(request.source)

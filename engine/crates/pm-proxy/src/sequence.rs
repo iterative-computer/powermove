@@ -80,6 +80,42 @@ pub(crate) fn read_manifest(path: &Path) -> Result<Option<SequenceManifest>> {
     Ok(Some(manifest))
 }
 
+/// A sequence read in place (`pm_media::image::sequence::Manifest`, the
+/// file a sequence asset retains) as its frames' bytes: each number from
+/// the first to the last is hashed once. A number with no file fails,
+/// naming it: a proxy never stands in for a frame that is not there.
+pub(crate) fn in_place(
+    path: &Path,
+    control: &GenerationControl<'_>,
+) -> Result<Option<SequenceManifest>> {
+    let Some(sequence) = pm_media::image::sequence::Manifest::read(path)
+        .map_err(|e| ProxyError::InvalidMedia(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let mut frames = Vec::with_capacity(sequence.frames() as usize);
+    for number in sequence.first..=sequence.last {
+        let path = sequence.file(number);
+        let hash = match hash_frame(&path, control) {
+            Err(ProxyError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                let file = path.file_name().unwrap_or_default().to_string_lossy();
+                return Err(ProxyError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("frame {number} of the image sequence is missing: {file}"),
+                )));
+            }
+            hash => hash?,
+        };
+        frames.push(SequenceFrame { path, hash });
+    }
+    let [num, den] = sequence.rate;
+    Ok(Some(SequenceManifest {
+        powermove_sequence: 1,
+        rate: crate::manifest::SequenceRate { num, den },
+        frames,
+    }))
+}
+
 fn wait_for_idle(control: &GenerationControl<'_>) -> Result<()> {
     let mut reported = false;
     loop {
@@ -101,7 +137,18 @@ fn wait_for_idle(control: &GenerationControl<'_>) -> Result<()> {
 }
 
 fn verify_frame(frame: &SequenceFrame, control: &GenerationControl<'_>) -> Result<()> {
-    let mut file = File::open(&frame.path)?;
+    if hash_frame(&frame.path, control)? != frame.hash.to_ascii_lowercase() {
+        return Err(ProxyError::InvalidMedia(
+            "sequence frame content hash changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The BLAKE3 of the file at `path` (lowercase hex), read while no
+/// interactive work asks the encoder to wait.
+fn hash_frame(path: &Path, control: &GenerationControl<'_>) -> Result<String> {
+    let mut file = File::open(path)?;
     let before = file.metadata()?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0_u8; 1 << 20];
@@ -113,18 +160,13 @@ fn verify_frame(frame: &SequenceFrame, control: &GenerationControl<'_>) -> Resul
         }
         hasher.update(&buf[..n]);
     }
-    let after = fs::metadata(&frame.path)?;
+    let after = fs::metadata(path)?;
     if before.len() != after.len() || before.modified()? != after.modified()? {
         return Err(ProxyError::InvalidMedia(
             "sequence frame changed while hashing".into(),
         ));
     }
-    if hasher.finalize().to_hex().as_str() != frame.hash.to_ascii_lowercase() {
-        return Err(ProxyError::InvalidMedia(
-            "sequence frame content hash changed".into(),
-        ));
-    }
-    Ok(())
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn verify_frames(manifest: &SequenceManifest, control: &GenerationControl<'_>) -> Result<()> {
@@ -916,6 +958,7 @@ pub(crate) fn generate_sequence(
     request: GenerationRequest<'_>,
     disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
     manifest: SequenceManifest,
+    hashed: bool,
 ) -> Result<GeneratedProxy> {
     let hash = manifest.content_hash()?;
     if hash != request.source_hash.to_ascii_lowercase() {
@@ -923,7 +966,10 @@ pub(crate) fn generate_sequence(
             "sequence aggregate content hash changed".into(),
         ));
     }
-    verify_frames(&manifest, &request.control)?;
+    // Frames hashed just now need not be read again before encoding.
+    if !hashed {
+        verify_frames(&manifest, &request.control)?;
+    }
     let (width, height, depth, alpha, color) = frame_facts(&manifest, &request.control)?;
     let recipe = ProxyRecipe::new(request.format, request.size, width, height, depth, alpha)?;
     match request.store.lookup(&hash, &recipe) {

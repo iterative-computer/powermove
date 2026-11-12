@@ -2173,8 +2173,6 @@ fn shader_quad(
     }
 }
 
-/// The world matrix of a vector layer in target pixels, including the size
-/// anchor offset `contentQuad` applies to its quad.
 /// The frame number an image sequence shows at `seconds` of its source:
 /// frame `n` of the clip is number `first + n`, `n` counted at `fps` from
 /// source time 0, the ends held.
@@ -2303,6 +2301,8 @@ fn offline_card<'d>(
         .map(|quad| quad.map(|q| device_quad(*q))))
 }
 
+/// The world matrix of a vector layer in target pixels, including the size
+/// anchor offset `contentQuad` applies to its quad.
 fn vector_world<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &Build<'_>,

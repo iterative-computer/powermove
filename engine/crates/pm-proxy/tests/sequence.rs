@@ -248,6 +248,114 @@ mod real {
         ));
     }
 
+    /// A sequence imported in place (the small file its asset retains, with
+    /// no extension, as in the media store) makes its proxy from its own
+    /// frames at their depth, frame for frame at its rate; a frame deleted
+    /// from the folder fails the proxy naming it.
+    #[test]
+    fn a_sequence_read_in_place_makes_its_proxy_and_names_a_missing_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg_dir = std::path::PathBuf::from(
+            std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"),
+        );
+        let ffmpeg = ffmpeg_dir.join("bin/ffmpeg");
+        let ffprobe = ffmpeg_dir.join("bin/ffprobe");
+        let level = |n: u16| [n * 12_000, 65_535 - n * 12_000, 30_000];
+        for n in 1..=4u16 {
+            let mut bytes = Vec::new();
+            for _ in 0..WIDTH * HEIGHT {
+                for code in level(n) {
+                    bytes.extend_from_slice(&code.to_be_bytes());
+                }
+            }
+            let file = fs::File::create(dir.path().join(format!("shot.{n:04}.png"))).unwrap();
+            let mut encoder = png::Encoder::new(file, WIDTH, HEIGHT);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&bytes).unwrap();
+        }
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: dir.path().to_path_buf(),
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 1,
+            last: 4,
+            rate: [24_000, 1001],
+        };
+        let source = dir.path().join("retained");
+        fs::write(&source, sequence.to_bytes()).unwrap();
+        let source_hash = blake3::hash(&fs::read(&source).unwrap())
+            .to_hex()
+            .to_string();
+        let store = ProxyStore::open(dir.path().join("generated")).unwrap();
+        let cancel = AtomicBool::new(false);
+        let never_pause = || false;
+        let on_pause = |_| {};
+        let make_request = || GenerationRequest {
+            source: &source,
+            source_hash: &source_hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &never_pause,
+                on_pause: &on_pause,
+                on_progress: &|_| {},
+            },
+        };
+        let quota = |_: &Path| Ok((40 << 30, 100 << 30));
+        let made = generate_with_disk_probe(make_request(), &quota).unwrap();
+        assert!(!made.reused);
+        assert_eq!(made.stored.recipe.source_depth, 16);
+        assert_eq!(
+            (made.stored.recipe.width, made.stored.recipe.height),
+            (WIDTH / 2, HEIGHT / 2)
+        );
+        assert!(
+            generate_with_disk_probe(make_request(), &quota)
+                .unwrap()
+                .reused
+        );
+        // Every frame, in order, at 24000/1001.
+        let proxy = pm_media::decode::service::MediaSource::open(&made.stored.path).unwrap();
+        assert_eq!(proxy.index.frames.len(), 4);
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&made.stored.path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb48le", "-"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let frame_bytes = (WIDTH / 2 * HEIGHT / 2 * 6) as usize;
+        assert_eq!(decoded.stdout.len(), 4 * frame_bytes);
+        for n in 0..4 {
+            let center = n * frame_bytes + (HEIGHT / 4 * WIDTH / 2 + WIDTH / 4) as usize * 6;
+            let red = u16::from_le_bytes([decoded.stdout[center], decoded.stdout[center + 1]]);
+            let want = level(n as u16 + 1)[0];
+            assert!(
+                (i32::from(red) - i32::from(want)).abs() < 600,
+                "proxy frame {n}: red {red}, file {} has {want}",
+                n + 1
+            );
+        }
+
+        fs::remove_file(dir.path().join("shot.0003.png")).unwrap();
+        let Err(ProxyError::Io(error)) = generate_with_disk_probe(make_request(), &quota) else {
+            panic!("a missing frame fails the proxy");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "frame 3 of the image sequence is missing: shot.0003.png"
+        );
+    }
+
     #[test]
     fn sequence_color_tags_follow_p3_and_preserve_exr_highlights_and_other_icc() {
         let dir = tempfile::tempdir().unwrap();

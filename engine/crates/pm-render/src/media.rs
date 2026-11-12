@@ -601,20 +601,44 @@ pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64>
     Some(index / fps + 0.001)
 }
 
-/// Numbered/animated imports today persist a WebM rendition, even when
-/// their document format is GIF or PNG. An EBML header identifies the
-/// rendition independently of path extensions and original metadata.
-/// The native video probe validates readability and indexability before
-/// a valid rendition can use the video path.
+/// Numbered/animated imports of earlier builds persist a WebM rendition,
+/// even when their document format is GIF or PNG; a sequence's proxy or
+/// optimized media is a QuickTime movie. An EBML header or a QuickTime atom
+/// identifies the rendition independently of path extensions and original
+/// metadata. The native video probe validates readability and indexability
+/// before a valid rendition can use the video path.
 pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
     static CACHE: StampCache<Result<bool, String>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         use std::io::Read;
-        let mut magic = [0; 4];
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read_exact(&mut magic))
+        let mut magic = [0; 12];
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let read = file
+            .read(&mut magic)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        if magic == [0x1a, 0x45, 0xdf, 0xa3] {
+        // AVIF and HEIF stills are ISO files too: those are originals.
+        let still = matches!(
+            &magic[8..],
+            b"avif"
+                | b"avis"
+                | b"mif1"
+                | b"mif2"
+                | b"msf1"
+                | b"heic"
+                | b"heix"
+                | b"heim"
+                | b"heis"
+                | b"hevc"
+                | b"hevx"
+                | b"hevm"
+                | b"hevs"
+        );
+        let quicktime = read == magic.len()
+            && match &magic[4..8] {
+                b"ftyp" => !still,
+                atom => matches!(atom, b"moov" | b"mdat" | b"wide" | b"free"),
+            };
+        if magic[..4] == [0x1a, 0x45, 0xdf, 0xa3] || quicktime {
             MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
             return Ok(true);
         }
