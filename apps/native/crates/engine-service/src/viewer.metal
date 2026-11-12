@@ -18,7 +18,7 @@ float eetf(float n,float source,float target) {
 }
 float hlg(float l) { return l<=1.0/12.0?sqrt(3.0*max(l,0.0)):0.17883277*log(12.0*l-0.28466892)+0.55991073; }
 float3 mastering(float3 p,float4 u) {
-    if(u.x==0) return p;
+    if(u.x==0||u.x==3) return p;
     float3 c=float3(0.753833*p.r+0.198597*p.g+0.047570*p.b,0.045744*p.r+0.941777*p.g+0.012479*p.b,-0.001210*p.r+0.017602*p.g+0.983609*p.b)*u.w;
     c=float3(eetf(c.r,u.y,u.z),eetf(c.g,u.y,u.z),eetf(c.b,u.y,u.z));
     if(u.x==1) return float3(pq(c.r),pq(c.g),pq(c.b));
@@ -52,6 +52,10 @@ fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], con
         : u.reduced!=0 ? scaled(src,p.xy,u.drawable) : src.read(uint2(p.xy)));
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
     v=float3(dec(v.r),dec(v.g),dec(v.b));
+    // An SDR project's view (mode 3) shows its delivery: light above white and
+    // colour outside Rec.709 clip as the SDR file clips them. EDR, PQ and HLG
+    // keep the extended signal.
+    if(u.output.x==3) v=clamp(v,0.0,1.0);
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);
     // Preserve signed, extended linear engine output. Clipping to a transient
     // headroom query broke viewer=export (especially wide-gamut PQ fixtures).

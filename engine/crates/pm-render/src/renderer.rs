@@ -1347,10 +1347,12 @@ impl Renderer {
         self.media.image_bytes()
     }
 
-    /// Explicit viewer opt-in; CLI exact/reference and export paths keep
-    /// native source resolution and precision by default.
-    pub fn set_preview_media(&mut self, enabled: bool) {
-        self.media.preview_media = enabled;
+    /// Explicit viewer opt-in, for stills and for video: a copy at the
+    /// view's resolution instead of the source's. CLI exact/reference and
+    /// export paths keep native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, stills: bool, video: bool) {
+        self.media.preview_media = stills;
+        self.media.preview_video = video;
         self.media.draw_edge = None;
     }
 
