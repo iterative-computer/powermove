@@ -1789,6 +1789,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 if readback.is_some() {
                     v.capture_owed = false;
                 }
+                // The fast paused picture is reported: its refinement, a
+                // new picture of the same time, is drawn next. (Asked for
+                // at submission, the new stamp made this report stale and
+                // the fast picture was never reported.)
+                if let Some(r) = runtime.get_mut(&f.id)
+                    && r.full_owed == Some(f.stamp)
+                {
+                    r.full_owed = None;
+                    r.full_due = true;
+                }
             }
             state.notify();
         }
@@ -2452,10 +2462,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             // rests, the same time is drawn again exact.
                             if spec.moment == Moment::Scrub {
                                 r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
-                            }
-                            if r.full_owed == Some(stamp) {
-                                r.full_owed = None;
-                                r.full_due = true;
                             }
                             if capture {
                                 r.capture_waiting = None;

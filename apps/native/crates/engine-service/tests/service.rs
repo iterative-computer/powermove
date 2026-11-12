@@ -67,7 +67,9 @@ fn wait_frame(v: &Viewer, stamp: Stamp) -> FrameReport {
         }
         assert!(
             start.elapsed() < Duration::from_secs(20),
-            "frame timed out: {stamp:?}"
+            "frame timed out: {stamp:?}, the viewer is at {:?}: {:?}",
+            v.stamp(),
+            v.status()
         );
         std::thread::sleep(Duration::from_millis(2));
     }
