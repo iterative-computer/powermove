@@ -275,14 +275,16 @@ pub mod native {
             self.label_row(label);
             let (gap, width) = (self.gap(), self.layout.number_width(self.gap()));
             let right = self.layout.number_right(gap);
-            let second = self.number_field(b, b_label, b_value, enabled);
-            self.place(&second, right - width, width);
-            let cross = self.small_label("×");
-            cross.setAlignment(NSTextAlignment::Center);
             let cross_x = right - width - gap - self.layout.cross_width();
-            self.place_label(&cross, cross_x, self.layout.cross_width());
+            // Built in reading order (Width, ×, Height): VoiceOver and the key
+            // view loop follow the subviews' order.
             let first = self.number_field(a, a_label, a_value, enabled);
             self.place(&first, cross_x - gap - width, width);
+            let cross = self.small_label("×");
+            cross.setAlignment(NSTextAlignment::Center);
+            self.place_label(&cross, cross_x, self.layout.cross_width());
+            let second = self.number_field(b, b_label, b_value, enabled);
+            self.place(&second, right - width, width);
             if !unit.is_empty() {
                 self.unit(unit);
             }

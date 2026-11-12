@@ -742,14 +742,19 @@ impl Properties {
                 continue;
             }
             let mut rows = vec![];
-            for (key, label, range) in [
-                ("color", "Color", None),
-                ("roughness", "Roughness", Some((0., 1., 0.01))),
-                ("metallic", "Metalness", Some((0., 1., 0.01))),
+            // Each surface reads like a model's material: Opacity in percent,
+            // and Emission (colour) with its strength, as on 3D models.
+            for (key, label, range, unit, precision) in [
+                ("color", "Color", None, "", 2),
+                ("roughness", "Roughness", Some((0., 1., 0.01)), "", 2),
+                ("metallic", "Metalness", Some((0., 1., 0.01)), "", 2),
+                ("opacity", "Opacity", Some((0., 100., 1.)), "%", 0),
+                ("emissionColor", "Emission", None, "", 2),
+                ("emissionIntensity", "Emission Strength", Some((0., 100., 0.1)), "", 1),
             ] {
                 let path = format!("ms.{surface}.{key}");
                 if extrude::has_override(record, surface, key)
-                    && let Some(r) = channel(self, model, &path, label, "", range)?
+                    && let Some(r) = channel(self, model, &path, label, unit, range)?
                 {
                     rows.push(r);
                     continue;
@@ -760,22 +765,26 @@ impl Properties {
                 let value = extrude::surface_value(record, surface, key);
                 let control = match range {
                     None => json!({"kind":"colour","binding":lease,"value":value}),
-                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":"","step":step,"precision":2,"min":min,"max":max}]}),
+                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":precision,"min":min,"max":max}]}),
                 };
                 rows.push(row(&id, label, Value::Null, control));
             }
-            let map = &data["surfaces"][surface]["maps"]["color"];
-            let mut options = vec![json!({"v":null,"label":"None"})];
-            options.extend(sources.iter().cloned());
-            let value = extrude::source_value(map);
-            let id = format!("3d.extrude.{surface}.map.color");
-            let lease = self.control_lease(&id);
-            rows.push(row(
-                &id,
-                "Color Map",
-                Value::Null,
-                json!({"kind":"choice","binding":lease,"value":value,"options":options}),
-            ));
+            // Color and Emission maps: a live layer, group or composition
+            // can paint the surface or make it glow (AE 27 layers as materials).
+            for (slot, label) in [("color", "Color Map"), ("emissive", "Emission Map")] {
+                let map = &data["surfaces"][surface]["maps"][slot];
+                let mut options = vec![json!({"v":null,"label":"None"})];
+                options.extend(sources.iter().cloned());
+                let value = extrude::source_value(map);
+                let id = format!("3d.extrude.{surface}.map.{slot}");
+                let lease = self.control_lease(&id);
+                rows.push(row(
+                    &id,
+                    label,
+                    Value::Null,
+                    json!({"kind":"choice","binding":lease,"value":value,"options":options}),
+                ));
+            }
             let id = format!("3d.extrude.{surface}");
             let closed = *surface != "front";
             let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
@@ -1119,7 +1128,16 @@ impl Properties {
                 }
                 ("number", Value::Number(_)) => {
                     let fine = field.max.is_some_and(|max| max <= 2.);
-                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":if field.min.is_some_and(|m| m > 0. && m < 0.01) {3} else {2}});
+                    // A small value (fog density 0.002) shows its first two
+                    // significant digits instead of reading "0".
+                    let n = value.as_f64().unwrap_or(0.).abs();
+                    let small = if n > 0. && n < 0.01 {
+                        ((-n.log10()).ceil() as u32 + 1).min(6)
+                    } else {
+                        0
+                    };
+                    let floor = if field.min.is_some_and(|m| m > 0. && m < 0.01) { 3 } else { 2 };
+                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":floor.max(small)});
                     if let Some(min) = field.min {
                         axis["min"] = json!(min);
                     }

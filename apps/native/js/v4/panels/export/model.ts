@@ -39,6 +39,9 @@ export interface Options {
   useProxies?: boolean;
   /** This export's 3D quality; absent or `composition` uses the saved preset. */
   studioQuality?: StudioQuality;
+  /** Render 3D at 75% of the output size and scale up: faster, slightly
+   * softer. Never automatic; absent means full size. */
+  studioReducedSize?: boolean;
 }
 export type StudioQuality =
   | "composition"
@@ -85,7 +88,15 @@ export interface ExportSnapshot {
     /** The project keeps HDR light, so HDR delivery is on offer. */
     hdr?: boolean;
     /** The composition has 3D layers; `saved` names its own quality preset. */
-    studio?: { saved: string };
+    studio?: {
+      saved: string;
+      /** The resolved preset of this export (draft, preview, production, final, custom). */
+      preset?: string;
+      /** The render time for the Render Time row ("12–60 min", "measuring…"). */
+      estimate?: string;
+      /** Where `estimate` comes from: the viewer's measurement or a static guess. */
+      state?: "measured" | "measuring" | "guess";
+    };
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;
     note?: string;
@@ -116,6 +127,8 @@ function validOptions(x: unknown): x is Options {
       (v) => typeof v === "boolean",
     ) &&
     (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
+    (x.studioReducedSize === undefined ||
+      typeof x.studioReducedSize === "boolean") &&
     (x.studioQuality === undefined ||
       ["composition", "draft", "preview", "production", "final"].includes(
         x.studioQuality as string,

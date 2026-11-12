@@ -637,6 +637,29 @@ export function SettingsRoot(props: Common) {
     metadata: { ...props.metadata, hostWindow: "settings" },
   });
 }
+export interface SliderProps extends Bound<number> {
+  min: number;
+  max: number;
+  step?: number;
+  /** A logarithmic track (brightness, size): equal moves multiply the value. */
+  log?: boolean;
+  unit?: string;
+}
+/** A native NSSlider for a bounded value. It changes once per pull (one
+ * Undo) and steps with the arrow keys; VoiceOver reads the value itself. */
+export function Slider(props: SliderProps) {
+  const { log, ...rest } = props;
+  return field(
+    "slider",
+    "slider",
+    "input",
+    {
+      ...rest,
+      metadata: kitMetadata(props, { log: !!log }),
+    },
+    { ...target, width: token("metrics.value_column") },
+  );
+}
 export function Switch(props: Bound<boolean>) {
   return field(
     "switch",

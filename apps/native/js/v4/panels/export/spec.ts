@@ -111,11 +111,28 @@ export const qualities = [
 /** Per-export 3D quality; the first row is the composition's own preset. */
 export const studioQualities = (saved: string) => [
   { v: "composition", label: `Composition · ${saved}` },
-  { v: "draft", label: "Draft" },
-  { v: "preview", label: "Preview" },
-  { v: "production", label: "Production" },
-  { v: "final", label: "Final" },
+  { v: "draft", label: "Draft", detail: "Check motion and timing" },
+  { v: "preview", label: "Preview", detail: "A quicker look for review" },
+  { v: "production", label: "Production", detail: "Clean, final-looking" },
+  { v: "final", label: "Final", detail: "Reference quality" },
 ];
+/** What each 3D quality promises (owner decision 2026-11-11): the row's
+ * second line names the chosen one's speed and look in plain words. */
+export const studioPromises: Record<string, string> = {
+  draft:
+    "A quick check of motion and timing, about 1 s a frame. It can look soft.",
+  preview: "A quicker, cleaner look for review. Not for delivery.",
+  production:
+    "A clean, final-looking picture: about 3 s a frame, up to 8 s with glass or chrome.",
+  final: "Reference quality. It takes as long as it needs.",
+  custom: "The composition's own sampling settings.",
+};
+/** The Render Time row's second line, by where the estimate comes from. */
+export const estimateNotes = {
+  measured: "Measured on this Mac for this scene and size.",
+  measuring: "Measuring on this Mac…",
+  guess: "A rough guess until this scene is measured.",
+} as const;
 export const sidecars = [
   { v: "none", label: "None" },
   { v: "srt", label: "SubRip (.srt)" },
@@ -145,6 +162,11 @@ export const rows = {
   studioQuality: [
     "3D Quality",
     "Cleaner 3D takes longer per frame.",
+  ],
+  studioTime: ["Render Time", "Measured on this Mac for this scene and size."],
+  studioReducedSize: [
+    "Render at 75% Size",
+    "Faster, slightly softer. Full size is always the default.",
   ],
   useProxies: [
     "Use Proxies (Draft)",

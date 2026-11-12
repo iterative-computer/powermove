@@ -40,6 +40,7 @@ fn role(node: &Node) -> Role {
         Some(SecureField) => Role::PasswordInput,
         Some(Switch) => Role::Switch,
         Some(PushButton | ViewerGizmo) => Role::Button,
+        Some(Slider) => Role::Slider,
         Some(FormGroup | FormRow | ViewerOverlay) => Role::Group,
         Some(ColourPopover) => Role::Dialog,
         Some(Banner) => Role::Status,
@@ -216,7 +217,7 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
     } else if interactive(source) {
         node.add_action(Action::Focus);
         match Component::of(source) {
-            Some(Component::NumberField) => {
+            Some(Component::NumberField | Component::Slider) => {
                 node.add_action(Action::Increment);
                 node.add_action(Action::Decrement);
                 node.add_action(Action::SetValue);

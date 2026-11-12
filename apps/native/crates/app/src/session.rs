@@ -1736,6 +1736,7 @@ impl Controller {
                             "Saved to a recovery copy; original was not overwritten".into()
                         });
                         v.load_recent(cx);
+                        v.refresh_poster();
                     }
                     other => v.message = format!("Save failed; recovery data retained: {other:?}"),
                 }
@@ -1750,6 +1751,19 @@ impl Controller {
             });
         })
         .detach();
+    }
+    /// Home's card for this project gets a fresh poster frame (a background
+    /// render at the playhead; the card keeps its size label until then).
+    pub fn refresh_poster(&self) {
+        if let Some(published) = self.published.clone() {
+            crate::thumbnails::refresh(
+                self.mcp.kernel.clone(),
+                published,
+                self.mcp.profile.clone(),
+                self.time(),
+                || {},
+            );
+        }
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         let rx = platform::paths(&self.host.borrow().window, true);

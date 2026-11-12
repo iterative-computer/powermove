@@ -250,12 +250,44 @@ With the fog fix, Fast and Quality agree. Found on the way (outside 3D):
 | A1 | A text field whose value is set through accessibility keeps drawing the old value (the stored value is right) | kit |
 | A2 | New Project sheet: accessibility order lists Height before Width | Home |
 
+## Round 5 (export promises, kit and accessibility leftovers, extruded surfaces) · 2026-11-12
+
+Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round5/` with
+`captions.md` (before and after for each visible change).
+
+### Export sheet
+
+| Item | Result |
+|---|---|
+| Per-preset promises (owner decision 2026-11-11) | ✅ the 3D Quality row's second line states the chosen preset's promise in plain words. Draft: "A quick check of motion and timing, about 1 s a frame. It can look soft." Production: "A clean, final-looking picture: about 3 s a frame, up to 8 s with glass or chrome." Final: "Reference quality. It takes as long as it needs." The menu rows carry short subtitles (Check motion and timing · Clean, final-looking · Reference quality) |
+| Estimate kept prominent | ✅ a Render Time row under 3D Quality ("Measured on this Mac for this scene and size", "Measuring on this Mac…", or "A rough guess…"), and the footer's first line is the time in the text colour, semibold ("12–60 min to render"), so it stays visible while the form scrolls |
+| Render at 75% Size | ⚠️ a secondary checkbox, off by default ("Faster, slightly softer. Full size is always the default."), stored with the sheet's options and presets. The engine's export request has no 3D render-size field yet, so it renders at full size; the coordinator says so where the request is built. For Sol: a `studio_render_scale` (0.75) on the export request |
+
+### Kit and accessibility
+
+| Item | Result |
+|---|---|
+| Native pop-ups in the Tab order | ✅ every native control (pop-ups, checkboxes, switches, buttons, sliders) is a Tab stop with the panel's focus ring. Space, Return or ↑/↓ open a pop-up's menu (AppKit then runs the menu's own keys); Space toggles a checkbox or switch and presses a button; arrows step a slider |
+| Tab trapped in multiline fields (found walking Tab through Properties) | ✅ Tab in the Text box typed tab characters into the layer's text and never left it. A plain multiline field now commits on Tab / Shift-Tab and focus moves on (Option-Tab types a tab; the code editor keeps Tab). A small vendored gpui-macos addition: the text slot reports `tab`/`backtab` |
+| Slider component | ✅ `Slider` in the v4 kit: a native NSSlider, linear or logarithmic, one change (one Undo) per pull, arrow keys step it, and VoiceOver reads the value (not the log position). The Light panel uses it for Brightness, Size, Distance (log) and Spread, each with its reading beside |
+| Pop-up row subtitles | ✅ an option's `detail` shows as the menu item's subtitle (macOS 14.4+), here and in every v4 pop-up |
+| Home thumbnails | ✅ cards show a poster frame: a small Draft-quality still at the playhead, rendered off the main thread after a save or when the project closes (`<profile>/thumbnails`) |
+| "Accessibility-edited field keeps its old value" (A1) | ✅ the field was right; the reading was wrong: a number field without a declared precision showed 0.002 as "0". Small values now keep two significant digits |
+| New Project: Width before Height (A2) | ✅ the pair is built in reading order (Width, ×, Height), so VoiceOver and the key-view loop follow it |
+
+### Extruded surfaces (Fable's list)
+
+| Item | Result |
+|---|---|
+| Per-surface Emission and Opacity | ✅ the data model and the engine already had `opacity` (percent), `emissionColor` and `emissionIntensity` per surface, and the commands accepted them; Properties now shows Opacity, Emission and Emission Strength on Front, Bevel, Side and Back, plus an Emission Map beside the Color Map (a live layer, group or composition can make a surface glow) |
+
 ## Open items
 
-1. Native pop-ups in the Tab order (kit/v4 owner).
-2. Light panel: an `NSSlider` kit component (log ranges) and the panel's
-   enter/exit motion.
-3. Extruded layers: per-surface Emission and Opacity rows.
+1. Light panel: its enter/exit motion.
+2. Export: wire Render at 75% Size once the engine takes a 3D render size.
+3. Fog in a studio scene (no terrain) still uses the schema's 10,000-unit
+   shape, which goes dark at any density; the landscape migration covers
+   terrains only.
 4. Engine: a model's selection box is about twice its size until geometry
    loads (unit bounds, R4); the first extrusion of a session once broke the
    render (R10, not reproduced); Fast's fog ignores shadowing in the

@@ -362,6 +362,11 @@ impl SurfaceView {
                 .flatten();
             if let Some(kind) = kind {
                 self.mount_control(kind, view, node, lease, window, cx);
+                // A native control is a Tab stop too: the panel draws its
+                // focus ring and forwards its keys (Full Keyboard Access).
+                if !view.disabled && view.tab_index.is_none_or(|t| t >= 0) {
+                    self.focus.entry(id).or_insert_with(|| cx.focus_handle());
+                }
                 continue;
             }
             if !view.disabled
@@ -438,7 +443,7 @@ impl SurfaceView {
             {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
-            let options = native_options(node);
+            let options = control_options(kind, node);
             control.update(cx, |v, cx| v.update(&value, &options, view.disabled, cx));
             return;
         }
@@ -455,7 +460,7 @@ impl SurfaceView {
                 .and_then(Value::as_str)
                 .unwrap_or(label)
         );
-        let options = native_options(node);
+        let options = control_options(kind, node);
         let button_role = node
             .props
             .get("metadata")
@@ -580,9 +585,17 @@ impl SurfaceView {
             field.set_unit(unit);
             field
         });
-        self.subscriptions.entry(id).or_default().push(cx.subscribe(
+        self.subscriptions.entry(id).or_default().push(cx.subscribe_in(
             &field,
-            move |this, _, event, cx| {
+            window,
+            move |this, _, event, window, cx| {
+                // A multiline field hands Tab on: focus moves to the next
+                // (or previous) control, as from any other field.
+                match event {
+                    TextEvent::Key("tab") => return window.focus_next(cx),
+                    TextEvent::Key("backtab") => return window.focus_prev(cx),
+                    _ => {}
+                }
                 if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
                     return;
                 }
@@ -1286,6 +1299,32 @@ impl SurfaceView {
             } else {
                 div().flex_none()
             };
+            let mut slot = slot.id(("v4-control", id));
+            if let Some(focus) = self.focus.get(&id) {
+                let t = &self.table.tokens;
+                let (ring, color, radius) = (
+                    px(t.metrics.border * 2.),
+                    rgb(t.colors.focus),
+                    px(t.metrics.control_radius),
+                );
+                let tab = node.tab_index.unwrap_or(0);
+                let handle = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
+                let control = control.clone();
+                slot = slot
+                    .track_focus(handle)
+                    .tab_index(tab.max(0))
+                    .rounded(radius)
+                    .focus_visible_style(move |s| s.ring(ring).ring_color(color))
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        let m = &event.keystroke.modifiers;
+                        if m.platform || m.control || m.alt {
+                            return;
+                        }
+                        if control.read(cx).key(event.keystroke.key.as_str()) {
+                            cx.stop_propagation();
+                        }
+                    });
+            }
             return slot
                 .child(control.clone())
                 .children(self.probe(id))
@@ -2132,17 +2171,34 @@ fn native_options(node: &pm_surface::Node) -> Vec<Value> {
         .and_then(Value::as_array);
     if let Some(menu) = menu {
         for option in options.iter_mut().filter(|o| o.is_object()) {
-            let checked = menu
+            let row = menu
                 .iter()
-                .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"))
-                .and_then(|m| m.get("checked"))
-                .cloned();
-            if let (Some(checked), Some(o)) = (checked, option.as_object_mut()) {
-                o.insert("checked".into(), checked);
+                .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"));
+            // A row's checkmark and its second line (the menu item subtitle).
+            for key in ["checked", "detail"] {
+                if let (Some(value), Some(o)) =
+                    (row.and_then(|m| m.get(key)).cloned(), option.as_object_mut())
+                {
+                    o.insert(key.into(), value);
+                }
             }
         }
     }
     options
+}
+/// A native control's rows: a pop-up's options, or a slider's one range.
+fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Vec<Value> {
+    if !matches!(kind, crate::v4_control::Kind::Slider) {
+        return native_options(node);
+    }
+    let n = |k: &str| node.props.get(k).and_then(Value::as_f64);
+    let log = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("log"))
+        == Some(&Value::Bool(true));
+    vec![json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log})]
 }
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
@@ -2151,6 +2207,7 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
         Some(Component::Checkbox | Component::Toggle) => Some(Kind::Checkbox),
         Some(Component::Switch) => Some(Kind::Switch),
         Some(Component::PushButton) => Some(Kind::Push),
+        Some(Component::Slider) => Some(Kind::Slider),
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node
