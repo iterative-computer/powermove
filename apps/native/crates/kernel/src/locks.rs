@@ -38,7 +38,6 @@ pub enum CopyReason {
     ForeignLibrary,
     ChangedOnDisk,
     OfflineFile,
-    CloudFolder,
     ReadOnly,
     OlderElectron,
     Locked,
@@ -211,45 +210,6 @@ fn existing(path: &Path) -> &Path {
     }
     p
 }
-fn cloud_name(path: &Path) -> bool {
-    path.components().any(|p| {
-        let s = p.as_os_str().to_string_lossy().to_lowercase();
-        s == "mobile documents"
-            || s == "icloud drive"
-            || s == "icloud"
-            || s.starts_with("com~apple~clouddocs")
-            || s.starts_with("dropbox")
-            || s.starts_with("onedrive")
-    })
-}
-fn provider_xattr(path: &Path) -> bool {
-    #[cfg(not(target_os = "macos"))]
-    let _ = path;
-    #[cfg(target_os = "macos")]
-    {
-        let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-            return true;
-        };
-        // SAFETY: valid C path; size query, followed by owned output buffer.
-        let size = unsafe { libc::listxattr(p.as_ptr(), std::ptr::null_mut(), 0, 0) };
-        if size > 0 {
-            let mut buf = vec![0u8; size as usize];
-            let n = unsafe { libc::listxattr(p.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0) };
-            return n > 0
-                && buf[..n as usize]
-                    .split(|b| *b == 0)
-                    .any(|k| k.starts_with(b"com.apple.file-provider"));
-        }
-    }
-    false
-}
-pub fn is_cloud_path(path: &Path) -> bool {
-    if cloud_name(path) {
-        return true;
-    }
-    let resolved = fs::canonicalize(existing(path)).unwrap_or_else(|_| path.to_path_buf());
-    cloud_name(&resolved) || resolved.ancestors().any(provider_xattr)
-}
 pub fn is_read_only(path: &Path) -> bool {
     let p = existing(path);
     if fs::metadata(p)
@@ -324,10 +284,13 @@ pub fn electron_owner(profile: &Path) -> ElectronOwner {
 pub fn older_electron_running(profile: &Path) -> bool {
     electron_owner(profile) != ElectronOwner::None
 }
+/// Whether `path` can be opened and saved in place. A file in a folder a
+/// sync client keeps (iCloud Drive, Dropbox, OneDrive, any file provider) is
+/// an ordinary local file to this app, as it was to v1: it opens and saves
+/// in place, and a version the client lands underneath is caught by the
+/// save's stale-write check, never overwritten.
 pub fn open_decision(path: &Path, electron_profile: Option<&Path>) -> OpenDecision {
-    if is_cloud_path(path) {
-        OpenDecision::AsCopy(CopyReason::CloudFolder)
-    } else if is_read_only(path) {
+    if is_read_only(path) {
         OpenDecision::AsCopy(CopyReason::ReadOnly)
     } else if electron_profile.is_some_and(older_electron_running) {
         OpenDecision::AsCopy(CopyReason::OlderElectron)

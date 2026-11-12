@@ -184,7 +184,6 @@ pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static
         ForeignLibrary => "Opened as a copy because the project belongs to another library.",
         ChangedOnDisk => "Opened as a copy because the file changed on disk.",
         OfflineFile => "Opened as a copy because the file isn’t downloaded.",
-        CloudFolder => "Opened as a copy because the file is in a syncing folder.",
         ReadOnly => "Opened as a copy because the file is read-only.",
         OlderElectron => "Opened as a copy because an earlier version of Powermove saved it.",
         Locked => "Opened as a copy because the project is open somewhere else.",

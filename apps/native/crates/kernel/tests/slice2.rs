@@ -416,23 +416,16 @@ fn successful_save_rebases_the_journal_and_next_crash_recovers_new_edits() {
     );
 }
 #[test]
-fn cloud_paths_readonly_and_symlinked_cloud_are_copy_decisions() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+fn a_read_only_folder_is_a_copy_decision_and_a_syncing_folder_is_not() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = common::TempDir::new("policy");
     for path in [
         "Library/Mobile Documents/com~apple~CloudDocs/movie.pmv",
         "Dropbox (Personal)/movie.pmv",
         "OneDrive-Work/movie.pmv",
     ] {
-        assert_eq!(
-            open_decision(&dir.path(path), None),
-            OpenDecision::AsCopy(CopyReason::CloudFolder)
-        );
+        assert_eq!(open_decision(&dir.path(path), None), OpenDecision::Writable);
     }
-    let cloud = dir.path("Dropbox");
-    fs::create_dir(&cloud).unwrap();
-    symlink(&cloud, dir.path("alias")).unwrap();
-    assert!(is_cloud_path(&dir.path("alias/movie.pmv")));
     let ro = dir.path("readonly");
     fs::create_dir(&ro).unwrap();
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
@@ -442,17 +435,105 @@ fn cloud_paths_readonly_and_symlinked_cloud_are_copy_decisions() {
     );
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
 }
-#[cfg(target_os = "macos")]
+fn open_file(k: &mut Kernel, file: &Path) -> (SessionHandle, OpenDecision) {
+    match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.into()),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened {
+            session, decision, ..
+        } => (session, decision),
+        _ => panic!(),
+    }
+}
+/// A project in a folder a sync client keeps (by name, or marked with a
+/// file-provider attribute) opens in place: Save writes the file, the next
+/// open holds the edit, and no library copy is made. A version the client
+/// lands underneath between open and save is never overwritten: the save
+/// keeps the file as the client left it and the work goes to a recovery
+/// copy.
 #[test]
-fn file_provider_xattr_causes_copy_without_a_cloud_folder_name() {
-    use std::os::unix::ffi::OsStrExt;
-    let dir = common::TempDir::new("provider");
-    let p = std::ffi::CString::new(dir.0.as_os_str().as_bytes()).unwrap();
-    let name = std::ffi::CString::new("com.apple.file-provider.synthetic").unwrap();
-    let result =
-        unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), b"1".as_ptr().cast(), 1, 0, 0) };
-    assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
-    assert!(is_cloud_path(&dir.path("p.pmv")));
+fn a_project_in_a_syncing_folder_opens_and_saves_in_place() {
+    let dir = common::TempDir::new("syncing");
+    let folder = dir.path("Dropbox/job");
+    fs::create_dir_all(&folder).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let p = std::ffi::CString::new(folder.as_os_str().as_bytes()).unwrap();
+        let name = std::ffi::CString::new("com.apple.file-provider.synthetic").unwrap();
+        assert_eq!(
+            unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), b"1".as_ptr().cast(), 1, 0, 0) },
+            0
+        );
+    }
+    let file = folder.join("cut.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    edit(&mut k, "P", 20.0);
+    assert!(matches!(
+        k.shell(ShellCall::Save(session.clone())).unwrap(),
+        ShellReply::Saved {
+            recovery_copy: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        common::opacity_of(&common::open_store(&file), "layer0"),
+        Some(20.0),
+        "Save wrote the file in the syncing folder"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    assert_eq!(
+        common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+        Some(20.0),
+        "the next open starts from the saved work"
+    );
+    let rows = LibraryStore::open(&dir.path("native")).projects().unwrap();
+    assert!(
+        rows.iter().all(|row| !row.name.ends_with("— Native")),
+        "no copy was made: {:?}",
+        rows.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+    // Save As into the syncing folder works too.
+    let beside = folder.join("cut 2.pmv");
+    k.shell(ShellCall::SaveAs {
+        session: session.clone(),
+        path: beside.clone(),
+        replace: false,
+    })
+    .unwrap();
+    assert_eq!(
+        common::opacity_of(&common::open_store(&beside), "layer0"),
+        Some(20.0)
+    );
+    // The sync client lands another Mac's version (a new file at the path).
+    edit(&mut k, "P", 55.0);
+    let landed = folder.join(".landing");
+    fs::write(&landed, PROJECT).unwrap();
+    fs::rename(&landed, &beside).unwrap();
+    let theirs = fs::read(&beside).unwrap();
+    let ShellReply::Saved {
+        recovery_copy: Some(copy),
+        ..
+    } = k.shell(ShellCall::Save(session)).unwrap()
+    else {
+        panic!("a save over a version landed underneath must not succeed in place")
+    };
+    assert_eq!(fs::read(&beside).unwrap(), theirs, "their version is kept");
+    let kept = LibraryStore::open(&dir.path("native"))
+        .load(&copy)
+        .unwrap()
+        .expect("the work is kept as a recovery copy");
+    assert!(to_canonical_string(&kept.project).contains("55"));
 }
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
