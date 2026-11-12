@@ -11,18 +11,6 @@ use std::time::Duration;
 /// have settled, for the viewer to draw the settled composition.
 const SETTLED_FRAME_WAIT: Duration = Duration::from_secs(10);
 
-/// The status line while a Render Selection waits for extensions.
-fn waiting_for(names: &[&str]) -> String {
-    match names {
-        [] => "Render Selection starts once extensions have loaded".into(),
-        [one] => format!("Render Selection starts once {one} has loaded"),
-        [one, rest @ ..] => format!(
-            "Render Selection starts once {one} and {} more have loaded",
-            rest.len()
-        ),
-    }
-}
-
 /// The engine's render cache, for the timeline's render bar.
 static DISK: OnceLock<pm_engine_service::render_cache::DiskFrames> = OnceLock::new();
 /// Timelines waiting for the render bar to change.
@@ -144,10 +132,8 @@ impl Controller {
             loop {
                 let Ok((pending, text)) = this.update(cx, |v, cx| {
                     let resources = &v.extensions.resources;
-                    let names: Vec<&str> =
-                        resources.loading.iter().map(|(_, n)| n.as_str()).collect();
                     let text = if resources.pending {
-                        waiting_for(&names)
+                        crate::extensions::starts_once_loaded("Render Selection", resources)
                     } else {
                         "Reading the composition to render".to_owned()
                     };
@@ -406,22 +392,6 @@ mod tests {
         assert_eq!(within_composition(-2., 4., 10.), Some((0., 4.)));
         assert_eq!(within_composition(12., 15., 10.), None);
         assert_eq!(within_composition(3., 3., 10.), None);
-    }
-
-    #[test]
-    fn a_render_selection_waiting_for_extensions_names_them() {
-        assert_eq!(
-            waiting_for(&["Deep Glow"]),
-            "Render Selection starts once Deep Glow has loaded"
-        );
-        assert_eq!(
-            waiting_for(&["Deep Glow", "Blur Kit", "Grain"]),
-            "Render Selection starts once Deep Glow and 2 more have loaded"
-        );
-        assert_eq!(
-            waiting_for(&[]),
-            "Render Selection starts once extensions have loaded"
-        );
     }
 
     #[test]

@@ -321,6 +321,16 @@ fn still_loading_note(names: &[&str]) -> Option<String> {
     };
     Some(format!("{who} still loading. Frames that use {its}."))
 }
+/// The status line while `what` waits for this window's extensions to load.
+pub(crate) fn starts_once_loaded(what: &str, resources: &ResourceSnapshot) -> String {
+    match resources.loading.as_slice() {
+        [] => format!("{what} starts once extensions have loaded"),
+        [(_, one)] => format!("{what} starts once {one} has loaded"),
+        [(_, one), rest @ ..] => {
+            format!("{what} starts once {one} and {} more have loaded", rest.len())
+        }
+    }
+}
 /// Effect types the engine draws without any extension.
 fn builtin_effects() -> &'static BTreeSet<String> {
     static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
@@ -2053,6 +2063,26 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_job_waiting_for_extensions_names_them() {
+        use super::{ResourceSnapshot, starts_once_loaded};
+        let waiting = |names: &[&str]| {
+            starts_once_loaded(
+                "Export",
+                &ResourceSnapshot {
+                    pending: true,
+                    loading: names.iter().map(|n| (n.to_lowercase(), (*n).into())).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(waiting(&["Deep Glow"]), "Export starts once Deep Glow has loaded");
+        assert_eq!(
+            waiting(&["Deep Glow", "Blur", "Grain"]),
+            "Export starts once Deep Glow and 2 more have loaded"
+        );
+        assert_eq!(waiting(&[]), "Export starts once extensions have loaded");
+    }
     #[test]
     fn an_open_that_stops_waiting_says_who_is_still_loading() {
         use super::still_loading_note as note;
