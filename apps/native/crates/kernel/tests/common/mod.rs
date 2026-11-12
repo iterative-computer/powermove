@@ -52,6 +52,30 @@ impl Drop for TempDir {
     }
 }
 
+/// A Trash for tests: a file goes into `dir`, intact, under a fresh name.
+pub fn trash(dir: &Path) -> pm_kernel::project_io::TrashHook {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = dir.to_owned();
+    pm_kernel::project_io::TrashHook(std::sync::Arc::new(move |path: &Path| {
+        std::fs::create_dir_all(&dir)?;
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let to = dir.join(format!("{}-{name}", N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::rename(path, &to)?;
+        Ok(to)
+    }))
+}
+
+/// What the test Trash at `dir` holds.
+pub fn trashed(dir: &Path) -> Vec<Vec<u8>> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.map(|e| std::fs::read(e.unwrap().path()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

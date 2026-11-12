@@ -25,6 +25,7 @@ fn writer(path: &Path) -> LibraryWriter {
 fn kernel(path: &Path) -> Kernel {
     let mut k = Kernel::new(KernelConfig {
         journal_root: Some(path.join("journals")),
+        trash: Some(common::trash(&path.join("Trash"))),
         ..Default::default()
     });
     assert!(matches!(
@@ -1052,6 +1053,7 @@ fn private_prefix(file: &Path) -> String {
 fn kernel_with_locks(path: &Path, locks: &Path) -> Kernel {
     let mut k = Kernel::new(KernelConfig {
         journal_root: Some(path.join("journals")),
+        trash: Some(common::trash(&path.join("Trash"))),
         lock_root: Some(locks.into()),
         ..Default::default()
     });
@@ -1067,6 +1069,7 @@ fn kernel_with_locks(path: &Path, locks: &Path) -> Kernel {
 fn kernel_with_backups(path: &Path) -> Kernel {
     let mut k = Kernel::new(KernelConfig {
         journal_root: Some(path.join("journals")),
+        trash: Some(common::trash(&path.join("Trash"))),
         backup_root: Some(path.join("backups")),
         ..Default::default()
     });
@@ -1171,6 +1174,165 @@ fn work_written_into_the_replaced_file_after_it_was_read_is_never_removed() {
         assert_eq!(fs::read(&kept).unwrap(), b"unread work", "{disk}");
         assert_eq!(visible_siblings(&file), [kept], "{disk}");
         assert_eq!(private_leftovers(&file), [""; 0], "{disk}");
+    }
+}
+/// Writes `bytes` into the file `path` through a descriptor, as a program
+/// that kept it open would: the same file, new contents.
+fn write_through(path: &Path, bytes: &[u8]) {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.set_len(bytes.len() as u64).unwrap();
+}
+/// A hook for the instant after a file was last read and right before it
+/// is disposed of: work lands in it then. Returns what was written, in
+/// order.
+fn work_before_disposal() -> (
+    pm_kernel::project_io::PublishHook,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) {
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = written.clone();
+    let hook: pm_kernel::project_io::PublishHook = std::sync::Arc::new(move |path: &Path| {
+        let mut log = log.lock().unwrap();
+        let work = format!("work written at the last moment {}", log.len()).into_bytes();
+        write_through(path, &work);
+        log.push(work);
+    });
+    (hook, written)
+}
+/// A version a save no longer needs (the one an earlier save replaced and
+/// retained, beside the project or in the backups) is read again before it
+/// goes, and a program that still has it open can write into it right after
+/// that read. So it is never unlinked: it goes to the Trash, intact, with
+/// whatever it holds by then. Where there is no Trash it stays where it is
+/// and the Error Log lists it.
+#[test]
+fn a_version_a_save_no_longer_needs_goes_to_the_trash_with_what_was_written_into_it() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        for backups in [false, true] {
+            let dir = common::TempDir::new("disposal");
+            fs::create_dir_all(dir.path("job")).unwrap();
+            let file = dir.path("job/cut.pmv");
+            fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+            let native = dir.path("native");
+            let mut k = if backups {
+                kernel_with_backups(&native)
+            } else {
+                kernel(&native)
+            };
+            let (hook, written) = work_before_disposal();
+            k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+                before_disposal: Some(hook),
+                ..hooks.clone()
+            });
+            let (session, _) = open_file(&mut k, &file);
+            // Enough saves for the backups to prune a version this project's
+            // saves moved there.
+            for n in 0..14 {
+                rename_comp(&mut k, "P", &format!("Save {n}"));
+                let plan = k
+                    .prepare_session_save(session.clone(), None, false)
+                    .unwrap();
+                k.finish_session_save(plan.run())
+                    .unwrap_or_else(|e| panic!("{disk}: {e}"));
+                if !backups && n == 2 {
+                    break;
+                }
+            }
+            let written = written.lock().unwrap().clone();
+            assert!(
+                !written.is_empty(),
+                "{disk} {backups}: something was disposed of"
+            );
+            let trashed = common::trashed(&native.join("Trash"));
+            for work in &written {
+                assert!(
+                    trashed.contains(work),
+                    "{disk} {backups}: the work written last is in the Trash"
+                );
+            }
+        }
+    }
+    // No Trash: the version stays, and the Error Log says so.
+    let dir = common::TempDir::new("disposal-none");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(dir.path("native/journals")),
+        ..Default::default()
+    });
+    k.shell(ShellCall::AttachLibrary {
+        profile: dir.path("native"),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    let (hook, written) = work_before_disposal();
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_disposal: Some(hook),
+        ..Default::default()
+    });
+    let (session, _) = open_file(&mut k, &file);
+    for name in ["One", "Two"] {
+        rename_comp(&mut k, "P", name);
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run()).unwrap();
+    }
+    let written = written.lock().unwrap().clone();
+    assert_eq!(written.len(), 1);
+    assert!(
+        private_versions(&file).contains(&written[0]),
+        "kept where it was"
+    );
+    assert!(
+        k.take_log().iter().any(|l| l.contains("Trash")),
+        "and listed"
+    );
+}
+/// Recovery disposes of files too: the cut-short copy it takes back from
+/// under the project's name, and the save's own staged file once the path
+/// holds a copy of it. Each was read a moment before; each goes to the
+/// Trash with whatever was written into it since.
+#[test]
+fn files_recovery_disposes_of_go_to_the_trash_with_what_was_written_into_them() {
+    for case in ["partial copy", "staged duplicate"] {
+        let dir = common::TempDir::new("recovery-disposal");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        if case == "partial copy" {
+            assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+        } else {
+            assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+            // Cut short before the staged file went: it is still there,
+            // and the path holds a copy of it.
+            let record = private_file(&file, ".save");
+            fs::copy(&file, record.with_extension("tmp")).unwrap();
+        }
+        let mut k = kernel(&native);
+        let (hook, written) = work_before_disposal();
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            before_disposal: Some(hook),
+            ..child_disk("no-exclusive")
+        });
+        let _ = k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        });
+        let written = written.lock().unwrap().clone();
+        assert_eq!(written.len(), 1, "{case}");
+        assert!(
+            common::trashed(&native.join("Trash")).contains(&written[0]),
+            "{case}: in the Trash, with the work"
+        );
     }
 }
 /// Every private file beside `file` (staged, moved aside, retained): what
@@ -1712,6 +1874,7 @@ fn coordinated_kernel(path: &Path, grants: bool) -> (Kernel, std::sync::Arc<Coor
     });
     let mut k = Kernel::new(KernelConfig {
         journal_root: Some(path.join("journals")),
+        trash: Some(common::trash(&path.join("Trash"))),
         write_coordinator: Some(pm_kernel::project_io::SharedWriteCoordinator(
             coordinator.clone(),
         )),

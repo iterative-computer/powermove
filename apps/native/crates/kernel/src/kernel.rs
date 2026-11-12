@@ -47,6 +47,10 @@ pub struct KernelConfig {
     /// ([`crate::project_io::WriteCoordinator`]). `None`: saves are not
     /// coordinated (tests, hosts without one).
     pub write_coordinator: Option<crate::project_io::SharedWriteCoordinator>,
+    /// The person's Trash: where versions of a project a save no longer
+    /// needs go, instead of being deleted (`project_io::TrashHook`).
+    /// `None`: they stay where they are and the Error Log lists them.
+    pub trash: Option<crate::project_io::TrashHook>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
@@ -156,13 +160,17 @@ impl Kernel {
             .journal_root
             .as_ref()
             .map(|_| Durability::new(config.journal.clone()));
+        let trash = config.trash.clone();
         Kernel {
             config,
             history_order: Vec::new(),
             history_max_bytes: crate::history::DEFAULT_MAX_BYTES,
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
-            publish_hooks: Default::default(),
+            publish_hooks: crate::project_io::PublishHooks {
+                trash,
+                ..Default::default()
+            },
             unproven: Default::default(),
             log: Vec::new(),
             durability,
@@ -471,7 +479,10 @@ impl Kernel {
     }
     /// Test hooks for every file save this kernel starts from now on.
     #[doc(hidden)]
-    pub fn set_publish_hooks(&mut self, hooks: crate::project_io::PublishHooks) {
+    pub fn set_publish_hooks(&mut self, mut hooks: crate::project_io::PublishHooks) {
+        if hooks.trash.is_none() {
+            hooks.trash = self.config.trash.clone();
+        }
         self.publish_hooks = hooks;
     }
     /// Exclusive use of the project file `path` ([`crate::locks::lock_project`]).

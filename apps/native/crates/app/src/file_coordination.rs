@@ -17,9 +17,9 @@ use std::time::Duration;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_foundation::{
-    NSError, NSFileCoordinator, NSFileCoordinatorWritingOptions, NSString, NSURL,
+    NSError, NSFileCoordinator, NSFileCoordinatorWritingOptions, NSFileManager, NSString, NSURL,
 };
-use pm_kernel::project_io::{SharedWriteCoordinator, WriteCoordinator};
+use pm_kernel::project_io::{SharedWriteCoordinator, TrashHook, WriteCoordinator};
 
 /// How long a save waits for its turn before it goes ahead without one.
 const WAIT: Duration = Duration::from_secs(5);
@@ -31,6 +31,25 @@ pub fn system() -> SharedWriteCoordinator {
 
 struct System {
     wait: Duration,
+}
+
+/// The person's Trash (`NSFileManager`'s `trashItemAtURL`), where the
+/// kernel puts versions of a project a save no longer needs instead of
+/// deleting them. An error where the volume has no Trash: the kernel then
+/// leaves the file where it is and lists it.
+pub fn trash() -> TrashHook {
+    TrashHook(Arc::new(|path: &Path| {
+        objc2::rc::autoreleasepool(|_| {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+            let mut moved: Option<Retained<NSURL>> = None;
+            NSFileManager::defaultManager()
+                .trashItemAtURL_resultingItemURL_error(&url, Some(&mut moved))
+                .map_err(|e| std::io::Error::other(e.localizedDescription().to_string()))?;
+            Ok(moved
+                .and_then(|url| url.path())
+                .map_or_else(|| path.to_owned(), |p| p.to_string().into()))
+        })
+    }))
 }
 
 #[derive(Clone, Copy, PartialEq)]

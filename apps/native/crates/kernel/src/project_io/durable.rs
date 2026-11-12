@@ -720,6 +720,19 @@ pub type PublishHook = Arc<dyn Fn(&Path) + Send + Sync>;
 #[doc(hidden)]
 pub type StepHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
 
+/// Moves a file to the person's Trash (on macOS, `NSFileManager`'s
+/// `trashItemAtURL`) and says where it went. An error where the volume has
+/// no Trash (a network share) or the move is refused.
+#[derive(Clone)]
+pub struct TrashHook(pub Arc<TrashFn>);
+/// What a [`TrashHook`] calls.
+pub type TrashFn = dyn Fn(&Path) -> io::Result<PathBuf> + Send + Sync;
+impl std::fmt::Debug for TrashHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Trash")
+    }
+}
+
 /// What a test makes a folder's syncs answer.
 #[doc(hidden)]
 pub type FolderSyncHook = Arc<dyn Fn() -> (Option<i32>, Option<i32>) + Send + Sync>;
@@ -778,6 +791,13 @@ pub struct PublishHooks {
     /// While set, the next copy into an exclusively created name stops
     /// half way with "No space left on device" (and clears it).
     pub copy_fails: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Called with a file right before it is disposed of ([`dispose`]):
+    /// after it was last read, immediately before it goes to the Trash.
+    pub before_disposal: Option<PublishHook>,
+    /// The person's Trash, where a version of the project goes once a save
+    /// no longer needs it (the kernel's host sets it; `None`: such files
+    /// stay where they are).
+    pub trash: Option<TrashHook>,
 }
 impl std::fmt::Debug for PublishHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -798,6 +818,8 @@ impl std::fmt::Debug for PublishHooks {
             .field("folder_sync", &self.folder_sync.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
+            .field("before_disposal", &self.before_disposal.is_some())
+            .field("trash", &self.trash.is_some())
             .finish()
     }
 }
@@ -1161,7 +1183,9 @@ pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
         return;
     }
     if begins(whole, &taken) {
-        let _ = fs::remove_file(&taken);
+        // A copy under a public name may have been opened there: to the
+        // Trash, never unlinked (left under its private name otherwise).
+        let _ = dispose(&taken, hooks);
     } else if place_new(&taken, destination, None, hooks).is_err() {
         let _ = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
             Ok(())
@@ -1187,6 +1211,22 @@ pub(super) fn begins(whole: &Path, part: &Path) -> bool {
             return false;
         }
     }
+}
+
+/// Disposes of `path`, a file that was a version of the project (a
+/// replaced version, a copy that was under the project's name) or a file
+/// this app cannot prove is its own untouched temporary file. It is never
+/// unlinked: whoever still had it open may have written work into it after
+/// it was last read, and a hash says nothing about the next moment. It goes
+/// to the person's Trash, intact, whatever it holds by then; the person
+/// empties the Trash. Where there is no Trash (no host Trash, a volume
+/// without one), it stays where it is: `None`, for the caller to keep it
+/// named and list it.
+pub(super) fn dispose(path: &Path, hooks: &PublishHooks) -> Option<PathBuf> {
+    if let Some(hook) = &hooks.before_disposal {
+        hook(path);
+    }
+    (hooks.trash.as_ref()?.0)(path).ok()
 }
 
 /// How the destination may be written.
@@ -1571,6 +1611,9 @@ pub(crate) struct Published {
     /// The published file, held open since it was confirmed under the
     /// name and confirmed again after the save's last step.
     pub installed: Option<Installed>,
+    /// Earlier versions this save no longer needs that could not be moved
+    /// to the Trash: they stay where they are, for the person.
+    pub untrashed: Vec<PathBuf>,
 }
 
 /// The system's way for programs to take turns at a file (on macOS,
@@ -1953,10 +1996,12 @@ fn publish_now(
     }
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.
-    published.changed = transaction::prune_retained(destination, &tx, hooks);
+    (published.changed, published.untrashed) = transaction::prune_retained(destination, &tx, hooks);
     if let Some(policy) = host.backups {
         let just_written = published.backup.as_deref().or(host.backup);
-        for changed in retain(policy, just_written).unwrap_or_default() {
+        let (changed, untrashed) = retain(policy, just_written, hooks).unwrap_or_default();
+        published.untrashed.extend(untrashed);
+        for changed in changed {
             match tx.keep_file(changed.clone(), "other version") {
                 Ok((kept, Placed::Moved)) => published.changed.push(kept),
                 // Its bytes are beside the project as a copy, or could not
@@ -2639,10 +2684,11 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
 pub(crate) fn retain(
     policy: &BackupPolicy,
     just_written: Option<&Path>,
-) -> Result<Vec<PathBuf>, ProjectIoError> {
-    let mut changed = Vec::new();
+    hooks: &PublishHooks,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProjectIoError> {
+    let (mut changed, mut untrashed) = (Vec::new(), Vec::new());
     let Some(dir) = open_backups(policy, false)? else {
-        return Ok(changed);
+        return Ok((changed, untrashed));
     };
     let folder_err = |e| io_err(&policy.directory, e);
     let keep = just_written.and_then(Path::file_name);
@@ -2664,10 +2710,18 @@ pub(crate) fn retain(
             // read again before it goes, and kept if something wrote into
             // it since it was replaced.
             let path = policy.directory.join(&name);
-            if retained_hash(&path).is_some_and(|hash| hash_file(&path).ok() != Some(hash)) {
-                changed.push(path);
+            if let Some(hash) = retained_hash(&path) {
+                if hash_file(&path).ok() != Some(hash) {
+                    changed.push(path);
+                } else if dispose(&path, hooks).is_some() {
+                    removed = true;
+                } else {
+                    untrashed.push(path);
+                }
                 continue;
             }
+            // The app's own copy, made here and never under the project's
+            // name.
             dir.unlink(&name).map_err(folder_err)?;
             removed = true;
         }
@@ -2696,7 +2750,7 @@ pub(crate) fn retain(
     if removed {
         dir.sync().map_err(folder_err)?;
     }
-    Ok(changed)
+    Ok((changed, untrashed))
 }
 
 /// A full disk must not cost the user their current work: frees `needed`

@@ -2159,16 +2159,19 @@ impl Kernel {
             }
             let p = self.project_mut(id).unwrap();
             let mut changed = Vec::new();
+            let mut untrashed = Vec::new();
             let mut unproven = None;
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
                 changed = receipt.changed.clone();
+                untrashed = receipt.untrashed.clone();
                 unproven = Some(receipt.unproven);
                 p.store_mut().finish_save(receipt)
             });
             if let Some(unproven) = unproven {
                 self.note_unproven(id, unproven);
             }
+            self.log_untrashed(&untrashed);
             // A retained version found changed is another version to tell
             // about: named by the reply where nothing else is.
             displaced = displaced.or_else(|| changed.into_iter().next());
@@ -2684,10 +2687,22 @@ impl Kernel {
     /// them is in a save's record until the person has seen it
     /// (`ShellCall::KeptBeside`).
     fn note_changed(&mut self, _id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
+        self.log_untrashed(&receipt.untrashed);
         receipt
             .displaced
             .clone()
             .or_else(|| receipt.changed.first().cloned())
+    }
+    /// Earlier versions a save no longer needed stay where they are when
+    /// they cannot go to the Trash: the Error Log lists them for the person.
+    fn log_untrashed(&mut self, untrashed: &[PathBuf]) {
+        for path in untrashed {
+            self.log(format!(
+                "An earlier version of a project is no longer needed but could not be moved to \
+                 the Trash (the volume may have none); it was left as it is: {}",
+                path.display()
+            ));
+        }
     }
     /// The file session `id` saves to was renamed or moved while open: carry
     /// on at the place the system says it is now (the same inode, its bytes

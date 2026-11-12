@@ -250,6 +250,7 @@ fn main() -> Result<()> {
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
             write_coordinator: Some(file_coordination::system()),
+            trash: Some(file_coordination::trash()),
             idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
             ..Default::default()
         });

@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
-    FileVersion, Folder, Host, Placed, PublishHooks, begins, folder_sync, is_uuid_v4, keep_beside,
-    lstat_file, place_new, probing, sync_directory, sync_file, withdraw,
+    FileVersion, Folder, Host, Placed, PublishHooks, begins, dispose, folder_sync, is_uuid_v4,
+    keep_beside, lstat_file, place_new, probing, sync_directory, sync_file, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -1055,8 +1055,14 @@ fn settle_one(
         (_, Holds::Nothing) => true,
         _ if record.retains(&record.staged) => true,
         // Installed by a copy: the save's own staged file, whose bytes the
-        // path holds.
-        (Holds::New, Holds::New) => fs::remove_file(&record.staged).is_ok(),
+        // path holds. Read a moment ago is all that is known of it now: to
+        // the Trash, or retained where there is none.
+        (Holds::New, Holds::New) => {
+            if dispose(&record.staged, hooks).is_none() {
+                tx.retain(&record.staged, Some(&record.new));
+            }
+            true
+        }
         // The exchange displaced the version the save replaced: retained,
         // under the name a replaced file has.
         (Holds::New | Holds::Old, Holds::Old) => {
@@ -1186,16 +1192,18 @@ pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
 /// save of `destination` replaced and retained beside it (and every
 /// original of a file that could only be copied to its name) is read
 /// again. One that still holds exactly the bytes it was retained with is
-/// removed, with its record. One that changed since (something wrote into
-/// it after it was replaced) holds work nobody read: it is kept beside the
-/// project as "other version" (recorded in the record that names it) and
-/// returned. `current` is the record of the save that runs the pass.
+/// moved to the person's Trash ([`dispose`]), never unlinked; with no Trash
+/// it stays retained and is returned in the second list. One that changed
+/// since (something wrote into it after it was replaced) holds work nobody
+/// read: it is kept beside the project as "other version" (recorded in the
+/// record that names it) and returned in the first. `current` is the
+/// record of the save that runs the pass.
 pub(super) fn prune_retained(
     destination: &Path,
     current: &Transaction,
     hooks: &PublishHooks,
-) -> Vec<PathBuf> {
-    let mut changed = Vec::new();
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut changed, mut untrashed) = (Vec::new(), Vec::new());
     let (records, _) = records_of(destination);
     for record in records {
         if record.path == current.record || !record.only_retains() || record.retained.is_empty() {
@@ -1215,7 +1223,10 @@ pub(super) fn prune_retained(
                 Err(_) => false,
             };
             if same {
-                gone &= fs::remove_file(path).is_ok();
+                if dispose(path, hooks).is_none() {
+                    untrashed.push(path.clone());
+                    gone = false;
+                }
             } else {
                 match tx.keep_file(path.clone(), "other version") {
                     Ok((kept, placed)) => {
@@ -1239,7 +1250,7 @@ pub(super) fn prune_retained(
             let _ = fs::remove_file(&record.path);
         }
     }
-    changed
+    (changed, untrashed)
 }
 
 /// A copy that was cut short: the record says a file was about to be placed
