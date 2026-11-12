@@ -1545,7 +1545,7 @@ fn a_folder_sync_that_fails_fails_the_save_and_keeps_the_old_version_and_the_jou
 /// one answers, and the server decides). A save to such a volume stands,
 /// but the app does not act as if it were proven: a copy of the saved
 /// version is kept on this machine and the journal is not deleted at close,
-/// until the file is read back with that version. If something else is
+/// until a later save's copy takes its place. If something else is
 /// read back (the server lost the save), the person is told where the copy
 /// is.
 #[test]
@@ -1617,10 +1617,127 @@ fn a_save_the_volume_cannot_prove_durable_keeps_a_local_copy_until_it_is_read_ba
             assert_eq!(told, [("unconfirmed".to_owned(), Some(kept[0].clone()))]);
             assert_eq!(saved_name(&kept[0]).as_deref(), Some("One"));
         } else {
-            assert_eq!(told, [], "read back: confirmed");
-            assert_eq!(local_copies(), [""; 0].map(Path::new), "and the copy goes");
+            assert_eq!(told, [], "read back: nothing to tell");
+            assert_eq!(
+                local_copies(),
+                kept,
+                "and the copy stays: a read back proves nothing on a share"
+            );
         }
     }
+}
+/// On a network share no save can be proven durable from this Mac: the
+/// server alone decides when a rename survives. So the local copy of the
+/// last save there is its checkpoint. A save whose local copy cannot be
+/// made fails before anything is published (the file and the journal keep
+/// everything). Reading the file back later is no proof (it can come from a
+/// cache), so the copy outlives an open that reads the save back and the
+/// Close after it: when the server later turns out to have lost the save,
+/// the copy still holds it and the person is told where it is.
+#[test]
+fn an_unproven_save_keeps_its_local_copy_until_a_later_save_takes_its_place() {
+    let dir = common::TempDir::new("unproven-kept");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let native = dir.path("native");
+    let share = || pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        no_exclusive: true,
+        folder_sync: Some(std::sync::Arc::new(|| (Some(45), None))),
+        ..Default::default()
+    };
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(share());
+    // The local copy cannot be made: the save does not happen.
+    fs::create_dir_all(native.join("unconfirmed")).unwrap();
+    fs::write(native.join("unconfirmed/P"), b"in the way").unwrap();
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect_err("no local copy, no save");
+    assert_eq!(fs::read(&file).unwrap(), original, "nothing was published");
+    assert!(
+        live_sessions(&native, "P") > 0,
+        "the journal keeps the work"
+    );
+    fs::remove_file(native.join("unconfirmed/P")).unwrap();
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("now it can be kept");
+    k.shell(ShellCall::Close(session)).unwrap();
+    // Read back: as far as this Mac can tell, it arrived. Closed again.
+    let (session, _) = open_file(&mut k, &file);
+    assert_eq!(kept_beside(&mut k, &session), []);
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    // The server had not kept it after all.
+    fs::write(&file, &original).unwrap();
+    let mut k = kernel(&native);
+    let session = match k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        ShellReply::RecoveryRequired { ticket, .. } => {
+            decide(&mut k, ticket, RecoveryDecision::Discard)
+        }
+        other => panic!("{other:?}"),
+    };
+    let told = kept_beside(&mut k, &session);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].0, "unconfirmed");
+    assert_eq!(
+        saved_name(told[0].1.as_ref().unwrap()).as_deref(),
+        Some("One"),
+        "the save is still on this Mac"
+    );
+}
+/// Recovery's moves are made durable before the open goes on: a folder
+/// sync that fails after them fails the open (and says so) rather than
+/// opening as if they would survive a power cut.
+#[test]
+fn a_recovery_whose_folder_cannot_be_synced_does_not_open_as_if_it_could() {
+    let dir = common::TempDir::new("recovery-sync");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed_between_renames(&native, &file, false));
+    let mut k = kernel(&native);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        // The first sync (as recovery begins) works; the one after its
+        // moves fails with an I/O error.
+        folder_sync: Some(std::sync::Arc::new(move || {
+            match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => (None, None),
+                _ => (Some(5), None),
+            }
+        })),
+        ..Default::default()
+    });
+    let failed = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("the moves could not be made durable");
+    assert!(failed.to_string().contains("sync"), "{failed}");
+    k.set_publish_hooks(Default::default());
+    open_file(&mut k, &file);
 }
 /// What a volume does is proven by every save, not once per run of the
 /// app: a drive can be unplugged and another mounted in its place under the

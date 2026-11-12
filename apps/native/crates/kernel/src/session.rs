@@ -751,7 +751,7 @@ impl Kernel {
                 self.durability_barrier()?;
                 let journals = self.project_dir(&handle.project);
                 // A volume that could not prove the save durable may still
-                // lose it: the journal stays until the file is read back.
+                // lose it: the journal stays (and its local copy, see `local_copy`).
                 let proven = !self.unproven.contains(&handle.project);
                 self.remove_closed_project(&handle.project);
                 // Saved where it belongs and durable: the journal holds nothing
@@ -1516,6 +1516,14 @@ impl Kernel {
                             // and never got to replace is the file again.
                             left_aside = project_io::settle(&path, &self.host());
                             self.log_unrecorded(&left_aside);
+                            if let Some(e) = &left_aside.unsynced {
+                                return Err(failure(format!(
+                                    "The last save of this project did not finish. Its files \
+                                     were put back in order, but the folder could not be \
+                                     synced to make that last ({e}). Nothing was removed. \
+                                     Try opening it again."
+                                )));
+                            }
                         }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
@@ -2668,12 +2676,14 @@ impl Kernel {
         }
     }
     /// The copy this machine keeps of `id`'s last save to a volume that
-    /// could not prove it durable, unless the file just read (`hash`) is
-    /// that save: then it arrived, and the copy goes.
+    /// could not prove it durable, when the file just read (`hash`) is not
+    /// that save: it may not have arrived.
     fn unconfirmed_copy(&self, id: &str, hash: &str) -> Option<PathBuf> {
         let local = self.unconfirmed_dir(id)?;
+        // Read back with that version: no proof it is durable on the
+        // server (it can come from a cache), so the copy stays, until a
+        // later save's copy takes its place or a save is proven durable.
         if local.join(format!("{hash}.pmv")).is_file() {
-            project_io::forget_local_copies(&local, None);
             return None;
         }
         std::fs::read_dir(&local)
@@ -2718,6 +2728,12 @@ impl Kernel {
         // aside: it is put back now, not followed to its private name.
         let path = path.clone();
         let left = project_io::settle(&path, &self.host());
+        if let Some(e) = &left.unsynced {
+            self.log(format!(
+                "Recovery beside {} could not sync its folder: {e}",
+                path.display()
+            ));
+        }
         self.log_unrecorded(&left);
         let Some(version) = self
             .project(id)

@@ -1611,7 +1611,7 @@ pub(crate) struct Published {
     /// The volume cannot prove the new file's name survives a power cut (a
     /// network share: the server decides). The save stands as far as can
     /// be told; `local_copy` is the copy of the new version kept on this
-    /// machine until the file is read back.
+    /// machine until a later save's copy takes its place.
     pub unproven: bool,
     pub local_copy: Option<PathBuf>,
     /// The published file, held open since it was confirmed under the
@@ -1958,11 +1958,20 @@ fn publish_now(
         host,
     )?;
     // A volume that cannot prove a name durable (a network share) may lose
-    // the new file's name after the save was reported: the new version is
-    // kept on this machine first, until the file is read back.
+    // the new file's name after the save was reported. Nothing this Mac can
+    // read proves otherwise (a read back can come from a cache), so the new
+    // version is kept on this machine first, as the checkpoint of record:
+    // until a later save's copy takes its place, or a save is proven
+    // durable. No copy, no save: nothing is published without it.
     let unproven = tx.folder().sync != FolderSync::Full;
     let local_copy = match host.unconfirmed {
-        Some(local) if unproven => local_copy(&temp.path, local, new_hash).ok(),
+        Some(local) if unproven => match local_copy(&temp.path, local, new_hash) {
+            Ok(copy) => Some(copy),
+            Err(e) => {
+                tx.finish();
+                return Err(e);
+            }
+        },
         _ => None,
     };
     let mut published = Published::default();

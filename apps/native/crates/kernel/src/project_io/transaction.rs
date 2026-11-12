@@ -29,8 +29,7 @@ use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
     FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, folder_sync,
-    is_uuid_v4, keep_beside, lstat_file, place_new, probing, rename_private, sync_directory,
-    sync_file, withdraw,
+    is_uuid_v4, keep_beside, lstat_file, place_new, probing, rename_private, sync_file, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -883,6 +882,9 @@ pub struct Settled {
     pub undecided: Vec<Leftover>,
     /// Private files no record names: never touched.
     pub unrecorded: Vec<PathBuf>,
+    /// The folder could not be synced after recovery's moves: they may not
+    /// survive a power cut. Whoever acts on the result says so.
+    pub unsynced: Option<String>,
 }
 
 /// What a file a record names holds.
@@ -978,8 +980,10 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
         .filter(|(path, _)| !named.contains(path) && fs::metadata(path).is_ok_and(|m| m.len() > 0))
         .map(|(path, _)| path)
         .collect();
-    if !records.is_empty() {
-        let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
+    if !records.is_empty()
+        && let Err(e) = folder_sync(destination.parent().unwrap_or(Path::new(".")), host.hooks)
+    {
+        settled.unsynced = Some(e.to_string());
     }
     settled
 }
@@ -1483,7 +1487,7 @@ fn use_leftover_now(
     if settled {
         tx.finish();
     }
-    let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
+    folder_sync(destination.parent().unwrap_or(Path::new(".")), hooks)?;
     Ok(left)
 }
 
