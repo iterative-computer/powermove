@@ -41,8 +41,15 @@ impl PrecomposeTarget {
             sheet
                 .controls
                 .get(id)
-                .and_then(|c| c.downcast_ref::<NSButton>())
-                .is_some_and(|b| b.state() == NSControlStateValueOn)
+                .and_then(|c| {
+                    c.downcast_ref::<NSButton>()
+                        .map(NSButton::state)
+                        .or_else(|| {
+                            c.downcast_ref::<objc2_app_kit::NSSwitch>()
+                                .map(|s| s.state())
+                        })
+                })
+                .is_some_and(|state| state == NSControlStateValueOn)
         };
         let result = match id {
             "leave" | "move" => {
@@ -77,7 +84,7 @@ pub fn precompose_sheet(
 ) -> PrecomposeSheet {
     let surface = draft.surface(DialogId("precompose".into()), WindowId("editor".into()));
     let field = |id: &str| surface.fields.iter().find(|f| f.id == id).expect("field");
-    let mut sheet = Sheet::new(&surface.title, 9, tokens, true, mtm);
+    let mut sheet = Sheet::new(&surface.title, tokens, true, mtm);
     sheet.text("name", &field("name").label, &draft.name, false, true);
     let on = |value: bool| {
         if value {
@@ -99,19 +106,6 @@ pub fn precompose_sheet(
         button.setEnabled(field(id).enabled);
         button
     };
-    let checkbox = |id: &str, value: bool| {
-        let button = unsafe {
-            NSButton::checkboxWithTitle_target_action(
-                &NSString::from_str(&field(id).label),
-                None,
-                None,
-                mtm,
-            )
-        };
-        button.setState(on(value));
-        button.setEnabled(field(id).enabled);
-        button
-    };
     let leave = draft.leave && draft.can_leave;
     for (id, button) in [
         ("leave", radio("leave", leave)),
@@ -119,14 +113,16 @@ pub fn precompose_sheet(
     ] {
         sheet.option(id, button.into_super());
         if let Some(text) = &field(id).description {
-            sheet.line(text, tokens.typography.minimum.into(), tokens.colors.muted);
+            sheet.note(text, text, tokens.colors.muted);
         }
     }
-    sheet.option(
-        "adjust",
-        checkbox("adjust", draft.adjust_duration).into_super(),
-    );
-    sheet.option("open", checkbox("open", draft.open_after).into_super());
+    for (id, value) in [
+        ("adjust", draft.adjust_duration),
+        ("open", draft.open_after),
+    ] {
+        let field = field(id);
+        sheet.toggle(id, &field.label, value, field.enabled);
+    }
     sheet.button("cancel", "Cancel", true, false, true);
     sheet.button("confirm", "Pre-compose", true, true, false);
     sheet.footer(&["cancel", "confirm"], None);

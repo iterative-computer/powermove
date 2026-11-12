@@ -130,6 +130,8 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
+    /// The height a sheet's body wants, measured as it is laid out.
+    sheet_fit: Rc<std::cell::Cell<f32>>,
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
     probing: bool,
@@ -195,6 +197,7 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
+            sheet_fit: Default::default(),
             probing: false,
             targets: Default::default(),
             capture: None,
@@ -819,6 +822,11 @@ impl SurfaceView {
     /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
     #[cfg(debug_assertions)]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
+        // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
+        let (semantic, value) = match semantic.split_once('=') {
+            Some((semantic, value)) => (semantic, serde_json::from_str(value).ok()),
+            None => (semantic, None),
+        };
         let id = self
             .prepared
             .semantics
@@ -827,7 +835,11 @@ impl SurfaceView {
             .min_by_key(|(key, _)| key.len())
             .map(|(_, id)| *id);
         if let Some(id) = id {
-            self.send(id, event, EventDetail::default(), cx);
+            let detail = EventDetail {
+                value,
+                ..Default::default()
+            };
+            self.send(id, event, detail, cx);
         }
     }
     #[cfg(test)]
@@ -1393,7 +1405,13 @@ impl SurfaceView {
             if fill != shrinks {
                 control.update(cx, |c, _| c.fill = shrinks);
             }
-            let slot = if control.read(cx).is_search() {
+            if node.style.flex_grow.is_some_and(|g| g > 0.) && !control.read(cx).stretches() {
+                control.update(cx, |c, _| c.stretch());
+            }
+            let slot = if control.read(cx).stretches() {
+                // A segmented control its panel lets grow fills its row.
+                div().w_full()
+            } else if control.read(cx).is_search() {
                 // A search field takes the room its row has.
                 div().flex_1().min_w(px(0.))
             } else if shrinks {
@@ -1545,8 +1563,104 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let element = element.children(children).children(self.probe(node.id));
+        let mut element = element.children(children).children(self.probe(node.id));
+        if self.fitted_sheet(node, window) {
+            // The sheet is its window's height: its actions stay on the bottom
+            // edge while the body between gives way.
+            element = element.h(window.viewport_size().height);
+        }
+        let in_fitted_sheet = node
+            .parent
+            .and_then(|p| self.prepared.node(p))
+            .is_some_and(|p| self.fitted_sheet(p, window));
+        if node.sheet_body && in_fitted_sheet {
+            return self.sheet_body(element.into_any_element(), id);
+        }
         self.place(element.into_any_element(), node, window, cx)
+    }
+    /// A sheet shown in its own window (Export) is the whole window.
+    fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {
+        node.component == Some(Component::SheetAnchor)
+            && window.viewport_size().width <= px(self.table.tokens.metrics.sheet_width_wide + 1.)
+    }
+    /// An own-window sheet that names its body: the window follows the body's
+    /// height on a spring instead of jumping to it.
+    fn fitted_sheet(&self, node: &NodeView, window: &Window) -> bool {
+        self.own_sheet(node, window)
+            && node
+                .children
+                .iter()
+                .any(|c| self.prepared.node(*c).is_some_and(|c| c.sheet_body))
+    }
+    /// The body of a sheet in its own window. It takes the room the window
+    /// leaves between the title and the actions and clips what does not fit;
+    /// the height it wants sets where the window is heading. The window grows
+    /// and shrinks from its top edge on the layout spring, so nothing inside
+    /// is moved by the animation but the actions riding the bottom edge.
+    fn sheet_body(&self, element: AnyElement, id: Id) -> AnyElement {
+        use pm_design::motion::{Animated, POINT_PRECISION, Preset, Spring};
+        let t = &self.table.tokens;
+        let spring = t.spring(Preset::Layout);
+        // A capped scroll region and the rows that stand over it.
+        let tallest = t.metrics.sheet_body_max + 2. * t.metrics.form_row;
+        let (wanted, values) = (self.sheet_fit.clone(), self.motion.values.clone());
+        let content = div().flex_none().relative().child(element).child(
+            canvas(
+                {
+                    let wanted = wanted.clone();
+                    move |bounds, _, _| wanted.set(f32::from(bounds.size.height))
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .relative()
+            .child(content)
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        if wanted.get() < 1. {
+                            return;
+                        }
+                        let viewport = f32::from(window.viewport_size().height);
+                        let target =
+                            (viewport - f32::from(bounds.size.height) + wanted.get()).round();
+                        let height = match values.borrow_mut().entry(id) {
+                            std::collections::hash_map::Entry::Occupied(mut value) => {
+                                let value = value.get_mut();
+                                if (value.target[0] - target).abs() > 0.5 {
+                                    value.animate_to([target], spring);
+                                    window.request_animation_frame();
+                                }
+                                value.get()
+                            }
+                            // The first fit is where the sheet opens.
+                            std::collections::hash_map::Entry::Vacant(value) => {
+                                value.insert(Animated::new(
+                                    [target],
+                                    Spring::SNAP,
+                                    POINT_PRECISION,
+                                ));
+                                target
+                            }
+                        };
+                        if (height - viewport).abs() > 0.5 {
+                            // The most the sheet grows to: its body's cap.
+                            let fixed = viewport - f32::from(bounds.size.height);
+                            pm_shell::resize_from_top(window, height, fixed + tallest, cx);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
     }
     /// What a disabled text or number field shows: its value as the editor
     /// would (number precision, then the unit).
@@ -1597,8 +1711,7 @@ impl SurfaceView {
         let t = &self.table.tokens;
         let origin = self.origin.get();
         // In its own sheet window (Export) the sheet is the whole window.
-        let own_window = node.component == Some(Component::SheetAnchor)
-            && window.viewport_size().width <= px(t.metrics.sheet_width_wide + 1.);
+        let own_window = self.own_sheet(node, window);
         let position = if node.component == Some(Component::SheetAnchor) {
             let width = window.viewport_size().width;
             if own_window {
@@ -1618,15 +1731,16 @@ impl SurfaceView {
         };
         let id = node.id;
         let mut wrapper = div().occlude().child(element);
-        if own_window {
-            // The sheet's window fits its content whenever that changes height.
+        if own_window && !self.fitted_sheet(node, window) {
+            // A sheet with no body of its own fits its window to its content.
             wrapper = wrapper.child(
                 canvas(
-                    |bounds, window, _| {
-                        let size = window.viewport_size();
-                        let laid_out = bounds.size.height > px(1.);
-                        if laid_out && (size.height - bounds.size.height).abs() > px(0.5) {
-                            window.resize(gpui::size(size.width, bounds.size.height));
+                    |bounds, window, cx| {
+                        let height = f32::from(bounds.size.height);
+                        if height > 1.
+                            && (window.viewport_size().height - bounds.size.height).abs() > px(0.5)
+                        {
+                            pm_shell::resize_from_top(window, height, height, cx);
                         }
                     },
                     |_, _, _, _| {},

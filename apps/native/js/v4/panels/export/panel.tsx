@@ -38,17 +38,26 @@ const cluster = {
   gap: token("metrics.gap"),
 } as const;
 const stack = { display: "flex", flexDirection: "column" } as const;
-/** Summary and actions under a hairline, like v1's sheet footer. */
-const footer = {
-  ...line,
-  gap: token("metrics.gap"),
-  borderTopWidth: token("metrics.border"),
-  borderColor: token("colors.hairline"),
-  paddingTop: token("metrics.inset"),
-  marginTop: token("metrics.gap"),
+/**
+ * The sheet's one text column: the title, the destination's description, the
+ * section headings, the row titles, the notes and the summary all start a
+ * row inset inside the cards' leading edge.
+ */
+const column = {
+  paddingLeft: token("metrics.inset"),
+  paddingRight: token("metrics.inset"),
 } as const;
+/** Between the title and the actions; the sheet's height follows it. */
+const body = { ...stack, gap: token("metrics.inset") } as const;
+/** Summary on the text column, actions at the trailing edge (a Mac sheet). */
+const footer = { ...line, gap: token("metrics.gap") } as const;
 /** The footer's notice wraps beside the buttons; the buttons never give way. */
-const notice = { ...stack, flexGrow: 1, flexShrink: 1 } as const;
+const notice = {
+  ...stack,
+  flexGrow: 1,
+  flexShrink: 1,
+  paddingLeft: token("metrics.inset"),
+} as const;
 const actions = { ...cluster, flexShrink: 0 } as const;
 const detail = {
   color: token("colors.muted"),
@@ -151,7 +160,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     key: "mblur" | "audio" | "alpha" | "captionsBurn" | "useProxies",
   ) => (
     <FormRow name={key} help={help(key)}>
-      <UI.Checkbox
+      <UI.Switch
         id={`export.${key}`}
         label={rows[key][0]}
         title={help(key)}
@@ -211,78 +220,77 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       <text
         role="heading"
         style={{
+          ...column,
           color: token("colors.text"),
           fontSize: token("typography.heading"),
-          fontWeight: token("typography.semibold_weight"),
+          fontWeight: token("typography.display_weight"),
         }}
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
       {progressSheet ? (
         <>
-          {s.run.phase === "rendering" && s.run.preview ? (
-            <frame
-              resource={s.run.preview}
-              metadata={{ export: { aspect: [p.width, p.height] } }}
-              style={{
-                background: token("colors.viewer"),
-                borderRadius: token("metrics.control_radius"),
-              }}
-            />
-          ) : null}
-          {s.run.phase === "failed" ? (
-            <text
-              label={`Export failed: ${s.run.message}`}
-              metadata={{
-                export: {
-                  symbol: "exclamationmark.triangle.fill",
-                  announce: "polite",
-                },
-              }}
-              style={{ ...text, color: token("colors.danger") }}
-            >{`Export failed: ${s.run.message}`}</text>
-          ) : (
-            <>
-              <UI.ProgressRow
-                id="export.progress"
-                label="Export progress"
-                // The bar speaks its label; the lines below show the words.
-                children={[]}
-                value={progress(s.run).value}
-                title={progress(s.run).eta}
-                metadata={{
-                  export: {
-                    valueDescription:
-                      progress(s.run).ax ?? progress(s.run).leading,
-                  },
+          <div data-pm-slot="body" style={{ ...body, ...column }}>
+            {s.run.phase === "rendering" && s.run.preview ? (
+              <frame
+                resource={s.run.preview}
+                metadata={{ export: { aspect: [p.width, p.height] } }}
+                style={{
+                  background: token("colors.viewer"),
+                  borderRadius: token("metrics.control_radius"),
                 }}
               />
-              <div style={line}>
-                <text style={{ ...text, fontVariantNumeric: "tabular-nums" }}>
-                  {progress(s.run).leading}
-                </text>
-                {progress(s.run).eta ? (
-                  <text
-                    style={{
-                      color: token("colors.secondary"),
-                      fontSize: token("typography.body"),
-                    }}
-                  >
-                    {progress(s.run).eta}
+            ) : null}
+            {s.run.phase === "failed" ? (
+              <text
+                label={`Export failed: ${s.run.message}`}
+                metadata={{
+                  export: {
+                    symbol: "exclamationmark.triangle.fill",
+                    announce: "polite",
+                  },
+                }}
+                style={{ ...text, color: token("colors.danger") }}
+              >{`Export failed: ${s.run.message}`}</text>
+            ) : (
+              <>
+                <UI.ProgressRow
+                  id="export.progress"
+                  label="Export progress"
+                  // The bar speaks its label; the lines below show the words.
+                  children={[]}
+                  value={progress(s.run).value}
+                  title={progress(s.run).eta}
+                  metadata={{
+                    export: {
+                      valueDescription:
+                        progress(s.run).ax ?? progress(s.run).leading,
+                    },
+                  }}
+                />
+                <div style={line}>
+                  <text style={{ ...text, fontVariantNumeric: "tabular-nums" }}>
+                    {progress(s.run).leading}
                   </text>
-                ) : null}
-              </div>
-            </>
-          )}
+                  {progress(s.run).eta ? (
+                    <text
+                      style={{
+                        color: token("colors.secondary"),
+                        fontSize: token("typography.body"),
+                      }}
+                    >
+                      {progress(s.run).eta}
+                    </text>
+                  ) : null}
+                </div>
+              </>
+            )}
+          </div>
           <div
             role="group"
             label="Export"
             metadata={{ export: { recipe: "sheet-footer" } }}
-            style={{
-              ...footer,
-              justifyContent: "end",
-              gap: token("metrics.gap"),
-            }}
+            style={{ ...footer, justifyContent: "end" }}
           >
             {s.run.phase === "failed" ? (
               <>
@@ -319,204 +327,217 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         </>
       ) : (
         <>
-          <UI.SegmentedControl
-            id="export.kind"
-            label="Export type"
-            value={model.kind}
-            options={kinds}
-            disabled={busy}
-            onChange={(kind) => {
-              model.chooseKind(kind as "video" | "images" | "project");
-              watch(model.refreshPlan());
-            }}
-          />
-          <text
-            style={{
-              color: token("colors.secondary"),
-              fontSize: token("typography.reading"),
-            }}
-          >
-            {descriptions[model.kind]}
-          </text>
-          {model.kind === "project" ? (
-            <UI.FormGroup label="Keep Every Layer Editable">
-              <div
-                role="group"
-                label="Keep Every Layer Editable"
-                style={{
-                  ...stack,
-                  gap: token("metrics.border"),
-                  padding: token("metrics.inset"),
-                }}
-              >
-                <text style={{ ...text, fontSize: token("typography.title") }}>
-                  Keep every layer editable
-                </text>
-                <text
-                  style={{ ...detail, fontSize: token("typography.label") }}
-                >
-                  Save a portable Powermove project with its media, effects,
-                  keyframes and composition settings.
-                </text>
-                <text
-                  style={{
-                    color: token("colors.secondary"),
-                    fontSize: token("typography.label"),
-                    marginTop: token("metrics.gap"),
-                  }}
-                >
-                  Editable layers · Original media · Animation & effects
-                </text>
-              </div>
-            </UI.FormGroup>
-          ) : (
-            <scroll
-              id="export.options"
-              role="group"
-              label="Export options"
+          <div data-pm-slot="body" style={body}>
+            <UI.SegmentedControl
+              id="export.kind"
+              label="Export type"
+              value={model.kind}
+              options={kinds}
+              disabled={busy}
+              // The destinations run the width of the cards under them.
+              style={{ flexGrow: 1 }}
+              onChange={(kind) => {
+                model.chooseKind(kind as "video" | "images" | "project");
+                watch(model.refreshPlan());
+              }}
+            />
+            <text
               style={{
-                // A long option list scrolls; the sheet stays on screen.
-                ...stack,
-                gap: token("metrics.inset"),
-                maxHeight: token("metrics.sheet_body_max"),
+                ...column,
+                color: token("colors.secondary"),
+                fontSize: token("typography.reading"),
               }}
             >
-              <Group label="Output">
-                {select(
-                  "format",
-                  formats
-                    .filter((f) => kindOf(f.v) === model.kind)
-                    .map((f) => ({
-                      ...f,
-                      disabled: !s.capabilities[f.v].available,
-                    })),
-                )}
-                {shows(o, "profile") ? select("profile", profiles) : null}
-                {/* HDR MP4 is always HEVC 10-bit: H.264 carries no HDR. */}
-                {shows(o, "codec") &&
-                !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
-                  ? select("codec", codecs)
-                  : null}
-                {shows(o, "depth") ? select("depth", depths) : null}
-                {shows(o, "scale")
-                  ? select("scale", [
-                      ...([0.5, 1, 2] as const).map((scale, i) => ({
-                        v: scale,
-                        label: `${["Half", "Full", "2×"][i]} · ${Math.round(p.width * scale)}×${Math.round(p.height * scale)}`,
+              {descriptions[model.kind]}
+            </text>
+            {model.kind === "project" ? (
+              <UI.FormGroup label="Keep Every Layer Editable">
+                <div
+                  role="group"
+                  label="Keep Every Layer Editable"
+                  style={{
+                    ...stack,
+                    gap: token("metrics.border"),
+                    padding: token("metrics.inset"),
+                  }}
+                >
+                  <text
+                    style={{ ...text, fontSize: token("typography.title") }}
+                  >
+                    Keep every layer editable
+                  </text>
+                  <text
+                    style={{ ...detail, fontSize: token("typography.label") }}
+                  >
+                    Save a portable Powermove project with its media, effects,
+                    keyframes and composition settings.
+                  </text>
+                  <text
+                    style={{
+                      color: token("colors.secondary"),
+                      fontSize: token("typography.label"),
+                      marginTop: token("metrics.gap"),
+                    }}
+                  >
+                    Editable layers · Original media · Animation & effects
+                  </text>
+                </div>
+              </UI.FormGroup>
+            ) : (
+              <scroll
+                id="export.options"
+                role="group"
+                label="Export options"
+                style={{
+                  // A long option list scrolls; the sheet stays on screen.
+                  ...stack,
+                  gap: token("metrics.inset"),
+                  maxHeight: token("metrics.sheet_body_max"),
+                }}
+              >
+                <Group label="Output">
+                  {select(
+                    "format",
+                    formats
+                      .filter((f) => kindOf(f.v) === model.kind)
+                      .map((f) => ({
+                        ...f,
+                        disabled: !s.capabilities[f.v].available,
                       })),
-                      { v: "custom", label: "Custom size…" },
-                    ])
-                  : null}
-                {o.scale === "custom" ? (
-                  <FormRow name="size">
-                    {(["width", "height"] as const).map((axis, i) => (
-                      <div key={axis}>
-                        {i ? <text style={text}>×</text> : null}
-                        <UI.NumberField
-                          id={`export.${axis}`}
-                          label={axis === "width" ? "Width" : "Height"}
-                          title={rows.size[1]}
-                          value={model.size[axis]}
-                          binding={s.bindings[axis]}
-                          min={16}
-                          max={8192}
-                          step={1}
-                          unit="px"
-                          disabled={busy}
-                          metadata={{ export: { axis } }}
-                          onChange={(e) => {
-                            model.customSize(axis, Number(e.value));
-                            if (!model.error) watch(model.refreshPlan());
-                          }}
-                        />
-                      </div>
-                    ))}
-                    <text metadata={{ export: { symbol: "link" } }} />
-                    {model.error ? (
-                      <text
-                        style={{ ...detail, color: token("colors.danger") }}
-                      >
-                        {model.error}
-                      </text>
-                    ) : null}
-                  </FormRow>
-                ) : null}
-                {shows(o, "fps") ? select("fps", rates) : null}
-                {shows(o, "range")
-                  ? select("range", [
-                      {
-                        v: "work",
-                        label: p.hasWorkArea
-                          ? "Work area"
-                          : "Work area · not set",
-                      },
-                      { v: "all", label: "Full composition" },
-                    ])
-                  : null}
-                {shows(o, "quality") ? select("quality", qualities) : null}
-                {p.hdr && (o.format === "prores" || o.format === "mp4")
-                  ? select("dynamicRange", dynamicRanges)
-                  : null}
-              </Group>
-              <Group label="Rendering">
-                {shows(o, "mblur") ? toggle("mblur") : null}
-                {shows(o, "audio") ? toggle("audio") : null}
-                {shows(o, "alpha") ? toggle("alpha") : null}
-                {shows(o, "useProxies") ? toggle("useProxies") : null}
-              </Group>
-              {p.captionLayers ? (
-                <Group label="Captions">
-                  {toggle("captionsBurn")}
-                  {model.kind === "video"
-                    ? select("captionsSidecar", sidecars)
+                  )}
+                  {shows(o, "profile") ? select("profile", profiles) : null}
+                  {/* HDR MP4 is always HEVC 10-bit: H.264 carries no HDR. */}
+                  {shows(o, "codec") &&
+                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                    ? select("codec", codecs)
+                    : null}
+                  {shows(o, "depth") ? select("depth", depths) : null}
+                  {shows(o, "scale")
+                    ? select("scale", [
+                        ...([0.5, 1, 2] as const).map((scale, i) => ({
+                          v: scale,
+                          label: `${["Half", "Full", "2×"][i]} · ${Math.round(p.width * scale)}×${Math.round(p.height * scale)}`,
+                        })),
+                        { v: "custom", label: "Custom size…" },
+                      ])
+                    : null}
+                  {o.scale === "custom" ? (
+                    <FormRow name="size">
+                      {(["width", "height"] as const).map((axis, i) => (
+                        <div key={axis}>
+                          {i ? <text style={text}>×</text> : null}
+                          <UI.NumberField
+                            id={`export.${axis}`}
+                            label={axis === "width" ? "Width" : "Height"}
+                            title={rows.size[1]}
+                            value={model.size[axis]}
+                            binding={s.bindings[axis]}
+                            min={16}
+                            max={8192}
+                            step={1}
+                            unit="px"
+                            disabled={busy}
+                            metadata={{ export: { axis } }}
+                            onChange={(e) => {
+                              model.customSize(axis, Number(e.value));
+                              if (!model.error) watch(model.refreshPlan());
+                            }}
+                          />
+                        </div>
+                      ))}
+                      <text metadata={{ export: { symbol: "link" } }} />
+                      {model.error ? (
+                        <text
+                          style={{ ...detail, color: token("colors.danger") }}
+                        >
+                          {model.error}
+                        </text>
+                      ) : null}
+                    </FormRow>
+                  ) : null}
+                  {shows(o, "fps") ? select("fps", rates) : null}
+                  {shows(o, "range")
+                    ? select("range", [
+                        {
+                          v: "work",
+                          label: p.hasWorkArea
+                            ? "Work area"
+                            : "Work area · not set",
+                        },
+                        { v: "all", label: "Full composition" },
+                      ])
+                    : null}
+                  {shows(o, "quality") ? select("quality", qualities) : null}
+                  {p.hdr && (o.format === "prores" || o.format === "mp4")
+                    ? select("dynamicRange", dynamicRanges)
                     : null}
                 </Group>
-              ) : null}
-              <Group label="Presets">
-                <FormRow name="preset">
-                  <UI.PopUpButton
-                    id="export.preset"
-                    label="Saved Preset"
-                    title={rows.preset[1]}
-                    binding={s.bindings.preset}
-                    value={model.chosenPreset}
-                    disabled={busy}
-                    options={[
-                      { v: "", label: "Choose Preset" },
-                      ...s.presets.map((p) => ({ v: p.id, label: p.name })),
-                    ]}
-                    onChange={(e) => watch(model.choosePreset(String(e.value)))}
-                  />
-                </FormRow>
-                <FormRow name="presetSave">
-                  <UI.TextField
-                    id="export.presetName"
-                    label="Save as Preset"
-                    title={rows.presetSave[1]}
-                    binding={s.bindings.presetName}
-                    value={model.presetName}
-                    disabled={busy}
-                    metadata={{ export: { placeholder: "Preset name" } }}
-                    onInput={(e) => model.namePreset(String(e.value ?? ""))}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.stopPropagation();
-                        watch(model.savePreset());
+                <Group label="Rendering">
+                  {shows(o, "mblur") ? toggle("mblur") : null}
+                  {shows(o, "audio") ? toggle("audio") : null}
+                  {shows(o, "alpha") ? toggle("alpha") : null}
+                  {shows(o, "useProxies") ? toggle("useProxies") : null}
+                </Group>
+                {p.captionLayers ? (
+                  <Group label="Captions">
+                    {toggle("captionsBurn")}
+                    {model.kind === "video"
+                      ? select("captionsSidecar", sidecars)
+                      : null}
+                  </Group>
+                ) : null}
+                <Group label="Presets">
+                  <FormRow name="preset">
+                    <UI.PopUpButton
+                      id="export.preset"
+                      label="Saved Preset"
+                      title={rows.preset[1]}
+                      binding={s.bindings.preset}
+                      value={model.chosenPreset}
+                      disabled={busy}
+                      options={[
+                        { v: "", label: "Choose Preset" },
+                        ...s.presets.map((p) => ({ v: p.id, label: p.name })),
+                      ]}
+                      onChange={(e) =>
+                        watch(model.choosePreset(String(e.value)))
                       }
-                    }}
-                    preventDefault={{ keydown: ["Enter"] }}
-                  />
-                  <Action
-                    id="export.savePreset"
-                    label="Save"
-                    disabled={busy || !model.presetName.trim() || !!model.error}
-                    onClick={() => watch(model.savePreset())}
-                  />
-                </FormRow>
+                    />
+                  </FormRow>
+                  <FormRow name="presetSave">
+                    <UI.TextField
+                      id="export.presetName"
+                      label="Save as Preset"
+                      title={rows.presetSave[1]}
+                      binding={s.bindings.presetName}
+                      value={model.presetName}
+                      disabled={busy}
+                      metadata={{ export: { placeholder: "Preset name" } }}
+                      onInput={(e) => model.namePreset(String(e.value ?? ""))}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          watch(model.savePreset());
+                        }
+                      }}
+                      preventDefault={{ keydown: ["Enter"] }}
+                    />
+                    <Action
+                      id="export.savePreset"
+                      label="Save"
+                      disabled={
+                        busy || !model.presetName.trim() || !!model.error
+                      }
+                      onClick={() => watch(model.savePreset())}
+                    />
+                  </FormRow>
+                </Group>
+                {/* Notes stand under their card, on the text column. */}
                 {model.presetError ? (
                   <text
                     role="status"
                     style={{
+                      ...column,
                       color: token("colors.danger"),
                       fontSize: token("typography.minimum"),
                     }}
@@ -524,10 +545,10 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     Couldn’t save the preset. Try again.
                   </text>
                 ) : null}
-                <text style={detail}>{colorNote}</text>
-              </Group>
-            </scroll>
-          )}
+                <text style={{ ...detail, ...column }}>{colorNote}</text>
+              </scroll>
+            )}
+          </div>
           <div
             role="group"
             label="Export"

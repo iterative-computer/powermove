@@ -824,6 +824,9 @@ impl Editor {
                 }
             }
             "shellAppearanceChanged" => self.rebuild_tokens(),
+            // This window was brought forward in its tab group: draw again,
+            // which publishes the strip for the new selection.
+            "shellTabShown" => {}
             // A theme from the theme pipeline: args[0] is its JSON output.
             "shellTheme" => {
                 let json = cmd.args.first().map(|v| match v {

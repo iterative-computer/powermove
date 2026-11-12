@@ -319,6 +319,45 @@ fn sidebar_material(
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
 }
+/// Gives a sheet a new content height. The first time, its top edge is put
+/// where a sheet `tallest` high stands centred in its parent (the most it
+/// will grow to, so it never runs off its parent); from then on the top stays
+/// there, so a sheet whose content changes height grows and shrinks downwards
+/// and is never centred again on the way (AppKit centres a sheet on every
+/// new frame; the window class hangs it from the pinned top instead). The
+/// frame is set on a later turn of the run loop, because a view asks for
+/// this while its window is being drawn and resizing calls back into it.
+pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let view: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    cx.spawn(async move |_| {
+        let frame = window.frame();
+        let grow = f64::from(height) - window.contentRectForFrameRect(frame).size.height;
+        if grow.abs() < 0.25 {
+            return;
+        }
+        let tall = frame.size.height + grow;
+        if window.respondsToSelector(sel!(pmPinSheetTop:)) {
+            let most = tall.max(tall + f64::from(tallest - height));
+            let _: () = unsafe { msg_send![&*window, pmPinSheetTop: most] };
+        }
+        window.setFrame_display(
+            NSRect::new(
+                NSPoint::new(frame.origin.x, frame.origin.y - grow),
+                NSSize::new(frame.size.width, tall),
+            ),
+            true,
+        );
+    })
+    .detach();
+}
 /// A window laid out as Home is: a sidebar on the window's glass and a
 /// content sheet beside it (Settings). The GPUI window is transparent over
 /// the behind-window blur; the sidebar's material stands in the leading
@@ -453,12 +492,7 @@ define_class!(
             let number: isize = unsafe { msg_send![sender, tag] };
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
-                unsafe {
-                    let group: *mut AnyObject = msg_send![&*window, tabGroup];
-                    if !group.is_null() {
-                        let _: () = msg_send![group, setSelectedWindow: &*window];
-                    }
-                }
+                show_in_tab_group(&window);
             }
             // This window's own tab, pressed while Home shows over the
             // project: back to the project (v1's title-bar tab).
@@ -1374,6 +1408,22 @@ fn tab_layout(count: usize, selected: usize, room: f64) -> (usize, usize, f64, b
 /// is a title bar accessory AppKit adds once a second window joins, and may
 /// add again when the group changes, so this runs whenever the tabs are
 /// synced. Hiding the accessory's controller also gives its height back.
+/// Posted to a window brought forward in its tab group by one of our tabs.
+const TAB_SHOWN: &str = "PMShellTabShown";
+/// Brings `window` forward in its tab group and tells it so. A window shown
+/// this way while the app is inactive gets no activation, so nothing else
+/// makes it hide AppKit's tab row or draw its own strip for the new state.
+fn show_in_tab_group(window: &NSWindow) {
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if group.is_null() {
+            return;
+        }
+        let _: () = msg_send![group, setSelectedWindow: window];
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .postNotificationName_object(&NSString::from_str(TAB_SHOWN), Some(window));
+    }
+}
 fn hide_system_tab_bar(window: &NSWindow) {
     fn tab_bar(view: &NSView) -> Option<Retained<NSView>> {
         if view.class().name().to_bytes() == b"NSTabBar" {
@@ -2297,6 +2347,34 @@ impl Host {
                 },
             )
         };
+        // Brought forward by a tab while the app is inactive: no activation
+        // follows, so the window is told to redraw its strip itself.
+        let shown = {
+            let (window, sender) = {
+                let host = host.borrow();
+                (host.window.clone(), host.sender.clone())
+            };
+            block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    hide_system_tab_bar(&window);
+                    let _ = sender.try_send(Command {
+                        name: "shellTabShown".into(),
+                        args: vec![],
+                        token: None,
+                    });
+                },
+            )
+        };
+        let observer = unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter()
+                .addObserverForName_object_queue_usingBlock(
+                    Some(&NSString::from_str(TAB_SHOWN)),
+                    Some(&host.borrow().window),
+                    None,
+                    &shown,
+                )
+        };
+        host.borrow_mut().window_observers.push(observer);
         for name in unsafe {
             [
                 NSWindowDidBecomeMainNotification,
@@ -2782,12 +2860,7 @@ impl Host {
             return;
         };
         match action {
-            "select" => unsafe {
-                let group: *mut AnyObject = msg_send![&**window, tabGroup];
-                if !group.is_null() {
-                    let _: () = msg_send![group, setSelectedWindow: &**window];
-                }
-            },
+            "select" => show_in_tab_group(window),
             "close" => request_close(window),
             // The tab at `index` of the strip as the pointer over it.
             "hover" => {
