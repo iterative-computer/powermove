@@ -35,6 +35,18 @@ impl Controller {
                     self.hide_home(cx)
                 }
             }
+            // Development builds: an event on a built-in panel's node, by
+            // semantic id (`reviewPanel:<panel>:<event>:<semantic>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewPanel:") => {
+                let mut parts = command.splitn(4, ':').skip(1);
+                if let (Some(panel), Some(event), Some(semantic)) =
+                    (parts.next(), parts.next(), parts.next())
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_send(semantic, event, cx));
+                }
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {

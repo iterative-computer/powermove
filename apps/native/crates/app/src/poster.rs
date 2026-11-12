@@ -63,14 +63,32 @@ fn times(duration: Option<f64>, kept: Option<f64>) -> Vec<f64> {
         .chain(PLACES.iter().map(|place| d * place))
         .collect()
 }
-/// A stored poster's stamp and the time in the composition it shows.
+/// The stamp of a poster drawn by another build of the app: older than any
+/// change to a project, so the poster is shown until it can be drawn again.
+pub(crate) const STALE: i64 = -1;
+/// What drew a poster: the app's version and build. A poster from another
+/// build may not be what this one's renderer draws (an effect fixed, a
+/// colour pipeline changed), so it is not fresh whatever its date.
+fn identity() -> String {
+    let build = objc2_foundation::NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&objc2_foundation::NSString::from_str("CFBundleVersion"))
+        .and_then(|v| v.downcast::<objc2_foundation::NSString>().ok())
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    format!("{} ({build})", crate::updates::current_version())
+}
+/// A stored poster's stamp and the time in the composition it shows. The
+/// stamp is [`STALE`] when another build drew it.
 pub(crate) fn stamp(stamp_file: &Path) -> Option<(i64, Option<f64>)> {
+    stamp_by(stamp_file, &identity())
+}
+fn stamp_by(stamp_file: &Path, identity: &str) -> Option<(i64, Option<f64>)> {
     let text = std::fs::read_to_string(stamp_file).ok()?;
     let mut lines = text.lines();
-    Some((
-        lines.next()?.trim().parse().ok()?,
-        lines.next().and_then(|at| at.trim().parse().ok()),
-    ))
+    let stamp: i64 = lines.next()?.trim().parse().ok()?;
+    let at = lines.next().and_then(|at| at.trim().parse().ok());
+    let same = lines.next().is_some_and(|by| by.trim() == identity);
+    Some((if same { stamp } else { STALE }, at))
 }
 /// Whether a frame shows anything: a flat frame (all black, or one colour
 /// from edge to edge) does not.
@@ -141,7 +159,7 @@ pub(crate) fn write(
     let (time, png) = chosen.or(first)?;
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&file, &png).ok()?;
-    std::fs::write(&stamp_file, format!("{stamp}\n{time}")).ok()?;
+    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
     Some(png)
 }
 
@@ -239,6 +257,11 @@ mod tests {
         );
         assert_eq!(*asked.lock().unwrap(), [30.]);
         assert_eq!(self::stamp(&stamp), Some((8, Some(30.))));
+        // Another build drew it (or one that did not say): stale whatever
+        // its date, and the time it was found at is kept for the redraw.
+        assert_eq!(stamp_by(&stamp, "another build"), Some((STALE, Some(30.))));
+        std::fs::write(&stamp, "8\n30").unwrap();
+        assert_eq!(self::stamp(&stamp), Some((STALE, Some(30.))));
         // Blank everywhere: its blank frame is still its poster.
         let blank: FrameRenderer = Arc::new(|_| Ok(frame(|_, _| [0, 0, 0, 255])));
         assert!(write(&blank, None, dir.path(), "b", 1, (1920, 1080), Some(60.)).is_some());

@@ -16,7 +16,9 @@ and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`;
 the surface host's native `SegmentedControl`; the `flexWrap` panel style;
 the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
 text field's `metadata.search`; `metrics.symbol_action`;
-`pm_shell::native::selected_color`. Nothing was renamed or removed.
+`pm_shell::native::selected_color`; `ControlSpec::quiet` and the panel
+variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
+`TreeItem`) are rounded. Nothing was renamed or removed.
 
 ## Colour
 
@@ -38,9 +40,12 @@ Dark is warm stone (hue about 55°, chroma under 0.01); light is cool paper
   drop target, progress). It is never a selected fill and never a focus ring.
 - Selected is the raised neutral surface (`colors.raised` with
   `Elevation::Raised`) or a neutral ink fill. An active window gives a
-  system "on" control the accent, so every hosted tab, toolbar toggle and
-  segmented control takes `selected_color()` as its bezel: judge selection in
-  an active window, not only in a background capture.
+  system "on" control the accent, so a hosted segmented control takes
+  `selected_color()` as its bezel (the selected tab's pill: paper on a light
+  ground, a lift on a dark one) and draws each segment's title or glyph
+  itself in the label ink, because AppKit would paint them white on a custom
+  bezel. Judge selection in an active window, not only in a background
+  capture.
 - Elevation is tonal: viewer below window below panel below floating.
 - Increase Contrast lifts the text steps to 7:1 and 4.5:1, separators to 3:1
   and doubles strokes; a theme patch cannot lower them.
@@ -106,7 +111,7 @@ Real system material through AppKit, for what the system itself makes glass:
   The selected cell is a raised neutral pill; the one under the pointer a
   wash of the same shape; hairlines part resting tabs and vanish beside
   either. The pull-down and New Project are round targets after the last
-  rule. A tab is carried along the strip to reorder it.
+  rule, each in a cell that shows the strip's wash under the pointer. A tab is carried along the strip to reorder it.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
   heavy tint of the window colour) in a column under the GPUI view, which
   leaves that column unpainted. The glass runs on under the content sheet's
@@ -157,7 +162,10 @@ clips with the panel. Focus, disabled state, Reduce Transparency and both
 appearances are the system's own. Extension panels get the same controls from
 the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
 `SegmentedControl`, and a `TextField` with `metadata.search`). A borderless
-pop-up beside content (`inline`) is titled in the secondary ink. A panel's
+pop-up in a bar of controls (`data-pm-variant="inline"`: the viewer's zoom
+and resolution) keeps the primary ink; one in an option row under the content
+it qualifies (`"quiet"`: a composer's options, Home's sort) is titled in the
+secondary ink. A panel's
 header is the child it marks
 `data-pm-slot="header"`: the dock shows it as the panel's one title row. A
 composer is the kit's multi-line `TextField` with `metadata.submitOnReturn`,
@@ -198,6 +206,21 @@ this window's project). A project with no poster yet is a quiet ground of the
 same shape that says its size. Under the pointer a card rises on the hover
 springs; pressed, it sits back down; a sort or a search slides cards to their
 new places. The list is the dense alternative under the same header.
+
+## Settings
+
+Its own window in Home's shape (`pm_shell::sidebar_frame`): the sections on
+the window's glass below the window buttons (the system search field, quiet
+group headings, rows whose selected state is a rounded neutral wash) and one
+content sheet. A page is a title and a line of description, then cards
+(`FormGroup`) under section headings. Every row of a card is the same
+anatomy: a title over its description, and a control of its natural width at
+the trailing edge (the real pop-up, switch, push button; a text or number
+field in its well). The page title, its description, every section heading
+and every row title start on one x: a card bleeds past that column by the
+row inset. Lists that are not settings (speech models, installed extensions,
+the Store, memory notes) are rows of the same cards, never loose text. A
+search lists every section with a match and dims the others in the sidebar.
 
 ## Timeline strips
 
