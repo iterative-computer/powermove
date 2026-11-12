@@ -1324,9 +1324,11 @@ const DECODE_SHARE: f64 = 0.35;
 /// playhead, one batch at a time: far enough ahead that the answers land
 /// before their frames (the realm's measured time), as many frames per batch
 /// as cost about a tenth of a second. A realm slower than real time answers
-/// every few frames; the frames between draw the nearest answer.
+/// every few frames; the frames between draw the nearest answer. A frame
+/// rendered on disk is read, not drawn: nothing is asked for it.
 fn ask_ahead(
     engine: &mut render::Engine,
+    disk: &render_cache::DiskFrames,
     scene: &Scene,
     spec: FrameSpec,
     rate: Option<pm_protocol::common::PlaybackRate>,
@@ -1353,6 +1355,9 @@ fn ask_ahead(
     let Ok(at) = Ticks::new(at) else {
         return;
     };
+    if disk.rendered(scene, at) {
+        return;
+    }
     let needs = engine.compat_needs(scene, at, spec);
     store.request_ahead(needs, at.get(), frames, step);
 }
@@ -2637,14 +2642,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             drop(state);
             if spec.moment == Moment::Playing {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
-                ask_ahead(&mut engine, &scene, spec, rate);
+                ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
             }
-            if let Some(at) = prepare_at {
+            // A frame rendered on disk is read, not drawn: planning it and
+            // opening its media ahead would only hold this thread (a quarter
+            // of a second on a heavy project) while frames are due.
+            if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);
                 }
-            } else if let Some(at) = refine_at {
+            } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 engine.prepare(&scene, at, spec);
             }
         } else {

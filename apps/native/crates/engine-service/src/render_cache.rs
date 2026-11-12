@@ -1316,6 +1316,19 @@ impl DiskFrames {
         }
     }
 
+    /// Whether `scene`'s frame at `time` is rendered on disk: playback
+    /// reads it, so nothing ahead of the playhead needs preparing for it.
+    pub(crate) fn rendered(&self, scene: &Scene, time: Ticks) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state.frames.as_ref().is_some_and(|frames| {
+            frames.identity.scene_matches(scene)
+                && frames.fingerprint.is_some()
+                && frames
+                    .index(time)
+                    .is_some_and(|n| frames.present.contains(&n))
+        })
+    }
+
     /// The paused playhead is at `time`: its frame and the next few are
     /// read ([`WARM`]), so a play from here starts on frames already read.
     pub(crate) fn warm(&self, scene: &Scene, time: Ticks) {
@@ -2495,6 +2508,10 @@ mod tests {
         assert_eq!(disk.ready_bytes(), WARM as u64 * 640 * 360 * 8);
         // The play starts on a read frame, never waiting.
         assert!(disk.read(&scene, times[10]).is_some());
+        // What is rendered needs no look-ahead; what is not still does.
+        assert!(disk.rendered(&scene, times[10]));
+        let beyond = Ticks::new(Rate::FPS_30.frame_start(60).unwrap()).unwrap();
+        assert!(!disk.rendered(&scene, beyond));
     }
 
     /// The viewer's output tone and its override wrappers are part of the
