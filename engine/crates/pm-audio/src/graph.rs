@@ -144,6 +144,11 @@ pub struct VoicePlan {
     pub static_at: f64,
     /// How the pitch follows a speed change (`d.pitch`).
     pub pitch: Pitch,
+    /// A stream its asset lists by index: it folds to the mix by its own
+    /// layout and never widens the bus other clips are summed on, so the
+    /// streams of one file cannot change each other's level. A clip without
+    /// a list joins the bus as today's graph does.
+    pub folded: bool,
     /// Source seconds per clip second from a conformed frame rate
     /// (Interpret Footage on a video asset); 1 otherwise. Applied in
     /// [`Point::source_time`].
@@ -674,6 +679,7 @@ impl<'d> Walk<'_, 'd> {
             static_point: None,
             static_at: 0.0,
             pitch,
+            folded: stream.is_some(),
             conform,
             constant_rate,
             map_key,

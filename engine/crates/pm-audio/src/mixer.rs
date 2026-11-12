@@ -1861,7 +1861,7 @@ impl Mixer {
         let mut spans = Vec::new();
         for (vi, plan) in graph.voices.iter().enumerate() {
             let channels = plan.source.channels();
-            if channels <= 2 {
+            if channels <= 2 || plan.folded {
                 continue;
             }
             self.ensure_today(vi, plan, comps)?;
@@ -1910,7 +1910,10 @@ impl Mixer {
         let end = start + frames as i64;
         let doc = self.doc.clone();
         let graph = self.graph.clone();
-        let wide = graph.voices.iter().any(|v| v.source.channels() > 2);
+        let wide = graph
+            .voices
+            .iter()
+            .any(|v| v.source.channels() > 2 && !v.folded);
         let spans = if wide && self.format.channels() == 2 && frames > 0 {
             let comps = graph.resolve(&doc)?;
             self.wide_spans(&comps)?
@@ -2028,7 +2031,20 @@ impl Mixer {
         self.bus = bus;
         if bus > 2 {
             for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices) {
-                voice.bus_matrix = crate::today::up_mix(plan.source.channels(), bus);
+                voice.bus_matrix = if plan.folded {
+                    // Its own stereo fold, placed on the bus's front pair.
+                    let fold = layout::matrix(&plan.source.info.speakers, &layout::stereo());
+                    crate::today::up_mix(2, bus)
+                        .iter()
+                        .map(|row| {
+                            (0..plan.source.channels())
+                                .map(|src| row[0] * fold[0][src] + row[1] * fold[1][src])
+                                .collect()
+                        })
+                        .collect()
+                } else {
+                    crate::today::up_mix(plan.source.channels(), bus)
+                };
             }
         }
         let mut wide_out = std::mem::take(&mut self.wide_out);

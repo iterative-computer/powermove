@@ -131,3 +131,73 @@ fn every_listed_stream_is_heard() {
     );
     assert!(graph.voices.iter().all(|v| v.strip == "V"));
 }
+
+/// Each stream folds to the mix by its own layout: a silent surround
+/// stream next to a mono one changes nothing a person hears.
+#[test]
+fn a_silent_surround_stream_does_not_change_a_mono_stream() {
+    let dir = temp_dir("audio-streams-layouts");
+    let wav = dir.join("click.wav");
+    write_wav(&wav, SR, &[clicks(SR as usize, &[CLICKS[0]], 0.9)]);
+    for layout in ["5.1", "quad"] {
+        let file = dir.join(format!("{layout}.mov"));
+        let status = std::process::Command::new(ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&wav)
+            .args(["-f", "lavfi", "-t", "1", "-i"])
+            .arg(format!("anullsrc=r=48000:cl={layout}"))
+            .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let rig = Rig::new(&[("m", &file)]);
+        let wide = if layout == "quad" { 4 } else { 6 };
+        let level = |surround_on: bool| {
+            let assets = format!(
+                r#"{{"m":{{"kind":"audio","audioStreams":[{{"index":0,"channels":1,"sampleRate":48000,"on":true}},{{"index":1,"channels":{wide},"sampleRate":48000,"on":{surround_on}}}]}}}}"#
+            );
+            let mut mixer = rig.mixer(document(&assets, "audio"), "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, SR as i64, 4096);
+            [out[0][CLICKS[0]], out[1][CLICKS[0]]]
+        };
+        let alone = level(false);
+        // Unity in both channels (16-bit samples).
+        assert!(
+            alone.iter().all(|x| (x - 0.9).abs() < 1e-4),
+            "{layout}: the mono stream alone is {alone:?}"
+        );
+        assert_eq!(level(true), alone, "{layout}: with the silent stream on");
+    }
+    // A surround stream with something in it is heard through its own
+    // layout: its centre channel at half power in both outputs, next to the
+    // mono stream at unity.
+    let surround = dir.join("surround.wav");
+    let mut channels = vec![vec![0.0; SR as usize]; 6];
+    channels[2] = clicks(SR as usize, &[CLICKS[1]], 0.9);
+    write_wav(&surround, SR, &channels);
+    let file = dir.join("centre.mov");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&wav)
+        .arg("-i")
+        .arg(&surround)
+        .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rig = Rig::new(&[("m", &file)]);
+    let assets = r#"{"m":{"kind":"audio","audioStreams":[{"index":0,"channels":1,"sampleRate":48000,"on":true},{"index":1,"channels":6,"sampleRate":48000,"on":true}]}}"#;
+    let mut mixer = rig.mixer(document(assets, "audio"), "C", MixFormat::stereo(SR));
+    let out = rig.render(&mut mixer, 0, SR as i64, 4096);
+    for side in &out[..2] {
+        assert!((side[CLICKS[0]] - 0.9).abs() < 1e-4, "{}", side[CLICKS[0]]);
+        let centre = 0.9 * 0.5f32.sqrt();
+        assert!(
+            (side[CLICKS[1]] - centre).abs() < 1e-4,
+            "{}",
+            side[CLICKS[1]]
+        );
+    }
+}
