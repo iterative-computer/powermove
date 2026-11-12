@@ -1,6 +1,7 @@
 //! The timeline playhead's CALayers, driven by the display link (S3: no GPUI
-//! repaint while playing): an `accent` line with a `panel` halo so it reads
-//! over clips of any colour, a pin head, and a motion trail whose width
+//! repaint while playing): pm-design's `playhead` (a hairline in `text` ink
+//! with a `panel` halo so it reads over strips of any hue, and a round head
+//! resting in the ruler), plus a motion trail whose width
 //! follows the head's measured speed through a critically damped spring
 //! (v1's playhead). The spring runs only while the head moves.
 use objc2::{rc::Retained, runtime::AnyObject};
@@ -9,9 +10,8 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CAGradientLayer, CAShapeLayer, CATransaction};
 use std::time::Instant;
 
-/// Head size, points: as wide as the language's playhead head, a little taller
-/// for the point.
-pub const HEAD: (f64, f64) = (11., 14.);
+/// Head size, points (pm-design `Playhead::head`): a disc.
+pub const HEAD: (f64, f64) = (9., 9.);
 /// v1's trail: width per point/second of head speed, spring response (s),
 /// widest trail (pt) and its opacity at the head.
 const TRAIL_GAIN: f64 = 0.3;
@@ -76,22 +76,15 @@ impl Playhead {
         trail.setStartPoint(NSPoint::new(0., 0.5));
         trail.setEndPoint(NSPoint::new(1., 0.5));
         trail.setHidden(true);
-        // The pin, y up: a flat top with rounded shoulders narrowing to a point.
         let (w, h) = HEAD;
         let path = CGMutablePath::new();
-        let p = Some(&*path);
-        let null = std::ptr::null();
-        let (r, shoulder) = (3., h * 0.45);
         unsafe {
-            CGMutablePath::move_to_point(p, null, 0., shoulder);
-            CGMutablePath::add_line_to_point(p, null, 0., h - r);
-            CGMutablePath::add_arc_to_point(p, null, 0., h, r, h, r);
-            CGMutablePath::add_line_to_point(p, null, w - r, h);
-            CGMutablePath::add_arc_to_point(p, null, w, h, w, h - r, r);
-            CGMutablePath::add_line_to_point(p, null, w, shoulder);
-            CGMutablePath::add_arc_to_point(p, null, w / 2., 0., 0., shoulder, 2.);
+            CGMutablePath::add_ellipse_in_rect(
+                Some(&*path),
+                std::ptr::null(),
+                NSRect::new(NSPoint::new(0., 0.), NSSize::new(w, h)),
+            );
         }
-        CGMutablePath::close_subpath(p);
         head.setPath(Some(&path));
         head.setLineWidth(1.);
         Self {
@@ -103,20 +96,21 @@ impl Playhead {
     }
     /// Colours follow the tokens (a theme or appearance change).
     pub fn style(&self, t: &pm_design::Tokens, scale: f64) {
-        let accent = colour(t.colors.accent, 1.);
-        let panel = colour(t.colors.panel, 1.);
+        let p = t.playhead();
+        let accent = colour(p.color, 1.);
+        let panel = colour(p.halo.0, 1.);
         unsafe {
             let _: () = objc2::msg_send![&*self.line, setBackgroundColor: &*accent];
             let _: () = objc2::msg_send![&*self.line, setShadowColor: &*panel];
-            let _: () = objc2::msg_send![&*self.line, setShadowOpacity: 0.9f32];
+            let _: () = objc2::msg_send![&*self.line, setShadowOpacity: p.halo.1];
             let _: () = objc2::msg_send![&*self.line, setShadowRadius: t.metrics.border as f64];
             let _: () = objc2::msg_send![&*self.line, setShadowOffset: NSSize::new(0., 0.)];
         }
         self.head.setFillColor(Some(&accent));
         self.head.setStrokeColor(Some(&panel));
         self.head.setContentsScale(scale);
-        let clear = colour(t.colors.accent, 0.);
-        let glow = colour(t.colors.accent, TRAIL_ALPHA);
+        let clear = colour(p.color, 0.);
+        let glow = colour(p.color, TRAIL_ALPHA);
         let colours: [&AnyObject; 2] = [cf_object(&clear), cf_object(&glow)];
         let array = NSArray::from_slice(&colours);
         unsafe { self.trail.setColors(Some(&array)) };
