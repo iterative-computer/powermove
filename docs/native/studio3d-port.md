@@ -2099,3 +2099,49 @@ now share the retained normalized geometry box; legacy unmeasured assets keep
 their existing unit envelope. The reproduced bottle outline now matches its
 retained aspect before mesh IO. Six panel tests and the kernel import/undo/
 reopen/archive regression pass.
+
+#### Walkthrough export: actual app path, not isolated worker timing
+
+`studio3d-export-perf.py` drives native MCP `export_video` through the same
+engine job, child export worker, composition render and video encoder used by
+the export sheet. It clones the input, uses a fresh private profile, retains
+motion blur and audio, and verifies the original input checksum. Use a bundled
+native executable so its FFmpeg libraries resolve. The driver and long runs
+hold the machine build lock. It records the executable fingerprint as well as
+the input fingerprint. No renderer noise/sample policy is relaxed.
+
+The recovered walkthrough product composition was measured at 1920×1080,
+30 fps, Production, three consecutive animated camera frames. End-to-end
+export is **31.906 s, 10.635 s/frame**, plus **0.176 s** MCP/project setup.
+This does not meet the 3 s budget. The shorter range avoids repeating the
+26-minute walkthrough while preserving its real animated scene and export path.
+
+| Real export component | First frame | Second frame | Third frame |
+|---|---:|---:|---:|
+| Scene preparation, ms | 143.069 | 7.996 | 5.741 |
+| Tracing, ms | 8925.296 | 8613.899 | 8686.265 |
+| Guide trace, ms | 78.470 | 78.479 | 81.293 |
+| Guide readback, ms | 102.905 | 81.921 | 87.169 |
+| OIDN, ms | 1174.151 | 956.502 | 921.120 |
+
+Video encoding totals **600.981 ms for all three frames**; preview generation
+adds **174.617 ms**. Geometry uploads remain 1, texture uploads 1, scene updates
+1, and BLAS builds 2 throughout. The existing worker already retains scene
+geometry and acceleration structures across these camera frames. There is no
+PNG encoding stage in this video export. Tracing is the dominant cost.
+
+Experimental one-light secondary-bounce sampling reduced warm tracing to
+7.60–7.73 s; sampling one light at every bounce reached 7.40–7.49 s. Cold shader
+initialization made total three-frame exports slower, so neither is enabled or
+claimed as an export improvement. Energy tests exercise both traversal paths.
+A replicated multidimensional sampling experiment remains unshipped pending
+compilation, image acceptance and end-to-end measurement. Preset ceilings and
+noise thresholds remain unchanged. Hero/chrome actual-export comparisons and
+current-round full-HD chrome/Cycles/on-screen acceptance remain outstanding.
+
+Fast fog's ambient approximation previously admitted outside sky light without
+medium extinction. The reproduced opaque-atmosphere test measured mean Live
+radiance 0.444341 while Quality was black. Both are below 0.005 after applying
+analytic medium transmittance to that fill. All 21 transport tests passed in
+the engineering working tree, including both traversal energy tests and this
+reproduction. The committed fog change leaves the experimental samplers out.
