@@ -330,6 +330,8 @@ fn compile(
                     .mx(px(t.metrics.gap))
                     .px(px(t.metrics.gap))
                     .gap(px(t.metrics.gap))
+                    // A selected or hovered row is never a square slab.
+                    .rounded(px(radius))
             }
             // Band rows (the timeline outline) share their band with native
             // track rows: selection spans the whole row, as in After Effects.

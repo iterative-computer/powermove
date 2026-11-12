@@ -526,9 +526,12 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    // Bar pop-ups are borderless titles; the rest keep the bezel.
-                    inline: crate::v4_compile::variant(node) == Some("inline")
+                    // Bar pop-ups are borderless titles; the rest keep the
+                    // bezel. `quiet` is the borderless title in the
+                    // secondary ink, for an option bar under a composer.
+                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
                 },
@@ -587,6 +590,18 @@ impl SurfaceView {
             },
         ));
         control.update(cx, |v, _| v.display(display.as_deref()));
+        // A search field starts with its node's text at the host's revision
+        // of it, so only a newer host value replaces what is typed: a first
+        // update that came after the first keystroke emptied the field.
+        if let Some(revision) = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("hostValue"))
+            .and_then(Value::as_u64)
+        {
+            let text = value.as_str().unwrap_or_default().to_owned();
+            control.update(cx, |v, _| v.host_text(&text, revision));
+        }
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
         }
@@ -799,6 +814,21 @@ impl SurfaceView {
     #[cfg(test)]
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
+    }
+    /// Development builds: `event` on the node whose semantic id is, or ends
+    /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
+    #[cfg(debug_assertions)]
+    pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
+        let id = self
+            .prepared
+            .semantics
+            .iter()
+            .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
+            .min_by_key(|(key, _)| key.len())
+            .map(|(_, id)| *id);
+        if let Some(id) = id {
+            self.send(id, event, EventDetail::default(), cx);
+        }
     }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
