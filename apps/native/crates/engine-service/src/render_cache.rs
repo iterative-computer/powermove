@@ -209,6 +209,9 @@ struct Source {
     scene: Scene,
     definitions: Vec<DefinitionSnapshot>,
     doc_id: u64,
+    /// The fonts its frames' keys were taken from (`None` until they are
+    /// fingerprinted): a fill draws with exactly these.
+    fonts: Option<Arc<pm_text::system_fonts::Inventory>>,
 }
 
 /// The open composition's frames.
@@ -831,6 +834,7 @@ impl DiskFrames {
             scene: scene.clone(),
             definitions: definitions.to_vec(),
             doc_id,
+            fonts: None,
         };
         state.generation += 1;
         let generation = state.generation;
@@ -1728,6 +1732,7 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        fonts: source.fonts.as_deref().cloned(),
     })
 }
 
@@ -2302,7 +2307,12 @@ impl IndexerShared {
         if stale() {
             return;
         }
-        let fingerprint = fingerprint(&source, &identity);
+        let fonts = pm_text::system_fonts::Inventory::current();
+        let fingerprint = fingerprint(&source, &identity, &fonts);
+        let source = Source {
+            fonts: Some(Arc::new(fonts)),
+            ..source
+        };
         if stale() {
             return;
         }
@@ -2471,27 +2481,31 @@ fn media_content(path: &Path, hash: &mut blake3::Hasher) {
     }
 }
 
-/// The fonts text can resolve to: every font file CoreText has registered
-/// now (`pm_text::system_fonts::available_files`: installed for the system
-/// or the user, activated from anywhere else, or registered by the
-/// process), with its length and modification time. The list is current as
-/// soon as a font is installed or removed; the font generation observes
-/// again when it changes.
-fn fonts_identity(hash: &mut blake3::Hasher) {
-    for file in pm_text::system_fonts::available_files() {
-        let (path, len, modified, _) = stamp(&file, None);
+/// The fonts text can resolve to (`pm_text::system_fonts::Inventory`):
+/// every font file CoreText has registered (installed for the system or
+/// the user, activated from anywhere else, or registered by the process),
+/// with its length and modification time. The list is current as soon as a
+/// font is installed or removed; the font generation observes again when
+/// it changes, and a fill draws with the very list its keys were taken
+/// from (`Source::fonts`).
+fn fonts_identity(fonts: &pm_text::system_fonts::Inventory, hash: &mut blake3::Hasher) {
+    for (path, len, modified) in &fonts.0 {
         hash.update(path.as_os_str().as_encoded_bytes());
         hash.update(&[0]);
         hash.update(&len.to_le_bytes());
-        hash.update(&modified.to_le_bytes());
+        hash.update(&u128::from(*modified).to_le_bytes());
     }
 }
 
 /// The fingerprint of everything that draws the composition's frames
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
-fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let parts = fingerprint_parts(source, identity);
+fn fingerprint(
+    source: &Source,
+    identity: &Identity,
+    fonts: &pm_text::system_fonts::Inventory,
+) -> [u8; 32] {
+    let parts = fingerprint_parts(source, identity, fonts);
     let mut hash = blake3::Hasher::new_derive_key("powermove render cache v6");
     for (_, part) in &parts {
         hash.update(part);
@@ -2525,7 +2539,11 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
 
 /// What a composition state's frames depend on beyond its document, each
 /// part digested on its own.
-fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str, [u8; 32])> {
+fn fingerprint_parts(
+    source: &Source,
+    identity: &Identity,
+    fonts: &pm_text::system_fonts::Inventory,
+) -> Vec<(&'static str, [u8; 32])> {
     let part = |fill: &dyn Fn(&mut blake3::Hasher)| {
         let mut hash = blake3::Hasher::new();
         fill(&mut hash);
@@ -2565,7 +2583,7 @@ fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str,
                 }
             }),
         ),
-        ("fonts", part(&|hash| fonts_identity(hash))),
+        ("fonts", part(&|hash| fonts_identity(fonts, hash))),
         (
             "tone",
             part(&|hash| {
@@ -3350,6 +3368,7 @@ mod tests {
             scene: scene.clone(),
             definitions: vec![],
             doc_id: 1,
+            fonts: None,
         };
         let mut request = fill_request(&source, Rate::FPS_30, frames, 0).unwrap();
         request.cache = None;
