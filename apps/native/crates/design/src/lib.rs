@@ -366,6 +366,10 @@ pub struct Translucency {
     /// Tint of the window colour on system glass that carries labels (a
     /// sidebar), so text keeps its contrast over any desktop.
     pub glass_tint: f32,
+    /// The floating colour laid under the rows of a palette or menu on
+    /// system glass. The glass keeps the rim and shows faintly through; the
+    /// rows keep their contrast over any content (a dark viewer in light).
+    pub glass_menu: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -784,6 +788,7 @@ impl Tokens {
                         pressed: 0.14,
                         faint: 0.36,
                         glass_tint: 0.9,
+                        glass_menu: 0.72,
                     },
                     Scheme::Light => Translucency {
                         ground,
@@ -800,6 +805,7 @@ impl Tokens {
                         pressed: 0.1,
                         faint: 0.42,
                         glass_tint: 0.6,
+                        glass_menu: 0.84,
                     },
                 }
             },
