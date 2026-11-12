@@ -378,6 +378,7 @@ pub(crate) fn frame_renderer(
     project: String,
     profile: PathBuf,
     overrides: OverrideWindows,
+    capture: Capture,
 ) -> AnyResult<pm_compat_runner::FrameRenderer> {
     let jobs = EngineJobs::new(
         kernel.clone(),
@@ -424,7 +425,8 @@ pub(crate) fn frame_renderer(
         };
         // An extension's snapshot (renderFrameTo, PM.Export.snapshot) is a
         // delivery: offline media refuses, so no Media Offline card is ever
-        // cached here or saved by an extension.
+        // cached here or saved by an extension. Home's poster is a look at
+        // the project and draws the card (its renderer is its own).
         let png = frame(
             &jobs,
             &published,
@@ -433,7 +435,7 @@ pub(crate) fn frame_renderer(
             Size::new(request.width, request.height),
             look,
             request.stop,
-            Capture::ExtensionSnapshot,
+            capture,
         )
         .map_err(|e| e.to_string())?;
         let mut cache = cache.lock().unwrap();
@@ -470,12 +472,15 @@ pub(crate) enum Capture {
     ExtensionSnapshot,
     /// A composition sheet.
     Sheet,
+    /// Home's poster frame of a project: a look at it.
+    Poster,
 }
 impl Capture {
-    /// Only an agent's still draws the Media Offline card; every other
-    /// capture refuses offline media, as an export does.
+    /// A look at the project (an agent's still, Home's poster) draws the
+    /// Media Offline card; a delivery refuses offline media, as an export
+    /// does.
     pub(crate) fn draws_offline_cards(self) -> bool {
-        self == Capture::AgentStill
+        matches!(self, Capture::AgentStill | Capture::Poster)
     }
 }
 #[allow(clippy::too_many_arguments)]

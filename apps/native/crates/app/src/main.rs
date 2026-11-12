@@ -34,6 +34,7 @@ mod gizmo;
 #[cfg(all(test, target_os = "macos"))]
 mod gpui_memory_tests;
 mod keyframe_sheets;
+mod poster;
 
 mod agent_speech;
 mod captions_generate;

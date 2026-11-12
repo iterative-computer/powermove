@@ -136,6 +136,8 @@ pub struct Controller {
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
+    /// The project and revision Home's poster was last written from.
+    pub poster_revision: Option<((String, u64), std::time::Instant)>,
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
@@ -664,6 +666,7 @@ impl Controller {
             reopening_stopped: false,
             mcp,
             job_overrides: Default::default(),
+            poster_revision: None,
             window_key: 0,
             close_pending: false,
             unprotected: false,
@@ -1982,6 +1985,7 @@ impl Controller {
                         if let Some(kept) = displaced {
                             v.other_version_kept(kept, cx);
                         }
+                        v.write_poster(cx);
                     }
                     other => v.save_failed(&crate::lifecycle::reason(other), cx),
                 }
