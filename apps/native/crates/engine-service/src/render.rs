@@ -214,6 +214,19 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
             )
         )
 }
+/// A rendered frame uploaded ahead of its turn.
+struct DiskUpload {
+    content: u64,
+    revision: u64,
+    time: Ticks,
+    size: Size,
+    surface: Arc<ExportedSurface>,
+}
+impl DiskUpload {
+    fn is(&self, scene: &Scene, time: Ticks) -> bool {
+        self.content == scene.content && self.revision == scene.doc.revision() && self.time == time
+    }
+}
 struct CachedFrame {
     key: crate::policy::CacheKey,
     surface: Arc<ExportedSurface>,
@@ -284,6 +297,9 @@ pub struct Engine {
     idle_released: bool,
     /// Playing frames in a row that gave way to the disk reader.
     disk_late: u32,
+    /// The next playing frame's rendered frame, uploaded already
+    /// ([`Engine::upload_ahead`]).
+    disk_next: Option<DiskUpload>,
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
@@ -353,6 +369,7 @@ impl Engine {
         self.renderer.release_idle_media();
         self.renderer.trim(0);
         self.cache.clear();
+        self.disk_next = None;
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
         self.idle_released = true;
@@ -616,6 +633,7 @@ impl Engine {
             last_frame: Instant::now(),
             idle_released: false,
             disk_late: 0,
+            disk_next: None,
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
@@ -668,6 +686,51 @@ impl Engine {
     pub fn media_landed(&self) -> u64 {
         self.renderer.media_landed()
     }
+    /// A frame read from disk into `surface`.
+    fn upload(&self, surface: &ExportedSurface, size: Size, pixels: &[u8]) {
+        self.gpu.queue.write_texture(
+            surface.texture.as_image_copy(),
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.width * 8),
+                rows_per_image: Some(size.height),
+            },
+            surface.texture.size(),
+        );
+        self.gpu.queue.submit([]);
+    }
+
+    /// After a playing frame is submitted: the frame after it, if it is
+    /// rendered on disk and read already, is uploaded now, in the slack
+    /// before its turn. Uploading a composition-size frame when its turn
+    /// came took 5 ms on a quiet machine and 12 to 100 ms on a busy one,
+    /// of the 15 ms a frame has before its refresh.
+    pub fn upload_ahead(&mut self, scene: &Scene, time: Ticks) {
+        if self.disk_next.as_ref().is_some_and(|n| n.is(scene, time)) {
+            return;
+        }
+        self.disk_next = None;
+        let Some(crate::render_cache::Read::Frame(size, pixels)) = self
+            .disk
+            .as_ref()
+            .map(|disk| disk.read_within(scene, time, std::time::Duration::ZERO))
+        else {
+            return;
+        };
+        let Ok(surface) = self.cache_surface(size) else {
+            return;
+        };
+        self.upload(&surface, size, &pixels);
+        self.disk_next = Some(DiskUpload {
+            content: scene.content,
+            revision: scene.doc.revision(),
+            time,
+            size,
+            surface,
+        });
+    }
+
     /// Opens and warms the videos of a coming frame on background workers, so
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
@@ -837,6 +900,10 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        {
+            let mut t = trace.lock().unwrap();
+            t.enter_ms = (now() - t.worker_start) * 1e3;
+        }
         self.sync_studio(scene)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
@@ -882,7 +949,12 @@ impl Engine {
         };
         let fits = |size: &Size| canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();
-        let disk = match looked
+        // Uploaded in the slack after the frame before: nothing to read.
+        let uploaded = self
+            .disk_next
+            .take()
+            .filter(|next| looked && next.is(scene, time) && fits(&next.size));
+        let disk = match (looked && uploaded.is_none())
             .then(|| Some(self.disk.as_ref()?.read_within(scene, time, patience)))
             .flatten()
         {
@@ -912,7 +984,10 @@ impl Engine {
         {
             disk.warm(scene, time);
         }
-        let whole = disk.is_some();
+        if uploaded.is_some() {
+            self.disk_late = 0;
+        }
+        let whole = disk.is_some() || uploaded.is_some();
         trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
         trace.lock().unwrap().disk = match (looked, whole) {
             (false, _) => 0,
@@ -920,30 +995,28 @@ impl Engine {
             (true, true) => 2,
         };
         let size = disk.as_ref().map_or(size, |(size, _)| *size);
-        let (surface, failures) = if let Some(index) = hit {
+        let size = uploaded.as_ref().map_or(size, |next| next.size);
+        let (surface, failures) = if let Some(next) = uploaded {
+            trace.lock().unwrap().cache_hit = true;
+            (next.surface, Arc::from(Vec::new()))
+        } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
             self.cache.push_back(entry);
             trace.lock().unwrap().cache_hit = true;
             found
         } else {
+            let uploading = std::time::Instant::now();
             let surface = self.cache_surface(size)?;
             if let Some((_, pixels)) = disk {
-                self.gpu.queue.write_texture(
-                    surface.texture.as_image_copy(),
-                    &pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(size.width * 8),
-                        rows_per_image: Some(size.height),
-                    },
-                    surface.texture.size(),
-                );
-                self.gpu.queue.submit([]);
+                self.upload(&surface, size, &pixels);
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
-                trace.lock().unwrap().cache_hit = true;
+                let mut t = trace.lock().unwrap();
+                t.cache_hit = true;
+                t.disk_upload_ms = uploading.elapsed().as_secs_f64() * 1e3;
+                drop(t);
                 (surface, Arc::from(Vec::new()))
             } else {
                 let target = Target::wrap(surface.texture.clone());
