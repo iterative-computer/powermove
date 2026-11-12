@@ -94,6 +94,7 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
         samples,
         frames: vec![],
         config: CodecConfig::default(),
+        edits: Default::default(),
         nal_codec: nal,
         stats: IndexStats {
             scan_reads: pkts.len(),

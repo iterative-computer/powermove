@@ -295,6 +295,12 @@ impl Catalog {
             } else {
                 Value::Object(Map::new())
             };
+            // Which audio streams are heard belongs to the file: the importer
+            // reconciled the old list with the new file, and no list means
+            // the file plays its one stream.
+            if replace.is_some() {
+                meta.as_object_mut().unwrap().remove("audioStreams");
+            }
             // Merge verified metadata without losing unknown extension fields.
             for (k, v) in item.metadata.as_object().unwrap().iter() {
                 if replace.is_some() && k.as_str() == Some("folder") {

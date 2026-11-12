@@ -638,9 +638,17 @@ impl MediaImporter for EngineJobs {
         let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
         let width = video.map(|video| f64::from(video.width));
         let height = video.map(|video| f64::from(video.height));
+        // The clip's own length (first frame start to last frame end), as
+        // the Project panel's import records it.
+        // A relinked asset keeps reading its file's times as it did, so its
+        // lengths are measured that way.
+        let timing = match &request.replace {
+            Some(asset) => pm_builtins::media_import::asset_timing(project["assets"].get(asset)),
+            None => pm_media::clip::ClipTiming::Presentation,
+        };
         let duration = probe
             .as_ref()
-            .and_then(|probe| seconds(probe.duration_us))
+            .and_then(|probe| probe.duration_as(timing))
             .filter(|_| kind != "image");
         let has_audio = probe
             .as_ref()
@@ -697,9 +705,47 @@ impl MediaImporter for EngineJobs {
             .map(|entry| archive.retain_entry(entry))
             .transpose()
             .map_err(failed)?;
-        let metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
+        let mut metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        if kind == "video" {
+            metadata["audioDur"] = json!(
+                probe
+                    .as_ref()
+                    .and_then(|probe| pm_media::facts::audio_duration(probe, timing))
+                    .unwrap_or(0.)
+            );
+        }
+        // Every audio stream of a multi-track file is listed and heard, as
+        // when a person imports it; a relink keeps what was heard.
+        let streams = probe
+            .as_ref()
+            .map(pm_media::facts::audio_streams)
+            .unwrap_or_default();
+        if let Some(asset) = &request.replace {
+            let old = published
+                .snapshot
+                .root()
+                .and_then(|root| root.get("assets")?.get(asset)?.get("audioStreams"))
+                .and_then(|streams| {
+                    serde_json::from_str(&pm_model::json::to_canonical_string(&streams.to_value()))
+                        .ok()
+                });
+            pm_builtins::media_import::relink_streams(
+                &mut metadata,
+                old.as_ref(),
+                &streams,
+                previous.as_ref(),
+                &original,
+            );
+        } else if let Some(streams) = pm_media::facts::asset_audio_streams(&streams) {
+            metadata["audioStreams"] = streams;
+        }
+        // As a person's import: a new clip's times address the file's
+        // presentation; a replaced asset keeps the reading it was edited with.
+        if request.replace.is_none() && matches!(kind, "video" | "audio") {
+            metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
+        }
         let catalog =
             pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog
@@ -1001,39 +1047,38 @@ impl EngineHook for EngineJobs {
             completed: cells.len(),
         })
     }
+    /// Loudness and silences of what the mix plays from the asset: its heard
+    /// streams on its clip's timeline (`pm_audio::waveform::clip_envelope`).
     fn waveform(&self, request: &WaveformRequest) -> Result<Waveform> {
         const BUCKETS_PER_SECOND: f64 = 100.;
         let path = self.original(&request.request)?;
-        let rate = pm_media::probe::probe_timing(&path)
-            .map_err(failed)?
-            .streams
-            .iter()
-            .find_map(|stream| stream.audio.as_ref().map(|audio| audio.sample_rate))
-            .ok_or_else(|| Error::invalid("This media has no audio."))?;
-        let per_peak = (rate as f64 / BUCKETS_PER_SECOND).round() as usize;
-        let peaks =
-            pm_media::probe::peaks::peaks(&path, None, per_peak.max(1), 0).map_err(failed)?;
-        let channels = peaks.channels.max(1);
-        let envelope = peaks
-            .data
-            .chunks(channels)
-            .map(|bucket| {
-                bucket
-                    .iter()
-                    .map(|[low, high]| low.abs().max(high.abs()) as f64)
-                    .fold(0., f64::max)
-            })
-            .collect::<Vec<f64>>();
-        let bucket_at = |time: f64| {
-            ((time * peaks.sample_rate as f64 / per_peak as f64) as usize).min(envelope.len())
-        };
+        let published = self.published(&request.request.snapshot)?;
+        let record = request
+            .request
+            .asset
+            .as_ref()
+            .and_then(|asset| asset["id"].as_str())
+            .and_then(|id| published.snapshot.root()?.get("assets")?.get(id));
+        let streams = pm_audio::graph::selected_streams(record);
+        if streams.is_empty() {
+            return Err(Error::invalid("This media's audio streams are all off."));
+        }
+        let (envelope, rate) = pm_audio::waveform::clip_envelope(
+            &path,
+            &streams,
+            pm_audio::graph::clip_timing(record),
+            BUCKETS_PER_SECOND,
+        )
+        .map_err(|_| Error::invalid("This media has no audio."))?;
+        let envelope: Vec<f64> = envelope.into_iter().map(f64::from).collect();
+        let bucket_at = |time: f64| ((time * rate) as usize).min(envelope.len());
         let span = &envelope[bucket_at(request.start)..bucket_at(request.end)];
         let peak = span.iter().copied().fold(0., f64::max);
         let threshold = 10f64.powf(request.threshold_db / 20.);
         let mut silences = vec![];
         let mut quiet = None;
         for (index, level) in span.iter().chain([&f64::MAX]).enumerate() {
-            let time = request.start + index as f64 / BUCKETS_PER_SECOND;
+            let time = request.start + index as f64 / rate;
             match (quiet, *level < threshold) {
                 (None, true) => quiet = Some(time),
                 (Some(start), false) => {
@@ -1156,8 +1201,17 @@ impl EngineJobs {
         .remove(asset)
         .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
     }
+    /// Source times read as the asset's layers read them (its `timing`).
     fn reader(&self, request: &MediaRequest) -> Result<PreviewReader> {
-        PreviewReader::open(&self.original(request)?).map_err(failed)
+        let timing = pm_media::clip::ClipTiming::of_asset(
+            request
+                .asset
+                .as_ref()
+                .and_then(|asset| asset["timing"].as_f64()),
+        );
+        Ok(PreviewReader::open(&self.original(request)?)
+            .map_err(failed)?
+            .with_timing(timing))
     }
 }
 fn seconds(micros: Option<i64>) -> Option<f64> {
@@ -1165,4 +1219,190 @@ fn seconds(micros: Option<i64>) -> Option<f64> {
 }
 fn decibels(level: f64) -> f64 {
     (20. * level.max(1e-9).log10() * 10.).round() / 10.
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+    use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::*};
+
+    const RATE: usize = 48_000;
+    const CLICKS: [usize; 3] = [4_800, 24_000, 14_400];
+
+    fn ffmpeg_path() -> PathBuf {
+        std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg")
+    }
+
+    /// A one-second clip with a picture and one mono PCM stream per click.
+    fn clip(root: &Path, name: &str, clicks: &[usize]) -> PathBuf {
+        let path = root.join(name);
+        let mut command = std::process::Command::new(ffmpeg_path());
+        command.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"]);
+        command.args(["-i", "testsrc2=size=64x64:rate=25:duration=1"]);
+        for at in clicks {
+            command
+                .args(["-f", "lavfi", "-i"])
+                .arg(format!("aevalsrc='0.9*eq(n\\,{at})':s={RATE}:d=1"));
+        }
+        command.args(["-map", "0:v"]);
+        for k in 0..clicks.len() {
+            command.args(["-map", &format!("{}:a", k + 1)]);
+        }
+        command.args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        assert!(command.arg(&path).status().unwrap().success());
+        path
+    }
+
+    fn root_of(kernel: &KernelHandle) -> (Arc<Published>, Value) {
+        let published = kernel.published("p").unwrap();
+        let root = serde_json::from_str(&to_canonical_string(
+            &published.snapshot.root().unwrap().to_value(),
+        ))
+        .unwrap();
+        (published, root)
+    }
+
+    /// The clicks heard from `asset` as the only clip, through the mix graph.
+    fn heard(kernel: &KernelHandle, asset: &str) -> Vec<usize> {
+        let (_, mut root) = root_of(kernel);
+        root["layers"] = json!([{"id":"V","type":"video","name":"V","from":0,"dur":1,"on":true,
+            "solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],
+            "d":{"asset":asset,"trim":0,"speed":1,"embeddedAudio":true}}]);
+        let source = PathBuf::from(root["assets"][asset]["sourcePath"].as_str().unwrap());
+        let doc =
+            pm_model::Document::new(Some(pm_model::json::parse(&root.to_string()).unwrap()), 1);
+        let cache = pm_audio::SourceCache::new(64 << 20, 0);
+        let resolver = move |_: &str| Some(source.clone());
+        let graph =
+            pm_audio::MixGraph::build(&doc, "c", &mut pm_eval::Evaluator::new(), &cache, &resolver)
+                .unwrap();
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(RATE as u32),
+            Arc::new(doc),
+            Arc::new(graph),
+            pm_eval::Evaluator::new(),
+            cache.clone(),
+        );
+        let mut left = vec![];
+        let summary = pm_audio::offline::render(&mut mixer, 0, RATE as i64, 4096, |_, inter| {
+            left.extend(inter.iter().step_by(2).copied());
+            Ok(())
+        })
+        .unwrap();
+        cache.shutdown();
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        CLICKS
+            .iter()
+            .enumerate()
+            .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// An agent's relink keeps which audio streams are heard, exactly as a
+    /// person's does (`pm_builtins` tests the full table).
+    #[test]
+    fn an_agent_relink_keeps_which_audio_streams_are_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entry =
+            |index: u32, on: bool| json!({"index":index,"channels":1,"sampleRate":48000,"on":on});
+        let project = json!({"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{
+                "older":{"id":"older","name":"Older.mov","kind":"video","dur":1},
+                "muted":{"id":"muted","name":"Muted.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, true), entry(2, false)]},
+                "first_off":{"id":"first_off","name":"First off.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, false), entry(2, true)]},
+                "late":{"id":"late","name":"Late.mp4","kind":"video","dur":1}}});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let ffmpeg = ffmpeg_path();
+        let recorder = clip(&root, "recorder.mov", &CLICKS[..2]);
+        let mono = clip(&root, "mono.mov", &CLICKS[2..]);
+        let relink = |asset: &str, path: &Path| {
+            let (published, project) = root_of(&kernel);
+            let replaced = jobs
+                .import(&MediaImport {
+                    frozen: FrozenProject {
+                        project_id: "p".into(),
+                        document_id: published.snapshot.doc_id,
+                        revision: published.revision(),
+                        project,
+                    },
+                    path: path.to_owned(),
+                    folder: None,
+                    replace: Some(asset.into()),
+                    expected_fingerprint: None,
+                    writer: 1,
+                })
+                .unwrap();
+            assert_eq!(replaced.status, "replaced");
+        };
+        relink("older", &recorder);
+        assert_eq!(heard(&kernel, "older"), [0]);
+        relink("muted", &recorder);
+        assert_eq!(heard(&kernel, "muted"), [0]);
+        relink("first_off", &mono);
+        assert_eq!(heard(&kernel, "first_off"), Vec::<usize>::new());
+        assert_eq!(
+            root_of(&kernel).1["assets"]["first_off"]["audioStreams"],
+            json!([entry(1, false)])
+        );
+        // An older asset measures its clip as it reads it: twenty frames
+        // 0.4 s into the file end 1.2 s in.
+        let late = root.join("late.mp4");
+        let status = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .args([
+                "-i",
+                "testsrc2=size=64x64:rate=25:duration=0.8",
+                "-c:v",
+                "mpeg4",
+            ])
+            .args(["-output_ts_offset", "0.4"])
+            .arg(&late)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        relink("late", &late);
+        let dur = root_of(&kernel).1["assets"]["late"]["dur"]
+            .as_f64()
+            .unwrap();
+        assert!((dur - 1.2).abs() < 1e-3, "{dur}");
+    }
 }

@@ -7,6 +7,7 @@ use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
 use super::{Backend, DecoderInfo, StreamSpec, open};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
+use crate::clip::{ClipTiming, LegacyMap, Span};
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input, PacketReader};
 use crate::frame::DecodedFrame;
@@ -38,8 +39,19 @@ pub struct MediaSource {
     startup_input: Arc<Mutex<Option<Input>>>,
     pub nominal: NominalRate,
     pub color: ColorDescription,
-    /// Presented PTS in presentation order.
+    /// Presented timestamps in presentation order on the clip's timeline
+    /// ([`ClipTiming::Presentation`]): 0 is the start of the file's
+    /// presentation ([`Span`]). Index timebase units.
     pub pts: Vec<i64>,
+    /// The container timestamp of clip time 0, in index timebase units.
+    pub origin_pts: i64,
+    /// Where the presentation ends on the clip's timeline, in ticks.
+    end: Tick,
+    /// Where the clip ends as an older asset reads the file, in ticks.
+    legacy_end: Tick,
+    /// The same frames as older projects address them
+    /// ([`ClipTiming::Legacy`]).
+    pub legacy: LegacyMap,
 }
 
 impl MediaSource {
@@ -79,10 +91,42 @@ impl MediaSource {
             .video_stream
             .ok_or_else(|| MediaError::invalid("no video stream"))?;
         let video = probe.video.as_ref().unwrap();
-        let nominal = video.nominal_rate.clone().ok_or_else(|| {
-            MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
-        })?;
-        let pts = index.presented_pts();
+        let nominal = match video.nominal_rate.clone() {
+            Some(nominal) => nominal,
+            // One frame is shown whatever its rate. A file that states none
+            // (a lone transport-stream picture without timing information)
+            // takes 30 fps for cadence decisions only; the probe goes on
+            // reporting that the file states no rate.
+            None if index.frames.len() == 1 && !crate::probe::still_container(&probe.container) => {
+                NominalRate {
+                    rate: Rate::FPS_30,
+                    method: crate::time::RateMethod::Declared,
+                    candidates: vec![],
+                    median_duration: 0,
+                    window: 1,
+                }
+            }
+            None => {
+                return Err(MediaError::invalid(
+                    "the stream has no frame rate (its frames share one timestamp)",
+                ));
+            }
+        };
+        let span = Span::of(&probe);
+        let origin_pts = span.origin.in_units(index.timebase);
+        let pts = index.frames.iter().map(|f| f.pts - origin_pts).collect();
+        let end = match span.end {
+            Some(end) => {
+                crate::time::ticks_of(end.in_units(index.timebase) - origin_pts, index.timebase)
+            }
+            None => crate::time::ticks_of(index.end_pts() - origin_pts, index.timebase),
+        };
+        let legacy = LegacyMap::of(&index);
+        let legacy_end = match Span::legacy_end(&probe) {
+            Some(end) => crate::time::ticks_of(end.in_units(index.timebase), index.timebase),
+            None => crate::time::ticks_of(index.end_pts() - index.edits.head_gap, index.timebase),
+        }
+        .max(0);
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
@@ -92,6 +136,10 @@ impl MediaSource {
             nominal,
             color: video.color.interpreted,
             pts,
+            origin_pts,
+            end,
+            legacy_end,
+            legacy,
             index,
             probe,
         }))
@@ -101,15 +149,54 @@ impl MediaSource {
         self.nominal.rate
     }
 
-    /// Section 5 rule 7: the presented frame showing at source time `t`
-    /// (ticks, on the presentation timeline: PTS 0 is tick 0).
+    /// Section 5 rule 7: the presented frame showing at clip time `t`
+    /// (ticks; tick 0 is the first presented frame). `None` before it.
     pub fn select(&self, t: Tick) -> Option<usize> {
         select_frame(&self.pts, self.index.timebase, self.nominal.rate, t)
     }
 
-    /// Source time of presented frame `n`, in ticks.
+    /// Presented frame times in index units as `timing` reads the file.
+    pub fn clip_pts(&self, timing: ClipTiming) -> &[i64] {
+        match timing {
+            ClipTiming::Legacy => &self.legacy.pts,
+            ClipTiming::Presentation => &self.pts,
+        }
+    }
+
+    /// The presented frame an asset's source time `t` shows under its
+    /// `timing`. The legacy reading always shows a frame (the first one
+    /// holds before its own time); the presentation reading shows nothing
+    /// before the picture starts.
+    pub fn select_as(&self, timing: ClipTiming, t: Tick) -> Option<usize> {
+        match timing {
+            ClipTiming::Presentation => self.select(t),
+            ClipTiming::Legacy if self.legacy.pts.is_empty() => None,
+            ClipTiming::Legacy => Some(
+                select_frame(&self.legacy.pts, self.index.timebase, self.nominal.rate, t)
+                    .map_or(self.legacy.head, |n| n.max(self.legacy.head)),
+            ),
+        }
+    }
+
+    /// Clip time of presented frame `n`, in ticks.
     pub fn time_of(&self, n: usize) -> Tick {
         crate::time::ticks_of(self.pts[n], self.index.timebase)
+    }
+
+    /// The clip's length in ticks: from the start of the file's
+    /// presentation to the latest end of any of its streams.
+    pub fn duration(&self) -> Tick {
+        self.end
+    }
+
+    /// The clip's length in ticks as an asset with `timing` reads the file
+    /// ([`crate::clip::Span::legacy_end`] for older assets), so the last
+    /// frame its source times reach is inside it.
+    pub fn duration_as(&self, timing: ClipTiming) -> Tick {
+        match timing {
+            ClipTiming::Legacy => self.legacy_end,
+            ClipTiming::Presentation => self.end,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -239,7 +326,12 @@ pub struct DecodeService {
     arbiter: Arc<dyn HardwareArbiter>,
     config: ServiceConfig,
     idle: Mutex<HashMap<SessionKey, Vec<Session>>>,
+    /// When a drag frame last asked for video (ms since process start), for
+    /// PM_FIX_VIDEO2's scrub-only decoder retention.
+    scrubbed_ms: AtomicU64,
     open_sessions: AtomicU64,
+    /// Decoders a failed session's recovery tried to open, in all.
+    recovery_opens: AtomicU64,
     /// The lease's decoder share ([`MediaLease::decoders`]).
     decoder_budget: AtomicUsize,
 }
@@ -297,8 +389,14 @@ impl SessionGuard<'_> {
         if let Some(f) = self.service.cache.get(&key) {
             return Ok(Some(f));
         }
+        let mut f = self.session.as_mut().unwrap().sample_with(sample, stop);
+        if f.is_err() {
+            f = self.recover(sample, stop, f);
+        }
         let s = self.session.as_mut().unwrap();
-        let f = s.sample_with(sample, stop);
+        if f.is_ok() {
+            s.replacement = false;
+        }
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
             let key = FrameKey {
@@ -316,6 +414,60 @@ impl SessionGuard<'_> {
             s.clear_window();
         }
         f
+    }
+
+    /// A VideoToolbox session that failed is not asked again: once the
+    /// system invalidates it (a GPU reset, sleep and wake), every later
+    /// sample fails. The session gives back its hardware and a new one
+    /// opens, once; if the sample still fails and the stream has a software
+    /// backend, that decodes it. A sample that fails everywhere is damaged,
+    /// and a file no decoder opens any more is gone: the error stands, and
+    /// the session that tried last stays, marked, so neither reopens
+    /// decoders on every request.
+    fn recover(
+        &mut self,
+        sample: usize,
+        stop: &mut dyn FnMut(super::session::Progress) -> bool,
+        failed: Result<Option<DecodedFrame>>,
+    ) -> Result<Option<DecodedFrame>> {
+        let old = self.session.as_mut().unwrap();
+        if old.replacement || old.decoder_info().backend != Backend::VideoToolbox {
+            return failed;
+        }
+        // Its hardware session is the replacement's to take.
+        old.release_hardware();
+        old.replacement = true;
+        let software = super::backends(&self.source.info, &self.source.index)
+            .into_iter()
+            .find(|b| *b != Backend::VideoToolbox);
+        let mut last = failed;
+        for prefer in [None, software] {
+            if prefer.is_none() && last.is_ok() {
+                break;
+            }
+            self.service.recovery_opens.fetch_add(1, Ordering::Relaxed);
+            let Ok(mut fresh) = self
+                .service
+                .open_session(&self.source, self.key.purpose, prefer)
+            else {
+                continue;
+            };
+            fresh.replacement = true;
+            last = fresh.sample_with(sample, stop);
+            // The failed session closes here; the new one takes its place.
+            self.session = Some(fresh);
+            self.service.open_sessions.fetch_sub(1, Ordering::Relaxed);
+            if last.is_ok() || software.is_none() {
+                break;
+            }
+        }
+        last
+    }
+
+    /// See [`Session::invalidate_hardware`].
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        self.session.as_mut().unwrap().invalidate_hardware()
     }
 
     /// See [`Session::set_window`].
@@ -396,20 +548,36 @@ impl Drop for SessionGuard<'_> {
             // and closes when that is still not enough (always for a zero
             // share, as in `fit_decoders`).
             let zero = svc.decoder_budget.load(Ordering::Relaxed) == 0;
+            // PM_FIX_KEEP_SESSION: over the share, a session gives back its
+            // window but stays open as its key's one idle session; cold
+            // sources and idle release close it.
+            let keep = (super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
+                || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
+                || svc.scrubbing())
+                && svc
+                    .idle
+                    .lock()
+                    .unwrap()
+                    .get(&self.key)
+                    .is_none_or(|l| l.is_empty());
             if zero || svc.decoders_over() {
                 s.clear_window();
-                if zero || svc.decoders_over() {
+                if !keep && (zero || svc.decoders_over()) {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
+                    super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
                     svc.fit_decoders();
                     return;
                 }
             }
             let mut idle = svc.idle.lock().unwrap();
             let list = idle.entry(self.key).or_default();
-            if list.len() < svc.config.idle_sessions {
+            let idle_cap = super::diag::knob("PM_ABL_IDLE_SESSIONS")
+                .map_or(svc.config.idle_sessions, |n| n as usize);
+            if list.len() < idle_cap {
                 list.push(s);
             } else {
+                super::diag::bump(&super::diag::SESSIONS_CLOSED_IDLE_FULL, 1);
                 svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -417,6 +585,30 @@ impl Drop for SessionGuard<'_> {
 }
 
 impl DecodeService {
+    /// A drag frame is asking for video now (PM_FIX_VIDEO2).
+    pub fn note_scrub(&self) {
+        self.scrubbed_ms.store(scrub_clock_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Whether a drag asked for video in the last half second, with
+    /// PM_FIX_VIDEO2 on: decoders and reorder windows are then kept.
+    pub fn scrubbing(&self) -> bool {
+        (super::diag::video2()
+            || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
+            && self.scrubbed_within(std::time::Duration::from_millis(500))
+    }
+
+    /// Whether a drag asked for video within `within`.
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        let at = self.scrubbed_ms.load(Ordering::Relaxed);
+        at != 0 && scrub_clock_ms().saturating_sub(at) < within.as_millis() as u64
+    }
+
+    /// Playback or export began: retention and the allowance end now.
+    pub fn clear_scrub_mark(&self) {
+        self.scrubbed_ms.store(0, Ordering::Relaxed);
+    }
+
     pub fn new(config: ServiceConfig) -> DecodeService {
         Self::with_arbiter(config, Arc::new(LocalArbiter::unlimited()))
     }
@@ -428,9 +620,17 @@ impl DecodeService {
             arbiter,
             config,
             idle: Mutex::new(HashMap::new()),
+            scrubbed_ms: AtomicU64::new(0),
             open_sessions: AtomicU64::new(0),
+            recovery_opens: AtomicU64::new(0),
             decoder_budget: AtomicUsize::new(usize::MAX),
         }
+    }
+
+    /// How many decoders failed sessions' recoveries tried to open. For tests.
+    #[doc(hidden)]
+    pub fn recovery_opens(&self) -> u64 {
+        self.recovery_opens.load(Ordering::Relaxed)
     }
 
     pub fn pool(&self) -> &FramePool {
@@ -473,41 +673,54 @@ impl DecodeService {
         });
         let session = match reused {
             Some(s) => s,
-            None => {
-                // The probe's demuxer serves the first session.
-                let input = match source.startup_input.lock().unwrap().take() {
-                    Some(input) => input,
-                    None => Input::open(source.path())?,
-                };
-                let spec = StreamSpec {
-                    input: &input,
-                    stream: source.stream,
-                    info: &source.info,
-                    index: &source.index,
-                    extradata: &source.extradata,
-                };
-                let (decoder, _skipped) = open(
-                    &spec,
-                    purpose,
-                    &self.pool,
-                    self.arbiter.as_ref(),
-                    self.config.threads,
-                    prefer,
-                )?;
-                let reader = PacketReader::new(source.path(), source.stream)?;
-                let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
-                s.set_window(self.config.session_window);
-                s.set_window_bytes(32 << 20);
-                self.open_sessions.fetch_add(1, Ordering::Relaxed);
-                s
-            }
+            None => self.open_session(source, purpose, prefer)?,
         };
+        let mut session = session;
+        session.set_reorder(self.scrubbing());
         Ok(SessionGuard {
             service: self,
             key,
             source: source.clone(),
             session: Some(session),
         })
+    }
+
+    /// A new session for `source` (counted as open).
+    fn open_session(
+        &self,
+        source: &Arc<MediaSource>,
+        purpose: DecodePurpose,
+        prefer: Option<Backend>,
+    ) -> Result<Session> {
+        // The probe's demuxer serves the first session.
+        let input = match source.startup_input.lock().unwrap().take() {
+            Some(input) => input,
+            None => Input::open(source.path())?,
+        };
+        let spec = StreamSpec {
+            input: &input,
+            stream: source.stream,
+            info: &source.info,
+            index: &source.index,
+            extradata: &source.extradata,
+        };
+        let (decoder, _skipped) = open(
+            &spec,
+            purpose,
+            &self.pool,
+            self.arbiter.as_ref(),
+            self.config.threads,
+            prefer,
+        )?;
+        let reader = PacketReader::new(source.path(), source.stream)?;
+        let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
+        s.set_window(self.config.session_window);
+        s.set_window_bytes(
+            super::diag::knob("PM_ABL_WINDOW_MIB").map_or(32 << 20, |m| (m << 20) as usize),
+        );
+        self.open_sessions.fetch_add(1, Ordering::Relaxed);
+        super::diag::bump(&super::diag::SESSIONS_OPENED, 1);
+        Ok(s)
     }
 
     /// Closes every idle session of an instance (a viewer closed, an export
@@ -520,6 +733,7 @@ impl DecodeService {
             if drop {
                 self.open_sessions
                     .fetch_sub(v.len() as u64, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_RELEASED, v.len() as u64);
             }
             !drop
         });
@@ -560,12 +774,17 @@ impl DecodeService {
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.decoder_budget.load(Ordering::Relaxed) == 0;
-        while zero || self.decoders_over() {
+        // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
+        // their decoder (windows and free pool memory go above); only a zero
+        // share (idle release, project close) closes them.
+        let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2) || self.scrubbing();
+        while zero || (!keep && self.decoders_over()) {
             let Some(s) = idle.values_mut().find_map(|l| l.pop()) else {
                 break;
             };
             drop(s);
             self.open_sessions.fetch_sub(1, Ordering::Relaxed);
+            super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
             self.trim_free();
         }
         idle.retain(|_, l| !l.is_empty());
@@ -648,4 +867,10 @@ pub fn read_ahead_order(source: &MediaSource, from: usize, plan: ReadAhead) -> V
                 .collect()
         }
     }
+}
+
+/// Milliseconds since this process first asked (PM_FIX_VIDEO2's clock).
+fn scrub_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }

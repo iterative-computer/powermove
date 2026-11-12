@@ -61,6 +61,10 @@ pub struct Session {
     window: BTreeMap<usize, DecodedFrame>,
     window_limit: usize,
     window_bytes: usize,
+    /// The sample of the newest request (PM_FIX_REORDER).
+    last_target: Option<usize>,
+    /// Keep reorder frames while a drag scrubs (PM_FIX_VIDEO2).
+    reorder: bool,
     color: Option<ColorDescription>,
     /// Classifies unreferenced pictures a seek may leave out.
     skip: Option<Disposable>,
@@ -70,6 +74,10 @@ pub struct Session {
     /// multiple of `keep_stride`.
     keep_before: usize,
     keep_stride: usize,
+    /// This session replaced one whose decoder failed and has not decoded
+    /// a frame since: if it fails too, the sample is damaged, and it is
+    /// not replaced again ([`super::service::SessionGuard`]).
+    pub(super) replacement: bool,
     pub stats: SessionStats,
 }
 
@@ -113,6 +121,7 @@ impl Session {
             shown_at,
             keep_before: 0,
             keep_stride: 1,
+            replacement: false,
             skip: Disposable::for_index(&index),
             index,
             reader,
@@ -124,6 +133,8 @@ impl Session {
             window: BTreeMap::new(),
             window_limit: DEFAULT_WINDOW,
             window_bytes: 32 << 20,
+            last_target: None,
+            reorder: false,
             color,
             stats: SessionStats::default(),
         }
@@ -160,6 +171,17 @@ impl Session {
 
     pub fn decoder_info(&self) -> DecoderInfo {
         self.decoder.info()
+    }
+
+    /// See [`Decoder::invalidate_hardware`].
+    #[doc(hidden)]
+    pub fn invalidate_hardware(&mut self) -> bool {
+        self.decoder.invalidate_hardware()
+    }
+
+    /// See [`super::Decoder::release_hardware`].
+    pub(super) fn release_hardware(&mut self) {
+        self.decoder.release_hardware();
     }
 
     pub fn index(&self) -> &Arc<FrameIndex> {
@@ -216,15 +238,19 @@ impl Session {
             return Err(MediaError::invalid(format!("sample {s} out of range")));
         }
         self.stats.requests += 1;
+        self.last_target = Some(s);
         if let Some(f) = self.window.get(&s) {
             self.stats.window_hits += 1;
+            super::diag::bump(&super::diag::WINDOW_HITS, 1);
             return Ok(Some(f.clone()));
         }
         let sync = self.index.sync_for(s);
         if self.continues(s) {
             self.stats.continued += 1;
+            super::diag::bump(&super::diag::CONTINUED, 1);
         } else {
             self.stats.seeks += 1;
+            super::diag::bump(&super::diag::SEEKS, 1);
             self.decoder.reset()?;
             self.window.clear();
             self.run_start = Some(sync);
@@ -242,6 +268,7 @@ impl Session {
             let t = std::time::Instant::now();
             self.decoder.sync(&mut out)?;
             self.stats.wait_us += t.elapsed().as_micros() as u64;
+            super::diag::bump(&super::diag::DECODE_WAIT_US, t.elapsed().as_micros() as u64);
             self.absorb(&mut out)?;
         }
         // Decoders with reorder delay output s after later samples.
@@ -329,6 +356,7 @@ impl Session {
                 }
                 self.decoder.send(p, out)?;
                 self.stats.samples_fed += 1;
+                super::diag::bump(&super::diag::SAMPLES_FED, 1);
             }
             self.stats.send_us += t.elapsed().as_micros() as u64;
             self.next = chunk[chunk.len() - 1] + 1;
@@ -357,10 +385,28 @@ impl Session {
     /// Keeps the window within its limit, dropping frames farthest from the
     /// last request.
     fn trim(&mut self, around: Option<usize>) {
+        let reorder = self.reorder || super::diag::knob("PM_FIX_REORDER") == Some(1);
         while self.window.len() > 1
             && (self.window.len() > self.window_limit.max(1)
                 || self.window.values().map(DecodedFrame::bytes).sum::<usize>() > self.window_bytes)
         {
+            if reorder {
+                // Drop the farthest frame that a later request could get
+                // back without a seek; frames already decoded and shown after
+                // the newest request stay (bounded by the reorder depth).
+                let c = around.or(self.last_target).unwrap_or(0);
+                let Some(drop) = self
+                    .window
+                    .keys()
+                    .copied()
+                    .filter(|&k| k != c && !self.pending(k))
+                    .max_by_key(|&k| k.abs_diff(c))
+                else {
+                    break;
+                };
+                self.window.remove(&drop);
+                continue;
+            }
             let first = *self.window.keys().next().unwrap();
             let last = *self.window.keys().next_back().unwrap();
             let c = around.unwrap_or(last);
@@ -376,7 +422,33 @@ impl Session {
     /// Drops every frame the window holds (a lease shrink). Decoding state
     /// is kept: the next request continues the current run when it can.
     pub fn clear_window(&mut self) {
+        if self.reorder || super::diag::knob("PM_FIX_REORDER") == Some(1) {
+            let keep: Vec<usize> = self
+                .window
+                .keys()
+                .copied()
+                .filter(|&k| self.pending(k))
+                .collect();
+            self.window.retain(|k, _| keep.contains(k));
+            return;
+        }
         self.window.clear();
+    }
+
+    /// Keep decoded reorder frames (a drag is scrubbing; PM_FIX_VIDEO2).
+    pub fn set_reorder(&mut self, on: bool) {
+        self.reorder = on;
+    }
+
+    /// A decoded frame shown after the newest request whose sample the run
+    /// has passed: dropping it means seeking back to its keyframe.
+    fn pending(&self, k: usize) -> bool {
+        let Some(t) = self.last_target else {
+            return false;
+        };
+        !self.drained
+            && k < self.next
+            && self.index.samples[k].cts > self.index.samples[t].cts
     }
 
     /// Frames currently held by the window.

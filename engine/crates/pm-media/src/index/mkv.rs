@@ -380,6 +380,7 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
             strip_prefix: t.strip_prefix,
             ..Default::default()
         },
+        edits: Default::default(),
         nal_codec: None,
         stats,
     };
