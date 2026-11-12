@@ -1095,12 +1095,12 @@ impl Controller {
     }
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
         let mut target = None;
-        if let Some(v) = &self.viewer {
-            if let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration)) {
-                target = Some(time as f64 / TICKS_PER_SECOND as f64);
-                if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
-                    self.message = e.to_string();
-                }
+        if let Some(v) = &self.viewer
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration))
+        {
+            target = Some(time as f64 / TICKS_PER_SECOND as f64);
+            if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                self.message = e.to_string();
             }
         }
         // The viewer's clock lands later (always so for a viewer bound a
