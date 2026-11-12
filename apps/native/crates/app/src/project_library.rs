@@ -45,18 +45,6 @@ pub struct ThumbnailSource {
     /// One frame of the open project as PNG, through the engine's frame path.
     pub renderer: Option<pm_compat_runner::FrameRenderer>,
 }
-/// Width of a stored poster frame; its height follows the composition.
-const POSTER_WIDTH: u32 = 640;
-fn poster_files(dir: &std::path::Path, id: &str) -> (PathBuf, PathBuf) {
-    let stem: String = id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    (
-        dir.join(format!("{stem}.png")),
-        dir.join(format!("{stem}.stamp")),
-    )
-}
 fn sort_options() -> Vec<Value> {
     [Sort::Recent, Sort::Name]
         .map(|sort| json!({"label": sort.label(), "v": sort.key()}))
@@ -697,12 +685,26 @@ impl ProjectLibrary {
             .into_any_element(),
         )
     }
+    /// A poster was written for `id`: its card reads it from the cache again.
+    pub fn poster_written(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.posters_read.remove(id);
+        self.posters_started
+            .retain(|(started, stamp)| started != id || *stamp != i64::MIN);
+        cx.notify();
+    }
+    /// Home shows again: posters written since (a project saved or closed in
+    /// any window) are read from the cache once more.
+    pub fn show_posters(&mut self, source: ThumbnailSource) {
+        self.thumbnails = Some(source);
+        self.posters_read.clear();
+        self.posters_started.retain(|(_, stamp)| *stamp != i64::MIN);
+    }
     /// A project's thumbnail: the one v1 stored with it (a data URL, decoded
-    /// once per source), else Home's own poster frame. A poster is read from
-    /// the cache off the main thread on first sight, and rendered (also off
-    /// the main thread) when this window has the project open and the cache
-    /// has none or an older one. Until it arrives the card shows its empty
-    /// canvas, then the image fades in.
+    /// once per source), else Home's own poster frame (`crate::poster`). A
+    /// poster is read from the cache off the main thread on first sight, and
+    /// rendered (also off the main thread) when this window has the project
+    /// open and the cache has none or an older one. Until it arrives the
+    /// card shows its empty canvas, then the image fades in.
     fn thumbnail(&mut self, row: &Row, cx: &mut Context<Self>) -> Option<Arc<Image>> {
         if let Some(source) = row.summary.as_ref().and_then(|s| s.thumbnail.as_deref()) {
             if let Some((length, image)) = self.thumbs.get(&row.id)
@@ -736,7 +738,7 @@ impl ProjectLibrary {
             return image;
         };
         let (id, stamp) = (row.id.clone(), row.modified_ms.unwrap_or(0));
-        let (file, stamp_file) = poster_files(&source.dir, &id);
+        let (file, stamp_file) = crate::poster::files(&source.dir, &id);
         let fade = kit::key(&format!("poster-{id}"));
         let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
             v.thumbs.insert(
@@ -757,13 +759,17 @@ impl ProjectLibrary {
                     let read = cx
                         .background_executor()
                         .spawn(async move {
-                            let stamp = std::fs::read_to_string(stamp_file).ok()?;
-                            Some((stamp.trim().parse::<i64>().ok()?, std::fs::read(file).ok()?))
+                            let (stamp, _) = crate::poster::stamp(&stamp_file)?;
+                            Some((stamp, std::fs::read(file).ok()?))
                         })
                         .await;
                     let _ = this.update(cx, |v, cx| {
                         v.posters_read.insert(id.clone());
-                        if let Some((stamp, png)) = read {
+                        // The one already shown stays as it is.
+                        let shown = v.thumbs.get(&id).map(|(at, _)| *at as i64);
+                        if let Some((stamp, png)) = read
+                            && shown != Some(stamp)
+                        {
                             store(v, id, stamp, png);
                         }
                         cx.notify();
@@ -773,47 +779,28 @@ impl ProjectLibrary {
             }
             return image;
         }
-        let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 == stamp);
+        // Taken at or after the project last changed on disk.
+        let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 >= stamp);
         if !fresh
             && self.active.as_deref() == Some(id.as_str())
             && let Some(renderer) = source.renderer.clone()
             && self.posters_started.insert((id.clone(), stamp))
         {
-            let (w, h) = row.dimensions().unwrap_or((1920, 1080));
-            let height = (POSTER_WIDTH as f64 * h as f64 / w.max(1) as f64).round() as u32;
-            // Early, but past a fade-up: a twelfth of the way in, between
-            // 0.4 s and 4 s.
-            let time = row
-                .summary
-                .as_ref()
-                .and_then(|s| s.duration_seconds)
-                .map_or(1., |d| (d / 12.).clamp(0.4, 4.));
+            let size = row.dimensions().unwrap_or((1920, 1080));
+            let duration = row.summary.as_ref().and_then(|s| s.duration_seconds);
             let dir = source.dir.clone();
+            let taken = crate::poster::now_ms().max(stamp);
             cx.spawn(async move |this, cx| {
+                let poster = id.clone();
                 let png = cx
                     .background_executor()
                     .spawn(async move {
-                        fn never() -> bool {
-                            false
-                        }
-                        let png = renderer(&pm_compat_runner::FrameRequest {
-                            time,
-                            width: POSTER_WIDTH,
-                            height: height.clamp(90, 2 * POSTER_WIDTH),
-                            motion_blur: false,
-                            stop: &never,
-                            published: None,
-                        })
-                        .ok()?;
-                        std::fs::create_dir_all(&dir).ok()?;
-                        std::fs::write(&file, &png).ok()?;
-                        std::fs::write(&stamp_file, stamp.to_string()).ok()?;
-                        Some(png)
+                        crate::poster::write(&renderer, None, &dir, &poster, taken, size, duration)
                     })
                     .await;
                 let _ = this.update(cx, |v, cx| {
                     if let Some(png) = png {
-                        store(v, id, stamp, png);
+                        store(v, id, taken, png);
                     }
                     cx.notify();
                 });

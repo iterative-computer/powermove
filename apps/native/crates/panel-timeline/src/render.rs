@@ -906,11 +906,13 @@ impl Scene {
                     let ink = clip.as_ref().map_or(c.text, |clip| {
                         t.strip(clip.label.color(t), strip_state(clip)).foreground
                     });
+                    // In the strip's foot, under the name's descenders.
+                    let size = (m.keyframe - SUMMARY_KEY_INSET) as f64;
                     paint_keys(
                         &row.id,
                         summary,
                         Some(ink),
-                        y + h - m.border as f64 - m.inner_radius as f64,
+                        y + h - t.strip_gap() as f64 - 1.5 * m.border as f64 - size / 2.,
                         v,
                         t,
                         ops,
@@ -1140,6 +1142,8 @@ impl Scene {
         }
     }
 }
+/// A waveform is a soft shape in the strip's own hue, not a solid one.
+const WAVEFORM_OPACITY: f64 = 0.72;
 fn valid_clip(c: &Clip) -> bool {
     c.from.is_finite()
         && c.duration.is_finite()
@@ -1224,7 +1228,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
         "grid":material.grid.0,"gridAlpha":material.grid.1,
         "gridFrom":grid_from,"gridStep":grid * v.pps,
         "rim":material.rim.0,"rimAlpha":material.rim.1,
-        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":m.border,
+        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":material.rim_width,"rimInset":material.rim_inset,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
@@ -1327,7 +1331,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
             material.primary,
         );
         o.text = Some(c.name.clone());
-        o.opacity = strength;
+        o.opacity = strength * WAVEFORM_OPACITY;
         let left = v.x(c.from);
         let bars: Vec<f32> = audio
             .as_ref()
@@ -1416,6 +1420,8 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
 /// foreground) are small quiet diamonds inside the clip's foot.
 /// A key glyph's look: shape, colour, selected (opacity and keyline), half.
 type Glyph<'a> = (&'a str, u32, bool, Option<&'a str>);
+/// A collapsed layer's summary marks are this much smaller than a key.
+const SUMMARY_KEY_INSET: f32 = 5.;
 fn paint_keys(
     row: &str,
     keys: &[Key],
@@ -1425,7 +1431,12 @@ fn paint_keys(
     t: &Tokens,
     ops: &mut Vec<Op>,
 ) {
-    let size = t.metrics.keyframe as f64 - if summary.is_some() { 4. } else { 0. };
+    let size = t.metrics.keyframe as f64
+        - if summary.is_some() {
+            SUMMARY_KEY_INSET as f64
+        } else {
+            0.
+        };
     let from = v.scroll_time - size / v.pps;
     let to = v.scroll_time + (v.width - v.layer_column + size) / v.pps;
     let start = keys.partition_point(|k| k.seconds < from);
@@ -1466,7 +1477,7 @@ fn paint_keys(
         );
         o.opacity = match summary {
             _ if key.selected => 1.,
-            Some(_) => 0.6,
+            Some(_) => 0.8,
             None => 0.85,
         };
         // A lone key is solid; the ends of a span are half filled toward it.

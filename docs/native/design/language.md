@@ -11,8 +11,9 @@ app, and it is better than v1 on every surface side by side.
 Kit API, additive changes since the first hand-back: `Kit::disabled`;
 `pm_shell::native_control` (the real AppKit control host, moved from the app,
 with `Radio`, `Segmented` and `Slider` kinds, `tint` and `symbol`);
-`typography.display_weight`; `Strip::glow` and `Strip::grid`;
-`translucency.glass_tint`. Nothing was renamed or removed.
+`typography.display_weight`; `Strip::glow`, `Strip::grid`, `Strip::under_label`
+and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`.
+Nothing was renamed or removed.
 
 ## Colour
 
@@ -151,18 +152,24 @@ Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
 `Tokens::strip(layer colour, StripState)`: a slab of tinted glass on the solid
 timeline canvas, the same in both appearances (a clip is an object with its
-own colour). A deep, saturated top opens into a luminous lower half (`glow`);
-a 1 px rim of light in the strip's hue runs inside the edge, brightest along
-the top and round its corners, with no outline; corners are continuous and
-about a quarter of the strip's height (`strip_radius`); an even `strip_gap`
-parts neighbours; the ruler's grid reads through the body (`grid`). Labels are
-a pale tint of the hue and stay at 4.5:1; waveforms are a paler filled shape
-on the bottom edge. Hover brightens and whitens the rim and shows the trim
-grip (`trim_grip`) inside the nearer edge; selection is a white rim; dragging
-lifts it; disabled drops chroma and opacity. Rows are 30 pt (v1's height), so
-a strip is 26 pt. Ruler labels stand over a small dot with a faint line down
-the tracks. `Tokens::playhead` is a hairline with a round head. Strips are
-drawn by the timeline renderer, never system views.
+own colour). The band a name stands on is deep and saturated; light gathers in
+the foot below it (`glow`, from `GLOW_FROM` of the way down), so the slab is
+luminous without costing the name its contrast. Labels are the palest tint of
+the hue that holds 4.5:1 on the body under them (`under_label`). A 1 px rim of
+light in the strip's hue runs inside the edge, brightest along the top and
+round its corners, faint down the sides, with no outline; corners are
+continuous and about a quarter of the strip's height (`strip_radius`); an even
+`strip_gap` parts neighbours; the ruler's grid reads through the body
+(`grid`). A waveform is a soft filled shape in a paler tone standing on the
+foot; silence draws nothing. A collapsed layer's keys are small marks in the
+foot, under the name. Hover brightens and whitens the rim and shows the trim
+grip (`trim_grip`) inside the nearer edge, with the name starting clear of it.
+Selection is a 2 px white ring: at the edge on a dark canvas, inside a band of
+the strip's own colour on a light one (`rim_inset`). Dragging lifts it;
+disabled drops chroma and opacity. Rows are 30 pt (v1's height), so a strip is
+26 pt. Ruler labels stand over a small dot with a faint line down the tracks.
+`Tokens::playhead` is a hairline with a round head. Strips are drawn by the
+timeline renderer, never system views.
 
 ## Three mistakes to avoid
 

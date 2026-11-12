@@ -16,6 +16,8 @@ use pm_builtins::RESOLUTIONS;
 use pm_kernel::Call;
 use std::rc::Rc;
 
+/// The least time between two posters written by saves of one project.
+const POSTER_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 impl Controller {
     pub fn surface_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
         match name {
@@ -227,6 +229,69 @@ impl Controller {
     }
     /// File ▸ Projects… and the toolbar's Home: Home in this window, over
     /// the project it shows (which stays open), with fresh rows.
+    /// Home's poster of the open project as it stands now (`crate::poster`),
+    /// rendered off the main thread: after a save, at most once in
+    /// `POSTER_EVERY`, so saving often never queues renders behind the
+    /// editor's own. Once per revision.
+    pub(crate) fn write_poster(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let Some(published) = self.kernel.published(&project) else {
+            return;
+        };
+        let revision = (project.clone(), published.revision());
+        if self.poster_revision.as_ref().map(|(at, _)| at) == Some(&revision) {
+            return;
+        }
+        if self
+            .poster_revision
+            .as_ref()
+            .is_some_and(|((last, _), at)| *last == project && at.elapsed() < POSTER_EVERY)
+        {
+            return;
+        }
+        let Ok(renderer) = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+            self.job_overrides.clone(),
+            crate::mcp_services::Capture::Poster,
+        ) else {
+            return;
+        };
+        self.poster_revision = Some((revision, std::time::Instant::now()));
+        let dir = self.profile.join("caches").join("thumbnails");
+        let (size, duration) = crate::poster::frame_of(&published);
+        let taken = crate::poster::now_ms();
+        cx.spawn(async move |this, cx| {
+            let id = project.clone();
+            let written = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::poster::write(
+                        &renderer,
+                        Some(published),
+                        &dir,
+                        &id,
+                        taken,
+                        size,
+                        duration,
+                    )
+                    .is_some()
+                })
+                .await;
+            // Home, if it is showing, takes the new poster at once.
+            if written {
+                let _ = this.update(cx, |v, cx| {
+                    if let Some(library) = v.library(cx) {
+                        library.update(cx, |home, cx| home.poster_written(&project, cx));
+                    }
+                });
+            }
+        })
+        .detach();
+    }
     pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
         self.home = true;
         if let Some(library) = self.library(cx) {
@@ -292,6 +357,7 @@ impl Controller {
                     project,
                     self.profile.clone(),
                     self.job_overrides.clone(),
+                    crate::mcp_services::Capture::Poster,
                 )
                 .ok()
             }),
@@ -299,7 +365,7 @@ impl Controller {
         library.update(cx, |v, cx| {
             v.active = active;
             if let Some(thumbnails) = thumbnails {
-                v.thumbnails = Some(thumbnails);
+                v.show_posters(thumbnails);
             }
             if appeared {
                 let _ = v.controller.refresh();
