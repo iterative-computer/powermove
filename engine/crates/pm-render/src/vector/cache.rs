@@ -834,12 +834,13 @@ impl VectorCache {
     /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
         if self.scene_scratch_bytes() > budget {
-            // PM_FIX_KEEP_OUTLINES: the exact outline cache (CPU, bounded by
-            // SceneOutlines::MAX_BYTES, counted in `bytes`) survives a frame's
-            // trim; only a zero budget (idle, close) drops it. Otherwise a
-            // budget below one frame's scratch rebuilds every outline per frame.
+            // The exact outline cache (CPU, bounded by SceneOutlines::MAX_BYTES,
+            // counted in `bytes`) survives a frame's trim; only a zero budget
+            // (idle, close) drops it. Otherwise a budget below one frame's
+            // scratch rebuilds every outline every frame.
+            // `PM_FIX_KEEP_OUTLINES=0` restores clearing it.
             let keep = budget > 0
-                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") == Some(1);
+                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") != Some(0);
             let outlines = keep.then(|| std::mem::take(&mut self.scene_outlines));
             self.clear_scene_scratch();
             if let Some(outlines) = outlines {

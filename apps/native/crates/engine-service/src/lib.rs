@@ -380,18 +380,25 @@ struct View {
     /// their pauses, skimmer moves): PM_FIX_PRESENT_STALE.
     moves: u64,
 }
-/// PM_FIX_PRESENT_STALE: while dragging, a finished frame whose stamp is
-/// older only by moves of the shown time is still presented (the newest
-/// time is drawn next) instead of being dropped: otherwise a drag that moves
-/// faster than a frame renders never shows a picture until it stops.
+/// While dragging, a finished frame of the same content (generation,
+/// document, revision) is presented even though newer playhead moves have
+/// arrived; the newest time is drawn next. Dropping it instead meant a drag
+/// that moves faster than a frame renders showed no picture until it stopped.
+/// `PM_FIX_PRESENT_STALE=0` restores dropping; `=1` accepts only frames older
+/// by playhead moves alone (the app bumps the stamp for more than moves).
 fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool) -> bool {
+    // 1: only playhead moves since the frame's stamp. 2: the same content
+    // (generation, document, revision); a drag picture may carry the
+    // previous overlay or quality for one frame, never another document.
+    let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
     moment == Moment::Scrub
         && !capture
-        && pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE") == Some(1)
+        && matches!(mode, Some(1 | 2))
         && v.stamp.generation == stamp.generation
         && v.stamp.doc_id == stamp.doc_id
         && v.stamp.revision == stamp.revision
-        && v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves)
+        && (mode == Some(2)
+            || v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves))
 }
 impl View {
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
@@ -2405,6 +2412,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "rejected_before_commit": true, "at": trace::now(),
+                            "view_stamp": format!("{:?}", v.stamp), "frame_stamp": format!("{:?}", stamp),
+                            "view_moves": v.moves, "frame_moves": moves,
+                            "moment": format!("{:?}", spec.moment), "capture": capture,
+                            "knob": pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE"),
+                        }));
+                    }
                     v.status.stale_rejections += 1;
                     v.capture |= capture;
                     continue;
