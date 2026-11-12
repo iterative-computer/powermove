@@ -1965,12 +1965,7 @@ impl Kernel {
                 .read(&format!("projectMeta.{id}"))
                 .ok()
                 .flatten()
-                .and_then(|meta| {
-                    meta.get("copyOf")?
-                        .get("path")?
-                        .as_str()
-                        .map(|recorded| same(recorded))
-                })
+                .and_then(|meta| meta.get("copyOf")?.get("path")?.as_str().map(&same))
                 .unwrap_or(false)
         })
     }

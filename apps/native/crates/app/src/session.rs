@@ -251,7 +251,7 @@ fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<b
     Alert::new(
         message,
         format!(
-            "An earlier version of Powermove opened this file as a copy and saved your changes there instead of in the file: {which}. The file now opens and saves in place. The copy stays in your projects either way."
+            "Powermove opened this file as a copy before and kept your changes there instead of in the file: {which}. The file now opens and saves in place. The copy stays in your projects either way."
         ),
         vec![
             Button::new("Open the Copy", true).default(),
@@ -509,10 +509,10 @@ impl Controller {
                                     v.message = "Something went wrong; see the Error Log.".into();
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
-                                KernelEvent::Notice { project, notice } => {
-                                    if v.session.as_ref().is_some_and(|s| s.project == project) {
-                                        v.notice(notice, cx);
-                                    }
+                                KernelEvent::Notice { project, notice }
+                                    if v.session.as_ref().is_some_and(|s| s.project == project) =>
+                                {
+                                    v.notice(notice, cx);
                                 }
                                 _ => {}
                             }

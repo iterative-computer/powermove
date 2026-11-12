@@ -232,6 +232,10 @@ const CHANGE_LOG: usize = 256;
 
 type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 
+/// A file's `history` member, the open composition it was judged with, and
+/// whether it needs an archive.
+type ArchiveJudgment = (crate::history::CompactJson, Option<String>, bool);
+
 /// The single document authority. See the crate documentation for the
 /// threading model.
 pub struct DocumentStore {
@@ -246,8 +250,7 @@ pub struct DocumentStore {
     /// Whether the file's `history` member needs an archive before a save
     /// replaces it ([`Self::file_history_needs_archive`]), for the member
     /// and open composition it was judged with.
-    archive_judged:
-        Arc<std::sync::Mutex<Option<(crate::history::CompactJson, Option<String>, bool)>>>,
+    archive_judged: Arc<std::sync::Mutex<Option<ArchiveJudgment>>>,
     selection: Selection,
     queries: QueryContext,
     gesture: Option<Gesture>,
