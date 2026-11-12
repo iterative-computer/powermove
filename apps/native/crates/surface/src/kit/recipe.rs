@@ -288,10 +288,9 @@ impl Recipe {
             value_column: (kind == InspectorRow).then_some(t.metrics.value_column),
             inset: t.metrics.inset,
             font: TEXT_FONT,
-            font_size: if kind == InspectorRow {
+            // A section heading is a label, a step under its panel's title.
+            font_size: if matches!(kind, InspectorRow | DisclosureButton | DisclosureGroup) {
                 t.typography.label
-            } else if matches!(kind, DisclosureButton | DisclosureGroup) {
-                t.typography.title
             } else if kind == EmptyState {
                 t.typography.heading
             } else {

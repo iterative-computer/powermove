@@ -13,8 +13,10 @@ Kit API, additive changes since the first hand-back: `Kit::disabled`;
 with `Radio`, `Segmented` and `Slider` kinds, `tint` and `symbol`);
 `typography.display_weight`; `Strip::glow`, `Strip::grid`, `Strip::under_label`
 and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`;
-the surface host's native `SegmentedControl`; the `flexWrap` panel style.
-Nothing was renamed or removed.
+the surface host's native `SegmentedControl`; the `flexWrap` panel style;
+the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
+text field's `metadata.search`; `metrics.symbol_action`;
+`pm_shell::native::selected_color`. Nothing was renamed or removed.
 
 ## Colour
 
@@ -35,7 +37,10 @@ Dark is warm stone (hue about 55°, chroma under 0.01); light is cool paper
 - The accent marks one action or one state per view (the primary button, a
   drop target, progress). It is never a selected fill and never a focus ring.
 - Selected is the raised neutral surface (`colors.raised` with
-  `Elevation::Raised`) or a neutral ink fill.
+  `Elevation::Raised`) or a neutral ink fill. An active window gives a
+  system "on" control the accent, so every hosted tab, toolbar toggle and
+  segmented control takes `selected_color()` as its bezel: judge selection in
+  an active window, not only in a background capture.
 - Elevation is tonal: viewer below window below panel below floating.
 - Increase Contrast lifts the text steps to 7:1 and 4.5:1, separators to 3:1
   and doubles strokes; a theme patch cannot lower them.
@@ -124,14 +129,19 @@ Real controls first. Wherever AppKit has the control and the system draws it
 (liquid glass on macOS 26 and later), host the real one:
 `pm_shell::native_control::NativeControl` with a `ControlSpec` of kind `Push`
 (optionally tinted, the view's one accent action), `Popup`, `Segmented`,
-`Switch`, `Checkbox`, `Radio` or `Slider`. A view creates them once (an entity
+`Switch`, `Checkbox`, `Radio`, `Slider` or `Search` (the system search
+field, with no focus ring: Return, Escape and Down hand the keyboard back to
+the window's content and reach the view as keys; ⌘F on Home calls `focus`).
+A view creates them once (an entity
 each), places them like any element, and subscribes to their values. Each
 sits in its own clipping wrapper above the GPUI view and is staged with the
 element's bounds and the content mask of its scroll region, so it scrolls and
 clips with the panel. Focus, disabled state, Reduce Transparency and both
 appearances are the system's own. Extension panels get the same controls from
 the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
-`SegmentedControl`). A panel's header is the child it marks
+`SegmentedControl`, and a `TextField` with `metadata.search`). A borderless
+pop-up beside content (`inline`) is titled in the secondary ink. A panel's
+header is the child it marks
 `data-pm-slot="header"`: the dock shows it as the panel's one title row. A
 composer is the kit's multi-line `TextField` with `metadata.submitOnReturn`,
 written on a surface its panel draws.
@@ -150,7 +160,11 @@ menus are `NSMenu` (`Host::context_menu`).
 
 Every drawn control: arrow cursor, hover wash, pressed fill, neutral
 keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
-(`metrics.symbol_toolbar` 14, `symbol_panel` 14, `symbol_inline` 12).
+(`metrics.symbol_toolbar` 14, `symbol_panel` 14, `symbol_inline` 12, and
+`symbol_action` 20 for a surface's one primary action glyph, a composer's
+Send). A value in a well starts on the same inset with or without a unit, in
+the text font, so it sits on its row label's baseline. A section heading in a
+panel is the Label role, a step under the panel's Title.
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
 ## Timeline strips

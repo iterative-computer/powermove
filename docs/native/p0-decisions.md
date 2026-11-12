@@ -488,6 +488,9 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Cached frames are exported frames, byte for byte: fills draw stored frames whole through the export's request (`pm_export::render::frame_request`, opaque, the project's export motion blur, which is in the fingerprint), never bypassing a missing effect, and store them as RGBA32F (`rgba32f-export-lzfse-v3`, about 8.5 MB a 1080p Paper frame; the export's values are finer than half floats). The reader converts to half floats for the viewer's surface. On Paper with the full extension set: 0 differing samples against 8-bit exports at 26.25, 27.96 and 35.04 s, and against 16-bit exports at 1.88, 3.83, 11.29, 16.54, 19.13, 27.75, 29.5 and 31.25 s (one fill child, frames in sequence). Probes still measure at playback quality. Exports banded while the viewer is busy (`Costs::bounded` within `QUIET`) can differ from whole ones in such effects: a renderer issue, not fixed here. `$PM_ENGINE_TRACE.fill.jsonl` names each stored frame's file.
 - Settings › Media and General › Playback rows (this Mac's media settings) publish with no project open too, and the `mediaSettings` fact is part of Settings' change stamp.
 - Panel styles accept `flexWrap` (`wrap`, `nowrap`): a row of controls wraps before any of them truncates (the Agent composer's option bar, as v1's).
+- A panel `TextField` with `metadata.search: true` is hosted as the system search field: `input` as it is typed, `keydown` for Enter, Escape and ArrowDown (each hands the keyboard back to the window), `metadata.placeholder` and `metadata.hostValue` as for a text field.
+- `metrics.symbol_action` (20) is the size of a surface's one primary action glyph (the Agent composer's Send and Stop).
+- Selection in hosted AppKit controls (project tabs, the Home toggle, segmented controls) is a neutral bezel, never the accent an active window gives an "on" control.
 
 ## Viewer and delivery parity (2026-11-12)
 

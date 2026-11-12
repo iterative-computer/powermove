@@ -31,11 +31,18 @@ pub enum Kind {
     Segmented,
     /// A continuous slider; the value is 0–1.
     Slider,
+    /// The system search field: `label` is its placeholder, the value its
+    /// text, sent as it is typed. Return, Escape and Down hand the keyboard
+    /// back to the window's content and are sent as `{"key": …}` (`Enter`,
+    /// `Escape`, `ArrowDown`) for the view to act on.
+    Search,
 }
 struct TargetState {
     sender: async_channel::Sender<Value>,
     options: std::cell::RefCell<Vec<Value>>,
     kind: Kind,
+    /// The window's content view: where the keyboard goes back to.
+    content: Retained<NSView>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -53,8 +60,25 @@ define_class!(
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let value:f64=unsafe{msg_send![sender,doubleValue]};json!(value)},
                 Kind::Push=>Value::Null,
+                Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};json!(text.to_string())},
             };
             let _=self.ivars().sender.try_send(value);
+        }
+        /// A search field's editor: Return, Escape and Down give the
+        /// keyboard back to the window's content and tell the view.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn command(&self,control:&NSControl,_editor:&NSTextView,command:objc2::runtime::Sel)->bool{
+            let key=if command==sel!(cancelOperation:){Some("Escape")}
+                else if command==sel!(insertNewline:){Some("Enter")}
+                else if command==sel!(moveDown:){Some("ArrowDown")}
+                else{None};
+            if let Some(key)=key{
+                if let Some(window)=control.window(){
+                    window.makeFirstResponder(Some(&self.ivars().content));
+                }
+                let _=self.ivars().sender.try_send(json!({"key":key}));
+            }
+            key.is_some()
         }
     }
 );
@@ -64,6 +88,7 @@ enum Control {
     Switch(Retained<NSSwitch>),
     Segmented(Retained<NSSegmentedControl>),
     Slider(Retained<NSSlider>),
+    Search(Retained<NSSearchField>),
 }
 impl Control {
     fn view(&self) -> &NSView {
@@ -73,6 +98,7 @@ impl Control {
             Self::Switch(v) => v.as_ref(),
             Self::Segmented(v) => v.as_ref(),
             Self::Slider(v) => v.as_ref(),
+            Self::Search(v) => v.as_ref(),
         }
     }
     fn enabled(&self, enabled: bool) {
@@ -82,6 +108,7 @@ impl Control {
             Self::Switch(v) => v.setEnabled(enabled),
             Self::Segmented(v) => v.setEnabled(enabled),
             Self::Slider(v) => v.setEnabled(enabled),
+            Self::Search(v) => v.setEnabled(enabled),
         }
     }
     fn value(&self, value: &Value, options: &[Value]) {
@@ -108,6 +135,15 @@ impl Control {
                 v.setSelectedSegment(value.as_i64().map_or(-1, |i| i as isize));
             }
             Self::Slider(v) => v.setDoubleValue(value.as_f64().unwrap_or(0.)),
+            // The field owns its text while the keyboard is in it (an echo
+            // of an earlier keystroke must not replace a later one); at rest
+            // it shows the view's text.
+            Self::Search(v) => {
+                let text = value.as_str().unwrap_or("");
+                if v.currentEditor().is_none() && v.stringValue().to_string() != text {
+                    v.setStringValue(&NSString::from_str(text));
+                }
+            }
         }
     }
 }
@@ -122,6 +158,10 @@ pub struct NativeControl {
     /// Fills a slot that may be narrower than `width` (its node has
     /// `flexShrink`); AppKit then truncates the title.
     pub fill: bool,
+    /// The keyboard was asked for before the control was in its window.
+    focus: Rc<std::cell::Cell<bool>>,
+    /// The last text the view's host set (`host_text`).
+    host_revision: Option<u64>,
 }
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
@@ -187,7 +227,8 @@ impl NativeControl {
                 super(Target::alloc(mtm).set_ivars(TargetState {
                     sender: tx,
                     options: std::cell::RefCell::new(options.clone()),
-                    kind
+                    kind,
+                    content: gpui.clone(),
                 })),
                 init
             ]
@@ -206,7 +247,10 @@ impl NativeControl {
                 }
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
                 if inline {
+                    // An option beside the content it qualifies: quiet, as a
+                    // caption, never the content's own ink.
                     v.setBordered(false);
+                    v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
                 }
                 v.sizeToFit();
                 Control::Popup(v)
@@ -253,6 +297,7 @@ impl NativeControl {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
                 }
+                v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
                 v.sizeToFit();
                 Control::Segmented(v)
             }
@@ -315,6 +360,23 @@ impl NativeControl {
                 v.sizeToFit();
                 Control::Button(v)
             }
+            Kind::Search => {
+                let v = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+                v.setPlaceholderString(Some(&NSString::from_str(label)));
+                // The caret and the clear button say where the keyboard is;
+                // no accent ring.
+                v.setFocusRingType(NSFocusRingType::None);
+                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+                v.setSendsSearchStringImmediately(true);
+                v.setSendsWholeSearchString(false);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                    let _: () = msg_send![&*v, setDelegate: &*target];
+                }
+                v.sizeToFit();
+                Control::Search(v)
+            }
             Kind::Switch => {
                 let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
                 unsafe {
@@ -336,7 +398,7 @@ impl NativeControl {
         let intrinsic = control.view().fittingSize();
         let width = if matches!(kind, Kind::Popup) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
-        } else if matches!(kind, Kind::Slider) {
+        } else if matches!(kind, Kind::Slider | Kind::Search) {
             t.metrics.value_column
         } else {
             (intrinsic.width as f32).max(t.metrics.hit)
@@ -361,8 +423,49 @@ impl NativeControl {
             width,
             height,
             inline,
-            fill: false,
+            // A search field is as wide as the place it is given.
+            fill: matches!(kind, Kind::Search),
+            focus: Rc::default(),
+            host_revision: None,
         }
+    }
+    /// Puts the keyboard in a search field (⌘F), with its text selected;
+    /// one not yet in its window takes it when it is first placed.
+    pub fn focus(&self) {
+        let Control::Search(v) = &self.control else {
+            return;
+        };
+        match v.window() {
+            Some(window) => {
+                window.makeFirstResponder(Some(v));
+            }
+            None => self.focus.set(true),
+        }
+    }
+    /// A text the view's host set (a filter applied from outside) replaces
+    /// a search field's text even while it is typed in, once per revision.
+    pub fn host_text(&mut self, text: &str, revision: u64) {
+        if let Control::Search(v) = &self.control
+            && self.host_revision.replace(revision) != Some(revision)
+        {
+            v.setStringValue(&NSString::from_str(text));
+        }
+    }
+    /// A search field's placeholder, when it is not its accessibility label.
+    pub fn placeholder(&self, text: &str) {
+        if let Control::Search(v) = &self.control {
+            v.setPlaceholderString(Some(&NSString::from_str(text)));
+        }
+    }
+    pub fn is_search(&self) -> bool {
+        matches!(self.control, Control::Search(_))
+    }
+    /// Whether the keyboard is in this control (a search field's editor).
+    pub fn focused(&self) -> bool {
+        let Control::Search(v) = &self.control else {
+            return false;
+        };
+        v.currentEditor().is_some()
     }
     pub fn keep(&self) {
         self.slot.keep();
@@ -432,7 +535,13 @@ impl NativeControl {
 impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
-        let root = if self.fill {
+        let focus = self.focus.clone();
+        let native: Retained<NSView> = unsafe {
+            Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
+        };
+        let root = if matches!(self.control, Control::Search(_)) {
+            div().w_full()
+        } else if self.fill {
             div().w_full().max_w(px(self.width))
         } else {
             div().w(px(self.width))
@@ -454,6 +563,12 @@ impl Render for NativeControl {
                         )
                     };
                     slot.stage(to_rect(bounds), to_rect(window.content_mask().bounds));
+                    if focus.get()
+                        && let Some(window) = native.window()
+                    {
+                        focus.set(false);
+                        window.makeFirstResponder(Some(&native));
+                    }
                 },
             )
             .absolute()

@@ -458,6 +458,16 @@ impl SurfaceView {
                     .unwrap_or_default(),
             };
             control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
+            // A filter the panel's host applied shows even mid-typing.
+            if let Some(revision) = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("hostValue"))
+                .and_then(Value::as_u64)
+            {
+                let text = value.as_str().unwrap_or_default().to_owned();
+                control.update(cx, |v, _| v.host_text(&text, revision));
+            }
             return;
         }
         let label = node
@@ -465,6 +475,12 @@ impl SurfaceView {
             .get("label")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let placeholder = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("placeholder"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let identifier = format!(
             "v4.{}.{}",
             self.publication.panel,
@@ -539,12 +555,41 @@ impl SurfaceView {
                     if let Some(segment) = segment {
                         v.send(segment, "click", EventDetail::default(), cx);
                     }
+                } else if matches!(kind, crate::v4_control::Kind::Search) {
+                    // The text as it is typed and the keys that leave the
+                    // field, as a text field reports them.
+                    let listens = |event: &str| {
+                        v.publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key(event))
+                    };
+                    if let Some(key) = value.get("key").and_then(Value::as_str) {
+                        if listens("keydown") {
+                            let detail = EventDetail {
+                                key: Some(key.into()),
+                                ..Default::default()
+                            };
+                            v.send(id, "keydown", detail, cx);
+                        }
+                    } else if listens("input") {
+                        let detail = EventDetail {
+                            value: Some(value.clone()),
+                            ..Default::default()
+                        };
+                        v.send(id, "input", detail, cx);
+                    } else {
+                        v.change(id, value.clone(), cx);
+                    }
                 } else {
                     v.change(id, value.clone(), cx);
                 }
             },
         ));
         control.update(cx, |v, _| v.display(display.as_deref()));
+        if let Some(placeholder) = placeholder {
+            control.read(cx).placeholder(&placeholder);
+        }
         self.controls.insert(id, control);
     }
     fn mount_field(
@@ -844,6 +889,8 @@ impl SurfaceView {
         if let Some(id) = self.prepared.semantics.get(semantic) {
             if let Some(field) = self.fields.get(id) {
                 field.update(cx, |f, cx| f.begin_editing(cx));
+            } else if let Some(control) = self.controls.get(id) {
+                control.read(cx).focus();
             } else if let Some(focus) = self.focus.get(id) {
                 focus.focus(window, cx);
             }
@@ -1316,7 +1363,10 @@ impl SurfaceView {
             if fill != shrinks {
                 control.update(cx, |c, _| c.fill = shrinks);
             }
-            let slot = if shrinks {
+            let slot = if control.read(cx).is_search() {
+                // A search field takes the room its row has.
+                div().flex_1().min_w(px(0.))
+            } else if shrinks {
                 div()
                     .flex_basis(px(width))
                     .flex_shrink(1.)
@@ -2150,6 +2200,13 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
         Some(Component::Switch) => Some(Kind::Switch),
         Some(Component::SegmentedControl) => Some(Kind::Segmented),
         Some(Component::PushButton) => Some(Kind::Push),
+        // A text field its panel marks as a search (`metadata.search`).
+        Some(Component::TextField)
+            if node.props.get("metadata").and_then(|m| m.get("search"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::Search)
+        }
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node
