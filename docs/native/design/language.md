@@ -17,7 +17,8 @@ the surface host's native `SegmentedControl`; the `flexWrap` panel style;
 the `Search` control kind (`focus`, `placeholder`, `host_text`) and a panel
 text field's `metadata.search`; `metrics.symbol_action`;
 `pm_shell::native::selected_color`; `ControlSpec::quiet` and the panel
-variant `quiet`. Nothing was renamed or removed.
+variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
+`TreeItem`) are rounded. Nothing was renamed or removed.
 
 ## Colour
 
@@ -205,6 +206,21 @@ this window's project). A project with no poster yet is a quiet ground of the
 same shape that says its size. Under the pointer a card rises on the hover
 springs; pressed, it sits back down; a sort or a search slides cards to their
 new places. The list is the dense alternative under the same header.
+
+## Settings
+
+Its own window in Home's shape (`pm_shell::sidebar_frame`): the sections on
+the window's glass below the window buttons (the system search field, quiet
+group headings, rows whose selected state is a rounded neutral wash) and one
+content sheet. A page is a title and a line of description, then cards
+(`FormGroup`) under section headings. Every row of a card is the same
+anatomy: a title over its description, and a control of its natural width at
+the trailing edge (the real pop-up, switch, push button; a text or number
+field in its well). The page title, its description, every section heading
+and every row title start on one x: a card bleeds past that column by the
+row inset. Lists that are not settings (speech models, installed extensions,
+the Store, memory notes) are rows of the same cards, never loose text. A
+search lists every section with a match and dims the others in the sidebar.
 
 ## Timeline strips
 

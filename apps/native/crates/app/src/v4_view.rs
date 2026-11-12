@@ -815,6 +815,21 @@ impl SurfaceView {
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
     }
+    /// Development builds: `event` on the node whose semantic id is, or ends
+    /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
+    #[cfg(debug_assertions)]
+    pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
+        let id = self
+            .prepared
+            .semantics
+            .iter()
+            .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
+            .min_by_key(|(key, _)| key.len())
+            .map(|(_, id)| *id);
+        if let Some(id) = id {
+            self.send(id, event, EventDetail::default(), cx);
+        }
+    }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];

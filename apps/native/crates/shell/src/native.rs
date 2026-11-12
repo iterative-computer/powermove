@@ -284,6 +284,64 @@ pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
     let view = backdrop(mtm, &content);
     ground(&window, &view, t);
 }
+/// A sidebar's material, `width` wide and `height` tall at the content
+/// view's leading edge: liquid glass on macOS 26 and later (clear style, a
+/// heavy tint of the window colour), the sidebar visual effect before, the
+/// solid window colour under Reduce Transparency. It runs on under the
+/// content sheet's leading corners, so its own rim is hidden and the two
+/// meet in one step.
+fn sidebar_material(
+    mtm: MainThreadMarker,
+    t: &Tokens,
+    width: f32,
+    height: f64,
+) -> Retained<NSView> {
+    let frame = NSRect::new(
+        NSPoint::ZERO,
+        NSSize::new((width + t.metrics.panel_radius + t.space.xs) as f64, height),
+    );
+    let view = material(mtm, frame, t, Surface::Sidebar);
+    if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
+        glass.setCornerRadius(0.);
+        glass.setStyle(NSGlassEffectViewStyle::Clear);
+        glass.setTintColor(Some(
+            &native_color(t.colors.window)
+                .colorWithAlphaComponent(t.translucency.glass_tint as f64),
+        ));
+    } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
+        effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
+        solid.setCornerRadius(0.);
+        solid.setBorderWidth(0.);
+        solid.setFillColor(&native_color(t.colors.window));
+    }
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+    view
+}
+/// A window laid out as Home is: a sidebar on the window's glass and a
+/// content sheet beside it (Settings). The GPUI window is transparent over
+/// the behind-window blur; the sidebar's material stands in the leading
+/// `width`, which the view leaves unpainted.
+pub fn sidebar_frame(w: &gpui::Window, t: &Tokens, width: f32) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let gpui: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let (Some(window), Some(content)) =
+        (gpui.window(), gpui.window().and_then(|w| w.contentView()))
+    else {
+        return;
+    };
+    appearance(&window, t);
+    let blur = backdrop(mtm, &content);
+    ground(&window, &blur, t);
+    let side = sidebar_material(mtm, t, width, content.bounds().size.height);
+    content.addSubview_positioned_relativeTo(&side, NSWindowOrderingMode::Below, Some(&gpui));
+}
 /// Frames a borderless GPUI window as a popover: `Surface::Popover` material
 /// (glass on macOS 26, a visual-effect popover before, solid `floating`
 /// under Reduce Transparency) under the transparent GPUI view, rounded to
@@ -2697,33 +2755,12 @@ impl Host {
         if slot.is_some() {
             return;
         }
-        let t = &self.tokens;
-        let frame = NSRect::new(
-            NSPoint::ZERO,
-            // The glass runs on under the sheet's leading corners, so its
-            // own rim is hidden and the two meet in one step.
-            NSSize::new(
-                (t.metrics.sidebar + t.metrics.panel_radius + t.space.xs) as f64,
-                self.content.bounds().size.height,
-            ),
+        let view = sidebar_material(
+            self.window.mtm(),
+            &self.tokens,
+            self.tokens.metrics.sidebar,
+            self.content.bounds().size.height,
         );
-        let view = material(self.window.mtm(), frame, t, Surface::Sidebar);
-        if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
-            glass.setCornerRadius(0.);
-            glass.setStyle(NSGlassEffectViewStyle::Clear);
-            glass.setTintColor(Some(
-                &native_color(t.colors.window)
-                    .colorWithAlphaComponent(t.translucency.glass_tint as f64),
-            ));
-        } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
-            effect.setMaterial(NSVisualEffectMaterial::Sidebar);
-            effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
-            solid.setCornerRadius(0.);
-            solid.setBorderWidth(0.);
-            solid.setFillColor(&native_color(t.colors.window));
-        }
-        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
         self.content.addSubview_positioned_relativeTo(
             &view,
             NSWindowOrderingMode::Below,
