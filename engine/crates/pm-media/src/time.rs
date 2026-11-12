@@ -21,6 +21,9 @@ pub enum RateMethod {
     MedianThenMean,
     /// No supported rate qualifies: (last PTS − first PTS) / (frames − 1).
     Fallback,
+    /// A single frame has no spacing to measure: the rate its own duration
+    /// (or the container's declared frame rate) states.
+    Declared,
 }
 
 /// The section 13 nominal rate of a stream.
@@ -131,6 +134,49 @@ pub fn nominal_rate(pts: &[i64], timebase: Rational) -> Option<NominalRate> {
         candidates,
         median_duration: median,
         window: window.len(),
+    })
+}
+
+/// The rate of a one-frame stream, from the frame's `duration` in
+/// `timebase` units: the supported rate whose frame duration is within one
+/// unit of it (the closest when several are), otherwise exactly
+/// 1 / duration. `None` for a duration that is not positive.
+pub fn declared_rate(duration: i64, timebase: Rational) -> Option<NominalRate> {
+    if duration <= 0 || timebase.num() <= 0 {
+        return None;
+    }
+    let (tn, td) = (timebase.num() as i128, timebase.den() as i128);
+    // |r.den·tb.den − duration·r.num·tb.num| / (r.num·tb.num): the distance
+    // of a rate's frame duration from `duration`, in units.
+    let distance = |r: &Rate| {
+        let d = r.num() as i128 * tn;
+        ((r.den() as i128 * td - duration as i128 * d).abs(), d)
+    };
+    let candidates: Vec<Rate> = SUPPORTED_RATES
+        .iter()
+        .copied()
+        .filter(|r| {
+            let (a, d) = distance(r);
+            a <= d
+        })
+        .collect();
+    let rate = match candidates.iter().min_by(|x, y| {
+        let ((ax, dx), (ay, dy)) = (distance(x), distance(y));
+        (ax * dy).cmp(&(ay * dx))
+    }) {
+        Some(rate) => *rate,
+        None => {
+            let (num, den) = (td, duration as i128 * tn);
+            let g = gcd(num, den);
+            Rate::new(i64::try_from(num / g).ok()?, i64::try_from(den / g).ok()?).ok()?
+        }
+    };
+    Some(NominalRate {
+        rate,
+        method: RateMethod::Declared,
+        candidates,
+        median_duration: duration,
+        window: 1,
     })
 }
 
@@ -392,6 +438,21 @@ mod tests {
         );
         assert!(nominal_rate(&[5], r(1, 1000)).is_none());
         assert!(nominal_rate(&[5, 5], r(1, 1000)).is_none());
+    }
+
+    #[test]
+    fn a_single_frame_states_its_rate_by_its_duration() {
+        let of = |duration, tb| declared_rate(duration, tb).map(|n| (n.rate, n.method));
+        assert_eq!(
+            of(1001, r(1, 30000)),
+            Some((Rate::FPS_29_97, RateMethod::Declared))
+        );
+        // 33 ms is within a unit of both 30 and 29.97 fps: 30 is closer.
+        assert_eq!(of(33, r(1, 1000)).unwrap().0, Rate::FPS_30);
+        assert_eq!(of(3600, r(1, 90000)).unwrap().0, Rate::FPS_25);
+        // No supported rate: exactly 1 / duration.
+        assert_eq!(of(80, r(1, 1000)).unwrap().0, Rate::new(25, 2).unwrap());
+        assert_eq!(of(0, r(1, 1000)), None);
     }
 
     #[test]

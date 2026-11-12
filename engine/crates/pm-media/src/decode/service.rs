@@ -83,9 +83,27 @@ impl MediaSource {
             .video_stream
             .ok_or_else(|| MediaError::invalid("no video stream"))?;
         let video = probe.video.as_ref().unwrap();
-        let nominal = video.nominal_rate.clone().ok_or_else(|| {
-            MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
-        })?;
+        let nominal = match video.nominal_rate.clone() {
+            Some(nominal) => nominal,
+            // One frame is shown whatever its rate. A file that states none
+            // (a lone transport-stream picture without timing information)
+            // takes 30 fps for cadence decisions only; the probe goes on
+            // reporting that the file states no rate.
+            None if index.frames.len() == 1 && !crate::probe::still_container(&probe.container) => {
+                NominalRate {
+                    rate: Rate::FPS_30,
+                    method: crate::time::RateMethod::Declared,
+                    candidates: vec![],
+                    median_duration: 0,
+                    window: 1,
+                }
+            }
+            None => {
+                return Err(MediaError::invalid(
+                    "the stream has no frame rate (its frames share one timestamp)",
+                ));
+            }
+        };
         let origin_pts = index.origin_pts();
         let pts = index.frames.iter().map(|f| f.pts - origin_pts).collect();
         Ok(Arc::new(MediaSource {

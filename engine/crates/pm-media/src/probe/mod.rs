@@ -14,7 +14,7 @@ use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input};
 use crate::index::{self, FrameIndex, IndexSource};
 use crate::sys::ffmpeg as ff;
-use crate::time::{NominalRate, nominal_rate};
+use crate::time::{NominalRate, declared_rate, nominal_rate};
 use color::{ColorInfo, SideData};
 use pm_protocol::color::AlphaMode;
 use pm_time::{Rate, TimecodeFormat};
@@ -232,6 +232,14 @@ impl MediaProbe {
             None => self.duration_us.map(|d| d as f64 / 1e6),
         }
     }
+}
+
+/// FFmpeg's still-image demuxers (`png_pipe`, `jpeg_pipe`, `image2`, ...):
+/// such a file is one picture read by the still path, never a one-frame
+/// movie.
+pub(crate) fn still_container(name: &str) -> bool {
+    name.split(',')
+        .any(|n| n == "image2" || n.ends_with("_pipe"))
 }
 
 /// The clip origin of a file's picture: the timestamp of its first
@@ -518,7 +526,31 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
     }
 
     let pts = idx.presented_pts();
-    let nominal = nominal_rate(&pts, idx.timebase);
+    // One frame has no spacing to measure: the frame rate the container
+    // declares for the stream states it, or the frame's own duration. A
+    // transport stream stamps a lone packet with a one-tick duration, so a
+    // rate no camera or encoder produces is not taken from either.
+    let nominal = nominal_rate(&pts, idx.timebase).or_else(|| {
+        let [frame] = idx.frames.as_slice() else {
+            return None;
+        };
+        if still_container(&input.format_name()) {
+            return None;
+        }
+        let plausible = |n: &NominalRate| n.rate.num() <= 1000 * n.rate.den();
+        // The average rate, then the base rate the codec's timing states.
+        let (average, base) =
+            unsafe { ((*input.st(v)).avg_frame_rate, (*input.st(v)).r_frame_rate) };
+        [average, base]
+            .into_iter()
+            .filter(|r| r.num > 0 && r.den > 0)
+            .filter_map(|r| pm_time::Rational::new(r.den as i64, r.num as i64).ok())
+            .filter_map(|unit| declared_rate(1, unit))
+            .find(plausible)
+            .or_else(|| {
+                declared_rate(idx.samples[frame.sample].duration, idx.timebase).filter(plausible)
+            })
+    });
     let durations: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
     let (min_d, max_d) = (
         durations.iter().copied().min().unwrap_or(0),

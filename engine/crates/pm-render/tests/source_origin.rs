@@ -195,3 +195,42 @@ fn a_late_first_timestamp_is_clip_time_zero_on_every_surface() {
         }
     }
 }
+
+/// A movie with a single frame is a clip like any other: it opens, shows
+/// its frame at time 0 and holds it.
+#[test]
+fn a_one_frame_movie_shows_its_frame() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-one-frame-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let h264: &[&str] = &["-c:v", "h264_videotoolbox", "-allow_sw", "1", "-b:v", "8M"];
+    let mut preview = Renderer::headless().unwrap();
+    let mut export = Renderer::headless().unwrap();
+    for (name, mux) in [
+        ("one.mp4", &["-frames:v", "1"][..]),
+        ("one.mov", &["-frames:v", "1"]),
+        ("one.ts", &["-frames:v", "1"]),
+    ] {
+        let path = dir.0.join(name);
+        steps_clip(&path, h264, mux);
+        let source = pm_media::decode::service::MediaSource::open(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(source.index.frames.len(), 1, "{name}");
+        // MP4 and QuickTime give the frame a duration; a lone
+        // transport-stream picture states no rate and still opens.
+        if name != "one.ts" {
+            assert_eq!(source.rate(), pm_time::Rate::FPS_25, "{name}");
+        }
+        let doc = load(&document(0.0, 1.0));
+        for (renderer, kind) in [
+            (&mut preview, OutputKind::Preview),
+            (&mut export, OutputKind::Final),
+        ] {
+            assert_eq!(
+                shown(renderer, &doc, kind, &path),
+                vec![Some(0); FRAMES + 2],
+                "{name}, {kind:?}"
+            );
+        }
+    }
+}
