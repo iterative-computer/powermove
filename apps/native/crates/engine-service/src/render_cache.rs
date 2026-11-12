@@ -928,6 +928,15 @@ impl DiskFrames {
         }
     }
 
+    /// The viewer has not yet given this cache a composition to render (no
+    /// settled frame observed): a Render Selection asked now waits for one.
+    pub fn reading(&self) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .frames
+            .as_ref()
+            .is_none_or(|frames| frames.fingerprint.is_none() || frames.ids.is_empty())
+    }
     /// Render Selection: the composition's frames in `[from, to)` seconds that
     /// are not on disk render in an `--engine-job` child (`executable`),
     /// admitted around viewer `activity` as exports are, its raster overrides

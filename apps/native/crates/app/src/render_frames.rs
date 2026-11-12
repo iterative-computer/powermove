@@ -7,6 +7,22 @@ use pm_promedia::tasks::{ProgressUnit, TaskKind, TaskSpec, TaskState};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+/// How long a Render Selection asked during loading waits, once extensions
+/// have settled, for the viewer to draw the settled composition.
+const SETTLED_FRAME_WAIT: Duration = Duration::from_secs(10);
+
+/// The status line while a Render Selection waits for extensions.
+fn waiting_for(names: &[&str]) -> String {
+    match names {
+        [] => "Render Selection starts once extensions have loaded".into(),
+        [one] => format!("Render Selection starts once {one} has loaded"),
+        [one, rest @ ..] => format!(
+            "Render Selection starts once {one} and {} more have loaded",
+            rest.len()
+        ),
+    }
+}
+
 /// The engine's render cache, for the timeline's render bar.
 static DISK: OnceLock<pm_engine_service::render_cache::DiskFrames> = OnceLock::new();
 /// Timelines waiting for the render bar to change.
@@ -113,7 +129,59 @@ impl Controller {
         (to > from).then_some((from, to))
     }
 
+    /// Asked while this window's extensions load, a Render Selection waits
+    /// for them (its frames would otherwise be drawn without effects still
+    /// loading, or find nothing to render), then for the viewer's settled
+    /// frame, then starts.
     pub(crate) fn render_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.extensions.resources.pending && !self.engine.render_cache().reading() {
+            return self.start_render_selection(cx);
+        }
+        let disk = self.engine.render_cache();
+        cx.spawn(async move |this, cx| {
+            let mut shown = String::new();
+            let mut settled_at = None;
+            loop {
+                let Ok((pending, text)) = this.update(cx, |v, cx| {
+                    let resources = &v.extensions.resources;
+                    let names: Vec<&str> =
+                        resources.loading.iter().map(|(_, n)| n.as_str()).collect();
+                    let text = if resources.pending {
+                        waiting_for(&names)
+                    } else {
+                        "Reading the composition to render".to_owned()
+                    };
+                    // Only our own line is replaced; anything said since stays.
+                    if (shown.is_empty() || v.message == shown) && v.message != text {
+                        v.message = text.clone();
+                        cx.notify();
+                    }
+                    (resources.pending, text)
+                }) else {
+                    return;
+                };
+                shown = text;
+                if !pending {
+                    let since = *settled_at.get_or_insert_with(std::time::Instant::now);
+                    if !disk.reading() || since.elapsed() >= SETTLED_FRAME_WAIT {
+                        break;
+                    }
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            let _ = this.update(cx, |v, cx| {
+                if v.message == shown {
+                    v.message.clear();
+                }
+                v.start_render_selection(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn start_render_selection(&mut self, cx: &mut Context<Self>) {
         let Some((from, to)) = self.render_range() else {
             self.message = "Nothing to render".into();
             cx.notify();
@@ -338,6 +406,22 @@ mod tests {
         assert_eq!(within_composition(-2., 4., 10.), Some((0., 4.)));
         assert_eq!(within_composition(12., 15., 10.), None);
         assert_eq!(within_composition(3., 3., 10.), None);
+    }
+
+    #[test]
+    fn a_render_selection_waiting_for_extensions_names_them() {
+        assert_eq!(
+            waiting_for(&["Deep Glow"]),
+            "Render Selection starts once Deep Glow has loaded"
+        );
+        assert_eq!(
+            waiting_for(&["Deep Glow", "Blur Kit", "Grain"]),
+            "Render Selection starts once Deep Glow and 2 more have loaded"
+        );
+        assert_eq!(
+            waiting_for(&[]),
+            "Render Selection starts once extensions have loaded"
+        );
     }
 
     #[test]
