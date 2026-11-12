@@ -29,6 +29,8 @@ counters! {
     WORKER_DECODED = "worker_decoded",
     WORKER_AHEAD = "worker_ahead",
     WORKER_STOPPED = "worker_stopped",
+    OPEN_COLD_FRAMES = "open_cold_frames",
+    OPEN_COLD_JOBS = "open_cold_jobs",
 }
 
 pub fn bump(counter: &AtomicU64, by: u64) {

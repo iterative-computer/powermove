@@ -35,6 +35,11 @@ fn skim_events(speed: f64, span: f64) -> usize {
     ((span / speed.max(1e-3)) * 60.).round().max(1.) as usize
 }
 
+/// Frames of a composition `duration` seconds long at `rate`.
+fn comp_frames(duration: f64, rate: pm_time::Rate) -> i64 {
+    (duration * rate.to_f64()).floor() as i64
+}
+
 fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
     sorted
         .get(((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1))
@@ -560,6 +565,62 @@ pub fn run() -> anyhow::Result<()> {
     // positions the viewer is asked for a capture, which the engine delivers
     // only from an exact frame (paused, full resolution, no stand-in). The
     // pixels are fingerprinted so two builds can be compared frame by frame.
+    // Benchmark-only `--drag=1`: a playhead drag as the app sends it, one
+    // scrub every 4 ms (250 Hz pointer), moving `--drag-fps` frames per second
+    // (120) for two seconds, never waiting for a frame. Counts distinct
+    // pictures completed during the drag and how long each position took.
+    let drag = if arg("drag", "0") == "1" {
+        diag_mark("drag", &service);
+        println!("PHASE drag");
+        let fps: f64 = arg("drag-fps", "120").parse()?;
+        let stale_before = viewer.status().stale_rejections;
+        let started = Instant::now();
+        let mut asked: std::collections::HashMap<i64, Instant> = Default::default();
+        let mut shown: Vec<(f64, i64, bool)> = Vec::new();
+        let mut lat = Vec::new();
+        let mut last_seq = None;
+        let mut next_event = started;
+        let total = 2.0f64;
+        let frames_total = (comp_frames(duration, rate)).max(1);
+        while started.elapsed().as_secs_f64() < total + 0.5 {
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
+            let now = Instant::now();
+            if now >= next_event && started.elapsed().as_secs_f64() < total {
+                let k = ((started.elapsed().as_secs_f64() * fps) as i64) % frames_total;
+                let at = Ticks::new(scrub_from + k * frame)?;
+                asked.entry(at.get()).or_insert(now);
+                viewer.scrub(at)?;
+                next_event = now + Duration::from_millis(4);
+            }
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            if let Some(f) = viewer.status().frame
+                && f.completion_host_seconds.is_some()
+                && last_seq != Some((f.stamp.sequence, f.time.get()))
+            {
+                last_seq = Some((f.stamp.sequence, f.time.get()));
+                let t = started.elapsed().as_secs_f64();
+                if shown.last().is_none_or(|s| s.1 != f.time.get()) {
+                    shown.push((t, f.time.get(), f.stand_ins));
+                    if let Some(a) = asked.get(&f.time.get()) {
+                        lat.push(a.elapsed().as_secs_f64() * 1000.);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_micros(250));
+        }
+        lat.sort_by(f64::total_cmp);
+        let during: Vec<_> = shown.iter().filter(|s| s.0 < total).collect();
+        let mut gaps: Vec<f64> = during.windows(2).map(|w| (w[1].0 - w[0].0) * 1000.).collect();
+        gaps.sort_by(f64::total_cmp);
+        json!({"fps":fps,"seconds":total,"positions_asked":asked.len(),
+            "distinct_shown_during":during.len(),"distinct_per_s":during.len() as f64 / total,
+            "stand_ins_shown":during.iter().filter(|s| s.2).count(),
+            "stale_rejections":viewer.status().stale_rejections - stale_before,
+            "position_to_picture_ms":{"n":lat.len(),"p50":percentile(&lat,0.5),"p95":percentile(&lat,0.95)},
+            "longest_gap_ms":gaps.last()})
+    } else {
+        serde_json::Value::Null
+    };
     diag_mark("exact", &service);
     println!("PHASE exact");
     let mut exact_frames = Vec::new();
@@ -646,7 +707,7 @@ pub fn run() -> anyhow::Result<()> {
             "stuck":{"seek":stuck.len(),"scrub_forward":gate_sweeps[0].1,"scrub_back":gate_sweeps[1].1,"scrub_cached":gate_sweeps[2].1},
             "settle":settle_report,"exact_capture":exact_frames},
         "skim_ms":{"counts":skim_counts,"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
-        "diag":DIAG.lock().unwrap().clone(),"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
+        "drag":drag,"diag":DIAG.lock().unwrap().clone(),"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
         arg("report", "/tmp/es2-service-offscreen.json"),

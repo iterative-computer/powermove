@@ -1709,7 +1709,12 @@ impl MediaCache {
                 Some(deadline) => {
                     Want::Playback(deadline.saturating_duration_since(std::time::Instant::now()))
                 }
-                None if self.scrub => Want::Scrub,
+                // PM_FIX_SCRUB_WAIT_MS: a drag waits this long for the exact
+                // frame before a stand-in, as playback does.
+                None if self.scrub => match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS") {
+                    Some(ms) if ms > 0 => Want::Playback(std::time::Duration::from_millis(ms)),
+                    _ => Want::Scrub,
+                },
                 None => Want::Exact,
             };
             let fetched = self

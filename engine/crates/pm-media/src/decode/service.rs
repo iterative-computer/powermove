@@ -419,7 +419,9 @@ impl Drop for SessionGuard<'_> {
             }
             let mut idle = svc.idle.lock().unwrap();
             let list = idle.entry(self.key).or_default();
-            if list.len() < svc.config.idle_sessions {
+            let idle_cap = super::diag::knob("PM_ABL_IDLE_SESSIONS")
+                .map_or(svc.config.idle_sessions, |n| n as usize);
+            if list.len() < idle_cap {
                 list.push(s);
             } else {
                 super::diag::bump(&super::diag::SESSIONS_CLOSED_IDLE_FULL, 1);

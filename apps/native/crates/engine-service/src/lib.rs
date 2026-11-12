@@ -376,6 +376,22 @@ struct View {
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
+    /// Stamp sequence bumps that only moved the shown time (scrub seeks and
+    /// their pauses, skimmer moves): PM_FIX_PRESENT_STALE.
+    moves: u64,
+}
+/// PM_FIX_PRESENT_STALE: while dragging, a finished frame whose stamp is
+/// older only by moves of the shown time is still presented (the newest
+/// time is drawn next) instead of being dropped: otherwise a drag that moves
+/// faster than a frame renders never shows a picture until it stops.
+fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool) -> bool {
+    moment == Moment::Scrub
+        && !capture
+        && pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE") == Some(1)
+        && v.stamp.generation == stamp.generation
+        && v.stamp.doc_id == stamp.doc_id
+        && v.stamp.revision == stamp.revision
+        && v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves)
 }
 impl View {
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
@@ -397,9 +413,18 @@ impl View {
             TransportCommand::AudioScrub { enabled } => self.audio_scrub = enabled,
             _ => {}
         }
+        let moved = matches!(
+            cmd,
+            TransportCommand::Pause
+                | TransportCommand::Seek {
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                    ..
+                }
+        );
         self.commands.push_back(cmd);
         self.commands_sent.get_or_insert_with(trace::now);
         self.stamp.sequence += 1;
+        self.moves += u64::from(moved);
         self.dirty = true;
         Ok(())
     }
@@ -618,6 +643,7 @@ impl Viewer {
             v.input = Some(input);
             v.pipeline.request = trace::now();
             v.stamp.sequence += 1;
+            v.moves += 1;
             v.dirty = true;
             Ok(())
         })
@@ -1062,6 +1088,7 @@ impl EngineService {
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
+                moves: 0,
             },
         );
         state.notify();
@@ -1220,6 +1247,7 @@ mod lookahead_tests {
 struct Flight {
     id: u64,
     stamp: Stamp,
+    moves: u64,
     spec: FrameSpec,
     submission: render::Submission,
     input: Option<f64>,
@@ -1236,6 +1264,7 @@ const DROPS_AT_MOST: i64 = 48;
 struct Work {
     id: u64,
     stamp: Stamp,
+    moves: u64,
     scene: Scene,
     spec: FrameSpec,
     layer: Option<metal::MetalLayer>,
@@ -1691,7 +1720,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
-                if v.stamp != f.stamp {
+                if v.stamp != f.stamp
+                    && !only_moved(
+                        v,
+                        f.stamp,
+                        f.moves,
+                        f.spec.moment,
+                        f.submission.readback.is_some(),
+                    )
+                {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= f.submission.readback.is_some();
@@ -2115,6 +2152,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             work = Some(Work {
                 id,
                 stamp: v.stamp,
+                moves: v.moves,
                 scene,
                 spec: FrameSpec {
                     time,
@@ -2202,6 +2240,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if let Some(Work {
             id,
             stamp,
+            moves,
             scene,
             spec,
             layer,
@@ -2365,7 +2404,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     v.status.missing_effects = engine.missing_effects.clone();
                 }
                 // A capture asked for belongs to the next frame that lands.
-                if v.stamp != stamp {
+                if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
                     v.status.stale_rejections += 1;
                     v.capture |= capture;
                     continue;
@@ -2451,6 +2490,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         flights.push_back(Flight {
                             id,
                             stamp,
+                            moves,
                             spec,
                             submission: s,
                             input,
