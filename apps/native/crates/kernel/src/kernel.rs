@@ -131,6 +131,7 @@ pub struct Kernel {
     history_max_entries: usize,
     pub(crate) trimmed_projects: Vec<String>,
     pub(crate) publish_hooks: crate::project_io::PublishHooks,
+    log: Vec<String>,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,
@@ -153,6 +154,7 @@ impl Kernel {
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
             publish_hooks: Default::default(),
+            log: Vec::new(),
             durability,
             slots: BTreeMap::new(),
             library: None,
@@ -428,8 +430,23 @@ impl Kernel {
         crate::SaveOptions {
             backups,
             hooks: self.publish_hooks.clone(),
+            profile: self.profile_dir().map(Into::into),
             ..Default::default()
         }
+    }
+    /// The profile folder this kernel keeps its journals in.
+    pub(crate) fn profile_dir(&self) -> Option<&std::path::Path> {
+        self.config.journal_root.as_ref()?.parent()
+    }
+    /// A line for the host's Error Log ([`crate::KernelEvent::Log`]).
+    pub(crate) fn log(&mut self, message: String) {
+        if !self.log.contains(&message) {
+            self.log.push(message);
+        }
+    }
+    /// The lines logged since the last call.
+    pub fn take_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.log)
     }
     /// Test hooks for every file save this kernel starts from now on.
     #[doc(hidden)]

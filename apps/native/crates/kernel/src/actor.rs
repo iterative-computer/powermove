@@ -305,6 +305,11 @@ pub enum KernelEvent {
         project: String,
         message: String,
     },
+    /// Something the person is not asked about but can look up: a line for
+    /// the host's Error Log.
+    Log {
+        message: String,
+    },
     /// A request failed with an internal error (a contained panic); the
     /// kernel keeps serving. Hosts show it in the Error Log.
     /// A panic was contained to one call. `projects` stopped
@@ -1253,6 +1258,9 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             };
             let revision = publish(kernel, shared, &id);
             reply(result);
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
+            }
             if let Some(revision) = revision {
                 emit(
                     shared,
@@ -1334,6 +1342,9 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 if !ids.contains(&id) {
                     emit(shared, KernelEvent::Closed { project: id });
                 }
+            }
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
             }
         }
         Msg::Call {

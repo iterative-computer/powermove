@@ -147,6 +147,9 @@ pub struct SaveOptions {
     pub fault: Option<WriteFault>,
     #[doc(hidden)]
     pub hooks: durable::PublishHooks,
+    /// The profile folder of the instance that saves: a save's record names
+    /// who is saving.
+    pub profile: Option<PathBuf>,
 }
 
 /// The `history` member a plan writes.
@@ -890,7 +893,11 @@ impl SavePlan {
             (Some(policy), Some(_)) => Some(durable::backup(policy, dest)?),
             _ => None,
         };
-        let published = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks);
+        let host = durable::Host {
+            hooks: &self.options.hooks,
+            profile: self.options.profile.as_deref(),
+        };
+        let published = durable::publish(temp, dest, &publish, &file_hash, &host);
         if published.is_err()
             && let (Some(path), Some(prev)) = (&backup, previous)
         {

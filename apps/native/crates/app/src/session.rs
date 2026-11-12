@@ -554,6 +554,9 @@ impl Controller {
                                     v.message = "Something went wrong; see the Error Log.".into();
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
+                                KernelEvent::Log { message } => {
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
                                 KernelEvent::Notice { project, notice }
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {

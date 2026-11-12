@@ -52,6 +52,19 @@ pub enum ShellCall {
     /// was shown (at quit, on close), and what a save that was cut short
     /// left (see `Kernel::note_kept`). Replies `Kept` and forgets them.
     KeptBeside(SessionHandle),
+    /// The files a save of the project file at this path left when it was
+    /// cut short and recovery would not choose between (their bytes are
+    /// not what the save's record says, or more than one save was cut
+    /// short). Moves nothing. Replies `Leftovers`.
+    Leftovers(PathBuf),
+    /// The person chose `leftover` (a path `Leftovers` listed) to be the
+    /// project file at `path`, whose name holds nothing: it takes that name
+    /// (never over a file that landed there since), and the other files
+    /// that save left get names the person finds. Replies `Kept` with them.
+    UseLeftover {
+        path: PathBuf,
+        leftover: PathBuf,
+    },
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
@@ -288,6 +301,13 @@ pub enum ShellReply {
     /// (the file such a save had moved aside, where the path holds a file),
     /// `unfinished` (the finished file of the save that was cut short).
     Kept(Vec<Value>),
+    /// Rows of files a cut-short save left that the person has to choose
+    /// between: `path`, `role` (`previous`: the file that was under the
+    /// project's name; `saving`: the file the save had finished; `record`:
+    /// a save's record that cannot be read), `why` (`unknown`, `several`,
+    /// `unreadable`), `size`, and who was saving and when (`computer`,
+    /// `user`, `at` in milliseconds) where the record says.
+    Leftovers(Vec<Value>),
     Changed(bool),
 }
 pub(crate) enum Destination {
@@ -320,6 +340,29 @@ fn left_row(left: &project_io::LeftAside) -> Value {
         Kept(path) => kept_row("other", Some(path)),
         Unfinished(path) => kept_row("unfinished", Some(path)),
     }
+}
+fn leftover_row(left: &project_io::Leftover) -> Value {
+    let mut m = Map::new();
+    m.insert(
+        "path",
+        Value::from(left.path.to_string_lossy().into_owned()),
+    );
+    m.insert("role", Value::from(left.role));
+    m.insert(
+        "why",
+        Value::from(match left.why {
+            project_io::Undecided::Unknown => "unknown",
+            project_io::Undecided::Several => "several",
+            project_io::Undecided::Unreadable => "unreadable",
+        }),
+    );
+    m.insert("size", Value::from(left.size as f64));
+    if let Some(owner) = &left.owner {
+        m.insert("computer", Value::from(owner.computer.as_str()));
+        m.insert("user", Value::from(owner.user.as_str()));
+        m.insert("at", Value::from(left.at as f64));
+    }
+    Value::Object(m)
 }
 fn push_kept(meta: &mut Map, rows: impl IntoIterator<Item = Value>) {
     let mut rows = rows.into_iter().peekable();
@@ -477,6 +520,19 @@ impl Kernel {
                     Some(Value::Array(rows)) => rows,
                     _ => Vec::new(),
                 }))
+            }
+            ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
+                project_io::leftovers(&path)
+                    .iter()
+                    .map(leftover_row)
+                    .collect(),
+            )),
+            ShellCall::UseLeftover { path, leftover } => {
+                // Under the project's lock: no save of it is in its steps.
+                let _lock = self.lock_project(&path).map_err(failure)?;
+                let left =
+                    project_io::use_leftover(&path, &leftover, &self.host()).map_err(failure)?;
+                Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
             }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
@@ -1193,7 +1249,7 @@ impl Kernel {
                 // puts it back.
                 match self
                     .file_entry(&project)
-                    .filter(|p| p.is_file() || project_io::left_aside(p))
+                    .filter(|p| p.is_file() || project_io::pending(p))
                 {
                     Some(path) => SessionSource::File(path),
                     None => SessionSource::Library { profile, project },
@@ -1376,16 +1432,18 @@ impl Kernel {
                     }
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
-                let mut left_aside = Vec::new();
+                let mut left_aside = project_io::Settled::default();
                 if decision == OpenDecision::Writable {
                     match self.lock_project(&path) {
                         Ok(l) => {
                             lock = Some(l);
                             // Staging files a save cut short by Quit Now left.
                             crate::project_io::remove_abandoned_temps(&path);
-                            // The version a save moved aside and never got
-                            // to replace is the file again.
-                            left_aside = project_io::settle_asides(&path, &self.publish_hooks);
+                            // What a save that was cut short left is settled
+                            // from its record: the version it moved aside
+                            // and never got to replace is the file again.
+                            left_aside = project_io::settle(&path, &self.host());
+                            self.log_unrecorded(&left_aside);
                         }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
@@ -1415,13 +1473,28 @@ impl Kernel {
                 // Nothing is moved without the lock.
                 if decision != OpenDecision::Writable
                     && !path.is_file()
-                    && project_io::left_aside(&path)
+                    && project_io::pending(&path)
                 {
                     return Err(failure(
                         "This project was being saved a moment ago, here or on another computer, \
                          and that save did not finish. Its last saved version is safe next to \
                          it. Try opening it again in a minute.",
                     ));
+                }
+                // The name holds nothing, and which of the files the save
+                // left is the project could not be told from its record:
+                // nothing was moved, and the person chooses
+                // (`ShellCall::Leftovers`, `ShellCall::UseLeftover`).
+                if !left_aside.undecided.is_empty() && !path.is_file() {
+                    let names: Vec<_> = left_aside
+                        .undecided
+                        .iter()
+                        .filter_map(|l| Some(l.path.file_name()?.to_string_lossy().into_owned()))
+                        .collect();
+                    return Err(failure(format!(
+                        "The last save of this project did not finish, and which of the files                          it left is the project cannot be told. Nothing was moved or removed.                          They are next to where the project was: {}",
+                        names.join(", ")
+                    )));
                 }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
@@ -1450,7 +1523,14 @@ impl Kernel {
                 // What a save that was cut short left is said once the
                 // project is open (`ShellCall::KeptBeside`).
                 if let Value::Object(m) = &mut meta {
-                    push_kept(m, left_aside.iter().map(left_row));
+                    push_kept(m, left_aside.left.iter().map(left_row));
+                    push_kept(
+                        m,
+                        left_aside
+                            .undecided
+                            .iter()
+                            .map(|l| kept_row("undecided", Some(&l.path))),
+                    );
                 }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
@@ -2414,6 +2494,23 @@ impl Kernel {
         }
         maybe
     }
+    /// What a save needs from this kernel besides the files.
+    pub(crate) fn host(&self) -> project_io::Host<'_> {
+        project_io::Host {
+            hooks: &self.publish_hooks,
+            profile: self.profile_dir(),
+        }
+    }
+    /// Private files beside a project that no save's record names are never
+    /// touched: they go to the host's Error Log.
+    fn log_unrecorded(&mut self, settled: &project_io::Settled) {
+        for path in &settled.unrecorded {
+            self.log(format!(
+                "A file a save left beside a project is not named by any save's record and                  was left as it is: {}",
+                path.display()
+            ));
+        }
+    }
     /// A save that failed put the version it had moved aside back under
     /// the project's name as a copy ([`ProjectIoError::PutBack`]): the same
     /// bytes in another file. The session carries on with that file, so
@@ -2459,8 +2556,10 @@ impl Kernel {
         };
         // A save that could not put the file back under its name left it
         // aside: it is put back now, not followed to its private name.
-        let left = project_io::settle_asides(path, &self.publish_hooks);
-        self.note_kept(id, left.iter().map(left_row));
+        let path = path.clone();
+        let left = project_io::settle(&path, &self.host());
+        self.log_unrecorded(&left);
+        self.note_kept(id, left.left.iter().map(left_row));
         let Some(version) = self
             .project(id)
             .and_then(|p| p.store().file().version.clone())

@@ -18,6 +18,8 @@
 //!   the volume has no exchange the file is moved aside under a private name
 //!   and the new one installed at the empty path ([`replace_aside`]). No
 //!   route removes a file before it was read and found to be that version.
+//! * Every save writes its record before it moves anything
+//!   ([`super::transaction`]); a save that was cut short is settled from it.
 //! * No file is ever renamed onto a public name (the project's, or the name
 //!   a kept file gets): a name is taken by the exclusive rename
 //!   (`RENAME_EXCL`), by a hard link, or by exclusive creation and a verified
@@ -31,6 +33,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use super::transaction::{self, Route, Transaction};
 use crate::error::{ProjectIoError, io_err};
 
 /// What identifies a file on disk (`fs.Stats` identity in the old app).
@@ -256,7 +259,7 @@ impl FileVersion {
             return Ok(None);
         };
         if !is_document_place(&path)
-            || is_aside_name(&path)
+            || transaction::is_private_name(&path)
             || !at.same_identity(&self.stat)
             || self.held_unchanged()?.is_none()
         {
@@ -648,6 +651,10 @@ mod sys {
 #[doc(hidden)]
 pub type PublishHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
+/// Something a test does when a save's record reaches a step.
+#[doc(hidden)]
+pub type StepHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
+
 /// Test hooks on publication.
 #[doc(hidden)]
 #[derive(Clone, Default)]
@@ -674,6 +681,14 @@ pub struct PublishHooks {
     /// project's own name, or the name a kept file gets): after every look
     /// at that name, immediately before the call that takes it.
     pub before_install: Option<PublishHook>,
+    /// Called with a step's name and the destination when a save's record
+    /// reaches that step (`begin`, `aside`, `install`, `exchanged`,
+    /// `restore`, `keep`, `closed`, ...): the step is recorded, and not yet
+    /// taken.
+    pub step: Option<StepHook>,
+    /// Called with the destination half way through a copy into an
+    /// exclusively created name.
+    pub mid_copy: Option<PublishHook>,
     /// While set, the next copy into an exclusively created name stops
     /// half way with "No space left on device" (and clears it).
     pub copy_fails: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -689,6 +704,8 @@ impl std::fmt::Debug for PublishHooks {
             .field("between_renames", &self.between_renames.is_some())
             .field("after_exchange", &self.after_exchange.is_some())
             .field("before_install", &self.before_install.is_some())
+            .field("step", &self.step.is_some())
+            .field("mid_copy", &self.mid_copy.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
             .finish()
     }
@@ -848,7 +865,7 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
 
 /// How a file came to be under a name nothing held ([`place_new`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Placed {
+pub(super) enum Placed {
     /// The file itself is under the new name and its old name is gone.
     Moved,
     /// The new name holds a verified copy of the file, which is still under
@@ -870,7 +887,7 @@ enum Placed {
 ///    name.
 ///
 /// `hash` is what `from` holds, when the caller knows.
-fn place_new(
+pub(super) fn place_new(
     from: &Path,
     to: &Path,
     hash: Option<&str>,
@@ -994,6 +1011,14 @@ fn create_exclusive(
                 let _ = out.write_all(&buf[..n / 2]);
                 return Err(io_err(destination, io::Error::from_raw_os_error(28)));
             }
+            if let Some(hook) = &hooks.mid_copy {
+                out.write_all(&buf[..n / 2])
+                    .map_err(|e| io_err(destination, e))?;
+                hook(destination);
+                out.write_all(&buf[n / 2..n])
+                    .map_err(|e| io_err(destination, e))?;
+                continue;
+            }
             out.write_all(&buf[..n])
                 .map_err(|e| io_err(destination, e))?;
         }
@@ -1029,7 +1054,7 @@ fn create_exclusive(
 /// file being copied, are that incomplete copy and are removed (`whole` still
 /// has all of them). Anything else landed there since and goes back under
 /// the name, or beside it if the name was taken again.
-fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
+pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
     let taken = temporary_sibling(destination).with_extension("partial");
     if rename_private(destination, &taken, hooks).is_err() {
         return;
@@ -1037,12 +1062,14 @@ fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
     if begins(whole, &taken) {
         let _ = fs::remove_file(&taken);
     } else if place_new(&taken, destination, None, hooks).is_err() {
-        keep_beside(taken, destination, "other version", hooks);
+        let _ = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
+            Ok(())
+        });
     }
 }
 
 /// Whether `part`'s bytes are the beginning (or all) of `whole`'s.
-fn begins(whole: &Path, part: &Path) -> bool {
+pub(super) fn begins(whole: &Path, part: &Path) -> bool {
     let (Ok(whole), Ok(part)) = (File::open(whole), File::open(part)) else {
         return false;
     };
@@ -1103,12 +1130,19 @@ fn local_stamp() -> String {
 
 /// Gives `held`, a file under a private name beside `destination`, a name
 /// the person finds: `<name> (<label> <date time>).<ext>`, never over
-/// anything ([`place_new`]). `label` says what it is: `other version` for a file found at
-/// the project's path that is not the version the save could replace,
-/// `recovered` for a finished save that could not take the path. Where that
-/// cannot be done it keeps a hidden name no sweep removes
-/// (`<private name>.conflict.pmv`). Returns where it is.
-fn keep_beside(held: PathBuf, destination: &Path, label: &str, hooks: &PublishHooks) -> PathBuf {
+/// anything ([`place_new`]). `label` says what it is: `other version` for a
+/// file found at the project's path that is not the version the save could
+/// replace, `recovered` for a finished save that could not take the path.
+/// `about_to` is told each name right before it is tried (a save's record
+/// keeps it). Returns where the file is: `Err` with its private name when it
+/// could not be given another (the record still names it there).
+pub(super) fn keep_beside(
+    held: PathBuf,
+    destination: &Path,
+    label: &str,
+    hooks: &PublishHooks,
+    about_to: &mut dyn FnMut(&Path, &Path) -> Result<(), ProjectIoError>,
+) -> Result<PathBuf, PathBuf> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let stem = destination
         .file_stem()
@@ -1126,24 +1160,21 @@ fn keep_beside(held: PathBuf, destination: &Path, label: &str, hooks: &PublishHo
             name.push_str(&extension.to_string_lossy());
         }
         let to = dir.join(name);
+        if about_to(&held, &to).is_err() {
+            break;
+        }
         match place_new(&held, &to, None, hooks) {
-            Ok(Placed::Moved) => return to,
+            Ok(Placed::Moved) => return Ok(to),
             // The copy was read back and holds the file's bytes.
             Ok(Placed::Copied) => {
                 let _ = fs::remove_file(&held);
-                return to;
+                return Ok(to);
             }
             Err(ProjectIoError::DestinationExists(_)) => continue,
             Err(_) => break,
         }
     }
-    let mut hidden = held.clone().into_os_string();
-    hidden.push(".conflict.pmv");
-    let hidden = PathBuf::from(hidden);
-    match fs::rename(&held, &hidden) {
-        Ok(()) => hidden,
-        Err(_) => held,
-    }
+    Err(held)
 }
 
 /// Whether `entry` is the private name a save gives a file beside the file
@@ -1155,76 +1186,6 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
         .and_then(|e| e.strip_prefix('.'))
         .and_then(|e| e.strip_suffix(suffix))
         .is_some_and(is_uuid_v4)
-}
-
-/// Whether `path` is a name a file waits under while a save replaces it
-/// ([`replace_aside`]). It is never a project's own name: a session whose
-/// file sits under one is not following a rename.
-fn is_aside_name(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| {
-            name.starts_with('.')
-                && name
-                    .strip_suffix(ASIDE)
-                    .and_then(|n| n.get(n.len().checked_sub(36)?..))
-                    .is_some_and(is_uuid_v4)
-        })
-}
-const ASIDE: &str = ".aside";
-
-/// The files a save moved aside from `destination` and did not get to settle
-/// (`.<file name>.<uuid v4>.aside`), newest first.
-fn asides_of(destination: &Path) -> Vec<PathBuf> {
-    let (Some(parent), Some(name)) = (
-        destination.parent(),
-        destination.file_name().and_then(OsStr::to_str),
-    ) else {
-        return Vec::new();
-    };
-    let parent = if parent.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        parent
-    };
-    let Ok(Some(dir)) = Dir::open(parent) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = dir
-        .entries()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(entry, kind)| {
-            matches!(kind, Kind::File { .. })
-                && entry
-                    .to_str()
-                    .is_some_and(|e| private_sibling(e, name, ASIDE))
-        })
-        .filter_map(|(entry, _)| {
-            let path = parent.join(entry);
-            Some((fs::symlink_metadata(&path).ok()?.modified().ok()?, path))
-        })
-        .collect();
-    found.sort_by(|a, b| b.cmp(a));
-    found.into_iter().map(|(_, path)| path).collect()
-}
-
-/// Whether a save of `destination` that was cut short left a file aside.
-pub(crate) fn left_aside(destination: &Path) -> bool {
-    !asides_of(destination).is_empty()
-}
-
-/// What [`settle_asides`] did with a file a save had moved aside.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LeftAside {
-    /// The project's path held nothing: the file moved aside (the version
-    /// that save was replacing) is the project file again.
-    Restored,
-    /// The path holds a file: the one moved aside is kept beside it here.
-    Kept(PathBuf),
-    /// The finished file of the save that was cut short (it holds the work
-    /// that save was writing), kept beside the project here.
-    Unfinished(PathBuf),
 }
 
 /// Puts the file a save moved aside back under the project's name, which
@@ -1243,71 +1204,40 @@ fn put_back(
     Ok(copied)
 }
 
-/// A save on a volume without an atomic exchange moves the project file
-/// aside and installs the new one at the empty path ([`replace_aside`]). Cut
-/// short between the two (a crash, a disk pulled), it leaves the path empty
-/// and the last saved version under a private name. This puts that version
-/// back at the path, never over anything; where the path holds a file it
-/// gives the one aside a name the person finds instead. The file that save
-/// had finished and not installed (its staging file: written, synced and
-/// verified before anything was moved) gets a plain name too. Nothing is
-/// removed. Call it while holding the project's lock, so no save of this
-/// project is between its two renames.
-pub(crate) fn settle_asides(destination: &Path, hooks: &PublishHooks) -> Vec<LeftAside> {
-    let mut settled = Vec::new();
-    for aside in asides_of(destination) {
-        let restored = matches!(lstat_file(destination), Ok(None))
-            && put_back(&aside, destination, hooks).is_ok();
-        let staged = aside.with_extension("tmp");
-        settled.push(if restored {
-            LeftAside::Restored
-        } else {
-            LeftAside::Kept(keep_beside(aside, destination, "other version", hooks))
-        });
-        if matches!(lstat_file(&staged), Ok(Some(stat)) if stat.size > 0) {
-            settled.push(LeftAside::Unfinished(keep_beside(
-                staged,
-                destination,
-                "recovered",
-                hooks,
-            )));
-        }
-    }
-    if !settled.is_empty() {
-        let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
-    }
-    settled
-}
-
 /// Replaces the file at `destination` with the staged `temp` on a volume
-/// without an atomic exchange, by two renames:
+/// without an atomic exchange, in two steps, each recorded in the save's
+/// record `tx` before it is taken:
 ///
 /// 1. The file at the path is moved aside under a private name in the same
 ///    folder. That takes whatever is there at that instant and destroys
 ///    nothing.
-/// 2. The staged file is installed at the now empty path by a rename that
-///    takes it only if nothing holds it ([`place_new`]). A file that landed there
-///    between the two renames stays; this save's file is kept beside it and
-///    the save fails naming it ([`ProjectIoError::KeptBeside`]).
+/// 2. The staged file is installed at the now empty path, which it takes
+///    only if nothing holds it ([`place_new`]). A file that landed there
+///    since stays; this save's file is kept beside it and the save fails
+///    naming it ([`ProjectIoError::KeptBeside`]).
 ///
 /// Then what was moved aside is read: if it does not have `expected`'s bytes
 /// (another version landed after the last check) it is kept beside the
 /// project under a plain name and reported ([`Published::displaced`]).
 ///
 /// The file moved aside is removed only once it was read and found to hold
-/// `expected`'s bytes, and the new file is at the path. Any other failure puts it
-/// back. A process killed between the renames leaves it under its private
-/// name for the next open ([`settle_asides`]).
+/// `expected`'s bytes, and the new file is at the path. Any other failure
+/// puts it back. A process killed on the way leaves the record and the
+/// files it names for the next open ([`super::transaction::settle`]).
+/// `settled` is cleared when a file of this save stays under a private name.
 fn replace_aside(
     temp: TempFile,
     destination: &Path,
     expected: &FileVersion,
     incoming: &FileStat,
     new_hash: &str,
-    hooks: &PublishHooks,
+    tx: &mut Transaction,
+    settled: &mut bool,
 ) -> Result<Published, ProjectIoError> {
+    let hooks = &tx.hooks.clone();
     let dir = destination.parent().unwrap_or(Path::new("."));
-    let aside = temp.path.with_extension(&ASIDE[1..]);
+    let aside = temp.path.with_extension(transaction::ASIDE);
+    tx.step("aside")?;
     if let Some(hook) = &hooks.before_exchange {
         hook(destination);
     }
@@ -1319,7 +1249,10 @@ fn replace_aside(
     if let Some(hook) = &hooks.between_renames {
         hook(destination);
     }
-    let installed = match place_new(&temp.path, destination, Some(new_hash), hooks) {
+    let installed = match tx
+        .step("install")
+        .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks))
+    {
         Ok(placed) => Some(placed),
         // Something landed at the path since it was emptied: it stays.
         Err(ProjectIoError::DestinationExists(_)) => None,
@@ -1328,13 +1261,16 @@ fn replace_aside(
             return Err(match put_back(&aside, destination, hooks) {
                 Ok(true) => ProjectIoError::PutBack(Box::new(e)),
                 Ok(false) => e,
-                Err(_) => ProjectIoError::Conflict {
-                    message: format!(
-                        "The project file could not be replaced ({e}), and the file that was \
-                         there could not be put back under its name."
-                    ),
-                    recovery_path: aside,
-                },
+                Err(_) => {
+                    *settled = false;
+                    ProjectIoError::Conflict {
+                        message: format!(
+                            "The project file could not be replaced ({e}), and the file that \
+                             was there could not be put back under its name."
+                        ),
+                        recovery_path: aside,
+                    }
+                }
             });
         }
     };
@@ -1351,10 +1287,19 @@ fn replace_aside(
         .flatten()
         .is_some_and(|moved| moved.hash == expected.hash);
     let mut published = Published::default();
+    let mut keep = |held: PathBuf, label: &str, why: &str| {
+        keep_beside(held, destination, label, hooks, &mut |from, to| {
+            tx.keeping(from, to, why)
+        })
+        .unwrap_or_else(|private| {
+            *settled = false;
+            private
+        })
+    };
     if replaced {
         let _ = fs::remove_file(&aside);
     } else {
-        published.displaced = Some(keep_beside(aside, destination, "other version", hooks));
+        published.displaced = Some(keep(aside, "other version", "other"));
     }
     match installed {
         // The staged file is the project file now.
@@ -1362,7 +1307,7 @@ fn replace_aside(
         // The project file is a verified copy of it.
         Some(Placed::Copied) => drop(temp),
         None => {
-            let kept = keep_beside(temp.keep(), destination, "recovered", hooks);
+            let kept = keep(temp.keep(), "recovered", "unfinished");
             let _ = sync_directory(dir);
             return Err(ProjectIoError::KeptBeside { kept });
         }
@@ -1388,6 +1333,14 @@ pub(crate) struct Published {
     pub displaced: Option<PathBuf>,
 }
 
+/// What a publication needs from its host besides the files.
+#[derive(Clone, Copy)]
+pub(crate) struct Host<'a> {
+    pub hooks: &'a PublishHooks,
+    /// The profile folder of the instance that saves (a record names it).
+    pub profile: Option<&'a Path>,
+}
+
 /// `publishFile`: atomically publishes `temp` (already flushed) at
 /// `destination`, whose content hash will be `new_hash`. On `Err` the
 /// destination holds what it held before, except for
@@ -1396,6 +1349,10 @@ pub(crate) struct Published {
 /// file right after it was published; both other versions are kept) and
 /// [`ProjectIoError::KeptBeside`] (another version took the path while the
 /// file was being replaced; it holds that version, ours is beside it).
+///
+/// Before anything is moved the save writes and syncs its record
+/// ([`Transaction`]); it is removed once nothing of the save is left beside
+/// the project, and is what the next open goes by if the save is cut short.
 ///
 /// An existing file is replaced by the atomic exchange, which takes
 /// whatever is at the path at that instant and hands it back to be judged.
@@ -1414,8 +1371,9 @@ pub(crate) fn publish(
     destination: &Path,
     mode: &Publish,
     new_hash: &str,
-    hooks: &PublishHooks,
+    host: &Host,
 ) -> Result<Published, ProjectIoError> {
+    let hooks = host.hooks;
     let dir = destination.parent().unwrap_or(Path::new("."));
     let expected = match mode {
         Publish::CreateNew => None,
@@ -1423,20 +1381,41 @@ pub(crate) fn publish(
     };
     check_version(destination, expected, false)?;
     let incoming = lstat_file(&temp.path)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+    let route = match expected {
+        None => Route::New,
+        Some(_) if exchanges(destination, hooks)? => Route::Exchange,
+        Some(_) => Route::Aside,
+    };
+    let mut tx = Transaction::begin(
+        destination,
+        &temp.path,
+        route,
+        expected.map(|v| v.hash.as_str()),
+        new_hash,
+        incoming.size,
+        host,
+    )?;
     let mut published = Published::default();
-    match expected {
-        Some(expected) => {
-            let exchanged = exchanges(destination, hooks)? && {
-                if let Some(hook) = &hooks.before_exchange {
-                    hook(destination);
-                }
-                swap_files(&temp.path, destination, hooks)?
-            };
-            if !exchanged {
-                published = replace_aside(temp, destination, expected, &incoming, new_hash, hooks)?;
-                sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
-                return Ok(published);
+    // Cleared when a file of this save stays under a private name: the
+    // record then stays too, for the next open.
+    let mut settled = true;
+    let exchanged = route == Route::Exchange && {
+        if let Some(hook) = &hooks.before_exchange {
+            hook(destination);
+        }
+        match swap_files(&temp.path, destination, hooks) {
+            Ok(exchanged) => exchanged,
+            Err(e) => {
+                tx.close();
+                return Err(e);
             }
+        }
+    };
+    match expected {
+        Some(expected) if exchanged => {
+            // The one step recorded after it was taken: an exchange cannot
+            // be half done, and what the two names hold says which it was.
+            let _ = tx.step("exchanged");
             if let Some(hook) = &hooks.after_exchange {
                 hook(destination);
             }
@@ -1453,12 +1432,15 @@ pub(crate) fn publish(
             if replaced {
                 drop(temp);
             } else {
-                published.displaced = Some(keep_beside(
+                let kept = keep_beside(
                     temp.keep(),
                     destination,
                     "other version",
                     hooks,
-                ));
+                    &mut |from, to| tx.keeping(from, to, "other"),
+                );
+                settled = kept.is_ok();
+                published.displaced = Some(kept.unwrap_or_else(|private| private));
             }
             // The path must still hold the file just published.
             if !lstat_file(destination)
@@ -1467,6 +1449,9 @@ pub(crate) fn publish(
                 .is_some_and(|now| now.same_identity(&incoming))
             {
                 let _ = sync_directory(dir);
+                if settled {
+                    tx.close();
+                }
                 return Err(match published.displaced {
                     Some(recovery_path) => ProjectIoError::Conflict {
                         message: "The project file was replaced by something else while it was \
@@ -1478,13 +1463,50 @@ pub(crate) fn publish(
                 });
             }
         }
-        None => match place_new(&temp.path, destination, Some(new_hash), hooks)? {
-            Placed::Moved => drop(temp.keep()),
-            // The copy keeps the data; `temp` unlinks its name on drop.
-            Placed::Copied => drop(temp),
-        },
+        Some(expected) => {
+            match replace_aside(
+                temp,
+                destination,
+                expected,
+                &incoming,
+                new_hash,
+                &mut tx,
+                &mut settled,
+            ) {
+                Ok(aside) => published = aside,
+                Err(e) => {
+                    if settled {
+                        tx.close();
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        None => {
+            let placed = tx
+                .step("install")
+                .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks));
+            match placed {
+                Ok(Placed::Moved) => drop(temp.keep()),
+                // The copy keeps the data; `temp` unlinks its name on drop.
+                Ok(Placed::Copied) => drop(temp),
+                Err(e) => {
+                    // Nothing of this save is under the name: it was taken
+                    // by something else, or a failed copy was taken back.
+                    if matches!(e, ProjectIoError::DestinationExists(_))
+                        || matches!(lstat_file(destination), Ok(None))
+                    {
+                        tx.close();
+                    }
+                    return Err(e);
+                }
+            }
+        }
     }
     sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
+    if settled {
+        tx.close();
+    }
     Ok(published)
 }
 
@@ -1613,7 +1635,7 @@ fn archived_key(name: &str) -> Option<BackupKey> {
 }
 
 /// [`random_uuid`]'s form: lowercase hex, hyphenated, version 4.
-fn is_uuid_v4(uuid: &str) -> bool {
+pub(super) fn is_uuid_v4(uuid: &str) -> bool {
     let uuid = uuid.as_bytes();
     let hyphens = [8, 13, 18, 23];
     uuid.len() == 36

@@ -38,6 +38,7 @@ mod envelope;
 mod main_delta_tests;
 pub mod media_jobs;
 pub mod save;
+mod transaction;
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -55,9 +56,11 @@ pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     temporary_sibling,
 };
-pub use durable::{LeftAside, PublishHooks};
-pub(crate) use durable::{left_aside, remove_abandoned_temps, settle_asides};
+pub(crate) use durable::{Host, remove_abandoned_temps};
+pub use durable::{PublishHook, PublishHooks, StepHook};
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
+pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
+pub(crate) use transaction::{leftovers, pending, settle, use_leftover};
 
 use crate::error::{ProjectIoError, io_err};
 use crate::history::History;
