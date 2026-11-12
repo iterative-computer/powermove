@@ -432,7 +432,7 @@ fn a_prepared_still_is_not_decoded_by_the_viewer_frame_that_first_draws_it() {
         let mut assets = MapResolver::default();
         assets.paths.insert("pic".into(), path);
         let mut renderer = Renderer::headless().unwrap();
-        renderer.set_preview_media(true);
+        renderer.set_preview_media(true, true);
         if prepared {
             let preparation = renderer
                 .prepare_media(&document, "Ptest-root", time, &request, &assets)

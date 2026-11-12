@@ -674,8 +674,10 @@ impl Engine {
             return Vec::new();
         };
         // Media is prepared as the frame will read it (a viewer frame's
-        // stills at the size it draws them).
-        self.renderer.set_preview_media(!spec.exact);
+        // stills at the size it draws them, paused or playing; video at the
+        // view's size only while playing or dragging).
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(

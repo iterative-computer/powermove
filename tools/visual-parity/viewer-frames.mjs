@@ -2,14 +2,15 @@
 // sees paused in the running lane app at each sample time.
 //
 //   node tools/visual-parity/viewer-frames.mjs --pid <lane app pid> --window <window id>
-//        --rect x,y,w,h --out <dir> [--times 2,8,13.458]
+//        --rect x,y,w,h --out <dir> [--times 2,8,13.458 | --frames 72,426] [--dir v2viewer]
 //
 // Seeks through the timeline's Current time field with the cua-driver CLI
 // (background input, no focus change), waits until the viewer stops changing, and crops
 // the viewer canvas (`--rect`, in the window screenshot's pixels) from a
 // native-resolution window screenshot into <out>/v2viewer/<time>.png. Times
 // come from <out>/v1/manifest.json (or v2/ without v1), all of them or the
-// samples nearest `--times` (seconds). The viewer shows the frame at its zoom,
+// samples nearest `--times` (seconds), or exactly `--frames` (indices at the
+// project rate), into <out>/<--dir>. The viewer shows the frame at its zoom,
 // so this column is for looking, not for pixel statistics.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,13 +23,15 @@ for (let i = 0; i < argv.length; i += 2) opt[argv[i].replace(/^--/, '')] = argv[
 const cua = path.join(process.env.HOME, '.local/bin/cua-driver');
 const pid = Number(opt.pid), window = Number(opt.window);
 const [x, y, w, h] = opt.rect.split(',').map(Number);
-const out = path.resolve(opt.out, 'v2viewer');
+const out = path.resolve(opt.out, opt.dir ?? 'v2viewer');
 mkdirSync(out, { recursive: true });
 const base = JSON.parse(readFileSync(['v1', 'v2'].map((d) => path.resolve(opt.out, d, 'manifest.json')).find(existsSync), 'utf8'));
 const fps = base.project.fps;
-const wanted = opt.times
-  ? opt.times.split(',').map(Number).map((t) => base.samples.reduce((a, b) => (Math.abs(b.time - t) < Math.abs(a.time - t) ? b : a)))
-  : base.samples;
+const wanted = opt.frames
+  ? opt.frames.split(',').map(Number).map((f) => ({ time: f / fps }))
+  : opt.times
+    ? opt.times.split(',').map(Number).map((t) => base.samples.reduce((a, b) => (Math.abs(b.time - t) < Math.abs(a.time - t) ? b : a)))
+    : base.samples;
 const session = `parity-${process.pid}`;
 const call = (tool, args) => JSON.parse(execFileSync(cua, ['call', tool, JSON.stringify({ pid, window_id: window, session, ...args })], { encoding: 'utf8', maxBuffer: 64 << 20 }));
 const steps = (list) => {
