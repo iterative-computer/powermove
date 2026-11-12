@@ -638,9 +638,11 @@ impl MediaImporter for EngineJobs {
         let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
         let width = video.map(|video| f64::from(video.width));
         let height = video.map(|video| f64::from(video.height));
+        // The clip's own length (first frame start to last frame end), as
+        // the Project panel's import records it.
         let duration = probe
             .as_ref()
-            .and_then(|probe| seconds(probe.duration_us))
+            .and_then(pm_media::probe::MediaProbe::duration)
             .filter(|_| kind != "image");
         let has_audio = probe
             .as_ref()
@@ -697,9 +699,17 @@ impl MediaImporter for EngineJobs {
             .map(|entry| archive.retain_entry(entry))
             .transpose()
             .map_err(failed)?;
-        let metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
+        let mut metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        // Every audio stream of a multi-track file is listed and heard, as
+        // when a person imports it.
+        if let Some(streams) = probe
+            .as_ref()
+            .and_then(|p| pm_media::facts::asset_audio_streams(&pm_media::facts::audio_streams(p)))
+        {
+            metadata["audioStreams"] = streams;
+        }
         let catalog =
             pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog

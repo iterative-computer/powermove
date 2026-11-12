@@ -318,3 +318,49 @@ fn durations_are_the_streams_own() {
     let sound = ts.audio_duration.unwrap();
     assert!((sound - 1.0).abs() < 0.05, "{sound}");
 }
+
+/// A recorder file's separate tracks are all listed for its asset, each
+/// with the stream index a clip plays it by; a file with one soundtrack
+/// lists none (its asset plays that one stream).
+#[test]
+fn every_audio_stream_is_listed_for_the_asset() {
+    let dir = tmp_dir();
+    let path = dir.path().join("recorder.mov");
+    let status = Command::new(ffmpeg_bin())
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("testsrc2=size=64x64:rate=25:duration=0.4")
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=0.4",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:sample_rate=44100:duration=0.4",
+        ])
+        .args([
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-pix_fmt", "yuv420p",
+        ])
+        .args(["-c:v", "mpeg4", "-c:a", "pcm_s16le"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let facts = pm_media::facts::media_facts(&path, None).unwrap();
+    assert_eq!(
+        pm_media::facts::asset_audio_streams(&facts.audio_streams),
+        Some(serde_json::json!([
+            {"index": 1, "channels": 1, "sampleRate": 48000, "on": true},
+            {"index": 2, "channels": 1, "sampleRate": 44100, "on": true},
+        ]))
+    );
+    let one = pm_media::facts::media_facts(&fixtures_dir().join("h264-aac.mp4"), None).unwrap();
+    assert_eq!(one.audio_streams.len(), 1);
+    assert_eq!(
+        pm_media::facts::asset_audio_streams(&one.audio_streams),
+        None
+    );
+}

@@ -156,12 +156,8 @@ fn metadata(path: &Path, kind: &str, size: u64) -> Result<Value, String> {
     }
     // A file with several audio streams (camera and recorder tracks) lists
     // them all, each on: every one is heard until it is switched off.
-    if facts.audio_streams.len() > 1 {
-        asset["audioStreams"] = facts
-            .audio_streams
-            .iter()
-            .map(|s| json!({"index": s.index, "channels": s.channels, "sampleRate": s.sample_rate, "on": true}))
-            .collect();
+    if let Some(streams) = pm_media::facts::asset_audio_streams(&facts.audio_streams) {
+        asset["audioStreams"] = streams;
     }
     if kind == "image" {
         asset["format"] = json!(extension(path));

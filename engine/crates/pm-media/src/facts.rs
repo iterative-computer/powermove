@@ -166,7 +166,7 @@ fn audio_duration(p: &MediaProbe) -> Option<f64> {
 }
 
 /// Every audio stream of the file that can be described, in file order.
-fn audio_streams(p: &MediaProbe) -> Vec<AudioStreamFacts> {
+pub fn audio_streams(p: &MediaProbe) -> Vec<AudioStreamFacts> {
     p.streams
         .iter()
         .filter_map(|stream| {
@@ -178,6 +178,26 @@ fn audio_streams(p: &MediaProbe) -> Vec<AudioStreamFacts> {
             })
         })
         .collect()
+}
+
+/// The asset's `audioStreams` member for a file's audio streams: every
+/// stream listed and on, when the file has more than one (camera and
+/// recorder tracks); `None` for a file with one stream or none, whose asset
+/// plays its one stream without a list.
+pub fn asset_audio_streams(streams: &[AudioStreamFacts]) -> Option<serde_json::Value> {
+    (streams.len() > 1).then(|| {
+        streams
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "index": s.index,
+                    "channels": s.channels,
+                    "sampleRate": s.sample_rate,
+                    "on": true,
+                })
+            })
+            .collect()
+    })
 }
 
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
