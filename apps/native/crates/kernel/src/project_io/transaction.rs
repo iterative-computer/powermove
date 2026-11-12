@@ -28,8 +28,9 @@ use std::path::{Path, PathBuf};
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
-    FileVersion, Folder, Host, Placed, PublishHooks, begins, dispose, folder_sync, is_uuid_v4,
-    keep_beside, lstat_file, place_new, probing, sync_directory, sync_file, withdraw,
+    FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, folder_sync,
+    is_uuid_v4, keep_beside, lstat_file, place_new, probing, rename_private, sync_directory,
+    sync_file, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -262,9 +263,12 @@ fn private_parts<'a>(entry: &'a str, destination: &Path) -> Option<(&'a str, &'a
 /// read at all, so recovery never acts on a name outside its own folder.
 fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> bool {
     let text = |key: &str| step.get(key).and_then(Value::as_str);
+    // The name an unreadable file at the project's name is moved to before
+    // a version the person chose takes the name ([`use_leftover`]).
+    let partial = staged.with_extension(PARTIAL);
     let own = |key: &str| {
         text(key).is_some_and(|n| {
-            [staged, aside]
+            [staged, aside, &partial]
                 .iter()
                 .any(|p| p.file_name() == Some(OsStr::new(n)))
         })
@@ -611,6 +615,15 @@ impl Transaction {
         self.record.with_extension(ASIDE)
     }
 
+    /// The kept file `path` needs no telling any more.
+    pub fn seen(&mut self, path: &Path) {
+        let mut members = Map::new();
+        if let Some(name) = path.file_name() {
+            members.insert("to", Value::from(name.to_string_lossy().into_owned()));
+        }
+        let _ = self.step_with("seen", members);
+    }
+
     /// The name this save staged its new file under.
     pub fn staged(&self) -> PathBuf {
         self.record.with_extension(STAGED)
@@ -829,6 +842,10 @@ pub enum Undecided {
     /// is still at it, so nothing is settled unasked: the person is told
     /// who and since when, and chooses.
     Elsewhere,
+    /// Not undecided: a whole version a save's record proves (read now, it
+    /// holds exactly the bytes the record names), offered when the file at
+    /// the project's name does not open.
+    Proven,
 }
 
 /// Whose save `record` is, where that keeps recovery from acting on it.
@@ -1281,10 +1298,15 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
             (Ok(part), Ok(whole)) => part.is_file() && part.len() < whole.len(),
             _ => false,
         };
-        // The whole file is first proven to be what the record says it is
-        // (the staged file, or the version the save replaced): only then is
-        // a beginning of it a copy this save was making.
-        if shorter && matches!(holds(whole, record), Holds::New | Holds::Old) && begins(whole, &to)
+        // The file under the name carries this save's mark, the whole file
+        // is proven to be what the record says it is (the staged file, or
+        // the version the save replaced), and the name holds a beginning of
+        // it: only then is it a copy this save was making. Anything else
+        // there is not this save's to take back.
+        if shorter
+            && copy_of(&to, whole)
+            && matches!(holds(whole, record), Holds::New | Holds::Old)
+            && begins(whole, &to)
         {
             withdraw(&to, whole, hooks);
         }
@@ -1313,7 +1335,48 @@ pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
             }
         }
     }
+    // Whole versions any record proves, wherever they are now (under a
+    // private name, retained, or kept beside the project), for when the file
+    // under the project's name does not open.
+    for record in records_of(destination).0 {
+        if held_by_another(&record, destination, host) == Some(Undecided::Active) {
+            continue;
+        }
+        for path in proven_candidates(&record) {
+            if found.iter().any(|l| l.path == path) {
+                continue;
+            }
+            let role = match holds(&path, &record) {
+                Holds::Old => "previous",
+                Holds::New => "saving",
+                _ => continue,
+            };
+            found.push(leftover(&path, role, Undecided::Proven, Some(&record)));
+        }
+    }
     found
+}
+
+/// The files `record` names that may hold one of its two versions: its own
+/// private files and the names it gave kept files beside the project.
+fn proven_candidates(record: &Record) -> Vec<PathBuf> {
+    let dir = record.path.parent().unwrap_or(Path::new("."));
+    let mut paths = vec![record.aside.clone(), record.staged.clone()];
+    for step in &record.steps {
+        let text = |key: &str| step.get(key).and_then(Value::as_str);
+        if matches!(text("step"), Some("keep" | "kept"))
+            && let Some(to) = text("to")
+        {
+            let path = dir.join(to);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter(|p| matches!(lstat_file(p), Ok(Some(_))))
+        .collect()
 }
 
 /// The person chose `chosen`, a file a record of `destination` names, to
@@ -1347,7 +1410,12 @@ fn use_leftover_now(
     let (records, _) = records_of(destination);
     let record = records
         .iter()
-        .find(|r| r.staged == chosen || r.aside == chosen)
+        .find(|r| {
+            r.staged == chosen
+                || r.aside == chosen
+                || (proven_candidates(r).iter().any(|p| p == chosen)
+                    && matches!(holds(chosen, r), Holds::Old | Holds::New))
+        })
         .ok_or_else(|| {
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
         })?;
@@ -1361,13 +1429,43 @@ fn use_leftover_now(
     let mut tx =
         Transaction::resume(record, destination, hooks).map_err(|e| io_err(&record.path, e))?;
     take_back_copies(record, destination, hooks);
+    let mut left = Vec::new();
+    // The name holds a file that does not open as a project (a copy cut
+    // short and changed since, or a file no save of this one made): it is
+    // not this save's to remove. It is moved to the record's own private
+    // name and kept beside the project, and the chosen version takes the
+    // name. A file there that opens is the project: nothing is changed.
+    if lstat_file(destination)?.is_some() {
+        if super::open_project(destination, super::OpenOptions::default()).is_ok() {
+            return Err(ProjectIoError::Invalid(
+                "The project's file opens as it is; nothing was changed.".into(),
+            ));
+        }
+        let unreadable = record.path.with_extension(PARTIAL);
+        if lstat_file(&unreadable)?.is_some() {
+            return Err(ProjectIoError::Invalid(
+                "A file this save left is in the way; nothing was changed.".into(),
+            ));
+        }
+        rename_private(destination, &unreadable, hooks).map_err(|e| io_err(destination, e))?;
+        match tx.keep(unreadable.clone(), "unreadable") {
+            Ok(kept) => left.push(LeftAside::Kept(kept)),
+            Err(_) => {
+                // Still under the record's private name, which it names.
+                tx.retain(&unreadable, None);
+            }
+        }
+    }
     tx.step("chosen")?;
     if place_new(chosen, destination, None, hooks)? == Placed::Copied {
         // The name holds a verified copy: the file itself stays, for a
         // later save to read again and prune.
         tx.retain(chosen, None);
     }
-    let mut left = Vec::new();
+    // A kept file that is the project now is nothing more to tell.
+    if chosen != record.aside && chosen != record.staged {
+        tx.seen(chosen);
+    }
     let mut settled = true;
     for (path, label) in [
         (&record.aside, "other version"),

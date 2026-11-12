@@ -1064,7 +1064,7 @@ pub(super) fn place_new(
 /// same where the volume has one.) Taking a file away from a public name
 /// this way destroys nothing: whatever is there at that instant is what
 /// gets the private name.
-fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io::Result<()> {
+pub(super) fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io::Result<()> {
     debug_assert!(
         to.file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with('.'))
@@ -1115,6 +1115,10 @@ fn create_exclusive(
         }
         Err(e) => return Err(io_err(destination, e)),
     };
+    // Marked as this save's copy before it holds a byte (a volume without
+    // extended attributes leaves it unmarked: recovery then never takes it
+    // back on its own, and offers the versions instead).
+    mark_copy(&out, source);
     let copied = (|| {
         use std::io::Write;
         let mut hasher = Sha256::new();
@@ -1156,6 +1160,8 @@ fn create_exclusive(
             .is_ok_and(|now| stat_of(&now).same_identity(&ours));
         let holds = hex(&hash_reader(&back, destination)?.finalize());
         if same && holds == read && hash.is_none_or(|hash| hash == read) {
+            unmark_copy(&out);
+            sync_file(&out).map_err(|e| io_err(destination, e))?;
             Ok(())
         } else {
             Err(ProjectIoError::Invalid(
@@ -1729,6 +1735,80 @@ fn retained_hash(path: &Path) -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 fn retained_hash(_: &Path) -> Option<String> {
     None
+}
+
+/// The extended attribute a file a save is copying into a name carries
+/// until the copy is complete and verified: the private name of the file
+/// it is a copy of, which names the save's transaction. It is what makes an
+/// incomplete file at that name this save's own, not equal first bytes.
+const COPY_OF: &str = "com.powermove.copy-of";
+
+#[cfg(target_os = "macos")]
+fn mark_copy(file: &File, source: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let (Some(value), Ok(name)) = (
+        source.file_name().and_then(OsStr::to_str),
+        std::ffi::CString::new(COPY_OF),
+    ) else {
+        return false;
+    };
+    // SAFETY: a live descriptor, a C string and a buffer of the stated length.
+    unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        ) == 0
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn mark_copy(_: &File, _: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn unmark_copy(file: &File) {
+    use std::os::fd::AsRawFd;
+    if let Ok(name) = std::ffi::CString::new(COPY_OF) {
+        // SAFETY: a live descriptor and a C string.
+        unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr(), 0) };
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn unmark_copy(_: &File) {}
+
+/// Whether `path` is an incomplete copy of the file named `source` that a
+/// save was making ([`COPY_OF`]).
+#[cfg(target_os = "macos")]
+pub(super) fn copy_of(path: &Path, source: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(c_path), Ok(name), Some(expected)) = (
+        std::ffi::CString::new(path.as_os_str().as_bytes()),
+        std::ffi::CString::new(COPY_OF),
+        source.file_name().and_then(OsStr::to_str),
+    ) else {
+        return false;
+    };
+    let mut buf = [0u8; 256];
+    // SAFETY: valid C strings and a buffer of the stated length.
+    let n = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    n > 0 && &buf[..n as usize] == expected.as_bytes()
+}
+#[cfg(not(target_os = "macos"))]
+pub(super) fn copy_of(_: &Path, _: &Path) -> bool {
+    false
 }
 
 /// Moves `displaced`, the version a save replaced, into the backups in

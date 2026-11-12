@@ -376,6 +376,7 @@ fn leftover_row(left: &project_io::Leftover) -> Value {
             project_io::Undecided::Unreadable => "unreadable",
             project_io::Undecided::Active => "active",
             project_io::Undecided::Elsewhere => "elsewhere",
+            project_io::Undecided::Proven => "proven",
         }),
     );
     m.insert("size", Value::from(left.size as f64));

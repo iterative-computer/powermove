@@ -20,6 +20,7 @@ pub enum Action {
     Ok,
     Reopen,
     Later,
+    OpenThisOne,
 }
 pub fn unsaved(name: &str) -> Alert<Action> {
     Alert::new(
@@ -275,6 +276,62 @@ pub fn not_protected(name: &str, failure: WriteFailure) -> Alert<Action> {
         ],
     )
 }
+/// A version of a project a save's record proves, offered when the file at
+/// the project's name does not open (a save cut short, a sync client that
+/// changed the file it left): `saving` is the one being saved, otherwise the
+/// last saved one. `at` is when that save began, as the person reads it.
+pub struct OfferedVersion<'a> {
+    pub saving: bool,
+    pub at: &'a str,
+    pub bytes: u64,
+}
+
+/// The file `file` did not open, and a whole version of it exists beside
+/// it: which one, from when, how large, with a way to open it.
+pub fn version_offer(name: &str, file: &str, version: &OfferedVersion) -> Alert<Action> {
+    let which = if version.saving {
+        "the version Powermove was saving"
+    } else {
+        "the last saved version"
+    };
+    Alert::new(
+        format!("“{name}” couldn’t be opened, but {which} is intact."),
+        format!(
+            "The file “{file}” is incomplete or was changed after a save was interrupted. {} from {}, {}, is next to it. Open This One puts it in place of “{file}”; the file there now is kept next to it, so nothing is lost.",
+            if version.saving {
+                "The version being saved"
+            } else {
+                "The last saved version"
+            },
+            version.at,
+            size_text(version.bytes)
+        ),
+        vec![
+            Button::new("Open This One", Action::OpenThisOne).default(),
+            Button::new("Show in Finder", Action::ShowInFinder),
+            Button::new("Cancel", Action::Cancel).cancel(),
+        ],
+    )
+}
+
+/// `285 MB`, `12 KB`: decimal units, as Finder shows sizes.
+fn size_text(bytes: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit + 1 < units.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else if size < 10.0 {
+        format!("{size:.1} {}", units[unit])
+    } else {
+        format!("{size:.0} {}", units[unit])
+    }
+}
+
 /// Why a project didn't open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenFailure {
@@ -301,6 +358,36 @@ pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<
 #[cfg(test)]
 mod write_failure_tests {
     use super::*;
+
+    #[test]
+    fn a_version_offered_after_a_failed_open_says_which_when_and_how_large() {
+        let alert = version_offer(
+            "cut",
+            "cut.pmv",
+            &OfferedVersion {
+                saving: true,
+                at: "2026-11-12 14.03.22",
+                bytes: 285_283_213,
+            },
+        );
+        assert_eq!(
+            alert.message,
+            "“cut” couldn’t be opened, but the version Powermove was saving is intact."
+        );
+        assert!(
+            alert
+                .informative
+                .contains("from 2026-11-12 14.03.22, 285 MB")
+        );
+        assert_eq!(
+            alert.labels(),
+            ["Open This One", "Show in Finder", "Cancel"]
+        );
+        assert!(alert.buttons[0].default);
+        assert!(!alert.informative.contains('/'), "names, never paths");
+        assert_eq!(size_text(12_400), "12 KB");
+        assert_eq!(size_text(1_500_000_000), "1.5 GB");
+    }
 
     #[test]
     fn a_version_kept_beside_a_save_is_named_with_a_way_to_it() {

@@ -1805,8 +1805,100 @@ impl Controller {
         })
         .detach();
     }
-    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    /// A file that did not open may have whole versions beside it that a
+    /// save's record proves (a save cut short, a sync client that changed
+    /// the file it left): the newest is offered first (which, when, how
+    /// large; Open This One / Show in Finder / Cancel). Otherwise, or after
+    /// Cancel, the plain open error.
     fn report_open_failure(
+        &mut self,
+        name: &str,
+        path: Option<PathBuf>,
+        error: &KernelFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(file) = path.clone() else {
+            return self.report_open_error(name, path, error, cx);
+        };
+        let asked = self.kernel.shell(ShellCall::Leftovers(file.clone()));
+        let (name, error) = (name.to_owned(), error.clone());
+        cx.spawn(async move |this, cx| {
+            let rows = match asked.await {
+                Some(Ok(ShellReply::Leftovers(rows))) => rows,
+                _ => Vec::new(),
+            };
+            let text = |row: &pm_model::Value, key: &str| {
+                row.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            // Never a save that is going on right now; the newest work first.
+            let offered = ["saving", "previous"].iter().find_map(|role| {
+                rows.iter().find(|r| {
+                    text(r, "role").as_deref() == Some(role)
+                        && text(r, "why").as_deref() != Some("active")
+                })
+            });
+            let Some(row) = offered else {
+                let _ = this.update(cx, |v, cx| v.report_open_error(&name, path, &error, cx));
+                return;
+            };
+            let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
+            let saving = text(row, "role").as_deref() == Some("saving");
+            let at = row
+                .get("at")
+                .and_then(pm_model::Value::as_f64)
+                .map_or_else(String::new, |ms| {
+                    pm_kernel::project_io::local_time((ms / 1000.0) as u64)
+                });
+            let bytes = row
+                .get("size")
+                .and_then(pm_model::Value::as_f64)
+                .unwrap_or(0.0) as u64;
+            let Ok(answer) = this.update(cx, |v, _| {
+                let alert = crate::surfaces::documents::version_offer(
+                    &name,
+                    &file_name(&file),
+                    &crate::surfaces::documents::OfferedVersion {
+                        saving,
+                        at: &at,
+                        bytes,
+                    },
+                );
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                alert.sheet(&v.host.borrow().window)
+            }) else {
+                return;
+            };
+            use crate::surfaces::documents::Action;
+            match answer.recv().await.ok().flatten() {
+                Some(Action::OpenThisOne) => {
+                    let Ok(used) = this.update(cx, |v, _| {
+                        v.kernel.shell(ShellCall::UseLeftover {
+                            path: file.clone(),
+                            leftover: leftover.clone(),
+                        })
+                    }) else {
+                        return;
+                    };
+                    let used = used.await;
+                    let _ = this.update(cx, |v, cx| match used {
+                        Some(Ok(_)) => v.open_named(SessionSource::File(file), Some(name), cx),
+                        Some(Err(e)) => v.report_open_error(&name, Some(file), &e, cx),
+                        None => {}
+                    });
+                }
+                Some(Action::ShowInFinder) => platform::reveal(&leftover),
+                _ => {}
+            }
+        })
+        .detach();
+    }
+    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    fn report_open_error(
         &mut self,
         name: &str,
         path: Option<PathBuf>,

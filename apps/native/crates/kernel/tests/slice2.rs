@@ -2965,6 +2965,79 @@ fn private_file(file: &Path, extension: &str) -> std::path::PathBuf {
     assert_eq!(found.len(), 1, "{extension}: {found:?}");
     file.parent().unwrap().join(&found[0])
 }
+/// A save on a volume that can only copy a file to its name was cut short
+/// mid-copy, and then the incomplete file at the project's name was not the
+/// one this save wrote: a sync client changed it, or it is a fresh file with
+/// the same first bytes (no mark of this save). Recovery never takes such a
+/// file back, so it is not lost; the open cannot parse it, and the person is
+/// offered the versions the save's record proves (the last saved one and the
+/// one being saved). Choosing one opens it; the file that was at the name is
+/// kept beside it.
+#[test]
+fn an_incomplete_file_at_the_name_never_traps_the_open_when_whole_versions_exist() {
+    for case in [
+        "changed by a sync client",
+        "a copy without this save's mark",
+    ] {
+        let dir = common::TempDir::new("trapped-open");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = saved_name(&file);
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+        let mut stray = fs::read(&file).unwrap();
+        if case == "changed by a sync client" {
+            stray[10] ^= 0xff;
+        }
+        land(&file, &stray);
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk("no-exclusive"));
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err(&format!("{case}: the file at the name is not a project"));
+        let holding = |bytes: &[u8]| {
+            fs::read_dir(dir.path("job"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .any(|p| fs::read(&p).is_ok_and(|b| b == bytes))
+        };
+        assert!(holding(&stray), "{case}: the file at the name is not lost");
+        let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap()
+        else {
+            panic!()
+        };
+        let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+        let offered = |role: &str| {
+            rows.iter()
+                .find(|r| text(r, "role").as_deref() == Some(role))
+                .and_then(|r| text(r, "path"))
+                .map(std::path::PathBuf::from)
+        };
+        let saving = offered("saving").unwrap_or_else(|| panic!("{case}: {rows:?}"));
+        assert_eq!(saved_name(&saving).as_deref(), Some("One"), "{case}");
+        let previous = offered("previous").unwrap_or_else(|| panic!("{case}: {rows:?}"));
+        assert_eq!(saved_name(&previous), original, "{case}");
+        k.shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: saving,
+        })
+        .unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "{case}");
+        assert!(holding(&stray), "{case}: kept beside");
+        assert!(
+            visible_siblings(&file)
+                .iter()
+                .any(|p| fs::read(p).unwrap() == stray),
+            "{case}: under a name the person finds"
+        );
+        let (session, _) = open_file(&mut k, &file);
+        let _ = session;
+    }
+}
 /// A record is read only if every name in it is a name of its own save
 /// beside the project: a single file name, never a path. A record whose
 /// step names a file elsewhere (a crafted or damaged line that still carries
