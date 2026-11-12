@@ -894,8 +894,26 @@ enum Scope {
     /// Reads, and state transactions (staged, swapped in at the end).
     Nothing,
     Project(String),
-    /// Shell calls open, save and close any project.
+    /// Shell calls that are not one project's (the library, quit).
     Every,
+}
+
+/// What a shell call can change. A call that names a project (its open,
+/// save, close, copies) can leave only that project half done: a panic in
+/// it stops that one and every other open project keeps working. Calls on
+/// the library as a whole can touch any of them.
+fn shell_scope(call: &crate::session::ShellCall) -> Scope {
+    use crate::session::ShellCall::*;
+    match call {
+        Open { id, .. } | PrepareOpen { id, .. } => Scope::Project(id.clone()),
+        Save(session)
+        | Close(session)
+        | DeferClose(session)
+        | DiscardClose(session)
+        | CopiesOf(session)
+        | SaveAs { session, .. } => Scope::Project(session.project.clone()),
+        _ => Scope::Every,
+    }
 }
 
 fn scope(msg: &Msg) -> Scope {
@@ -906,7 +924,7 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::Close { project, .. } => Scope::Project(project.clone()),
         Msg::PrepareSave { session, .. } => Scope::Project(session.project.clone()),
         Msg::FinishSave { completion, .. } => Scope::Project(completion.project().to_owned()),
-        Msg::Shell { .. } => Scope::Every,
+        Msg::Shell { call, .. } => shell_scope(call),
         Msg::State { .. }
         | Msg::ProClock { .. }
         | Msg::Profile { .. }
