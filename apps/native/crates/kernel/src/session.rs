@@ -138,6 +138,9 @@ pub(crate) struct Prepared {
     base: String,
     recovered: Recovery,
     recovery_file: Option<project_io::ProjectFile>,
+    /// `recovered` is another file entry's work (its id), offered to this
+    /// file: see [`RecoveryResult::FromOtherFile`].
+    from_other: Option<String>,
 }
 /// Sizes and modification times of the files an open read.
 type Freshness = Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>;
@@ -222,9 +225,25 @@ impl SessionSave {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryResult {
     None,
-    Recovered { truncated: bool },
-    OfferCopy { project: String, truncated: bool },
-    Unrecoverable { reason: String },
+    Recovered {
+        truncated: bool,
+    },
+    OfferCopy {
+        project: String,
+        truncated: bool,
+    },
+    Unrecoverable {
+        reason: String,
+    },
+    /// Unsaved work left for another file (`name`, no longer where it was)
+    /// whose saved content is exactly this file's. It may be this file
+    /// (moved across volumes, restored from a backup) or a duplicate of it:
+    /// the person decides. Until they choose Recover nothing of that work
+    /// is touched, and `Discard` leaves it where it is.
+    FromOtherFile {
+        name: String,
+        truncated: bool,
+    },
 }
 #[derive(Clone, Debug)]
 pub enum ShellReply {
@@ -412,10 +431,12 @@ impl Kernel {
                     .remove(&ticket)
                     .ok_or_else(|| failure("Recovery choice expired; prepare the open again"))?;
                 if let Some(prepared) = pending.prepared.take() {
-                    let journals = self.project_dir(match &prepared.destination {
-                        Destination::Library(slot) => slot,
-                        _ => &prepared.id,
-                    });
+                    let journals =
+                        self.project_dir(match (&prepared.from_other, &prepared.destination) {
+                            (Some(other), _) => other,
+                            (None, Destination::Library(slot)) => slot,
+                            _ => &prepared.id,
+                        });
                     let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
                     if freshness(prepared.inputs(journals, library.as_deref())) == pending.fresh {
                         return self.settle_open(*prepared, Some(decision));
@@ -1075,6 +1096,8 @@ impl Kernel {
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
         let mut rejected_history = None;
+        // A file entry whose unsaved work may be this file's (id, file name).
+        let mut maybe_left: Option<(String, String)> = None;
         let (source, destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
@@ -1284,12 +1307,16 @@ impl Kernel {
                 }
                 // Recovery follows the file, not its path: unsaved work left
                 // in the journal of the name or place it had before comes
-                // along, with where the person left off in it.
+                // along, with where the person left off in it. Work that
+                // only may be this file's is not taken: it is offered.
                 if decision == OpenDecision::Writable
                     && let Some(version) = &opened.file.version
-                    && let Some(left) = self.adopt_moved_entry(&id, &path, &version.hash)
                 {
-                    meta = left;
+                    match self.left_behind(&id, &path, version) {
+                        Some(Left::Mine(left)) => meta = left,
+                        Some(Left::Maybe { entry, name }) => maybe_left = Some((entry, name)),
+                        None => {}
+                    }
                 }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
@@ -1357,6 +1384,29 @@ impl Kernel {
                 recovered = Recovery::Nothing;
             }
         }
+        // Work that may be this file's is offered only where someone can be
+        // asked, and only if it replays cleanly onto exactly this file.
+        let mut from_other = None;
+        if !journaled
+            && !matches!(mode, RecoveryMode::Legacy)
+            && let Some((entry, name)) = maybe_left
+        {
+            let document = source_document(&source);
+            let saved = saved_state(&source);
+            let found = self.recover_from(
+                &entry,
+                Some(&base),
+                Some(crate::journal::Base {
+                    document: &document,
+                    history: saved.as_ref().map(|(h, _)| h),
+                    workspace: saved.as_ref().map(|(_, w)| w),
+                }),
+            );
+            if matches!(found, Recovery::Recovered(_)) {
+                recovered = found;
+                from_other = Some((entry, name));
+            }
+        }
         let file_stamp = recovery_file
             .as_ref()
             .and_then(|f| f.version.as_ref())
@@ -1378,22 +1428,29 @@ impl Kernel {
             }
         );
         if matches!(mode, RecoveryMode::Ask) && !matches!(recovered, Recovery::Nothing) {
-            let recovery = match &recovered {
-                Recovery::Recovered(r) => RecoveryResult::Recovered {
+            let recovery = match (&recovered, &from_other) {
+                (Recovery::Recovered(r), Some((_, name))) => RecoveryResult::FromOtherFile {
+                    name: name.clone(),
                     truncated: r.truncated,
                 },
-                Recovery::Copy { recovered: r, .. } => RecoveryResult::OfferCopy {
-                    project: id.clone(),
-                    truncated: r.truncated,
+                _ => match &recovered {
+                    Recovery::Recovered(r) => RecoveryResult::Recovered {
+                        truncated: r.truncated,
+                    },
+                    Recovery::Copy { recovered: r, .. } => RecoveryResult::OfferCopy {
+                        project: id.clone(),
+                        truncated: r.truncated,
+                    },
+                    Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
+                        reason: reason.clone(),
+                    },
+                    _ => unreachable!(),
                 },
-                Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
-                    reason: reason.clone(),
-                },
-                _ => unreachable!(),
             };
             self.pending_recovery.retain(|_, p| p.id != id);
             let ticket = crate::new_id("recovery-choice");
-            let journals = self.project_dir(recovery_id);
+            let journals =
+                self.project_dir(from_other.as_ref().map_or(recovery_id, |(entry, _)| entry));
             let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
             let prepared = Prepared {
                 id: id.clone(),
@@ -1406,6 +1463,7 @@ impl Kernel {
                 base,
                 recovered,
                 recovery_file,
+                from_other: from_other.map(|(entry, _)| entry),
             };
             let fresh = freshness(prepared.inputs(journals, library.as_deref()));
             self.pending_recovery.insert(
@@ -1442,6 +1500,7 @@ impl Kernel {
                 base,
                 recovered,
                 recovery_file,
+                from_other: from_other.map(|(entry, _)| entry),
             },
             choice,
         )
@@ -1463,6 +1522,7 @@ impl Kernel {
             base,
             recovered,
             recovery_file,
+            from_other,
         } = prepared;
         let setting_aside = matches!(
             choice,
@@ -1476,7 +1536,9 @@ impl Kernel {
                 "Recovery could not be replayed; files are retained",
             ));
         }
-        if setting_aside {
+        // Work offered from another file and declined is left exactly where
+        // it is: it may not be this file's to set aside.
+        if setting_aside && from_other.is_none() {
             // Explicitly rejected sessions remain archived. No save of recovered
             // content, and no unrelated journal session is retired.
             let paths = match &recovered {
@@ -1950,6 +2012,14 @@ impl Kernel {
     }
 }
 
+/// Unsaved work a file entry left behind, as it relates to a file being
+/// opened ([`Kernel::left_behind`]).
+enum Left {
+    /// The entry is this file: its journal was moved to it; its metadata.
+    Mine(Value),
+    /// The entry may be this file (its id, and the file name it had).
+    Maybe { entry: String, name: String },
+}
 /// What a copy's entry records about the file it stands in for (`copyOf`):
 /// where it was, why it opened as a copy, and which file it was (`source`:
 /// its content hash, and the stat that says without reading it that it is
@@ -2133,21 +2203,36 @@ impl Kernel {
         }
         found
     }
-    /// `path` (whose bytes hash to `hash`) is being opened under `id` and has
-    /// no journal of its own: if a file entry of the library is this same
-    /// file under the path it had before (it names this path already because
-    /// a save followed it there, or it was saved with exactly these bytes
-    /// and its old path no longer holds a file) and left a journal, that
-    /// journal becomes this file's, so the open offers its unsaved work.
-    /// Returns that entry's metadata. A journal replays only onto the base
-    /// it was written for, so a wrong match recovers nothing.
-    fn adopt_moved_entry(&self, id: &str, path: &std::path::Path, hash: &str) -> Option<Value> {
+    /// `path` (the file `version`) is being opened under `id` and has no
+    /// journal of its own. A file entry of the library that left a journal
+    /// may be this file under the name or place it had before.
+    ///
+    /// It *is* this file when it names this path already (a save followed
+    /// the file here), or when it recorded this very file: the device and
+    /// inode it had when last opened or saved, which a rename or a move
+    /// within the volume keep and a copy never has, with exactly these
+    /// bytes. Then its journal becomes this file's and its metadata is
+    /// returned ([`Left::Mine`]).
+    ///
+    /// It only *may* be this file when it was saved with exactly these bytes
+    /// and its old path holds no file any more, but the identity does not
+    /// match or was never recorded (a duplicate, a copy restored from a
+    /// backup, a file moved to another volume). Equal bytes do not make two
+    /// files one: nothing is moved, and the entry is returned for the person
+    /// to decide ([`Left::Maybe`]).
+    fn left_behind(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        version: &project_io::FileVersion,
+    ) -> Option<Left> {
         let store = self.library.as_ref()?.store();
         let root = self.config_journal_root()?;
         let to = root.join(id);
         if !crate::journal::sessions(&to).is_empty() {
             return None;
         }
+        let mut maybe = None;
         for row in store.projects().ok()? {
             if row.id == id || self.sessions.contains_key(&row.id) {
                 continue;
@@ -2162,24 +2247,37 @@ impl Kernel {
             let Some(file) = meta.get("file") else {
                 continue;
             };
-            let was = file
-                .get("path")
-                .and_then(Value::as_str)
-                .map(std::path::Path::new);
-            let here = was == Some(path);
-            let moved = file.get("savedHash").and_then(Value::as_str) == Some(hash)
-                && was.is_some_and(|was| !was.is_file());
             let from = root.join(&row.id);
-            if !(here || moved) || crate::journal::sessions(&from).is_empty() {
+            if crate::journal::sessions(&from).is_empty() {
                 continue;
             }
-            // An empty folder left by an earlier open of this id is no journal.
-            let _ = std::fs::remove_dir(&to);
-            if std::fs::rename(&from, &to).is_ok() {
-                return Some(meta);
+            let text = |key: &str| file.get(key).and_then(Value::as_str);
+            let was = text("path").map(std::path::Path::new);
+            let same_bytes = text("savedHash") == Some(version.hash.as_str());
+            let same_file = same_bytes
+                && text("dev") == Some(&version.stat.dev.to_string())
+                && text("ino") == Some(&version.stat.ino.to_string());
+            if was == Some(path) || same_file {
+                // An empty folder left by an earlier open of this id is no journal.
+                let _ = std::fs::remove_dir(&to);
+                if std::fs::rename(&from, &to).is_ok() {
+                    return Some(Left::Mine(meta));
+                }
+            } else if maybe.is_none()
+                && same_bytes
+                && let Some(was) = was.filter(|was| !was.is_file())
+            {
+                let name = was
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| row.name.clone());
+                maybe = Some(Left::Maybe {
+                    entry: row.id.clone(),
+                    name,
+                });
             }
         }
-        None
+        maybe
     }
     /// The file session `id` saves to was renamed or moved while open: carry
     /// on at the place the system says it is now (the same inode, its bytes
@@ -2428,6 +2526,10 @@ fn file_metadata(meta: Value, store: &crate::DocumentStore) -> Value {
     if let Some(version) = &store.file().version {
         file.insert("savedHash", Value::from(version.hash.clone()));
         file.insert("baselineHash", Value::from(version.hash.clone()));
+        // Which file this was (text: neither fits a JSON number). A rename
+        // keeps both; a copy of the file has neither.
+        file.insert("dev", Value::from(version.stat.dev.to_string()));
+        file.insert("ino", Value::from(version.stat.ino.to_string()));
     }
     m.insert("file", Value::Object(file));
     Value::Object(m)

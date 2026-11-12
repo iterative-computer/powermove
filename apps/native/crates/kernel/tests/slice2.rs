@@ -1440,6 +1440,159 @@ fn a_renamed_file_is_offered_its_unsaved_work() {
         Some(10.0)
     );
 }
+/// Every file under `dir`, with its bytes.
+fn tree(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else {
+                found.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+/// A project file saved by the app at `file`, closed.
+fn saved_file(profile: &Path, file: &Path) {
+    fs::write(file, PROJECT).unwrap();
+    let mut k = kernel(profile);
+    let h = open(&mut k, "seed", SessionSource::File(file.into()));
+    edit(&mut k, "seed", 90.0);
+    k.shell(ShellCall::Save(h.clone())).unwrap();
+    k.shell(ShellCall::Close(h)).unwrap();
+}
+fn legacy_open(k: &mut Kernel, id: &str, file: &Path) -> (SessionHandle, RecoveryResult) {
+    match k
+        .shell(ShellCall::Open {
+            id: id.into(),
+            source: SessionSource::File(file.into()),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened {
+            session, recovery, ..
+        } => (session, recovery),
+        other => panic!("{other:?}"),
+    }
+}
+/// Equal bytes do not make two files one. A and its duplicate B each have
+/// unsaved work of their own; A is deleted; C is another duplicate of what
+/// A had saved. B recovers B's work. C is never handed A's: an open that
+/// asks nobody recovers nothing and moves nothing, an open that can ask
+/// offers it as work from A's name, declining leaves A's journal byte for
+/// byte, and only Recover opens it in C.
+#[test]
+fn unsaved_work_is_never_handed_to_an_identical_duplicate_unasked() {
+    let dir = common::TempDir::new("journal-identity");
+    let native = dir.path("native");
+    let (a, b, c) = (dir.path("a.pmv"), dir.path("b.pmv"), dir.path("c.pmv"));
+    saved_file(&native, &a);
+    fs::copy(&a, &b).unwrap();
+    fs::copy(&a, &c).unwrap();
+    crash_with_edit(&native, "A", &a, 20.0);
+    crash_with_edit(&native, "B", &b, 30.0);
+    fs::remove_file(&a).unwrap();
+    let journal = native.join("journals/A");
+    let left = tree(&journal);
+    assert!(!left.is_empty());
+    let mut k = kernel(&native);
+    // B has its own.
+    let (ticket, offer) = prepare(&mut k, "B", SessionSource::File(b.clone()));
+    assert!(
+        matches!(offer, RecoveryResult::Recovered { .. }),
+        "{offer:?}"
+    );
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert_eq!(
+        common::opacity_of(k.project("B").unwrap().store(), "layer0"),
+        Some(30.0)
+    );
+    k.shell(ShellCall::DeferClose(session)).unwrap();
+    // Nobody to ask: nothing recovered, nothing moved.
+    let (session, recovery) = legacy_open(&mut k, "C", &c);
+    assert_eq!(recovery, RecoveryResult::None);
+    assert_eq!(
+        common::opacity_of(k.project("C").unwrap().store(), "layer0"),
+        Some(90.0),
+        "the duplicate opens as it was saved"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(
+        tree(&journal),
+        left,
+        "the other file's journal is untouched"
+    );
+    // Asked: offered under the other file's name; declined, it stays.
+    let (ticket, offer) = prepare(&mut k, "C", SessionSource::File(c.clone()));
+    assert_eq!(
+        offer,
+        RecoveryResult::FromOtherFile {
+            name: "a.pmv".into(),
+            truncated: false
+        }
+    );
+    assert_eq!(tree(&journal), left, "offering consumes nothing");
+    let session = decide(&mut k, ticket, RecoveryDecision::Discard);
+    assert_eq!(
+        common::opacity_of(k.project("C").unwrap().store(), "layer0"),
+        Some(90.0)
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(tree(&journal), left, "declining leaves it where it is");
+    // Accepted: the work opens here.
+    let (ticket, offer) = prepare(&mut k, "C", SessionSource::File(c.clone()));
+    assert!(matches!(offer, RecoveryResult::FromOtherFile { .. }));
+    decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert_eq!(
+        common::opacity_of(k.project("C").unwrap().store(), "layer0"),
+        Some(20.0)
+    );
+}
+/// A file with unsaved work is deleted and restored from a backup under
+/// another name: the same bytes in a new file. Its unsaved work is offered
+/// as work from the old name; accepted, it opens, saves into the restored
+/// file, and only then is the old journal retired.
+#[test]
+fn a_file_restored_from_a_backup_is_offered_its_unsaved_work() {
+    let dir = common::TempDir::new("journal-restore");
+    let native = dir.path("native");
+    let file = dir.path("cut.pmv");
+    saved_file(&native, &file);
+    let backup = fs::read(&file).unwrap();
+    crash_with_edit(&native, "A", &file, 20.0);
+    fs::remove_file(&file).unwrap();
+    let restored = dir.path("cut restored.pmv");
+    fs::write(&restored, &backup).unwrap();
+    let journal = native.join("journals/A");
+    let left = tree(&journal);
+    let mut k = kernel(&native);
+    let (ticket, offer) = prepare(&mut k, "R", SessionSource::File(restored.clone()));
+    assert_eq!(
+        offer,
+        RecoveryResult::FromOtherFile {
+            name: "cut.pmv".into(),
+            truncated: false
+        }
+    );
+    assert_eq!(tree(&journal), left);
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert_eq!(
+        common::opacity_of(k.project("R").unwrap().store(), "layer0"),
+        Some(20.0)
+    );
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(
+        common::opacity_of(&common::open_store(&restored), "layer0"),
+        Some(20.0)
+    );
+    assert_eq!(live_sessions(&native, "A"), 0, "taken once it was chosen");
+}
 /// A journal left by a project that is not open and cannot be folded into
 /// the library (here its library slot is unreadable) never fails a quit: the
 /// quit's compaction succeeds, the library is released, and the journal is

@@ -11,6 +11,28 @@ pub enum Action {
     Discard,
     OpenSavedVersion,
     Acknowledge,
+    /// Leave another file's unsaved work where it is.
+    Leave,
+}
+/// Unsaved work left for another file (`from`, no longer where it was) whose
+/// saved content is exactly this file's. Whether this is that file is the
+/// person's to say: Recover opens the work here, Leave Them touches nothing.
+pub fn ask_other_files_work(name: &str, from: &str, truncated: bool) -> Alert<Action> {
+    Alert::new(
+        format!("Recover unsaved changes from “{from}” into “{name}”?"),
+        format!(
+            "Powermove has unsaved changes for “{from}”, a file with exactly the content of this one that is no longer where it was. If this is that file (moved, renamed or restored from a backup), Recover opens those changes here. If it is a different file, leave them: they stay with “{from}”.{}",
+            if truncated {
+                " The last few seconds of edits may be missing."
+            } else {
+                ""
+            }
+        ),
+        vec![
+            Button::new("Recover", Action::Recover).default(),
+            Button::new("Leave Them", Action::Leave).cancel(),
+        ],
+    )
 }
 pub fn ask_recovery(
     name: &str,
@@ -84,6 +106,10 @@ impl PreparedRecovery {
                 ask_recovery(name, *truncated, archive_recently_deleted)
             }
             RecoveryResult::Unrecoverable { .. } => unrecoverable(name, saved_exists),
+            RecoveryResult::FromOtherFile {
+                name: from,
+                truncated,
+            } => ask_other_files_work(name, from, *truncated),
         };
         Some(Self {
             ticket: ticket.clone(),
@@ -103,6 +129,9 @@ impl PreparedRecovery {
             Action::Discard if self.archive_recently_deleted => RecoveryDecision::Discard,
             // Never Discard: this one keeps the unreadable journal, set aside.
             Action::OpenSavedVersion => RecoveryDecision::OpenSavedVersion,
+            // Offered only for another file's work, which the kernel leaves
+            // exactly where it is when it is declined.
+            Action::Leave => RecoveryDecision::Discard,
             _ => return None,
         };
         Some(ShellCall::DecideRecovery {
