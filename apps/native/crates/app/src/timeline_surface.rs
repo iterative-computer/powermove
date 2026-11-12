@@ -2322,23 +2322,25 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 },
             );
         }
-        // The tactile clip chip (pm-design `clip_material`).
+        // A layer or clip strip (pm-design `strip`): a tinted, slightly
+        // translucent body, lighter toward the bottom, with a rim of light
+        // inside its edge that is brightest along the top.
         "clip" => {
             let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
-            let alpha = |key: &str| op.detail[key].as_f64().unwrap_or(0.) * op.opacity;
+            let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
             let tint =
                 |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
-            let radius = px(op.radius as f32);
-            let border = op.detail["seamWidth"].as_f64().unwrap_or(1.) as f32;
-            if alpha("shadowAlpha") > 0. {
+            let radius = px(op.radius as f32).min(area.size.height / 2.);
+            let rim = px(number("rimWidth").max(1.) as f32);
+            if number("shadowAlpha") > 0. {
                 window.paint_drop_shadows(
                     area,
                     Corners::all(radius),
                     0.,
                     &[BoxShadow {
-                        color: tint(hex("shadow"), alpha("shadowAlpha")).into(),
-                        offset: point(px(0.), px(border * 2.)),
-                        blur_radius: px(border * 4.),
+                        color: tint(hex("shadow"), number("shadowAlpha")).into(),
+                        offset: point(px(0.), px(number("shadowY") as f32)),
+                        blur_radius: px(number("shadowBlur") as f32),
                         spread_radius: px(0.),
                         inset: false,
                     }],
@@ -2353,22 +2355,25 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     ))
                     .corner_radii(radius),
             );
-            if alpha("highlightAlpha") > 0. && area.size.width > radius * 2. {
-                let inset = radius * 0.7;
-                window.paint_quad(
-                    PaintQuad::new(Bounds::new(
-                        point(area.origin.x + inset, area.origin.y + px(border)),
-                        size(area.size.width - inset * 2., px(border)),
-                    ))
-                    .background(tint(hex("highlight"), alpha("highlightAlpha"))),
-                );
-            }
+            // The rim fades from its top value to its side value down the strip.
             window.paint_quad(
                 PaintQuad::new(area)
-                    .border_color(tint(hex("seam"), op.opacity))
-                    .border_widths(px(border))
+                    .border_color(tint(hex("rim"), number("rimAlpha")))
+                    .border_widths(rim)
                     .corner_radii(radius),
             );
+            if area.size.width > radius * 2. {
+                window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(area.origin.x + radius, area.origin.y),
+                        size(area.size.width - radius * 2., rim),
+                    ))
+                    .background(tint(
+                        hex("rimTop"),
+                        (number("rimTopAlpha") - number("rimAlpha")).max(0.),
+                    )),
+                );
+            }
         }
         "square" => {
             if let Some(keyline) = op.detail["keyline"].as_u64() {

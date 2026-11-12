@@ -378,6 +378,50 @@ const ROLES: &[(&str, &str)] = &[
         "Neutral on state of a tab or segment, as `text` ink",
     ),
     ("translucency.pressed", "Pressed wash, as `text` ink"),
+    ("translucency.faint", "Third text step, as `text` ink"),
+    (
+        "colors.faint",
+        "Placeholders, shortcut hints, disabled labels (derived)",
+    ),
+    (
+        "colors.raised",
+        "Raised neutral surface: selected segment or tab, neutral button, card (derived)",
+    ),
+    (
+        "metrics.dock_gap",
+        "Space between docked panels and to the window edge",
+    ),
+    ("metrics.sidebar", "Sidebar width of Home and Settings"),
+    ("typography.heading_tracking", "Tracking of headings (pt)"),
+    (
+        "typography.display_tracking",
+        "Tracking of screen titles (pt)",
+    ),
+    (
+        "space.hair",
+        "Spacing scale: pill inset, icon-to-edge nudge",
+    ),
+    ("space.xs", "Spacing scale: icon to label, stacked text"),
+    ("space.sm", "Spacing scale: between related controls"),
+    ("space.md", "Spacing scale: between panels, control padding"),
+    ("space.lg", "Spacing scale: panel and card inset"),
+    ("space.xl", "Spacing scale: between groups"),
+    ("space.xxl", "Spacing scale: screen margins"),
+    ("space.section", "Spacing scale: between sections"),
+    ("radius.base", "Radius scale base"),
+    ("radius.xs", "Checkbox, kind badge (base)"),
+    (
+        "radius.sm",
+        "Wells, segments, menu rows: the smallest control corner",
+    ),
+    ("radius.md", "Buttons, fields, tabs, pill tracks"),
+    ("radius.lg", "Panels, cards, menus"),
+    ("radius.xl", "Popovers, sheets, the palette"),
+    ("radius.window", "The window's own corner (system-owned)"),
+    (
+        "radius.smoothing",
+        "Continuous-corner smoothing of `lg` and larger surfaces",
+    ),
     (
         "colors.fill",
         "Soft neutral fill: segmented tracks, search fields (derived)",
@@ -433,7 +477,15 @@ fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, Value)>) {
 fn leaves(t: &Tokens) -> Vec<(String, Value)> {
     let v = serde_json::to_value(t).unwrap();
     let mut out = Vec::new();
-    for group in ["colors", "metrics", "typography", "motion", "translucency"] {
+    for group in [
+        "colors",
+        "metrics",
+        "space",
+        "radius",
+        "typography",
+        "motion",
+        "translucency",
+    ] {
         flatten(group, &v[group], &mut out);
     }
     out
@@ -597,28 +649,44 @@ fn contrast_rules_from_language() {
 }
 
 #[test]
-fn dark_is_neutral_grey() {
-    let c = Tokens::new(Scheme::Dark, Accessibility::default()).colors;
-    for v in [
-        c.window,
-        c.panel,
-        c.panel_secondary,
-        c.viewer,
-        c.field,
-        c.floating,
-        c.hover,
-        c.separator,
-        c.text,
-        c.secondary,
-        c.muted,
-        c.selected_fill,
-    ] {
-        let (r, g, b) = ((v >> 16) & 255, (v >> 8) & 255, v & 255);
-        assert!(
-            r == g && g == b,
-            "#{v:06x} is tinted; dark neutrals are pure grey"
-        );
+fn neutrals_are_one_ink_over_a_ground() {
+    for t in variants() {
+        let c = &t.colors;
+        // No neutral carries more chroma than its appearance's ink and grounds.
+        for v in [
+            c.window,
+            c.panel,
+            c.panel_secondary,
+            c.viewer,
+            c.field,
+            c.floating,
+            c.hover,
+            c.separator,
+            c.text,
+            c.secondary,
+            c.muted,
+            c.faint,
+            c.raised,
+            c.selected_fill,
+            c.fill,
+            c.fill_strong,
+            c.hairline,
+            c.focus,
+        ] {
+            let (_, chroma, _) = pm_design::color::to_oklch(v);
+            assert!(chroma < 0.016, "#{v:06x} is tinted ({chroma:.3})");
+        }
+        // The text steps descend toward the panel: text, secondary, muted, faint.
+        let steps = [c.text, c.secondary, c.muted, c.faint].map(|v| contrast(v, c.panel));
+        assert!(steps.windows(2).all(|w| w[0] > w[1]), "{steps:?}");
+        assert!(steps[3] >= 2., "faint still reads as text");
     }
+    // Dark is warm stone, light is cool paper: the identity v1 established.
+    let hue = |scheme| pm_design::color::to_oklch(Colors::of(scheme).panel).2;
+    assert!((30. ..90.).contains(&hue(Scheme::Dark)));
+    assert!((250. ..300.).contains(&hue(Scheme::Light)));
+    assert_eq!(pm_design::color::oklch(1., 0., 0.), 0xffffff);
+    assert_eq!(pm_design::color::oklch(0., 0., 0.), 0x000000);
 }
 
 #[test]
@@ -631,6 +699,19 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        let r = t.radius;
+        assert_eq!(
+            (r.xs, r.sm, r.md, r.lg, r.xl),
+            (r.base, r.base * 1.5, r.base * 2., r.base * 3., r.base * 4.),
+            "one scale from one base"
+        );
+        assert_eq!(r.nested(r.lg, t.space.xs), r.md, "child = parent − inset");
+        assert_eq!(
+            r.nested(r.md, t.space.md),
+            r.sm,
+            "never below the smallest corner"
+        );
+        assert!(m.dock_gap <= m.inset);
         assert_eq!(
             m.segment_radius,
             m.pill_radius - m.pill_inset,
@@ -707,7 +788,10 @@ fn theme_patch_cannot_beat_increase_contrast() {
         ("colors.accent", 0x123456 as f64),
     ])
     .unwrap();
-    assert_eq!(t.colors.separator, 0x888888);
+    assert!(
+        contrast(t.colors.separator, t.colors.panel) >= 3.,
+        "a patched separator is raised back to 3:1"
+    );
     assert_eq!(t.metrics.border, 2.);
     assert_eq!(t.colors.accent, 0x123456);
     let before = t.clone();

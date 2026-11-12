@@ -44,7 +44,7 @@ fn all_reviewed_paint_states_have_wire_snapshots_in_each_appearance() {
     assert_eq!(actual, expected);
 }
 #[test]
-fn selected_clips_keep_their_material_with_an_inside_accent_ring_and_exact_authored_times() {
+fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
     for scheme in [Scheme::Light, Scheme::Dark] {
         let t = Tokens::new(scheme, Accessibility::default());
         let f = scene(&t).prepare(viewport(&t), &t).unwrap();
@@ -52,16 +52,19 @@ fn selected_clips_keep_their_material_with_an_inside_accent_ring_and_exact_autho
         assert_eq!(clip.detail["from"], 0.125);
         assert_eq!(clip.detail["duration"], 5.375);
         assert_eq!(clip.bounds.x, t.metrics.layer_column as f64); // sticky visible edge
-        // The body is the label's tactile material, never an accent fill.
-        let material = t.clip_material(t.colors.labels.teal);
+        // The body is the layer's strip in its selected state: its own hue
+        // with a bright rim inside the edge, never an accent fill or ring.
+        let material = t.strip(t.colors.labels.teal, pm_design::StripState::Selected);
+        let rest = t.strip(t.colors.labels.teal, pm_design::StripState::Rest);
         assert_eq!(clip.shape, "clip");
         assert_eq!(clip.detail["top"], material.top);
-        assert_eq!(clip.detail["seam"], material.seam);
-        // The ring sits inside the clip's edge, so it never grows into a neighbour.
-        let ring = f.ops.iter().find(|o| o.id == "clip-ring:selected").unwrap();
-        assert_eq!((ring.shape, ring.bounds), ("ring", clip.bounds));
-        assert_eq!(ring.color, t.colors.accent);
-        assert_eq!(ring.stroke, 2. * t.metrics.border as f64);
+        assert_eq!(clip.detail["rim"], material.rim.0);
+        assert!(material.rim.1 > rest.rim.1 * 2., "selection is the rim");
+        assert!(
+            f.ops
+                .iter()
+                .all(|o| o.color != t.colors.accent || !o.id.starts_with("clip"))
+        );
         let content = f
             .ops
             .iter()
@@ -480,7 +483,11 @@ fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
     let body = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
     assert_eq!(wave.shape, "waveform");
-    assert_eq!(wave.color, t.clip_material(t.colors.labels.green).primary);
+    assert_eq!(
+        wave.color,
+        t.strip(t.colors.labels.green, pm_design::StripState::Rest)
+            .primary
+    );
     let bars = wave.detail["bars"].as_array().unwrap();
     let inset = 2. * t.metrics.border as f64;
     assert_eq!(

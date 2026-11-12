@@ -1,11 +1,24 @@
 //! Powermove Native's only styling source. Theme translation targets these semantic names.
 //!
-//! The language these values encode is `docs/native/design/language.md`; the
+//! The system these values encode is `docs/native/design/language.md`; the
 //! generated table in `docs/native/design/tokens.md` is checked against this file
 //! by `tests/spec.rs`. Change a value here, then regenerate the table with
 //! `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
+//!
+//! One ink per appearance and a handful of OKLCH roles make every colour
+//! ([`Colors::of`]); sizes come from one spacing scale and one radius scale
+//! ([`Space`], [`Radii`]); text, edges and elevation are recipes ([`Text`],
+//! [`Elevation`]); motion is springs ([`motion`]); the timeline's strips are a
+//! drawn material ([`Strip`]).
+pub mod color;
 pub mod motion;
+mod recipe;
+mod strip;
+pub use color::mix;
+use color::oklch;
+pub use recipe::{Elevation, Shadow, Text, TextStyle};
 use serde::{Deserialize, Serialize};
+pub use strip::{Playhead, Strip, StripState, TrimGrip};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
     Light,
@@ -31,6 +44,12 @@ pub struct Colors {
     pub text: u32,
     pub secondary: u32,
     pub muted: u32,
+    /// Third text step: placeholders, shortcut hints, disabled labels and
+    /// counts nobody has to read (`text` ink at `translucency.faint`).
+    pub faint: u32,
+    /// The raised neutral surface: the selected segment or tab, a neutral
+    /// push button, a card. Drawn with `Elevation::Raised`. Never the accent.
+    pub raised: u32,
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
@@ -118,6 +137,61 @@ pub struct TypeScale {
     pub reading_leading: f32,
     pub text_optical_size: f32,
     pub display_optical_size: f32,
+    /// Tracking (pt) of `heading` and `display`: large type is set tighter.
+    /// Text sizes use the system font's own tracking table.
+    pub heading_tracking: f32,
+    pub display_tracking: f32,
+}
+/// The spacing scale. Every gap, padding and inset is one of these steps.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Space {
+    pub hair: f32,
+    pub xs: f32,
+    pub sm: f32,
+    pub md: f32,
+    pub lg: f32,
+    pub xl: f32,
+    pub xxl: f32,
+    pub section: f32,
+}
+/// The radius scale: multiples of `base`. A nested corner is its parent's
+/// radius minus the inset between them, and never below `sm`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Radii {
+    pub base: f32,
+    /// Checkbox, kind badge, keyline details (base).
+    pub xs: f32,
+    /// Wells, segments, menu rows: the smallest corner a control gets (base × 1.5).
+    pub sm: f32,
+    /// Controls: buttons, fields, tabs, pill tracks (base × 2).
+    pub md: f32,
+    /// Panels, cards, menus (base × 3).
+    pub lg: f32,
+    /// Popovers, sheets, the palette (base × 4).
+    pub xl: f32,
+    /// The window's own corner on macOS 26 and later (system-owned).
+    pub window: f32,
+    /// Continuous-corner smoothing for `lg` and larger surfaces (0–1). Small
+    /// controls stay circular so nested corners match.
+    pub smoothing: f32,
+}
+impl Radii {
+    fn new(base: f32) -> Self {
+        Self {
+            base,
+            xs: base,
+            sm: base * 1.5,
+            md: base * 2.,
+            lg: base * 3.,
+            xl: base * 4.,
+            window: 26.,
+            smoothing: 0.6,
+        }
+    }
+    /// The corner of a surface nested `inset` inside one of radius `outer`.
+    pub fn nested(&self, outer: f32, inset: f32) -> f32 {
+        (outer - inset).max(self.sm)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
@@ -135,6 +209,10 @@ pub struct Metrics {
     pub toolbar_title_width: f32,
     pub toolbar_title_line: f32,
     pub control: f32,
+    /// Space between docked panels, and between them and the window edge.
+    pub dock_gap: f32,
+    /// Sidebar width of full-window screens (Home, Settings).
+    pub sidebar: f32,
     pub border: f32,
     pub min_panel: f32,
     pub min_center: f32,
@@ -277,6 +355,8 @@ pub struct Translucency {
     pub selected: f32,
     /// Pressed wash, as `text` ink.
     pub pressed: f32,
+    /// Third text step (`colors.faint`), as `text` ink.
+    pub faint: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -349,9 +429,137 @@ pub struct Tokens {
     pub accessibility: Accessibility,
     pub colors: Colors,
     pub metrics: Metrics,
+    pub space: Space,
+    pub radius: Radii,
     pub typography: TypeScale,
     pub motion: Motion,
     pub translucency: Translucency,
+}
+/// Layer colours, dark then light: the body of a kind badge and the hue a
+/// strip takes. Text on them is `text`.
+const LABELS: [Labels; 2] = [
+    Labels {
+        blue: 0x3b4250,
+        violet: 0x4a3b6b,
+        orange: 0x7a3a1f,
+        red: 0x6e2b2b,
+        yellow: 0x5c4a17,
+        green: 0x24503a,
+        teal: 0x1f4b52,
+        gray: 0x3a3a3a,
+    },
+    Labels {
+        blue: 0xc9d4e8,
+        violet: 0xd8cff0,
+        orange: 0xf7cfb6,
+        red: 0xf2cac7,
+        yellow: 0xefe0b2,
+        green: 0xc5e3d1,
+        teal: 0xc2e2e3,
+        gray: 0xdcdce0,
+    },
+];
+impl Colors {
+    /// The colour table of one appearance. Seven roles are chosen in OKLCH: an
+    /// ink, four grounds (window, panel, recess, viewer), a floating surface
+    /// and the accent. Every other neutral is the ink over a ground at an
+    /// alpha step, raised where needed to clear its contrast floor.
+    ///
+    /// Dark is warm stone (hue about 55°, chroma under 0.01): the grounds step
+    /// up in lightness toward the viewer's surround, so elevation is tonal.
+    /// Light is a cool paper (hue 286°). The accent is Powermove orange; it
+    /// marks one action or one state per view and is never a selected fill.
+    pub fn of(scheme: Scheme) -> Self {
+        let dark = scheme == Scheme::Dark;
+        let (ink, window, panel, recess, viewer, floating) = if dark {
+            (
+                oklch(0.97, 0.0013, 106.),
+                oklch(0.147, 0.004, 49.),
+                oklch(0.216, 0.006, 56.),
+                oklch(0.188, 0.005, 67.),
+                oklch(0.135, 0.003, 70.),
+                oklch(0.268, 0.006, 34.),
+            )
+        } else {
+            (
+                oklch(0.201, 0.0124, 270.7),
+                oklch(0.95, 0.004, 286.),
+                oklch(0.994, 0.0013, 286.),
+                oklch(0.971, 0.0027, 286.),
+                oklch(0.926, 0.0054, 286.),
+                0xffffff,
+            )
+        };
+        // Ink alpha steps: text, secondary, muted; hover and selected fills.
+        let (text, secondary, muted, wash, selected, line) = if dark {
+            (1., 0.7, 0.54, 0.055, 0.12, 0.12)
+        } else {
+            (0.96, 0.74, 0.62, 0.045, 0.1, 0.14)
+        };
+        let field = mix(panel, ink, wash);
+        let selected_fill = mix(panel, ink, selected);
+        let grounds = [window, panel, field, floating, selected_fill];
+        let secondary = color::ink_step(panel, ink, secondary, 4.5, &grounds);
+        Self {
+            window,
+            panel,
+            panel_secondary: recess,
+            viewer,
+            field,
+            floating,
+            hover: mix(panel, ink, wash + 0.03),
+            separator: mix(panel, ink, line),
+            text: mix(panel, ink, text),
+            secondary,
+            muted: color::ink_step(panel, ink, muted, 4.5, &grounds),
+            faint: 0,
+            raised: 0,
+            accent: if dark {
+                // A step under v1's #FF6B1A so a white label on it clears 3:1.
+                oklch(0.685, 0.2, 42.5)
+            } else {
+                oklch(0.656, 0.2, 40.5)
+            },
+            selected_text: 0xffffff,
+            selected_fill,
+            fill: 0,
+            fill_strong: 0,
+            hairline: 0,
+            selected_secondary: secondary,
+            selected_danger: if dark { 0xff8a80 } else { 0xa82319 },
+            focus: mix(panel, ink, if dark { 0.58 } else { 0.5 }),
+            accent_text: if dark {
+                oklch(0.753, 0.16, 47.)
+            } else {
+                oklch(0.527, 0.1735, 37.8)
+            },
+            accent_wash: mix(
+                panel,
+                if dark { 0xff6b1a } else { 0xf0580a },
+                if dark { 0.16 } else { 0.1 },
+            ),
+            danger: if dark {
+                oklch(0.68, 0.18, 27.6)
+            } else {
+                oklch(0.532, 0.19, 29.3)
+            },
+            warning: if dark {
+                oklch(0.769, 0.165, 70.)
+            } else {
+                oklch(0.542, 0.124, 62.5)
+            },
+            success: if dark {
+                oklch(0.763, 0.154, 159.)
+            } else {
+                oklch(0.514, 0.11, 161.)
+            },
+            media_badge: 0x000000,
+            scope_red: 0xff6b62,
+            scope_green: 0x4fd58a,
+            scope_blue: 0x6ba6ff,
+            labels: LABELS[usize::from(!dark)],
+        }
+    }
 }
 pub const TEXT_FONT: &str = ".SystemUIFont";
 pub const DISPLAY_FONT: &str = "SF Pro Display";
@@ -400,99 +608,30 @@ macro_rules! patchable {
 }
 impl Tokens {
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
-        let colors = match scheme {
-            Scheme::Dark => Colors {
-                window: 0x111111,
-                panel: 0x1a1a1a,
-                panel_secondary: 0x161616,
-                viewer: 0x0e0e0e,
-                field: 0x262626,
-                floating: 0x2c2c2c,
-                hover: 0x232323,
-                separator: 0x303030,
-                text: 0xf2f2f2,
-                secondary: 0xb4b4b4,
-                muted: 0x949494,
-                accent: 0xff6019,
-                selected_text: 0xffffff,
-                selected_fill: 0x3a3a3a,
-                fill: 0,
-                fill_strong: 0,
-                hairline: 0,
-                selected_secondary: 0xb4b4b4,
-                selected_danger: 0xff8a80,
-                focus: 0x9a9a9a,
-                accent_text: 0xff8a55,
-                accent_wash: 0x3c241a,
-                danger: 0xf36357,
-                warning: 0xf59e0b,
-                success: 0x3fcf8e,
-                media_badge: 0x000000,
-                scope_red: 0xff6b62,
-                scope_green: 0x4fd58a,
-                scope_blue: 0x6ba6ff,
-                labels: Labels {
-                    blue: 0x3b4250,
-                    violet: 0x4a3b6b,
-                    orange: 0x7a3a1f,
-                    red: 0x6e2b2b,
-                    yellow: 0x5c4a17,
-                    green: 0x24503a,
-                    teal: 0x1f4b52,
-                    gray: 0x3a3a3a,
-                },
-            },
-            Scheme::Light => Colors {
-                window: 0xeeeef1,
-                panel: 0xfdfdfe,
-                panel_secondary: 0xf5f5f7,
-                viewer: 0xe4e4e4,
-                field: 0xf3f3f6,
-                floating: 0xffffff,
-                hover: 0xebebef,
-                separator: 0xd4d4d8,
-                text: 0x1b1d23,
-                secondary: 0x52545a,
-                muted: 0x62646a,
-                accent: 0xf0580a,
-                selected_text: 0xffffff,
-                selected_fill: 0xd5d5da,
-                fill: 0,
-                fill_strong: 0,
-                hairline: 0,
-                selected_secondary: 0x52545a,
-                selected_danger: 0xa82319,
-                focus: 0x76767c,
-                accent_text: 0xb93800,
-                accent_wash: 0xfbe9e1,
-                danger: 0xc22a1f,
-                warning: 0xa15c00,
-                success: 0x117a52,
-                media_badge: 0x000000,
-                scope_red: 0xff6b62,
-                scope_green: 0x4fd58a,
-                scope_blue: 0x6ba6ff,
-                labels: Labels {
-                    blue: 0xc9d4e8,
-                    violet: 0xd8cff0,
-                    orange: 0xf7cfb6,
-                    red: 0xf2cac7,
-                    yellow: 0xefe0b2,
-                    green: 0xc5e3d1,
-                    teal: 0xc2e2e3,
-                    gray: 0xdcdce0,
-                },
-            },
+        let colors = Colors::of(scheme);
+        let ground = colors.window;
+        let space = Space {
+            hair: 2.,
+            xs: 4.,
+            sm: 6.,
+            md: 8.,
+            lg: 12.,
+            xl: 16.,
+            xxl: 24.,
+            section: 32.,
         };
+        let radius = Radii::new(4.);
         let mut tokens = Self {
             scheme,
             accessibility,
             colors,
+            space,
+            radius,
             metrics: Metrics {
-                gap: 6.,
-                inset: 12.,
-                panel_radius: 8.,
-                control_radius: 6.,
+                gap: space.sm,
+                inset: space.lg,
+                panel_radius: radius.lg,
+                control_radius: radius.md,
                 capsule_radius: 17.,
                 header: 38.,
                 row: 28.,
@@ -502,6 +641,8 @@ impl Tokens {
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
                 control: 28.,
+                dock_gap: space.md,
+                sidebar: 224.,
                 border: 1.,
                 min_panel: 72.,
                 min_center: 180.,
@@ -517,14 +658,14 @@ impl Tokens {
                 field_menu_height: 280.,
                 settings_width: 760.,
                 settings_height: 520.,
-                settings_sidebar: 180.,
+                settings_sidebar: 200.,
                 menu_inset: 12.,
                 menu_row: 30.,
-                inner_radius: 4.,
+                inner_radius: radius.sm,
                 tab: 28.,
-                pill_radius: 9.,
-                pill_inset: 2.,
-                segment_radius: 7.,
+                pill_radius: radius.md,
+                pill_inset: space.hair,
+                segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
                 keyframe: 9.,
@@ -532,14 +673,14 @@ impl Tokens {
                 property_row: 22.,
                 ruler: 24.,
                 layer_column: 320.,
-                clip_radius: 4.,
-                playhead: 1.5,
+                clip_radius: radius.sm,
+                playhead: 1.,
                 symbol_toolbar: 15.,
-                symbol_panel: 13.,
-                symbol_inline: 11.,
+                symbol_panel: 14.,
+                symbol_inline: 12.,
                 hit: 24.,
                 popover_width: 260.,
-                popover_radius: 16.,
+                popover_radius: radius.xl,
                 sheet_width: 480.,
                 agent_width: 360.,
                 tree_indent: 16.,
@@ -550,7 +691,7 @@ impl Tokens {
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
                 composer_max_lines: 10.,
-                group_radius: 10.,
+                group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
                 gizmo_handle: 7.,
@@ -583,7 +724,7 @@ impl Tokens {
                 body: 12.,
                 label: 12.,
                 title: 13.,
-                display: 22.,
+                display: 24.,
                 reading: 13.,
                 heading: 15.,
                 timecode: 13.,
@@ -593,7 +734,9 @@ impl Tokens {
                 dense_leading: 1.3,
                 reading_leading: 1.45,
                 text_optical_size: 12.,
-                display_optical_size: 22.,
+                display_optical_size: 24.,
+                heading_tracking: -0.2,
+                display_tracking: -0.45,
             },
             motion: Motion {
                 enter: 0.32,
@@ -608,115 +751,92 @@ impl Tokens {
                 tooltip_warm: 0.6,
                 note_hold: 2.2,
             },
-            translucency: match (scheme, accessibility.reduce_transparency) {
-                (Scheme::Dark, true) => Translucency {
-                    ground: 0x111111,
-                    window: 1.,
-                    panel: 1.,
-                    edge: 0.06,
-                    line: 0.07,
-                    tick_minor: 0.14,
-                    tick_major: 0.3,
-                    grid: 0.04,
-                    offline_hatch: 0.28,
-                    hover: 0.06,
-                    selected: 0.1,
-                    pressed: 0.14,
-                },
-                (Scheme::Light, true) => Translucency {
-                    ground: 0xeeeef1,
-                    window: 1.,
-                    panel: 1.,
-                    edge: 0.08,
-                    line: 0.09,
-                    tick_minor: 0.14,
-                    tick_major: 0.3,
-                    grid: 0.04,
-                    offline_hatch: 0.28,
-                    hover: 0.045,
-                    selected: 0.07,
-                    pressed: 0.1,
-                },
-                (Scheme::Dark, false) => Translucency {
-                    ground: 0x080808,
-                    window: 0.82,
-                    panel: 0.7,
-                    edge: 0.06,
-                    line: 0.07,
-                    tick_minor: 0.14,
-                    tick_major: 0.3,
-                    grid: 0.04,
-                    offline_hatch: 0.28,
-                    hover: 0.06,
-                    selected: 0.1,
-                    pressed: 0.14,
-                },
-                (Scheme::Light, false) => Translucency {
-                    ground: 0xeeeef1,
-                    window: 0.62,
-                    panel: 0.66,
-                    edge: 0.08,
-                    line: 0.09,
-                    tick_minor: 0.14,
-                    tick_major: 0.3,
-                    grid: 0.04,
-                    offline_hatch: 0.28,
-                    hover: 0.045,
-                    selected: 0.07,
-                    pressed: 0.1,
-                },
+            translucency: {
+                // The translucent shell is a heavy tint of the window colour
+                // over a behind-window blur; Reduce Transparency makes it solid.
+                let solid = accessibility.reduce_transparency;
+                match scheme {
+                    Scheme::Dark => Translucency {
+                        ground,
+                        window: if solid { 1. } else { 0.82 },
+                        panel: if solid { 1. } else { 0.72 },
+                        edge: 0.07,
+                        line: 0.07,
+                        tick_minor: 0.14,
+                        tick_major: 0.3,
+                        grid: 0.04,
+                        offline_hatch: 0.28,
+                        hover: 0.06,
+                        selected: 0.1,
+                        pressed: 0.14,
+                        faint: 0.36,
+                    },
+                    Scheme::Light => Translucency {
+                        ground,
+                        window: if solid { 1. } else { 0.62 },
+                        panel: if solid { 1. } else { 0.7 },
+                        edge: 0.08,
+                        line: 0.08,
+                        tick_minor: 0.14,
+                        tick_major: 0.3,
+                        grid: 0.04,
+                        offline_hatch: 0.28,
+                        hover: 0.045,
+                        selected: 0.07,
+                        pressed: 0.1,
+                        faint: 0.42,
+                    },
+                }
             },
         };
         tokens.enforce_accessibility();
         tokens.derive_fills();
         tokens
     }
-    /// `fill`, `fill_strong` and `hairline` are `text` ink over the panel (or
-    /// a raised track) at their alphas; they follow a theme's colour patch.
+    /// Everything that is `text` ink over a ground at an alpha step follows a
+    /// theme's colour patch: soft fills, the raised surface, hairlines and the
+    /// third text step.
     fn derive_fills(&mut self) {
         let (ink, ground, t) = (self.colors.text, self.colors.panel, self.translucency);
-        self.colors.fill = mix(ground, ink, t.hover);
+        let c = &mut self.colors;
+        c.fill = mix(ground, ink, t.hover);
         // The on state sits on raised tracks as well as panels.
-        self.colors.fill_strong = mix(self.colors.floating, ink, t.selected);
-        self.colors.hairline = if self.accessibility.increase_contrast {
-            self.colors.separator
+        c.fill_strong = mix(c.floating, ink, t.selected);
+        c.raised = match self.scheme {
+            Scheme::Dark => mix(c.floating, ink, 0.07),
+            Scheme::Light => c.floating,
+        };
+        c.faint = mix(ground, ink, t.faint);
+        c.hairline = if self.accessibility.increase_contrast {
+            c.separator
         } else {
             mix(ground, ink, t.edge)
         };
     }
-    /// Increase Contrast always wins, including over a theme patch.
+    /// Increase Contrast always wins, including over a theme patch: text steps
+    /// rise to 7:1 and 4.5:1 on every ground, separators to 3:1, strokes double.
     fn enforce_accessibility(&mut self) {
         if !self.accessibility.increase_contrast {
             return;
         }
         let c = &mut self.colors;
-        match self.scheme {
-            Scheme::Dark => {
-                c.separator = 0x888888;
-                c.secondary = 0xdddddd;
-                c.selected_secondary = 0xdddddd;
-                c.muted = 0xbfbfbf;
-                c.focus = 0xe0e0e0;
-                c.accent_text = 0xffa073;
-            }
-            Scheme::Light => {
-                c.separator = 0x686868;
-                c.secondary = 0x303036;
-                c.selected_secondary = 0x303036;
-                c.muted = 0x414148;
-                c.focus = 0x3c3c42;
-                c.accent_text = 0x9a2f00;
-            }
-        }
+        let grounds = [c.window, c.panel, c.field, c.floating, c.selected_fill];
+        c.separator = color::ink_step(c.panel, c.text, 0.46, 3., &[c.panel, c.window]);
+        c.secondary = color::ink_step(c.panel, c.text, 0.86, 7., &grounds);
+        c.selected_secondary = c.secondary;
+        c.muted = color::ink_step(c.panel, c.text, 0.74, 4.5, &grounds);
+        c.focus = mix(c.panel, c.text, 0.88);
+        c.accent_text = match self.scheme {
+            Scheme::Dark => 0xffa073,
+            Scheme::Light => 0x9a2f00,
+        };
         self.metrics.border = 2.;
         self.metrics.drop_stroke = 2.;
         // Washes and on states read at a glance under Increase Contrast.
         let t = &mut self.translucency;
-        let dark = self.scheme == Scheme::Dark;
-        (t.hover, t.selected, t.pressed) = if dark {
-            (0.1, 0.16, 0.2)
-        } else {
-            (0.08, 0.12, 0.16)
+        (t.hover, t.selected, t.pressed) = match self.scheme {
+            Scheme::Dark => (0.1, 0.16, 0.2),
+            Scheme::Light => (0.08, 0.12, 0.16),
         };
     }
     patchable! {
@@ -806,110 +926,6 @@ impl Tokens {
             Material::Glass
         } else {
             Material::VisualEffect
-        }
-    }
-}
-/// `b` composited onto `a` at `amount` (0–1): `a` moved that far toward `b`,
-/// per sRGB channel, as opaque 0xRRGGBB.
-pub fn mix(a: u32, b: u32, amount: f32) -> u32 {
-    [0, 8, 16].into_iter().fold(0, |out, s| {
-        let (x, y) = (((a >> s) & 255) as f32, ((b >> s) & 255) as f32);
-        out | (((x + (y - x) * amount).round() as u32) << s)
-    })
-}
-/// `rgb` with its HSL lightness set to `lightness` and saturation scaled by
-/// `chroma` (capped at 0.6), keeping its hue: a label's bright tint.
-fn tint(rgb: u32, chroma: f32, lightness: f32) -> u32 {
-    let [r, g, b] = [16, 8, 0].map(|s| ((rgb >> s) & 255) as f32 / 255.);
-    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-    let l = (max + min) / 2.;
-    let d = max - min;
-    let s = if d == 0. {
-        0.
-    } else {
-        d / (1. - (2. * l - 1.).abs())
-    };
-    let h = if d == 0. {
-        0.
-    } else if max == r {
-        ((g - b) / d).rem_euclid(6.)
-    } else if max == g {
-        (b - r) / d + 2.
-    } else {
-        (r - g) / d + 4.
-    } * 60.;
-    let s = (s * chroma).min(0.6);
-    let c = (1. - (2. * lightness - 1.).abs()) * s;
-    let x = c * (1. - ((h / 60.).rem_euclid(2.) - 1.).abs());
-    let m = lightness - c / 2.;
-    let (r, g, b) = match (h / 60.) as u32 {
-        0 => (c, x, 0.),
-        1 => (x, c, 0.),
-        2 => (0., c, x),
-        3 => (0., x, c),
-        4 => (x, 0., c),
-        _ => (c, 0., x),
-    };
-    [(r, 16), (g, 8), (b, 0)]
-        .into_iter()
-        .fold(0, |out, (v, s)| {
-            out | ((((v + m) * 255.).round() as u32) << s)
-        })
-}
-/// A timeline clip's tactile chip, derived from its label fill: a soft vertical
-/// gradient, a hairline highlight inside the top edge, a seam one shade under the
-/// body and a small drop shadow (v1's clip recipe, kept at low intensity).
-/// Increase Contrast flattens it: one fill, a solid `separator` seam, no shadow.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ClipMaterial {
-    pub top: u32,
-    pub bottom: u32,
-    /// Hairline just inside the top edge, as (colour, alpha); alpha 0 draws none.
-    pub highlight: (u32, f32),
-    /// 1 pt ring inside the clip's edge.
-    pub seam: u32,
-    /// Drop shadow (colour, alpha), offset `border × 2`, blur `border × 4`.
-    pub shadow: (u32, f32),
-    /// Names and lock glyphs on the clip.
-    pub foreground: u32,
-    /// Waveforms and marks drawn on the clip (the body's bright tint).
-    pub primary: u32,
-}
-impl Tokens {
-    pub fn clip_material(&self, fill: u32) -> ClipMaterial {
-        let dark = self.scheme == Scheme::Dark;
-        let (white, black) = (0xffffff, 0x000000);
-        if self.accessibility.increase_contrast {
-            return ClipMaterial {
-                top: fill,
-                bottom: fill,
-                highlight: (white, 0.),
-                seam: self.colors.separator,
-                shadow: (black, 0.),
-                foreground: self.colors.text,
-                primary: self.colors.text,
-            };
-        }
-        if dark {
-            ClipMaterial {
-                top: mix(fill, white, 0.06),
-                bottom: mix(fill, black, 0.1),
-                highlight: (white, 0.1),
-                seam: mix(fill, black, 0.4),
-                shadow: (black, 0.35),
-                foreground: mix(fill, white, 0.86),
-                primary: tint(fill, 1.5, 0.66),
-            }
-        } else {
-            ClipMaterial {
-                top: mix(fill, white, 0.04),
-                bottom: mix(fill, black, 0.05),
-                highlight: (white, 0.45),
-                seam: mix(fill, black, 0.18),
-                shadow: (0x0f0f14, 0.12),
-                foreground: mix(fill, black, 0.66),
-                primary: tint(fill, 1.3, 0.3),
-            }
         }
     }
 }
