@@ -9,7 +9,7 @@
 //! encoder input itself, so tests can compare it exactly without a codec in the way.
 
 use crate::Error;
-use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
+use crate::convert::{Chroma, ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
 use crate::settings::ExportSpec;
 use std::sync::atomic::AtomicBool;
 
@@ -175,8 +175,14 @@ impl<S: Sink> Pipeline<S> {
     }
 
     /// Converts a premultiplied RGBA working frame on the CPU and delivers it. The frame
-    /// index seeds the dither.
+    /// index seeds the dither. Chroma is decimated band-limited ([`Chroma::Filtered`]).
     pub fn push_frame(&mut self, frame: &WorkingFrame) -> Result<(), Error> {
+        self.push_frame_with(frame, Chroma::Filtered)
+    }
+
+    /// [`Pipeline::push_frame`] with the chroma decimation the frame takes
+    /// ([`Chroma::Footage`] only for a frame of untouched footage).
+    pub fn push_frame_with(&mut self, frame: &WorkingFrame, chroma: Chroma) -> Result<(), Error> {
         let index = self.admit()?;
         if frame.width != self.spec.width || frame.height != self.spec.height {
             return Err(Error::InvalidFrame(format!(
@@ -191,7 +197,13 @@ impl<S: Sink> Pipeline<S> {
             dither: self.spec.dither_enabled(),
             frame: index as u32,
         };
-        let input = convert_tagged(frame, self.spec.input_format(), &params, self.spec.tags)?;
+        let input = convert_tagged(
+            frame,
+            self.spec.input_format(),
+            &params,
+            self.spec.tags,
+            chroma,
+        )?;
         self.sink.video_owned(index, input)?;
         self.next += 1;
         Ok(())

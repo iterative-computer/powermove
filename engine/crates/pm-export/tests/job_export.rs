@@ -546,7 +546,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let input = convert::convert(
+        let input = convert::convert_tagged(
             &WorkingFrame {
                 width: W,
                 height: H,
@@ -560,6 +560,8 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
                 dither: true,
                 frame: n as u32,
             },
+            ColorTags::Rec709QuickTime,
+            convert::Chroma::Filtered,
         )
         .unwrap();
         assert!(out.frames[n as usize] == input, "frame {n}");

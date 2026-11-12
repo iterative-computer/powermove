@@ -16,11 +16,13 @@
 //! * normalization: 16-bit Y′ = 4096 + 56064·Y′, C = 32768 + 57344·C (section 13);
 //!   10-bit Y′ = 64 + 876·Y′, C = 512 + 896·C; 8-bit Y′ = 16 + 219·Y′,
 //!   C = 128 + 224·C; RGB full range 0..2ⁿ − 1;
-//! * chroma: 4:2:2 by point decimation at the co-sited (even) column; 4:2:0 with
-//!   siting type 0 by point decimation horizontally and, vertically, the declared
-//!   filter `[−1, 3, 3, −1] / 4` on rows 2y − 1 to 2y + 2 (clamped), on Y′CbCr: the
-//!   exact inverse of the renderer's linear vertical upsampling
-//!   (`pm_color::chroma::VERTICAL_420`, section 2 invariant (1));
+//! * chroma ([`Chroma`]): rendered frames are decimated band-limited by the
+//!   tent kernel, `[1, 2, 1] / 4` across on the co-sited (even) column for
+//!   4:2:2 and 4:2:0 siting type 0, and `[1, 3, 3, 1] / 8` on rows 2y − 1 to
+//!   2y + 2 for 4:2:0 (clamped), on Y′CbCr; a frame of untouched footage takes
+//!   the exact inverse of the renderer's upsampling instead (point decimation
+//!   across, `pm_color::chroma::VERTICAL_420` down), so a 4:2:x source keeps
+//!   its chroma (section 2 invariant (1));
 //! * dither (when on): `dither_offset` at the output's LSB — 16 units of `y416`
 //!   (12-bit), 64 units of `v216` (10-bit), one code of `x420` (10-bit), one 8-bit
 //!   or 16-bit code; never on alpha;
@@ -331,10 +333,35 @@ fn pixel(frame: &WorkingFrame, x: usize, y: usize) -> [f32; 4] {
     ]
 }
 
-/// The declared 4:2:0 vertical filter (`pm_color::chroma::VERTICAL_420`): the
-/// exact inverse of the renderer's linear vertical upsampling, so 4:2:0 sources
-/// keep their chroma (section 2 invariant (1)). Taps on rows 2y − 1 to 2y + 2.
-const VERTICAL_420: [(i64, f64); 4] = [(-1, -0.25), (0, 0.75), (1, 0.75), (2, -0.25)];
+/// How a frame's chroma is decimated for a subsampled output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chroma {
+    /// Band-limited, for every rendered frame: the tent kernel sited where
+    /// the output's chroma sits (`pm_color::chroma::TENT_COSITED` across,
+    /// `TENT_CENTERED` between rows). Thin coloured detail keeps its colour
+    /// at either pixel parity, and no tap is negative.
+    #[default]
+    Filtered,
+    /// The exact inverse of the renderer's upsampling (point decimation at
+    /// the co-sited column, `pm_color::chroma::VERTICAL_420` between rows),
+    /// for a frame that is untouched footage whose chroma the renderer
+    /// upsampled at the output's factors and siting: it passes through.
+    Footage,
+}
+
+/// Filter taps: (offset in luma pixels, weight).
+type Taps = &'static [(i64, f64)];
+
+impl Chroma {
+    /// Taps across (columns from `2x`) and down (rows from `2y`, 4:2:0).
+    fn taps(self) -> (Taps, Taps) {
+        use pm_color::chroma::{TENT_CENTERED, TENT_COSITED, VERTICAL_420};
+        match self {
+            Chroma::Filtered => (&TENT_COSITED, &TENT_CENTERED),
+            Chroma::Footage => (&[(0, 1.0)], &VERTICAL_420),
+        }
+    }
+}
 
 fn u16_plane(data: Vec<u16>, row_samples: usize, rows: usize) -> Plane {
     Plane {
@@ -431,23 +458,29 @@ pub fn convert_rgba8_into(
     Ok(())
 }
 
-/// Converts one working frame to `format`. Rows are converted in parallel
-/// (`crate::par`); every sample depends only on its own inputs, so the result is
-/// the same bytes on any number of threads.
+/// Converts one frame of untouched footage to `format`: chroma by the exact
+/// inverse of the renderer's upsampling ([`Chroma::Footage`]), the reference
+/// section 2's pass-through invariants are measured against. Deliveries
+/// convert with [`convert_tagged`] and the decimation their frame takes.
+/// Rows are converted in parallel (`crate::par`); every sample depends only
+/// on its own inputs, so the result is the same bytes on any number of
+/// threads.
 pub fn convert(
     frame: &WorkingFrame,
     format: InputFormat,
     params: &ConvertParams,
 ) -> Result<EncoderInput, Error> {
-    convert_tagged(frame, format, params, params.tags)
+    convert_tagged(frame, format, params, params.tags, Chroma::Footage)
 }
 
-/// Applies the selected SDR/HDR output transform before quantization and chroma sampling.
+/// Applies the selected SDR/HDR output transform before quantization and
+/// chroma decimation (`chroma`).
 pub fn convert_tagged(
     frame: &WorkingFrame,
     format: InputFormat,
     params: &ConvertParams,
     tags: crate::settings::ColorTags,
+    chroma: Chroma,
 ) -> Result<EncoderInput, Error> {
     if tags.is_hdr() {
         crate::hdr::validate(tags)?;
@@ -461,6 +494,7 @@ pub fn convert_tagged(
         }
     }
     let params = &ConvertParams { tags, ..*params };
+    let (across, down) = chroma.taps();
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
@@ -524,17 +558,33 @@ pub fn convert_tagged(
             (rgb_to_ycbcr(c), a)
         }
     };
-    // Chroma of 4:2:0 sample (cx, cy): siting type 0, point decimation
-    // horizontally (the even column), the declared filter vertically.
-    let chroma420 = |cx: usize, cy: usize| -> (f64, f64) {
-        let (mut cb, mut cr) = (0.0, 0.0);
-        for (k, wt) in VERTICAL_420 {
-            let row = (2 * cy as i64 + k).clamp(0, h as i64 - 1) as usize;
-            let (v, _) = ycc(2 * cx, row);
-            cb += wt * v[1];
-            cr += wt * v[2];
+    // (Cb, Cr) of one chroma row: siting type 0 for 4:2:0 (co-sited on the
+    // even column, centred between rows 2y and 2y + 1), co-sited for 4:2:2;
+    // taps clamped to the frame.
+    let chroma_row = |cy: usize, subsampled_rows: bool| -> Vec<[f64; 2]> {
+        let (taps, base): (&[(i64, f64)], i64) = if subsampled_rows {
+            (down, 2 * cy as i64)
+        } else {
+            (&[(0, 1.0)], cy as i64)
+        };
+        let step = if across.len() == 1 { 2 } else { 1 };
+        let mut line = vec![[0.0; 2]; w];
+        let mut out = vec![[0.0; 2]; w / 2];
+        for &(k, wy) in taps {
+            let y = (base + k).clamp(0, h as i64 - 1) as usize;
+            for x in (0..w).step_by(step) {
+                let v = ycc(x, y).0;
+                line[x] = [v[1], v[2]];
+            }
+            for (cx, o) in out.iter_mut().enumerate() {
+                for &(dx, wx) in across {
+                    let c = line[(2 * cx as i64 + dx).clamp(0, w as i64 - 1) as usize];
+                    o[0] += wy * wx * c[0];
+                    o[1] += wy * wx * c[1];
+                }
+            }
         }
-        (cb, cr)
+        out
     };
     // Quantizers at the output depth (dither in the output domain, then round
     // half to even and clip to the codable range).
@@ -570,8 +620,7 @@ pub fn convert_tagged(
     let cbcr_plane8 = || {
         let mut chroma = vec![0u8; w * h / 2];
         crate::par::rows(&mut chroma, w, |cy, row| {
-            for cx in 0..w / 2 {
-                let (cb, cr) = chroma420(cx, cy);
+            for (cx, [cb, cr]) in chroma_row(cy, true).into_iter().enumerate() {
                 row[cx * 2] = chroma8(cb, cx, cy, 1);
                 row[cx * 2 + 1] = chroma8(cr, cx, cy, 2);
             }
@@ -606,19 +655,21 @@ pub fn convert_tagged(
         InputFormat::V216 => {
             let mut out = vec![0u16; w * h * 2];
             crate::par::rows(&mut out, w * 2, |y, row| {
-                for t in 0..w / 2 {
+                for (t, [cb, cr]) in chroma_row(y, false).into_iter().enumerate() {
                     let (x0, x1) = (2 * t, 2 * t + 1);
-                    let (a, _) = ycc(x0, y);
-                    let (b, _) = ycc(x1, y);
                     let o = &mut row[t * 4..t * 4 + 4];
-                    o[0] =
-                        code(a[1] * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
-                    o[1] =
-                        code(a[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0), 256.0, 65216.0) as u16;
-                    o[2] =
-                        code(a[2] * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
-                    o[3] =
-                        code(b[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0), 256.0, 65216.0) as u16;
+                    o[0] = code(cb * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
+                    o[1] = code(
+                        ycc(x0, y).0[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0),
+                        256.0,
+                        65216.0,
+                    ) as u16;
+                    o[2] = code(cr * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
+                    o[3] = code(
+                        ycc(x1, y).0[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0),
+                        256.0,
+                        65216.0,
+                    ) as u16;
                 }
             });
             vec![u16_plane(out, w * 2, h)]
@@ -642,8 +693,7 @@ pub fn convert_tagged(
             });
             let mut chroma = vec![0u16; w * h / 2];
             crate::par::rows(&mut chroma, w, |cy, row| {
-                for cx in 0..w / 2 {
-                    let (cb, cr) = chroma420(cx, cy);
+                for (cx, [cb, cr]) in chroma_row(cy, true).into_iter().enumerate() {
                     row[cx * 2] = chroma10(cb, cx, cy, 1);
                     row[cx * 2 + 1] = chroma10(cr, cx, cy, 2);
                 }

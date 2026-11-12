@@ -31,9 +31,12 @@ overwrite policy, and file mode (agent exports use `0o600`).
 | PNG, 8-bit | RGBA8 | 0..255 | 1 code | on |
 
 `convert.rs` is S2's prototype pass (`docs/engine/spikes/S2.md`) in
-f64 on the CPU: Rec.709 matrix, co-sited point decimation for 4:2:2, type-0 siting with
-a two-tap vertical average for 4:2:0, round half to even (WGSL `round`), then
-clipping. Opaque outputs take premultiplied values (over black); straight alpha
+f64 on the CPU: Rec.709 matrix; chroma of rendered frames band-limited by the tent
+kernel at each output's siting (`[1, 2, 1] / 4` across on the co-sited column for
+4:2:2 and 4:2:0 type 0, `[1, 3, 3, 1] / 8` between rows for 4:2:0), and of untouched
+footage (`Renderer::pass_through`, a 4:2:x Rec.709 source at the output's siting) by
+the exact inverse of the renderer's upsampling; round half to even (WGSL `round`),
+then clipping. Opaque outputs take premultiplied values (over black); straight alpha
 unpremultiplies below a 1/4096 guard; premultiplied output re-premultiplies in E when
 the working values are linear. It is the reference the GPU pass must match and the
 fallback when no GPU pass runs.
