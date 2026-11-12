@@ -97,6 +97,20 @@ impl FrameSpec {
             1.
         }
     }
+    /// Whether stills are read at the view's resolution (ImageIO's
+    /// filtered thumbnail of the original): every viewer frame, captures
+    /// excepted. Full-resolution stills held for paused frames cost
+    /// gigabytes on large images for no visible difference.
+    pub(crate) fn preview_stills(&self) -> bool {
+        !self.exact
+    }
+    /// Whether video frames are converted at the view's resolution: only
+    /// for frames a final picture replaces, playing and dragged ones. A
+    /// paused frame converts video as the export does, so paused Full shows
+    /// the export's pixels.
+    pub(crate) fn preview_video(&self) -> bool {
+        !self.exact && self.moment != Moment::Paused
+    }
     pub(crate) fn render_size(&self) -> Size {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
@@ -133,18 +147,22 @@ impl FrameSpec {
             .lock()
             .unwrap()
             .push((self.exact, self.moment, self.scale, request.sampling));
+        #[cfg(test)]
+        MEDIA_SAMPLED
+            .lock()
+            .unwrap()
+            .push((self.exact, self.moment, scene.media.clone()));
         Ok(request)
     }
 
-    /// Frames while playing, and a drag's reduced frames (a preview the
-    /// final resampler redraws once the playhead settles), take the
-    /// playback resampler (pm-render's rule for scrub frames); paused
-    /// frames, drags at full resolution (which nothing redraws), and exact
-    /// reads such as captures, the final one.
+    /// A drag's reduced frames (a preview the final resampler redraws once
+    /// the playhead settles) take the playback resampler; every frame a
+    /// person watches, playing or paused, and exact reads such as captures
+    /// take the final one (Lanczos-3), so footage and precomps don't sharpen
+    /// when playback stops. Its cost on a real project's playing frames was
+    /// within run-to-run noise.
     fn sampling(&self) -> pm_render::sampling::Sampling {
-        if !self.exact
-            && (self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.))
-        {
+        if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
         } else {
             pm_render::sampling::Sampling::Final
@@ -656,8 +674,10 @@ impl Engine {
             return Vec::new();
         };
         // Media is prepared as the frame will read it (a viewer frame's
-        // stills at the size it draws them).
-        self.renderer.set_preview_media(!spec.exact);
+        // stills at the size it draws them, paused or playing; video at the
+        // view's size only while playing or dragging).
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(
@@ -753,7 +773,7 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
-        self.renderer.set_preview_media(false);
+        self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
         self.sync_studio(scene)?;
@@ -886,7 +906,8 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
-                self.renderer.set_preview_media(!spec.exact);
+                self.renderer
+                    .set_preview_media(spec.preview_stills(), spec.preview_video());
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
@@ -1170,7 +1191,8 @@ impl Engine {
         }
         let surface = self.cache_surface(size)?;
         // Drawn as `frame` draws this spec: the cached picture stands for it.
-        self.renderer.set_preview_media(!spec.exact);
+        self.renderer
+            .set_preview_media(spec.preview_stills(), spec.preview_video());
         self.renderer.set_draw_reuse(!spec.exact);
         self.renderer.set_scrub(false);
         self.renderer.set_playback(None);
@@ -1343,6 +1365,11 @@ impl Engine {
 pub(crate) static SAMPLED: std::sync::Mutex<
     Vec<(bool, Moment, f64, pm_render::sampling::Sampling)>,
 > = std::sync::Mutex::new(Vec::new());
+/// Every viewer request's (exact, moment, media files), for tests.
+#[cfg(test)]
+pub(crate) static MEDIA_SAMPLED: std::sync::Mutex<
+    Vec<(bool, Moment, Arc<pm_export::render::MediaPaths>)>,
+> = std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -1462,7 +1489,7 @@ mod sampling_tests {
     use pm_render::sampling::Sampling;
 
     #[test]
-    fn only_frames_a_final_one_replaces_take_the_playback_resampler() {
+    fn only_reduced_drag_frames_take_the_playback_resampler() {
         let output = Output {
             width: 64,
             height: 36,
@@ -1476,7 +1503,8 @@ mod sampling_tests {
             exact: false,
             ..FrameSpec::exact(Ticks::new(0).unwrap(), output)
         };
-        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Playback);
+        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Final);
+        assert_eq!(spec(Moment::Playing, 0.5).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Scrub, 0.5).sampling(), Sampling::Playback);
         assert_eq!(spec(Moment::Scrub, 1.).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Paused, 0.5).sampling(), Sampling::Final);
@@ -1690,6 +1718,77 @@ mod lifetime_tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(worst < 1e-3, "banded differs by {worst}");
+    }
+
+    /// The frame cache holds viewer pictures only. A paused viewer frame at
+    /// a scale is kept and served again at that scale; an exact read of the
+    /// same time and scale (a capture, an export frame) is drawn from the
+    /// originals every time, is never kept, and never takes or displaces
+    /// the viewer picture that is.
+    #[test]
+    fn an_exact_frame_at_a_scale_is_drawn_each_time_beside_the_cached_viewer_frame() {
+        let mut engine = Engine::new(Gpu::new("exact-scale-cache-test").unwrap()).unwrap();
+        let doc = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+            )),
+            1,
+        );
+        let scene = Scene {
+            doc: Arc::new(doc),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = FrameSpec {
+            scale: 4.,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
+        };
+        let viewer = FrameSpec {
+            exact: false,
+            ..exact
+        };
+        // Draws `spec` and says whether the frame cache served it.
+        let draw = |engine: &mut Engine, spec: FrameSpec| {
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            while engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    false,
+                    trace.clone(),
+                )
+                .unwrap()
+                .is_none()
+            {}
+            trace.lock().unwrap().cache_hit
+        };
+        assert!(
+            !draw(&mut engine, viewer),
+            "the first viewer frame is drawn"
+        );
+        assert_eq!(engine.cache.len(), 1, "and kept at its scale");
+        assert!(draw(&mut engine, viewer), "the same viewer frame is served");
+        for read in 1..=2 {
+            assert!(
+                !draw(&mut engine, exact),
+                "exact read {read} took a cached picture"
+            );
+            assert_eq!(engine.cache.len(), 1, "exact read {read} was kept");
+        }
+        assert!(
+            draw(&mut engine, viewer),
+            "the viewer frame is still served after the exact reads"
+        );
     }
 
     #[test]
@@ -1945,5 +2044,179 @@ mod lifetime_tests {
             }
             assert!(worst < 0.002, "{mode:?}: max signal error {worst}");
         }
+    }
+}
+
+#[cfg(test)]
+mod paused_media_tests {
+    use super::*;
+    /// A 64 × 64 composition showing 480 px of 3-px stripes at 6.25 %.
+    fn stripes() -> Scene {
+        let clip = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../../engine/crates/pm-render/tests/fixtures/video/stripes-709-limited.mp4",
+        );
+        let p = |k: &str, v: f64| format!(r#""{k}":{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            p("position.x", 32.),
+            p("position.y", 32.),
+            p("anchor.x", 0.),
+            p("anchor.y", 0.),
+            p("scale.x", 6.25),
+            p("scale.y", 6.25),
+            p("rotation", 0.),
+            p("opacity", 100.),
+        ]
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":64,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"v","type":"video","name":"clip","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"clip","trim":0,"speed":1,"w":480,"h":480}}}}],
+            "comps":{{}},"assets":{{"clip":{{"id":"clip","type":"video","name":"clip","w":480,"h":480,"dur":1}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_string(), clip)].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the clip's frame never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// A paused frame shows a large clip drawn small exactly as an export
+    /// (a capture) draws it: the source read through the export's path, not
+    /// a preview-sized copy.
+    #[test]
+    fn a_paused_frame_reads_video_as_the_export_does() {
+        let mut engine = Engine::new(Gpu::new("paused-media-test").unwrap()).unwrap();
+        let scene = stripes();
+        let output = Output {
+            width: 64,
+            height: 64,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let exact = drawn(&mut engine, &scene, FrameSpec::exact(Ticks::ZERO, output));
+        let paused = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        assert!(!paused.preview_video());
+        let shown = drawn(&mut engine, &scene, paused);
+        // The clip is drawn (grey stripes averaged, not the black ground).
+        assert!(shown[32 * 64 + 32][0] > 0.2, "{:?}", shown[32 * 64 + 32]);
+        assert_eq!(shown, exact);
+        // Playing frames may read the smaller copy.
+        assert!(
+            FrameSpec {
+                moment: Moment::Playing,
+                ..paused
+            }
+            .preview_video()
+        );
+    }
+}
+
+#[cfg(test)]
+mod viewer_output_tests {
+    use super::*;
+    use crate::color::Mastering;
+    /// An SDR project's view shows its delivery: a white solid pushed to
+    /// twice white (one stop of exposure) shows as white, as the SDR file
+    /// holds it; the EDR view keeps the light above white.
+    #[test]
+    fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
+        let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 32.),
+            ("position.y", 18.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let exposure = ch(1.);
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"s","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":64,"h":36}},
+              "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{exposure}}}}}]}}],
+            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: 64,
+            height: 36,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut shown = |mastering| {
+            engine.mastering = mastering;
+            let sub = engine
+                .frame(
+                    &scene,
+                    FrameSpec::exact(Ticks::ZERO, output),
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            sub.pixels()[18 * 64 + 32]
+        };
+        let edr = shown(Mastering::Edr);
+        assert!(
+            edr.iter().all(|c| *c > 1.5),
+            "EDR keeps light above white: {edr:?}"
+        );
+        let sdr = shown(Mastering::LinearP3);
+        assert!(
+            sdr.iter().all(|c| (*c - 1.).abs() < 0.002),
+            "the SDR view shows white: {sdr:?}"
+        );
     }
 }
