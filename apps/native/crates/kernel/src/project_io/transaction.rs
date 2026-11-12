@@ -29,7 +29,7 @@ use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
     FileVersion, Folder, Host, Placed, PublishHooks, begins, folder_sync, is_uuid_v4, keep_beside,
-    lstat_file, place_new, sync_directory, sync_file, withdraw,
+    lstat_file, place_new, probing, sync_directory, sync_file, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -748,7 +748,7 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
         let mut once = Some(());
         host.coordinated(destination, &mut |_| {
             if once.take().is_some() {
-                settle_all(&mut left, &mut undecided);
+                probing(|| settle_all(&mut left, &mut undecided));
             }
         });
         settled.left = left;
@@ -1014,7 +1014,7 @@ pub(crate) fn use_leftover(
     let mut used = None;
     host.coordinated(destination, &mut |_| {
         if used.is_none() {
-            used = Some(use_leftover_now(destination, chosen, host));
+            used = Some(probing(|| use_leftover_now(destination, chosen, host)));
         }
     });
     used.unwrap_or_else(|| {

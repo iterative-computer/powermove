@@ -754,6 +754,11 @@ pub struct PublishHooks {
     /// after that file was read and found to be the version the save could
     /// replace.
     pub after_judged: Option<PublishHook>,
+    /// While set, the volume answers the exchange with success and only
+    /// renames, as [`Self::exchange_renames`]: a volume whose behaviour
+    /// changed while the app ran (unmounted, and another mounted in its
+    /// place).
+    pub weak_exchange: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Called with a step's name and the destination when a save's record
     /// reaches that step (`begin`, `aside`, `install`, `exchanged`,
     /// `restore`, `keep`, `closed`, ...): the step is recorded, and not yet
@@ -781,6 +786,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("after_exchange", &self.after_exchange.is_some())
             .field("before_install", &self.before_install.is_some())
             .field("after_judged", &self.after_judged.is_some())
+            .field("weak_exchange", &self.weak_exchange.is_some())
             .field("step", &self.step.is_some())
             .field("folder_sync", &self.folder_sync.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
@@ -795,7 +801,12 @@ fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectI
     if hooks.no_exchange {
         return Ok(false);
     }
-    if hooks.exchange_renames {
+    if hooks.exchange_renames
+        || hooks
+            .weak_exchange
+            .as_ref()
+            .is_some_and(|weak| weak.load(std::sync::atomic::Ordering::SeqCst))
+    {
         fs::rename(a, b).map_err(|e| io_err(b, e))?;
         return Ok(true);
     }
@@ -821,60 +832,65 @@ fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectI
     }
 }
 
-/// The volume a folder is on, as far as one mount of it can be told from
-/// another: its device, filesystem type and mount point.
-fn volume_of(dir: &Path) -> Option<(u64, String)> {
-    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
-    let dev = fs::metadata(dir).ok()?.dev();
-    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: a valid C path and output storage, read only on success.
-    let stat = unsafe {
-        if libc::statfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
-            return None;
-        }
-        stat.assume_init()
-    };
-    // SAFETY: both are NUL-terminated arrays the system filled.
-    let text = |chars: &[libc::c_char]| unsafe {
-        std::ffi::CStr::from_ptr(chars.as_ptr())
-            .to_string_lossy()
-            .into_owned()
-    };
-    #[cfg(target_os = "macos")]
-    let mounted = format!("{} {}", text(&stat.f_fstypename), text(&stat.f_mntonname));
-    #[cfg(not(target_os = "macos"))]
-    let mounted = {
-        let _ = (&stat, &text);
-        String::new()
-    };
-    Some((dev, mounted))
+/// What folders were proven to do: (which call, the folder) and the answer.
+type Probes = Vec<((&'static str, PathBuf), bool)>;
+
+thread_local! {
+    /// What the folders probed by the publication or recovery this thread
+    /// is in the middle of were proven to do ([`probing`]).
+    static PROBED: std::cell::RefCell<Option<Probes>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// What mounted volumes were proven to do or not to do ([`exchanges`],
-/// [`excludes`]). A volume is not probed again while it stays mounted.
-type Proven = std::sync::Mutex<Vec<((u64, String), bool)>>;
+/// Runs `work`, one publication or one recovery, remembering what its
+/// volume is proven to do ([`exchanges`], [`excludes`]) for that long and no
+/// longer. Nothing is remembered from one save to the next, or from an open
+/// to a save: a volume can be unmounted and another mounted in its place
+/// under the same name, device number and type while the app runs, and a
+/// proof that the first one exchanges files says nothing about the second.
+/// An answer relied on wrongly destroys a file, so each save proves it
+/// afresh (two one-byte files beside the project, a few calls).
+pub(super) fn probing<T>(work: impl FnOnce() -> T) -> T {
+    struct Forget(Option<Probes>);
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            PROBED.with(|probed| *probed.borrow_mut() = self.0.take());
+        }
+    }
+    let _forget = Forget(PROBED.with(|probed| probed.borrow_mut().replace(Vec::new())));
+    work()
+}
 
-/// Runs `probe` on two one-byte staging files beside `destination` unless
-/// the volume's answer is known. An error is the staging files' own (a
-/// folder that cannot be written) and is not remembered.
+/// A call the volume was proven to have just answered that it has not: what
+/// was proven no longer holds, and is proven again before it is relied on.
+fn forget_probes() {
+    PROBED.with(|probed| {
+        if let Some(probed) = probed.borrow_mut().as_mut() {
+            probed.clear();
+        }
+    });
+}
+
+/// Runs `probe` on two one-byte staging files beside `destination`, unless
+/// the publication or recovery in progress already did ([`probing`]). An
+/// error is the staging files' own (a folder that cannot be written) and is
+/// not remembered.
 fn proven(
-    cache: &Proven,
+    what: &'static str,
     destination: &Path,
-    simulated: bool,
     probe: impl FnOnce(&TempFile, &TempFile) -> Result<bool, ProjectIoError>,
 ) -> Result<bool, ProjectIoError> {
-    let dir = destination.parent().unwrap_or(Path::new("."));
-    let volume = volume_of(if dir.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        dir
+    let key = (
+        what,
+        destination.parent().unwrap_or(Path::new(".")).to_owned(),
+    );
+    let known = PROBED.with(|probed| {
+        let probed = probed.borrow();
+        let (_, does) = probed.as_ref()?.iter().find(|(k, _)| *k == key)?;
+        Some(*does)
     });
-    if !simulated
-        && let Some(volume) = &volume
-        && let Some((_, does)) = cache.lock().unwrap().iter().find(|(v, _)| v == volume)
-    {
-        return Ok(*does);
+    if let Some(does) = known {
+        return Ok(does);
     }
     // Told apart by a byte of content each: an empty file has no stable
     // inode number on FAT-family volumes.
@@ -885,9 +901,11 @@ fn proven(
         Ok(temp)
     };
     let does = probe(&stage(b"a")?, &stage(b"b")?)?;
-    if !simulated && let Some(volume) = volume {
-        cache.lock().unwrap().push((volume, does));
-    }
+    PROBED.with(|probed| {
+        if let Some(probed) = probed.borrow_mut().as_mut() {
+            probed.push((key, does));
+        }
+    });
     Ok(does)
 }
 
@@ -902,9 +920,7 @@ fn holds(path: &Path, text: &[u8]) -> bool {
 /// which destroys whatever was at the destination (measured on a FAT32
 /// volume).
 pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
-    static PROVEN: Proven = std::sync::Mutex::new(Vec::new());
-    let simulated = hooks.no_exchange || hooks.exchange_renames;
-    proven(&PROVEN, destination, simulated, |a, b| {
+    proven("exchange", destination, |a, b| {
         Ok(swap_files(&a.path, &b.path, hooks)? && holds(&a.path, b"b") && holds(&b.path, b"a"))
     })
 }
@@ -914,13 +930,12 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
 /// leave both files, and onto a free name it must rename. (One volume type
 /// refuses the taken name and then cannot do the rename at all: exFAT.)
 fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
-    static PROVEN: Proven = std::sync::Mutex::new(Vec::new());
     if hooks.no_exclusive || hooks.links_only {
         return Ok(false);
     }
     #[cfg(target_os = "macos")]
     {
-        proven(&PROVEN, destination, false, |a, b| {
+        proven("exclusive rename", destination, |a, b| {
             let refused = sys::renamex(&a.path, &b.path, sys::RENAME_EXCL)
                 .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
                 && holds(&a.path, b"a")
@@ -936,7 +951,7 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (destination, &PROVEN);
+        let _ = destination;
         Ok(false)
     }
 }
@@ -983,7 +998,8 @@ pub(super) fn place_new(
         match sys::renamex(from, to, sys::RENAME_EXCL) {
             Ok(()) => return Ok(Placed::Moved),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
-            Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => {}
+            // Proven a moment ago and refused now: not relied on again.
+            Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => forget_probes(),
             Err(e) => return Err(io_err(from, e)),
         }
     }
@@ -1659,7 +1675,9 @@ pub(crate) fn publish(
     let mut published = None;
     host.coordinated(destination, &mut |_| {
         if let Some(temp) = temp.take() {
-            published = Some(publish_now(temp, destination, mode, new_hash, host));
+            published = Some(probing(|| {
+                publish_now(temp, destination, mode, new_hash, host)
+            }));
         }
     });
     published.unwrap_or_else(|| {
@@ -1712,7 +1730,13 @@ fn publish_now(
             hook(destination);
         }
         match swap_files(&temp.path, destination, hooks) {
-            Ok(exchanged) => exchanged,
+            Ok(true) => true,
+            // Proven a moment ago and refused now: the other route, and
+            // nothing proven is relied on again.
+            Ok(false) => {
+                forget_probes();
+                false
+            }
             Err(e) => {
                 tx.finish();
                 return Err(e);

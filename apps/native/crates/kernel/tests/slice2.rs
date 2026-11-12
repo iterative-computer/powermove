@@ -1365,6 +1365,66 @@ fn a_save_the_volume_cannot_prove_durable_keeps_a_local_copy_until_it_is_read_ba
         }
     }
 }
+/// What a volume does is proven by every save, not once per run of the
+/// app: a drive can be unplugged and another mounted in its place under the
+/// same name, device number and type. Here the volume exchanges files for
+/// the first save and afterwards answers the exchange with success while
+/// only renaming (which destroys whatever is at the destination). The next
+/// save proves the exchange again, finds it does not hold, and takes the
+/// route that moves the file aside: the previous version is retained and a
+/// version that had just landed is kept.
+#[test]
+fn what_a_volume_does_is_proven_by_every_save_not_remembered_from_an_earlier_one() {
+    let dir = common::TempDir::new("remounted");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let weak = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        weak_exchange: Some(weak.clone()),
+        ..Default::default()
+    });
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("a save by the atomic exchange");
+    let one = fs::read(&file).unwrap();
+    // The same mount point, device and type; another volume's behaviour.
+    weak.store(true, std::sync::atomic::Ordering::SeqCst);
+    rename_comp(&mut k, "P", "Two");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("the save takes the other route");
+    assert_eq!(saved_name(&file).as_deref(), Some("Two"));
+    assert_eq!(
+        retained_version(&file),
+        one,
+        "the version it replaced was moved aside and retained, not renamed over"
+    );
+    // And a version that lands right before the file is taken is kept.
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        weak_exchange: Some(weak),
+        before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+        ..Default::default()
+    });
+    rename_comp(&mut k, "P", "Three");
+    let plan = k.prepare_session_save(session, None, false).unwrap();
+    let ShellReply::Saved {
+        displaced: Some(kept),
+        ..
+    } = k.finish_session_save(plan.run()).unwrap()
+    else {
+        panic!("the save says another version was kept")
+    };
+    assert_eq!(fs::read(&kept).unwrap(), b"version B");
+    assert_eq!(saved_name(&file).as_deref(), Some("Three"));
+}
 /// A coordinator as the app supplies one: grants every write (or none),
 /// and notes what the project file held when the work began and ended.
 struct Coordinator {
