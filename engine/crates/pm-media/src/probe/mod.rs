@@ -1,12 +1,11 @@
 //! Probe (section 13 "Probe and index"): streams, timecode, reel, UMID or
 //! content identifier, pixel aspect, clean aperture; color; the frame index;
 //! timing (edit lists, composition offsets, start offsets, priming); the
-//! nominal rate; decode cost, poster, and filmstrip seed. Waveform peaks are
-//! in [`peaks`]; the content hash in [`crate::hash`].
+//! nominal rate; decode cost, poster, and filmstrip seed. The content hash
+//! is in [`crate::hash`]; waveforms are the mix's (`pm_audio::waveform`).
 
 pub mod cache;
 pub mod color;
-pub mod peaks;
 pub mod timing;
 
 use crate::decode::{Backend, backends};

@@ -89,8 +89,9 @@ timecode (drop-frame aware), reel, UMID, content identifier, pixel aspect,
 clean aperture, rotation; color (primaries, transfer, matrix, range, chroma
 siting, mastering display, content light, ICC, HDR format) with the section 9
 interpretation for untagged sources; the frame index; timing and priming; the
-nominal rate; decode cost; poster frame and filmstrip seed. Waveform peaks
-are `probe::peaks`.
+nominal rate; decode cost; poster frame and filmstrip seed. Waveforms come
+from the mix's own sources (`pm_audio::waveform::clip_envelope`), so they
+show each clip's heard streams where its timing places them.
 
 The frame index (`index::build`) comes from container tables wherever they
 exist. Only box, element, or KLV headers and table payloads are read:

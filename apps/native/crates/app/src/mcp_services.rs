@@ -1047,39 +1047,38 @@ impl EngineHook for EngineJobs {
             completed: cells.len(),
         })
     }
+    /// Loudness and silences of what the mix plays from the asset: its heard
+    /// streams on its clip's timeline (`pm_audio::waveform::clip_envelope`).
     fn waveform(&self, request: &WaveformRequest) -> Result<Waveform> {
         const BUCKETS_PER_SECOND: f64 = 100.;
         let path = self.original(&request.request)?;
-        let rate = pm_media::probe::probe_timing(&path)
-            .map_err(failed)?
-            .streams
-            .iter()
-            .find_map(|stream| stream.audio.as_ref().map(|audio| audio.sample_rate))
-            .ok_or_else(|| Error::invalid("This media has no audio."))?;
-        let per_peak = (rate as f64 / BUCKETS_PER_SECOND).round() as usize;
-        let peaks =
-            pm_media::probe::peaks::peaks(&path, None, per_peak.max(1), 0).map_err(failed)?;
-        let channels = peaks.channels.max(1);
-        let envelope = peaks
-            .data
-            .chunks(channels)
-            .map(|bucket| {
-                bucket
-                    .iter()
-                    .map(|[low, high]| low.abs().max(high.abs()) as f64)
-                    .fold(0., f64::max)
-            })
-            .collect::<Vec<f64>>();
-        let bucket_at = |time: f64| {
-            ((time * peaks.sample_rate as f64 / per_peak as f64) as usize).min(envelope.len())
-        };
+        let published = self.published(&request.request.snapshot)?;
+        let record = request
+            .request
+            .asset
+            .as_ref()
+            .and_then(|asset| asset["id"].as_str())
+            .and_then(|id| published.snapshot.root()?.get("assets")?.get(id));
+        let streams = pm_audio::graph::selected_streams(record);
+        if streams.is_empty() {
+            return Err(Error::invalid("This media's audio streams are all off."));
+        }
+        let (envelope, rate) = pm_audio::waveform::clip_envelope(
+            &path,
+            &streams,
+            pm_audio::graph::clip_timing(record),
+            BUCKETS_PER_SECOND,
+        )
+        .map_err(|_| Error::invalid("This media has no audio."))?;
+        let envelope: Vec<f64> = envelope.into_iter().map(f64::from).collect();
+        let bucket_at = |time: f64| ((time * rate) as usize).min(envelope.len());
         let span = &envelope[bucket_at(request.start)..bucket_at(request.end)];
         let peak = span.iter().copied().fold(0., f64::max);
         let threshold = 10f64.powf(request.threshold_db / 20.);
         let mut silences = vec![];
         let mut quiet = None;
         for (index, level) in span.iter().chain([&f64::MAX]).enumerate() {
-            let time = request.start + index as f64 / BUCKETS_PER_SECOND;
+            let time = request.start + index as f64 / rate;
             match (quiet, *level < threshold) {
                 (None, true) => quiet = Some(time),
                 (Some(start), false) => {

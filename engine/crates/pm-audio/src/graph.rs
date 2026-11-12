@@ -55,7 +55,9 @@ use crate::source::{Source, SourceCache};
 /// file's separate tracks. An asset without the member (every project made
 /// before streams were listed) plays the file's best stream alone, as it
 /// always has, so it sounds the same. `None` is that best stream.
-fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
+/// The audio streams an asset record plays (`audioStreams` entries that are
+/// on; the file's best stream without the member).
+pub fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
     let Some(list) = node::array(node::member(record, "audioStreams")) else {
         return vec![None];
     };
@@ -69,7 +71,7 @@ fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
 
 /// Which reading of its file's timestamps an asset's stored times address:
 /// the record's `timing` member (`pm_media::clip`).
-fn clip_timing(record: Option<&Node>) -> ClipTiming {
+pub fn clip_timing(record: Option<&Node>) -> ClipTiming {
     ClipTiming::of_asset(node::number(node::member(record, "timing")))
 }
 

@@ -363,3 +363,72 @@ fn a_clip_without_a_picture_is_as_long_as_its_sound() {
         );
     }
 }
+
+/// A waveform shows the sound where the mix plays it: the loudest bucket of
+/// an asset's clip envelope holds the click the mix plays, for a late
+/// soundtrack and a late picture, read either way, and for a file with two
+/// streams of which only the second is heard.
+#[test]
+fn a_waveform_shows_the_sound_where_the_mix_plays_it() {
+    let dir = temp_dir("clip-origin-waveform");
+    let wav = dir.join("click.wav");
+    write_wav(&wav, SR, &[clicks(SR as usize, &[CLICK], 0.9)]);
+    let pcm_mov: &[&str] = &["-c:v", "mpeg4", "-q:v", "4", "-c:a", "pcm_s16le"];
+    let loudest = |envelope: &[f32]| {
+        envelope
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0
+    };
+    for (name, picture_at, sound_at) in [
+        ("late-sound.mov", 0.0, 0.25),
+        ("late-picture.mov", 0.4, 0.0),
+    ] {
+        let path = dir.join(name);
+        clip(&path, &wav, picture_at, sound_at, pcm_mov);
+        for timing in [None, Some(pm_media::clip::ASSET_TIMING)] {
+            let (heard, _) = click_with(&path, r#""trim":0,"speed":1"#, timing);
+            let reading = pm_media::clip::ClipTiming::of_asset(timing.map(|t| t as f64));
+            let (envelope, rate) =
+                pm_audio::waveform::clip_envelope(&path, &[None], reading, 100.0).unwrap();
+            assert_eq!(
+                loudest(&envelope),
+                (heard as f64 * rate / f64::from(SR)) as usize,
+                "{name}, timing {timing:?}: the mix plays the click at {heard}"
+            );
+        }
+    }
+    // Two mono streams; the first clicks early, the second late. Only the
+    // second is on.
+    let early = dir.join("early.wav");
+    write_wav(&early, SR, &[clicks(SR as usize, &[4_800], 0.9)]);
+    let two = dir.join("two.mov");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&early)
+        .arg("-i")
+        .arg(&wav)
+        .args(["-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le"])
+        .arg(&two)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let record = pm_model::json::parse(
+        r#"{"kind":"audio","timing":2,"audioStreams":[{"index":0,"channels":1,"sampleRate":48000,"on":false},{"index":1,"channels":1,"sampleRate":48000,"on":true}]}"#,
+    )
+    .unwrap();
+    let doc = pm_model::Document::new(Some(record), 1);
+    let record = doc.root();
+    let streams = pm_audio::graph::selected_streams(record);
+    let reading = pm_audio::graph::clip_timing(record);
+    assert_eq!(streams, [Some(1)]);
+    let (envelope, rate) =
+        pm_audio::waveform::clip_envelope(&two, &streams, reading, 100.0).unwrap();
+    assert_eq!(
+        loudest(&envelope),
+        (CLICK as f64 * rate / f64::from(SR)) as usize
+    );
+    assert!(envelope[(4_800.0 * rate / f64::from(SR)) as usize] < 0.01);
+}
