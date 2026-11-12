@@ -471,11 +471,11 @@ impl Engine {
     }
     #[cfg(feature = "kernel")]
     pub(crate) fn start_export_calibration(
-        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64,
+        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64, render_scale:f32,
     ) -> Result<crate::export_estimate::Calibration> {
         self.sync_studio(scene, time)?;
         crate::export_estimate::Calibration::new(
-            self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,
+            self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,render_scale,
             self.renderer.definitions(), self.fonts.as_ref(),
         ).map_err(anyhow::Error::msg)
     }

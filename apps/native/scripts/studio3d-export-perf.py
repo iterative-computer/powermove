@@ -94,10 +94,11 @@ def main():
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory outside Git")
     parser.add_argument("--frames", type=int, default=30)
-    parser.add_argument("--library-dir", type=Path, help="FFmpeg libraries for an unbundled benchmark snapshot")
+    parser.add_argument("--library-dir", type=Path, action="append", help="library directory for an unbundled snapshot; repeat for OIDN and FFmpeg")
     parser.add_argument("--sample-counts", action="store_true", help="record measured per-pixel counts and readback overhead")
     parser.add_argument("--fixed-spp", type=int, help="diagnostic fixed samples with the chosen preset's other settings")
     parser.add_argument("--quality-patch", type=json.loads, help="explicit diagnostic preset overrides as a JSON object")
+    parser.add_argument("--render-scale", type=float, default=1.0, help="explicit 3D-only render scale; output stays 1920x1080")
     parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--start", type=float, default=0)
     parser.add_argument("--bounces", type=int, help="diagnostic total bounce limit")
@@ -107,6 +108,8 @@ def main():
     parser.add_argument("--single-tree", action="store_true", help="explicit experimental single-light A/B")
     parser.add_argument("--stratified-lights", action="store_true", help="explicit experimental replicated-light A/B")
     args = parser.parse_args()
+    if not math.isfinite(args.render_scale) or not 0 < args.render_scale <= 1:
+        parser.error("render scale must be greater than zero and at most one")
     if args.frames < 1 or not math.isfinite(args.fps) or args.fps <= 0 or not math.isfinite(args.start) or args.start < 0:
         parser.error("frames/fps must be positive; start must be nonnegative")
     if args.quality_patch is not None and (not isinstance(args.quality_patch, dict) or "preset" in args.quality_patch):
@@ -135,7 +138,7 @@ def main():
     profile.mkdir()
     env = dict(os.environ, STUDIO_TIMINGS="1", PM_EXPORT_PROFILE="1")
     if args.library_dir:
-        env["DYLD_LIBRARY_PATH"] = str(args.library_dir.resolve(strict=True))
+        env["DYLD_LIBRARY_PATH"] = os.pathsep.join(str(p.resolve(strict=True)) for p in args.library_dir)
     if args.sample_counts:
         env["STUDIO_SAMPLE_COUNTS"] = "1"
     env["STUDIO_SECONDARY_LIGHT_TREE"] = "1" if args.secondary_tree else "0"
@@ -174,7 +177,7 @@ def main():
                 if args.bounces is not None:
                     export_quality["maxBounces"]=args.bounces
             result = client.tool("export_video", {"name": "Studio performance", "range": "work", "audio": True,
-                                                   "motionBlur": True, "studioQuality": export_quality})
+                                                   "motionBlur": True, "studioQuality": export_quality, "studioRenderScale": args.render_scale})
             while result.get("status") == "running":
                 time.sleep(0.2)
                 result = client.tool("export_video", {"jobId": result["jobId"]})
@@ -187,6 +190,8 @@ def main():
                 if not line.startswith("STUDIO_FRAME_TIMING "):
                     continue
                 frame={}
+                dimensions=re.search(r"\bsize=(\d+)x(\d+)",line)
+                if dimensions:frame["render_size"]=[int(v) for v in dimensions.groups()]
                 for field in ["prepare_ms","total_ms","trace_ms","guides_ms","guide_readback_ms","denoise_ms","sample_statistics_ms"]:
                     match=re.search(r"\b"+field+r"[=:]\s*([0-9.eE+-]+)",line)
                     if match:frame[field]=float(match[1])
@@ -195,7 +200,7 @@ def main():
                     if match:frame[field]=float(match[1])
                 frames.append(frame)
             report = {"frame_timings":frames,"executable_sha256": executable_hash, "input_sha256": source_hash, "preset": args.preset, "frames": args.frames,
-                      "requested_quality":export_quality,"fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
+                      "requested_quality":export_quality,"studio_render_scale":args.render_scale,"fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
                       "secondary_light_tree": args.secondary_tree,
                       "single_light_tree": args.single_tree,
                       "stratified_lights": args.stratified_lights,

@@ -60,6 +60,9 @@ pub struct ExportRequest {
     /// Omitted jobs use saved composition quality (or legacy camera samples).
     #[serde(default)]
     pub studio_quality: Option<serde_json::Value>,
+    /// Explicit 3D-only render fraction. Omitted is full size; never automatic.
+    #[serde(default)]
+    pub studio_render_scale:Option<f32>,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -377,6 +380,7 @@ impl ExportRequest {
             preview: false,
             cache: None,
             studio_quality: None,
+            studio_render_scale:None,
         })
     }
 }
@@ -873,19 +877,10 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]
-        if let Some(quality) = request.studio_quality {
-            crate::studio::attach_with_quality_fonts(
-                &mut renderer,
-                Arc::new(doc.clone()),
-                &media,
-                composition.as_str(),
-                quality,
-                Some(&fonts),
-            )
-            .map_err(anyhow::Error::msg)?;
-        } else {
-            crate::studio::attach_with_fonts(&mut renderer, Arc::new(doc.clone()), &media, &fonts);
-        }
+        crate::studio::attach_with_export_options_fonts(
+            &mut renderer,Arc::new(doc.clone()),&media,composition.as_str(),
+            request.studio_quality,request.studio_render_scale.unwrap_or(1.),Some(&fonts),
+        ).map_err(anyhow::Error::msg)?;
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {
             let job = request.job.clone();

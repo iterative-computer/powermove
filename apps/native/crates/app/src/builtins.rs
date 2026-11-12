@@ -1020,11 +1020,12 @@ impl Controller {
                         && n("height") > 0
                     {
                         let time = viewer.status().frame.map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
-                        if let Err(error) = viewer.estimate_studio_export(
+                        if let Err(error) = viewer.estimate_studio_export_scaled(
                             stamp,
                             time,
                             pm_protocol::common::Size::new(n("width") as u32, n("height") as u32),
                             n("frames").max(1),
+                            request.input["renderScale"].as_f64().unwrap_or(1.) as f32,
                         ) {
                             eprintln!("Studio export estimate not started: {error}");
                         }

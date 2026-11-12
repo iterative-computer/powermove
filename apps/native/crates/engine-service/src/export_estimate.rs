@@ -60,6 +60,9 @@ pub struct ExportEstimate {
     pub ticks: i64,
     pub width: u32,
     pub height: u32,
+    pub render_scale:f32,
+    pub render_width:u32,
+    pub render_height:u32,
     pub frames: u64,
     pub calibration_width: u32,
     pub calibration_height: u32,
@@ -73,6 +76,7 @@ pub(crate) struct Pending {
     time: Ticks,
     size: Size,
     frames: u64,
+    render_scale:f32,
     reply: async_channel::Sender<Result<ExportEstimate, String>>,
     #[cfg(feature = "kernel")]
     calibration: Option<Calibration>,
@@ -89,7 +93,18 @@ impl Viewer {
         size: Size,
         frames: u64,
     ) -> anyhow::Result<async_channel::Receiver<Result<ExportEstimate, String>>> {
+        self.estimate_studio_export_scaled(stamp,time,size,frames,1.)
+    }
+    pub fn estimate_studio_export_scaled(
+        &self,
+        stamp: Stamp,
+        time: Ticks,
+        size: Size,
+        frames: u64,
+        render_scale:f32,
+    ) -> anyhow::Result<async_channel::Receiver<Result<ExportEstimate, String>>> {
         validate(size, frames).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(render_scale.is_finite() && render_scale>0. && render_scale<=1.,"Invalid Studio render scale");
         let (reply, receive) = async_channel::bounded(1);
         let mut state = self.shared.state.lock().unwrap();
         anyhow::ensure!(
@@ -109,6 +124,7 @@ impl Viewer {
             time,
             size,
             frames,
+            render_scale,
             reply,
             #[cfg(feature = "kernel")]
             calibration: None,
@@ -229,6 +245,8 @@ pub(crate) struct Calibration {
     service: studio::StudioService,
     request: studio::SceneRequest,
     target: Size,
+    render_target:Size,
+    render_scale:f32,
     frames: u64,
     stage: usize,
     pair: Vec<Sample>,
@@ -244,11 +262,16 @@ impl Calibration {
         time: Ticks,
         size: Size,
         frames: u64,
+        render_scale:f32,
         definitions: pm_protocol::definitions::DefinitionSetSnapshot,
         fonts: Option<&pm_render::text::host::RenderFonts>,
     ) -> Result<Self, String> {
         validate(size, frames)?;
-        let small = calibration_size(size);
+        let dimensions=pm_studio3d_engine::compositor::scaled_export_request(&studio::SceneRequest {
+            composition:scene.comp.clone(),revision:scene.doc.revision(),ticks:time.get(),width:size.width,height:size.height,
+        },render_scale)?;
+        let render_target=Size::new(dimensions.width,dimensions.height);
+        let small = calibration_size(render_target);
         Ok(Self {
             source: studio::DocumentSource::new(scene.doc.clone(), scene.media.as_ref().clone())
                 .with_native_fonts(fonts)
@@ -263,6 +286,8 @@ impl Calibration {
                 height: small.height,
             },
             target: size,
+            render_target,
+            render_scale,
             frames,
             stage: 0,
             pair: Vec::new(),
@@ -355,11 +380,11 @@ impl Calibration {
             trace: t.pipeline.trace_ms,
             oidn: t.pipeline.denoise_ms,
             guides: t.pipeline.guides_ms + t.pipeline.guide_readback_ms,
-            prepare_post: t.prepare_ms + t.pipeline.post_ms,
+            prepare_post: t.prepare_ms + (t.pipeline.post_ms-t.pipeline.denoise_ms-t.pipeline.guides_ms-t.pipeline.guide_readback_ms).max(0.),
         });
         self.stage += 1;
         if self.pair.len() == 2 {
-            let area = self.target.width as f64 * self.target.height as f64
+            let area = self.render_target.width as f64 * self.render_target.height as f64
                 / (self.request.width as f64 * self.request.height as f64);
             self.presets.push(project(
                 name,
@@ -378,10 +403,13 @@ impl Calibration {
             ticks: self.request.ticks,
             width: self.target.width,
             height: self.target.height,
+            render_scale:self.render_scale,
+            render_width:self.render_target.width,
+            render_height:self.render_target.height,
             frames: self.frames,
             calibration_width: self.request.width,
             calibration_height: self.request.height,
-            extrapolated: self.target != Size::new(self.request.width, self.request.height),
+            extrapolated: self.render_target != Size::new(self.request.width, self.request.height),
             presets: self.presets.clone(),
             warnings: self.warnings.clone(),
             excludes: vec![
@@ -439,7 +467,7 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
             engine.set_resources(resources);
             p.calibration = Some(
                 engine
-                    .start_export_calibration(&scene, p.time, p.size, p.frames)
+                    .start_export_calibration(&scene, p.time, p.size, p.frames,p.render_scale)
                     .map_err(|e| e.to_string())?,
             );
         }

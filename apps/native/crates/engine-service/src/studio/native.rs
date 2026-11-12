@@ -50,6 +50,7 @@ pub struct DocumentSource {
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
+    export_render_scale:f32,
     camera: super::ViewCamera,
     view_composition: Option<String>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
@@ -107,6 +108,7 @@ impl DocumentSource {
             resources: Mutex::default(),
             resolved: Mutex::default(),
             quality_override: None,
+            export_render_scale:1.,
             camera: super::ViewCamera::Active,
             view_composition: None,
             environment_maps: Mutex::default(),
@@ -117,6 +119,10 @@ impl DocumentSource {
             failures: Mutex::default(),
             backdrop_owner: Mutex::default(),
         }
+    }
+    pub fn with_export_render_scale(mut self, scale:f32)->Result<Self,String> {
+        if !scale.is_finite() || scale<=0. || scale>1. {return Err("Studio render scale must be greater than zero and at most one".into());}
+        self.export_render_scale=scale;Ok(self)
     }
     pub fn with_refine_observer(mut self, observer: Option<super::RefineObserver>) -> Self {
         self.refine_observer = observer; self
@@ -366,6 +372,7 @@ impl DocumentSource {
     }
 }
 impl pm_studio3d_engine::compositor::Source for DocumentSource {
+    fn final_render_scale(&self,_request:&SceneRequest)->Result<f32,String>{Ok(self.export_render_scale)}
     fn needs_materials(&self, request: &SceneRequest) -> Result<bool, String> {
         Ok(!self.material_references(request)?.is_empty())
     }

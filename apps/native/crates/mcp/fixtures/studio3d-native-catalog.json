@@ -335,6 +335,12 @@
                 }
               }
             ]
+          },
+          "studioRenderScale": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "description": "Explicit 3D-only render fraction, such as 0.75. Full size when omitted; 2D and output resolution are unchanged."
           }
         }
       }

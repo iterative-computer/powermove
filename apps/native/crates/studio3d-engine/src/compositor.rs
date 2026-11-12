@@ -9,6 +9,9 @@ pub use pm_render::scene3d::provider::{Counters, Settings};
 use std::sync::Arc;
 
 pub trait Source: SceneSource {
+    /// Explicit per-export transport scale; preview and the 2D compositor stay full size.
+    fn final_render_scale(&self, _request: &SceneRequest) -> Result<f32,String> {Ok(1.)}
+
     fn needs_materials(&self, _request: &SceneRequest) -> Result<bool, String> {
         Ok(false)
     }
@@ -123,6 +126,10 @@ impl Pass {
         tier: Tier,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<wgpu::Texture, String> {
+        let scaled=if matches!(tier,Tier::Final{..}) {
+            Some(scaled_export_request(request,self.source.final_render_scale(request)?)?)
+        } else {None};
+        let request=scaled.as_ref().unwrap_or(request);
         self.prepare_materials(request, tier)?;
         let service = self.service.as_ref().unwrap();
         let device = service.device().unwrap();
@@ -269,7 +276,10 @@ impl Backend for Pass {
 pub struct Adapter(pub Arc<dyn Source>);
 impl RenderSource for Adapter {
     fn final_samples(&self, request: &SceneRequest) -> Result<u32, String> {
-        self.0.final_samples(request)
+        // Use the same cache key as transport, rather than alternating full
+        // and reduced scene evaluation once for every compositor layer.
+        let scaled=scaled_export_request(request,self.0.final_render_scale(request)?)?;
+        self.0.final_samples(&scaled)
     }
     fn create(
         &self,
@@ -281,5 +291,37 @@ impl RenderSource for Adapter {
         let mut pass = Pass::new(self.0.clone());
         pass.service = Some(StudioService::with_device(device, queue, width, height)?);
         Ok(Box::new(pass))
+    }
+}
+
+/// Scale only the 3D transport request. The compositor's output dimensions
+/// and its 2D layer plans remain unchanged.
+pub fn scaled_export_request(request: &SceneRequest, scale: f32) -> Result<SceneRequest, String> {
+    if !scale.is_finite() || scale <= 0. || scale > 1. {
+        return Err("Studio render scale must be greater than zero and at most one".into());
+    }
+    if request.width == 0 || request.height == 0 {
+        return Err("Studio output is empty".into());
+    }
+    let mut scaled = request.clone();
+    scaled.width = (request.width as f64 * scale as f64).round().max(1.) as u32;
+    scaled.height = (request.height as f64 * scale as f64).round().max(1.) as u32;
+    Ok(scaled)
+}
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+    #[test]
+    fn export_scale_preserves_request_identity_and_defaults_to_full_size() {
+        let r=SceneRequest{composition:"C".into(),revision:7,ticks:123,width:1920,height:1080};
+        assert_eq!(scaled_export_request(&r,1.).unwrap(),r);
+        let small=scaled_export_request(&r,0.75).unwrap();
+        assert_eq!((small.width,small.height),(1440,810));
+        assert_eq!((&small.composition,small.revision,small.ticks),(&r.composition,r.revision,r.ticks));
+        for invalid in [0.,-0.5,1.01,f32::NAN,f32::INFINITY] {
+            assert!(scaled_export_request(&r,invalid).is_err());
+        }
+        let mut tiny=r;tiny.width=1;tiny.height=1;
+        assert_eq!(scaled_export_request(&tiny,0.75).unwrap(),tiny);
     }
 }

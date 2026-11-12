@@ -1092,7 +1092,8 @@ impl Backend {
             pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
         ) {
             let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
-            let key = format!("{w}x{h}x{frames}@{}", p.revision());
+            let render_scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+            let key = format!("{w}x{h}x{frames}@{}:{render_scale}", p.revision());
             let status = self.native.facts["studioExportEstimate"]["status"]
                 .as_str()
                 .unwrap_or("idle")
@@ -1107,7 +1108,7 @@ impl Backend {
                 self.native.export_estimate_key = Some(key);
                 self.native.platform.push((
                     "export.estimate".into(),
-                    json!({"width":w,"height":h,"frames":frames}),
+                    json!({"width":w,"height":h,"frames":frames,"renderScale":render_scale}),
                 ));
             }
             let preset = policy["preset"].as_str().unwrap_or("production");
@@ -1115,23 +1116,25 @@ impl Backend {
             // rather than flash the static guess before the measured range.
             let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
             let from_viewer = asked.is_some()
-                || crate::delivery::measured_estimate(
+                || crate::delivery::measured_estimate_scaled(
                     &self.native.facts["studioExportEstimate"],
                     preset,
                     &label,
                     w,
                     h,
                     frames,
+                    render_scale,
                 )
                 .is_some();
             if let Some(note) = asked.or_else(|| {
-                crate::delivery::measured_estimate(
+                crate::delivery::measured_estimate_scaled(
                     &self.native.facts["studioExportEstimate"],
                     preset,
                     &label,
                     w,
                     h,
                     frames,
+                    render_scale,
                 )
             }) {
                 let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();

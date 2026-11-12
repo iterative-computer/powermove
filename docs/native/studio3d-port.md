@@ -2408,13 +2408,13 @@ command; no panel, control or layout is introduced here.
 
 #### Round 2 rejected: Metal OIDN misses the real-export improvement rule
 
-The candidate explicitly requests Metal device type 5, uses OIDN-owned device
-buffers, and retains explicit CPU device type 1 fallback. It never binds Rust
-Vec memory to the Metal device. GPU results are published only after all
+The tested prototype requested Metal device type 5, used OIDN-owned device
+buffers, and retained explicit CPU device type 1 fallback. It never bound Rust
+Vec memory to the Metal device. GPU results were published only after all
 layers succeed, so fallback cannot accidentally denoise a partially modified
 input twice. Buffers and filter handles survive frames; alpha and extra
 channels remain intact. The native application and the five-library development
-bundle compile with OIDN 2.5.1.
+bundle compiled with OIDN 2.5.1.
 
 Two device tests pass: cancelled-frame recovery and CPU/Metal picture tolerance
 across dimensions, padded channels, guide scales and filter qualities. The
@@ -2422,16 +2422,15 @@ three measured display-compressed RGB RMS differences are 0.000232,
 0.000233 and 0.000276 (limit 0.003); p99 differences are below 0.000833
 (limit 0.01). These are binding tests, not full-HD native export acceptance.
 First-use filtering at the tested small dimensions costs 0.70–2.06 s on Metal;
-its warm full-HD application cost and graph/filter reuse still need measurement.
-The diagnostic log reports actual backend, fallback, guide scale and individual
-filter/upload/download times. The profiler can request `--oidn-device cpu` or
-`metal` for controlled runs.
+those binding tests did not measure full-HD application cost. Prototype logs
+record backend, fallback, guide scale and filter/upload/download times. Its
+`--oidn-device` diagnostic option was removed with the rejected implementation.
 
 A three-frame native diagnostic measures first-use Metal denoising at
 5468 ms, followed by 577 and 508 ms warm frames. The diagnostic export averages
 4.602 s/frame; its short range and the unaccepted sampling candidate make it
-unsuitable for the speed-round decision. A matched **30-frame** CPU/Metal
-comparison is still required. No 15% end-to-end GPU gain is claimed.
+unsuitable for the speed-round decision. The completed matched **30-frame**
+comparison below supplies that decision.
 
 **Shipping blocker:** the development TBB library declares macOS 27.0, while
 the app's Info.plist and linker target require macOS 14.0. The bundle helper
@@ -2461,3 +2460,27 @@ run removes that cache bias. The native CPU path already uses balanced OIDN,
 half-resolution guide prefilters and cropped beauty work; GPU transfer/guide
 work and two noisy layers limit its application gain despite the larger
 standalone OIDN benchmark gain. Image thresholds and references are unchanged.
+
+### Explicit reduced-size export plumbing (native UI round 5)
+
+The export request carries `studio_render_scale` (MCP: `studioRenderScale`).
+Omitted is 1.0. The existing `studioReducedSize: true` export option selects
+0.75 explicitly; no preset or timing decision enables it automatically.
+Only Final-tier 3D transport and its material preparation use the reduced
+request. The compositor still works at the requested delivery size and upsamples
+in linear light, so 1080p output remains 1920×1080 while 3D traces at 1440×810.
+The two-dimensional layer plan and authored document are unchanged.
+
+`export.estimate` accepts `renderScale`; ready estimate state includes
+`renderScale`, `renderWidth` and `renderHeight` alongside full delivery dimensions.
+Changing the option invalidates the previous estimate. Calibration extrapolates
+against the actual transport area and avoids counting guides/OIDN a second time
+inside the inclusive post-processing timer. This is an explicit quality option,
+not a relaxation of full-size image acceptance or a speed-round result.
+
+Verification: the combined native app builds in 25.47 s; all 12 native MCP
+scene tests pass, including invalid/omitted scale inputs. Two focused unit
+checks pass for scale arithmetic and estimate invalidation. A headless Metal
+integration test observes actual transport requests changing from 64×64 to
+48×48 at 75%, while delivery remains 64×64 and the document stays identical.
+Full-HD real-export timings of the option are recorded separately when available.

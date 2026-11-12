@@ -298,3 +298,17 @@ fn extrusion_commands_and_surface_channels_are_exposed_to_agents(){
     assert_eq!(read["scene"]["extrusions"][0]["extrusion"]["surfaces"]["side"]["maps"]["color"],"paint");
     assert!(read["channels"].as_array().unwrap().iter().any(|c|c["path"]=="ms.bevel.metallic" && c["value"]==0.6));
 }
+
+#[test]
+fn video_render_scale_is_explicit_validated_and_defaults_to_full_size() {
+    use pm_mcp::{catalog,services::VideoOptions};
+    let args=serde_json::json!({"studioRenderScale":0.75});
+    catalog::validate("export_video",&args).unwrap();
+    assert_eq!(VideoOptions::parse(&args).unwrap().studio_render_scale,Some(0.75));
+    assert_eq!(VideoOptions::parse(&serde_json::json!({})).unwrap().studio_render_scale,None);
+    for value in [serde_json::json!(0),serde_json::json!(-1),serde_json::json!(1.1),serde_json::json!(true)] {
+        let args=serde_json::json!({"studioRenderScale":value});
+        assert!(catalog::validate("export_video",&args).is_err());
+        assert!(VideoOptions::parse(&args).is_err());
+    }
+}

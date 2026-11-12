@@ -556,10 +556,8 @@ async fn execute_inner(
         .get("studioQuality")
         .filter(|q| q.as_str().is_some_and(|q| q != "composition"))
         .cloned();
-    // "Render at 75% Size" (`studioReducedSize`) travels with the sheet's
-    // options and presets. The engine's export request has no 3D render-size
-    // field yet, so until it does the export renders 3D at full size and the
-    // option changes nothing here.
+    request.studio_render_scale=frozen.options.opaque.get("studioReducedSize")
+        .and_then(serde_json::Value::as_bool).filter(|v|*v).map(|_|0.75);
     let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
     if let Some(overrides) = engine.overrides {

@@ -203,6 +203,7 @@ impl EngineJobs {
         look: bool,
         preview: bool,
         studio_quality: Option<serde_json::Value>,
+        studio_render_scale:Option<f32>,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -224,6 +225,7 @@ impl EngineJobs {
         )?;
         request.preview = preview;
         request.studio_quality = studio_quality;
+        request.studio_render_scale=studio_render_scale;
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -330,6 +332,7 @@ impl ExportChild for EngineJobs {
             false,
             false,
             request.options.studio_quality.clone(),
+            request.options.studio_render_scale,
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -586,6 +589,7 @@ fn frame_with(
         true,
         capture.draws_offline_cards(),
         studio_quality,
+        None,
     )?;
     while matches!(
         handle.status().state,

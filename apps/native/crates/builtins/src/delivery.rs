@@ -48,7 +48,8 @@ pub fn studio_estimate(
     let comp = crate::data::wire(&comp.to_value());
     let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
     let (policy, label) = pm_panel_studio3d::properties::export_quality(&comp, choice)?;
-    let per = pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, width, height);
+    let scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+    let per = pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, width*scale, height*scale);
     Some(format!(
         "3D {label}, {}",
         pm_panel_studio3d::properties::about(per * frames as f64)
@@ -67,6 +68,17 @@ pub fn measured_estimate(
     height: u32,
     frames: u64,
 ) -> Option<String> {
+    measured_estimate_scaled(state,preset,label,width,height,frames,1.)
+}
+pub fn measured_estimate_scaled(
+    state: &Value,
+    preset: &str,
+    label: &str,
+    width: u32,
+    height: u32,
+    frames: u64,
+    render_scale:f64,
+) -> Option<String> {
     match state["status"].as_str()? {
         "queued" | "measuring" => Some(format!("3D {label}, measuring…")),
         "ready" => {
@@ -75,6 +87,7 @@ pub fn measured_estimate(
             if e["width"].as_u64() != Some(width as u64)
                 || e["height"].as_u64() != Some(height as u64)
                 || e["frames"].as_u64() != Some(frames)
+                || (e["renderScale"].as_f64().unwrap_or(1.)-render_scale).abs()>1e-6
             {
                 return Some(format!("3D {label}, measuring…"));
             }
@@ -975,5 +988,20 @@ mod estimate_tests {
         // Nothing measured, or a failure: the static guess stays.
         assert_eq!(say(&json!({"status":"idle"}), 1920), None);
         assert_eq!(say(&json!({"status":"failed","message":"x"}), 1920), None);
+    }
+}
+
+#[cfg(test)]
+mod scale_estimate_tests {
+    #[test]
+    fn changing_scale_invalidates_the_previous_estimate() {
+        let mut state=serde_json::json!({"status":"ready","estimate":{"width":1920,"height":1080,"frames":30,
+            "renderScale":0.75,"presets":[{"preset":"production","totalMs":{"min":30000,"max":32000}}]}});
+        let say=|s:&serde_json::Value,scale|super::measured_estimate_scaled(s,"production","Production",1920,1080,30,scale).unwrap();
+        assert!(say(&state,0.75).contains("about"));
+        assert!(say(&state,1.).contains("measuring"));
+        state["estimate"].as_object_mut().unwrap().remove("renderScale");
+        assert!(say(&state,1.).contains("about"));
+        assert!(say(&state,0.75).contains("measuring"));
     }
 }

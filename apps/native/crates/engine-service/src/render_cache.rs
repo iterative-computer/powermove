@@ -770,6 +770,7 @@ fn fill_request(
         preview: false,
         cache: Some(fill),
         studio_quality: None,
+        studio_render_scale:None,
     })
 }
 

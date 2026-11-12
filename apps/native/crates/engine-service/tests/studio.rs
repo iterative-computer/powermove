@@ -3861,3 +3861,35 @@ fn orthographic_live_text_keeps_bright_bevel_edges_free_of_dark_outliers() {
     assert!(fraction < 0.01, "dark bevel outliers: {fraction:.4}");
     assert!(rms < 0.05, "orthographic text RMS {rms}");
 }
+
+
+#[test]
+fn native_studio_export_scale_reduces_only_transport_and_preserves_document_and_output() {
+    use pm_studio3d_engine::{compositor,extract};
+    struct Source { inner:studio::DocumentSource, scale:f32, seen:Arc<std::sync::Mutex<Vec<(u32,u32)>>> }
+    impl studio::SceneSource for Source {
+        fn scene(&self,r:&studio::SceneRequest)->Result<studio::SceneInput,String> {
+            self.seen.lock().unwrap().push((r.width,r.height));self.inner.scene(r)
+        }
+        fn final_quality(&self,r:&studio::SceneRequest)->Result<Option<extract::FinalQuality>,String> {self.inner.final_quality(r)}
+    }
+    impl compositor::Source for Source {
+        fn final_samples(&self,r:&studio::SceneRequest)->Result<u32,String>{compositor::Source::final_samples(&self.inner,r)}
+        fn final_render_scale(&self,_:&studio::SceneRequest)->Result<f32,String>{Ok(self.scale)}
+    }
+    let doc=document(true,100.);let before=doc.to_value();let mut renderer=Renderer::headless().unwrap();
+    for scale in [1.,0.75] {
+        let seen=Arc::new(std::sync::Mutex::new(vec![]));
+        let source=Source{inner:studio::DocumentSource::new(doc.clone(),Default::default()),scale,seen:seen.clone()};
+        renderer.set_studio_source(Some(Arc::new(compositor::Adapter(Arc::new(source)))),compositor::Settings{revision:doc.revision(),..Default::default()});
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&request(),&pm_render::MapResolver::default()).unwrap();
+        assert!(frame.failures.is_empty(),"{:?}",frame.failures);
+        let pixels=renderer.read_rgba(&frame).unwrap();assert_eq!(pixels.len(),64*64*4);
+        assert!(pixels.iter().any(|v|*v>0.1));
+        let expected=if scale==1. {(64,64)}else{(48,48)};
+        assert!(!seen.lock().unwrap().is_empty());
+        let actual=seen.lock().unwrap().clone();
+        assert!(actual.iter().all(|dims|*dims==expected),"{actual:?}");
+        assert_eq!(doc.to_value(),before);
+    }
+}

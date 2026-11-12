@@ -241,11 +241,19 @@ pub fn attach_with_quality_fonts(
     quality: serde_json::Value,
     fonts: Option<&pm_render::text::host::RenderFonts>,
 ) -> Result<(), String> {
-    let source = DocumentSource::new(doc, media.clone())
-        .with_native_fonts(fonts)
-        .with_quality_override(composition, quality)?;
-    attach_source(renderer, source, Tier::QualityLive);
-    Ok(())
+    attach_with_export_options_fonts(renderer,doc,media,composition,Some(quality),1.,fonts)
+}
+/// Frozen export options; neither quality nor scale writes the document.
+#[cfg(feature="kernel")]
+pub fn attach_with_export_options_fonts(
+    renderer:&mut pm_render::Renderer, doc:std::sync::Arc<pm_model::Document>,
+    media:&pm_export::render::MediaPaths, composition:&str,
+    quality:Option<serde_json::Value>, scale:f32,
+    fonts:Option<&pm_render::text::host::RenderFonts>,
+)->Result<(),String>{
+    let mut source=DocumentSource::new(doc,media.clone()).with_native_fonts(fonts).with_export_render_scale(scale)?;
+    if let Some(quality)=quality {source=source.with_quality_override(composition,quality)?;}
+    attach_source(renderer,source,Tier::QualityLive);Ok(())
 }
 #[cfg(feature = "kernel")]
 fn attach_source(renderer: &mut pm_render::Renderer, source: DocumentSource, preview: Tier) {
