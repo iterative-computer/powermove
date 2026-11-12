@@ -75,6 +75,23 @@ fn effect_space(
     ]
 }
 
+/// A transition's `u_m`, `u_res` and `u_texel` for a `w` × `h` stack: in
+/// composition pixels at its density, as an effect's ([`effect_space`]), so
+/// an effect and a transition never disagree on one frame.
+fn transition_space(step: &super::plan::TransitionStep, w: u32, h: u32) -> (Call, Call, Call) {
+    let d = if step.density.iter().all(|d| d.is_finite() && *d > 0.) {
+        step.density
+    } else {
+        [1., 1.]
+    };
+    let (rw, rh) = (f64::from(w) / d[0], f64::from(h) / d[1]);
+    (
+        Call::M3([rw as f32, 0.0, 0.0, 0.0, rh as f32, 0.0, 0.0, 0.0, 1.0]),
+        f(&[rw, rh]),
+        f(&[d[0] / f64::from(w), d[1] / f64::from(h)]),
+    )
+}
+
 /// `effectViewportCoordinates(W, H)`: `u_uv`, `u_pxOrigin`, `u_coordRes`
 /// for a buffer covering `region` of a level of `full` pixels. With a
 /// `view` (an output origin, today's preview viewport) the coordinates are
@@ -770,13 +787,10 @@ impl<'c> Gpu<'c> {
         let mut calls: Vec<(String, Call)> = vec![
             ("u_from".into(), Call::I(0)),
             ("u_to".into(), Call::I(1)),
-            ("u_m".into(), Call::M3(full_quad(w, h))),
-            ("u_res".into(), f(&[f64::from(w), f64::from(h)])),
+            ("u_m".into(), transition_space(step, w, h).0),
+            ("u_res".into(), transition_space(step, w, h).1),
             ("u_uv".into(), f(&[0.0, 0.0, 1.0, 1.0])),
-            (
-                "u_texel".into(),
-                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-            ),
+            ("u_texel".into(), transition_space(step, w, h).2),
             ("u_time".into(), f(&[time])),
             ("u_prog".into(), f(&[step.progress])),
         ];
@@ -893,13 +907,10 @@ impl<'c> Gpu<'c> {
         let mut calls: Vec<(String, Call)> = vec![
             ("u_from".into(), Call::I(0)),
             ("u_to".into(), Call::I(1)),
-            ("u_m".into(), Call::M3(full_quad(w, h))),
-            ("u_res".into(), f(&[f64::from(w), f64::from(h)])),
+            ("u_m".into(), transition_space(step, w, h).0),
+            ("u_res".into(), transition_space(step, w, h).1),
             ("u_uv".into(), f(&[0.0, 0.0, 1.0, 1.0])),
-            (
-                "u_texel".into(),
-                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
-            ),
+            ("u_texel".into(), transition_space(step, w, h).2),
             ("u_time".into(), f(&[time])),
             ("u_prog".into(), f(&[step.progress])),
         ];

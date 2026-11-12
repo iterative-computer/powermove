@@ -295,6 +295,7 @@ fn build_options(
         offline_cards,
         preview: preview_window(comp, request),
         origin: request.origin,
+        final_output: request.output_kind == crate::OutputKind::Final,
     }
 }
 
@@ -2224,6 +2225,7 @@ impl Renderer {
                     background: plan.background.clone(),
                     plan_size: (plan.width, plan.height),
                     sampling: request.sampling,
+                    final_output: request.output_kind == crate::OutputKind::Final,
                 };
                 crate::frame_prefix::render(
                     &mut exec,

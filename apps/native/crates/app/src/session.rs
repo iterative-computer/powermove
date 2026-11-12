@@ -1098,15 +1098,12 @@ impl Controller {
     }
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
         let mut target = None;
-        if let Some(v) = &self.viewer {
-            let frame = self
-                .rate
-                .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
-            if let Ok(time) = self.rate.frame_start(frame) {
-                target = Some(time as f64 / TICKS_PER_SECOND as f64);
-                if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
-                    self.message = e.to_string();
-                }
+        if let Some(v) = &self.viewer
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration))
+        {
+            target = Some(time as f64 / TICKS_PER_SECOND as f64);
+            if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                self.message = e.to_string();
             }
         }
         // The viewer's clock lands later (always so for a viewer bound a
@@ -2287,11 +2284,42 @@ pub(crate) fn sync_render_storage(
         })
         .ok();
 }
+/// The start tick of the frame on screen at `seconds`. Seconds round to the
+/// nearest tick, never truncate: a frame start written in seconds is often a
+/// hair under its tick (frame 247 at 30 fps is 5,809,439,999.99… ticks), and
+/// truncating lands on the frame before.
+pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
+    let tick = (seconds * TICKS_PER_SECOND as f64).round() as i64;
+    rate.frame_start(rate.frame_of(tick)).ok()
+}
 
 #[cfg(test)]
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn a_typed_timecode_lands_on_its_frame() {
+        use pm_time::Rate;
+        for rate in [Rate::FPS_30, Rate::FPS_29_97, Rate::FPS_24, Rate::FPS_59_94] {
+            let fps = rate.num() as f64 / rate.den() as f64;
+            for frame in 0..2000 {
+                let typed = format!(
+                    "00:{:02}:{:02}:{:02}",
+                    frame / 30 / 60,
+                    frame / 30 % 60,
+                    frame % 30
+                );
+                let nominal = fps.round();
+                let n = (frame / 30) as f64 * nominal + (frame % 30) as f64;
+                let seconds = pm_panel_timeline::v4::parse_timecode(&typed, fps).unwrap();
+                assert_eq!(
+                    frame_start_at(rate, seconds),
+                    rate.frame_start(n as i64).ok(),
+                    "{typed} at {fps} fps"
+                );
+            }
+        }
+    }
     #[::core::prelude::v1::test]
     fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
         // A viewer that reported a clock is where it says (playing included).

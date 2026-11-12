@@ -3820,6 +3820,41 @@ mod worker_tests {
                 .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
         });
         assert_eq!(read(Moment::Paused).last(), Some(&proxy));
+        v.media_mode(MediaMode::ProxyPreferred).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame in Proxy Preferred", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        assert_eq!(read(Moment::Paused).last(), Some(&proxy));
+        // Optimized media outranks the original in Automatic, paused too.
+        let optimized = fixture("h264-aac.mov");
+        let mut media = MediaCatalog::default();
+        media
+            .originals
+            .insert("large-clip".into(), original.clone());
+        media.proxies.insert("large-clip".into(), proxy.clone());
+        media
+            .optimized
+            .insert("large-clip".into(), optimized.clone());
+        media.automatic_proxies.insert("large-clip".into());
+        v.media_mode(MediaMode::Automatic).unwrap();
+        v.media(media).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame with optimized media", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        let last = crate::render::MEDIA_SAMPLED
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(exact, m, _)| !exact && *m == Moment::Paused)
+            .and_then(|(_, _, paths)| paths.paths.get("large-clip").cloned());
+        assert_eq!(last, Some(optimized));
         v.retire();
     }
 

@@ -298,6 +298,20 @@ pub trait EffectHost: Send + Sync {
         }
     }
 
+    /// Whether `layer` has an effect or transition at `time` that must read
+    /// the composition's pixel grid: without an owner binding, and in final
+    /// output any, in a viewer frame one whose shader addresses physical
+    /// texels (`crate::plan::comp_pass`).
+    fn needs_composition_density<'d>(
+        &self,
+        _scope: &mut Scope<'_, 'd>,
+        _layer: &'d Node,
+        _time: f64,
+        _final_output: bool,
+    ) -> JsResult<bool> {
+        Ok(false)
+    }
+
     /// Whether a transition type is registered (`PM.transitionDef`), for
     /// `activeTransition` and the group boundary rule.
     fn transition_known(&self, _ty: &JsString) -> bool {

@@ -90,6 +90,11 @@ pub struct CacheKey {
     pub height: u32,
     pub crop: Option<Crop>,
     pub moment: Moment,
+    /// The render scale (`FrameSpec::scale`, bits): with the crop, the
+    /// request's composition density and origin.
+    pub scale: u64,
+    /// The resampler the frame was drawn with.
+    pub sampling: pm_render::sampling::Sampling,
 }
 impl CacheKey {
     pub fn same_content(self, other: Self) -> bool {

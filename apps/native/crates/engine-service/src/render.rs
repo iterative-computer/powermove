@@ -142,6 +142,11 @@ impl FrameSpec {
             MotionBlurKind::PreviewPaused
         });
         request.sampling = self.sampling();
+        // A capture reads the exact picture: final output, as an export
+        // (effects at the composition's density, `pm_render::plan`).
+        if self.exact {
+            request.output_kind = pm_render::OutputKind::Final;
+        }
         #[cfg(test)]
         SAMPLED
             .lock()
@@ -161,7 +166,7 @@ impl FrameSpec {
     /// take the final one (Lanczos-3), so footage and precomps don't sharpen
     /// when playback stops. Its cost on a real project's playing frames was
     /// within run-to-run noise.
-    fn sampling(&self) -> pm_render::sampling::Sampling {
+    pub(crate) fn sampling(&self) -> pm_render::sampling::Sampling {
         if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
         } else {
@@ -232,6 +237,8 @@ pub struct Engine {
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
+    /// A capture of an SDR view: the frame presented without the delivery clip.
+    capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
     /// Set by the device's lost callback or an internal GPU error: the
@@ -285,6 +292,10 @@ pub struct Submission {
     pub command: metal::CommandBuffer,
     pub surface: Arc<ExportedSurface>,
     pub readback: Option<metal::Buffer>,
+    /// Tests: the presented picture of a capture whose readback skipped the
+    /// presentation's SDR clip.
+    #[cfg(test)]
+    pub presented: Option<metal::Buffer>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -539,7 +550,15 @@ impl Engine {
             }));
         let metal = metal_device(&gpu);
         let library = metal
-            .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
+            .new_library_with_source(
+                &format!(
+                    "#define SDR_MIN {:?}\n#define SDR_MAX {:?}\n{}",
+                    pm_color::delivery::SDR_MIN,
+                    pm_color::delivery::SDR_MAX,
+                    include_str!("viewer.metal")
+                ),
+                &metal::CompileOptions::new(),
+            )
             .map_err(|s| anyhow!(s))?;
         let desc = metal::RenderPipelineDescriptor::new();
         let vertex = library
@@ -590,6 +609,7 @@ impl Engine {
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
             offscreen: None,
+            capture_target: None,
             cache_enabled: true,
             strip: None,
             refine_bands: 0,
@@ -846,6 +866,8 @@ impl Engine {
             height: size.height,
             crop: output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
@@ -1027,15 +1049,7 @@ impl Engine {
             || self.offscreen.as_ref().unwrap().as_ref(),
             |d| d.texture(),
         );
-        let desc = metal::RenderPassDescriptor::new();
-        let color = desc.color_attachments().object_at(0).unwrap();
-        color.set_texture(Some(destination));
-        color.set_load_action(metal::MTLLoadAction::Clear);
-        color.set_store_action(metal::MTLStoreAction::Store);
         let command = self.queue.new_command_buffer().to_owned();
-        let pass = command.new_render_command_encoder(desc);
-        pass.set_render_pipeline_state(&self.pipeline);
-        pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
         params.output = hdr
             .map_or(self.mastering, |v| {
@@ -1054,21 +1068,52 @@ impl Engine {
             ],
             None => [0., 0., output.width as f32, output.height as f32],
         };
-        pass.set_fragment_bytes(
-            0,
-            size_of_val(&params) as u64,
-            (&params as *const crate::OverlayParams).cast(),
-        );
-        pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
-        pass.end_encoding();
-        let readback = if capture {
+        // A capture reads the engine's frame, not the display's picture: the
+        // SDR delivery clip (mode 3) is presentation only, so a capture of an
+        // SDR view is drawn again without it.
+        let unclipped_capture = capture && params.output[0] == 3.;
+        if unclipped_capture
+            && self.capture_target.as_ref().is_none_or(|t| {
+                t.width() != output.width as u64 || t.height() != output.height as u64
+            })
+        {
+            let desc = metal::TextureDescriptor::new();
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            desc.set_width(output.width as u64);
+            desc.set_height(output.height as u64);
+            desc.set_storage_mode(metal::MTLStorageMode::Private);
+            desc.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            self.capture_target = Some(self.metal.new_texture(&desc));
+        }
+        let present = |target: &metal::TextureRef, params: &crate::OverlayParams| {
+            let desc = metal::RenderPassDescriptor::new();
+            let color = desc.color_attachments().object_at(0).unwrap();
+            color.set_texture(Some(target));
+            color.set_load_action(metal::MTLLoadAction::Clear);
+            color.set_store_action(metal::MTLStoreAction::Store);
+            let pass = command.new_render_command_encoder(desc);
+            pass.set_render_pipeline_state(&self.pipeline);
+            pass.set_fragment_texture(0, Some(&source));
+            pass.set_fragment_bytes(
+                0,
+                size_of_val(params) as u64,
+                (params as *const crate::OverlayParams).cast(),
+            );
+            pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+            pass.end_encoding();
+        };
+        present(destination, &params);
+        let read = |texture: &metal::TextureRef| {
             let b = self.metal.new_buffer(
                 output.width as u64 * output.height as u64 * 8,
                 metal::MTLResourceOptions::StorageModeShared,
             );
             let blit = command.new_blit_command_encoder();
             blit.copy_from_texture_to_buffer(
-                destination,
+                texture,
                 0,
                 0,
                 metal::MTLOrigin { x: 0, y: 0, z: 0 },
@@ -1084,7 +1129,26 @@ impl Engine {
                 metal::MTLBlitOption::None,
             );
             blit.end_encoding();
-            Some(b)
+            b
+        };
+        #[cfg(test)]
+        let mut presented = None;
+        let readback = if unclipped_capture {
+            let target = self.capture_target.as_ref().unwrap();
+            present(
+                target,
+                &crate::OverlayParams {
+                    output: [0.; 4],
+                    ..params
+                },
+            );
+            #[cfg(test)]
+            {
+                presented = Some(read(destination));
+            }
+            Some(read(target))
+        } else if capture {
+            Some(read(destination))
         } else {
             None
         };
@@ -1095,6 +1159,8 @@ impl Engine {
             command,
             surface,
             readback,
+            #[cfg(test)]
+            presented,
             width: output.width,
             height: output.height,
             failures,
@@ -1168,6 +1234,8 @@ impl Engine {
             height: size.height,
             crop: spec.output.crop,
             moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
         };
         if self.cache.iter().any(|c| c.key == key) {
             return Ok(true);
@@ -2145,16 +2213,123 @@ mod paused_media_tests {
 mod viewer_output_tests {
     use super::*;
     use crate::color::Mastering;
+    /// `n` white solids `w` px wide, every other `w` px from x = 0, one stop
+    /// over white (2.0 encoded), on black, in a 64 × 36 composition.
+    fn columns(n: usize, w: f64) -> Scene {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let layers = (0..n)
+            .map(|i| {
+                // The anchor (0, 0) is the solid's top-left corner.
+                let x = 2. * w * i as f64;
+                let transform = [
+                    ("position.x", x),
+                    ("position.y", 0.),
+                    ("anchor.x", 0.),
+                    ("anchor.y", 0.),
+                    ("scale.x", 100.),
+                    ("scale.y", 100.),
+                    ("rotation", 0.),
+                    ("opacity", 100.),
+                ]
+                .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+                .join(",");
+                format!(
+                    r##"{{"id":"s{i}","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+                    "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":{w},"h":36}},
+                    "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{}}}}}]}}"##,
+                    ch(1.)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{layers}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        }
+    }
+    fn halves(b: &metal::Buffer, len: usize) -> Vec<[f64; 3]> {
+        let values = unsafe { std::slice::from_raw_parts(b.contents().cast::<u16>(), len * 4) };
+        values
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]].map(|v| half::f16::from_bits(v).to_f64()))
+            .collect()
+    }
+    /// (capture readback, presented picture) at the middle of the drawable.
+    fn draw(
+        engine: &mut Engine,
+        scene: &Scene,
+        spec: FrameSpec,
+        mastering: Mastering,
+    ) -> ([f64; 3], Option<[f64; 3]>) {
+        engine.mastering = mastering;
+        let sub = engine
+            .frame(scene, spec, None, &Default::default(), true, Arc::default())
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+        assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+        let (w, h) = (sub.width as usize, sub.height as usize);
+        let at = (h / 2) * w + w / 2;
+        (
+            sub.pixels()[at],
+            sub.presented.as_ref().map(|b| halves(b, w * h)[at]),
+        )
+    }
+    fn output(width: u32, height: u32) -> Output {
+        Output {
+            width,
+            height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        }
+    }
     /// An SDR project's view shows its delivery: a white solid pushed to
     /// twice white (one stop of exposure) shows as white, as the SDR file
-    /// holds it; the EDR view keeps the light above white.
+    /// holds it; the EDR view keeps the light above white. A capture is the
+    /// engine's frame, not the display's picture: it keeps the light.
     #[test]
     fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
         let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+        let scene = columns(1, 64.);
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (edr, _) = draw(&mut engine, &scene, spec, Mastering::Edr);
+        assert!(
+            edr.iter().all(|c| *c > 1.5),
+            "EDR keeps light above white: {edr:?}"
+        );
+        let (captured, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        assert!(
+            shown.iter().all(|c| (*c - 1.).abs() < 0.002),
+            "the SDR view shows white: {shown:?}"
+        );
+        assert!(
+            captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
+            "a capture is the engine's frame: {captured:?} vs {edr:?}"
+        );
+    }
+    /// The SDR view shows a colour past white as every SDR file delivers it
+    /// (`pm_color::delivery`, channel by channel in Rec.709): two (0.8, 0.25,
+    /// 0.1) solids added make (1.6, 0.5, 0.2), shown as (1, 0.5, 0.2).
+    #[test]
+    fn an_sdr_view_shows_out_of_range_colour_by_the_delivery_rule() {
         let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
         let transform = [
-            ("position.x", 32.),
-            ("position.y", 18.),
+            ("position.x", 0.),
+            ("position.y", 0.),
             ("anchor.x", 0.),
             ("anchor.y", 0.),
             ("scale.x", 100.),
@@ -2164,13 +2339,17 @@ mod viewer_output_tests {
         ]
         .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
         .join(",");
-        let exposure = ch(1.);
+        let solid = |id: &str, blend: &str| {
+            format!(
+                r##"{{"id":"{id}","type":"solid","name":"{id}","from":0,"dur":1,"on":true,"solo":false,"mblur":false,"blend":"{blend}",
+                "p":{{{transform}}},"fx":[],"masks":[],"d":{{"color":"#CC401A","w":64,"h":36}}}}"##
+            )
+        };
         let project = format!(
             r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
-            "layers":[{{"id":"s","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
-              "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":64,"h":36}},
-              "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{exposure}}}}}]}}],
-            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+            "layers":[{},{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##,
+            solid("a", "add"),
+            solid("b", "normal")
         );
         let scene = Scene {
             doc: Arc::new(pm_model::Document::new(
@@ -2183,40 +2362,190 @@ mod viewer_output_tests {
             media: Default::default(),
             content: 1,
         };
-        let output = Output {
-            width: 64,
-            height: 36,
-            display: 0,
-            headroom: 1.,
-            crop: None,
+        let mut engine = Engine::new(Gpu::new("sdr-colour-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        let encoded = [0xCC, 0x40, 0x1A].map(|v: u8| f64::from(v) / 255.0 * 2.0);
+        let dec = |v: f64| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
-        let mut shown = |mastering| {
-            engine.mastering = mastering;
+        let l = pm_color::delivery::sdr(encoded).map(dec);
+        let want = [
+            0.8224621 * l[0] + 0.1775380 * l[1],
+            0.0331941 * l[0] + 0.9668058 * l[1],
+            0.0170827 * l[0] + 0.0723974 * l[1] + 0.9105199 * l[2],
+        ];
+        assert!(
+            shown.iter().zip(want).all(|(s, w)| (s - w).abs() < 0.004),
+            "{shown:?} vs the delivered {want:?}"
+        );
+    }
+    /// The SDR view clips each engine sample before it reduces the frame to
+    /// the drawable: 1-px columns of twice white and black, drawn at the
+    /// composition's size and shown at half size, average to the delivered
+    /// grey (encoded 0.5), not to clipped white.
+    #[test]
+    fn an_sdr_view_clips_before_it_reduces() {
+        let mut engine = Engine::new(Gpu::new("sdr-reduce-test").unwrap()).unwrap();
+        let scene = columns(32, 1.);
+        let spec = FrameSpec {
+            scale: 2.,
+            ..FrameSpec::exact(Ticks::ZERO, output(32, 18))
+        };
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        // Encoded 0.5 is 0.214 linear (sRGB); white would be 1.0.
+        assert!(
+            shown.iter().all(|c| (*c - 0.214).abs() < 0.03),
+            "half white, half black: {shown:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_cache_tests {
+    use super::*;
+    /// A 256 × 256 still of 1-px black and white stripes (a 24-bit BMP).
+    fn stripes(dir: &std::path::Path) -> std::path::PathBuf {
+        let (w, h) = (256u32, 256u32);
+        let row = w * 3;
+        let size = 54 + row * h;
+        let mut b = Vec::with_capacity(size as usize);
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&size.to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&(w as i32).to_le_bytes());
+        b.extend_from_slice(&(h as i32).to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&[0; 24]);
+        for _ in 0..h {
+            for x in 0..w {
+                let v = if x % 2 == 0 { 255 } else { 0 };
+                b.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let path = dir.join("stripes.bmp");
+        std::fs::write(&path, b).unwrap();
+        path
+    }
+    fn scene(path: &std::path::Path) -> Scene {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 64.),
+            ("position.y", 36.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 23.),
+            ("scale.y", 23.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":128,"h":72,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"i","type":"image","name":"stripes","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":256,"h":256}}}}],
+            "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"stripes","w":256,"h":256,"dur":0}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("pic".to_string(), path.to_path_buf())].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        }
+    }
+    fn drawn(engine: &mut Engine, scene: &Scene, spec: FrameSpec) -> Vec<[f64; 3]> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
             let sub = engine
-                .frame(
-                    &scene,
-                    FrameSpec::exact(Ticks::ZERO, output),
-                    None,
-                    &Default::default(),
-                    true,
-                    Arc::default(),
-                )
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
                 .unwrap()
                 .unwrap();
             sub.commit();
             sub.complete().unwrap();
             assert!(sub.failures.is_empty(), "{:?}", sub.failures);
-            sub.pixels()[18 * 64 + 32]
+            if !sub.stand_ins {
+                return sub.pixels();
+            }
+            assert!(Instant::now() < deadline, "the still never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// A playing frame draws a reduced still with the final resampler, as the
+    /// paused frame of the same time and density does: footage and
+    /// precomps don't sharpen when playback stops.
+    #[test]
+    fn playing_and_paused_frames_resample_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = Output {
+            width: 128,
+            height: 72,
+            display: 0,
+            headroom: 1.,
+            crop: None,
         };
-        let edr = shown(Mastering::Edr);
-        assert!(
-            edr.iter().all(|c| *c > 1.5),
-            "EDR keeps light above white: {edr:?}"
-        );
-        let sdr = shown(Mastering::LinearP3);
-        assert!(
-            sdr.iter().all(|c| (*c - 1.).abs() < 0.002),
-            "the SDR view shows white: {sdr:?}"
-        );
+        let spec = |moment| FrameSpec {
+            moment,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
+        let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
+        let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
+        assert_eq!(playing, paused);
+    }
+    /// Two dragged frames of one render size at one time but different
+    /// densities (output 256 at half resolution, output 128 at full) take
+    /// different resamplers: the second is drawn for itself, as a cold
+    /// engine draws it, never answered from the first's cached frame.
+    #[test]
+    fn frames_of_one_size_but_another_density_are_not_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = |w, h| Output {
+            width: w,
+            height: h,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let reduced = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 0.5,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(256, 144))
+        };
+        let full = FrameSpec {
+            moment: Moment::Scrub,
+            scale: 1.,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(128, 72))
+        };
+        assert_eq!(reduced.render_size(), full.render_size());
+        assert_ne!(reduced.sampling(), full.sampling());
+        let mut cold = Engine::new(Gpu::new("cache-identity-cold").unwrap()).unwrap();
+        let want = drawn(&mut cold, &scene, full);
+        let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
+        drawn(&mut engine, &scene, reduced);
+        assert_eq!(drawn(&mut engine, &scene, full), want);
     }
 }

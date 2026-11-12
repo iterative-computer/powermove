@@ -83,6 +83,9 @@ pub struct TransitionStep {
     pub edge_in: bool,
     pub progress: f64,
     pub params: Vec<Param>,
+    /// Output pixels per composition pixel where it draws: a transition sees
+    /// composition pixels as an effect does (`EffectStep::density`).
+    pub density: [f64; 2],
 }
 
 /* ── setParam's value conversion ─────────────────────────────────────── */
@@ -252,6 +255,7 @@ pub fn transition_step(
                 None => param(spec, &default_value(spec)),
             })
             .collect(),
+        density: [1., 1.],
     }
 }
 
