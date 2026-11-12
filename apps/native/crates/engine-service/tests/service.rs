@@ -703,7 +703,7 @@ fn the_scope_tap_settles_on_the_frame_on_screen() {
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(frame) = inbox.try_recv() {
-                return Some(frame.unwrap().waveform);
+                return Some(frame.unwrap());
             }
             if Instant::now() > deadline {
                 return None;
@@ -711,22 +711,32 @@ fn the_scope_tap_settles_on_the_frame_on_screen() {
             std::thread::sleep(Duration::from_millis(2));
         }
     };
+    // A paused picture is shown at once at the drawable's size, then
+    // refined at the composition's: each is analyzed, and the scope ends on
+    // the refinement, the picture that stays on screen.
+    let refined = |frame: &pm_render::scopes::ScopeFrame| frame.pixels == 640 * 360;
+    let settled_on = || loop {
+        let frame = next(Duration::from_secs(20)).expect("the paused picture is analyzed");
+        if refined(&frame) {
+            return frame;
+        }
+    };
     let (start, end) = (Ticks::ZERO, Ticks::new(2 * TICKS_PER_SECOND).unwrap());
     v.scrub(end).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    let mut settled = next(Duration::from_secs(20)).expect("a paused frame is analyzed");
-    while let Some(later) = next(Duration::from_millis(300)) {
-        settled = later;
-    }
-    // The first frame takes the interval's analysis. The next arrives inside
-    // it, and nothing renders after that.
+    let settled = settled_on();
     v.scrub(start).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    let first = next(Duration::from_secs(20)).expect("the first frame is analyzed");
+    let first = settled_on();
     assert_ne!(first, settled, "the two frames must differ");
+    // Back on the first time: whatever was still being analyzed, the scope
+    // ends on that time's picture again, and stays on it.
     v.scrub(end).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    assert_eq!(next(Duration::from_secs(20)), Some(settled));
+    while settled_on() != settled {}
+    while let Some(later) = next(Duration::from_millis(500)) {
+        assert!(later == settled, "the scope left the picture on screen");
+    }
     v.scopes(None).unwrap();
 }
 
