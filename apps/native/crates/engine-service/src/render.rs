@@ -232,6 +232,8 @@ pub struct Engine {
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
+    /// A capture of an SDR view: the frame presented without the delivery clip.
+    capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
     /// Set by the device's lost callback or an internal GPU error: the
@@ -285,6 +287,10 @@ pub struct Submission {
     pub command: metal::CommandBuffer,
     pub surface: Arc<ExportedSurface>,
     pub readback: Option<metal::Buffer>,
+    /// Tests: the presented picture of a capture whose readback skipped the
+    /// presentation's SDR clip.
+    #[cfg(test)]
+    pub presented: Option<metal::Buffer>,
     pub width: u32,
     pub height: u32,
     /// Layers left out of this frame, with why.
@@ -590,6 +596,7 @@ impl Engine {
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
             offscreen: None,
+            capture_target: None,
             cache_enabled: true,
             strip: None,
             refine_bands: 0,
@@ -1027,15 +1034,7 @@ impl Engine {
             || self.offscreen.as_ref().unwrap().as_ref(),
             |d| d.texture(),
         );
-        let desc = metal::RenderPassDescriptor::new();
-        let color = desc.color_attachments().object_at(0).unwrap();
-        color.set_texture(Some(destination));
-        color.set_load_action(metal::MTLLoadAction::Clear);
-        color.set_store_action(metal::MTLStoreAction::Store);
         let command = self.queue.new_command_buffer().to_owned();
-        let pass = command.new_render_command_encoder(desc);
-        pass.set_render_pipeline_state(&self.pipeline);
-        pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
         params.output = hdr
             .map_or(self.mastering, |v| {
@@ -1054,21 +1053,52 @@ impl Engine {
             ],
             None => [0., 0., output.width as f32, output.height as f32],
         };
-        pass.set_fragment_bytes(
-            0,
-            size_of_val(&params) as u64,
-            (&params as *const crate::OverlayParams).cast(),
-        );
-        pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
-        pass.end_encoding();
-        let readback = if capture {
+        // A capture reads the engine's frame, not the display's picture: the
+        // SDR delivery clip (mode 3) is presentation only, so a capture of an
+        // SDR view is drawn again without it.
+        let unclipped_capture = capture && params.output[0] == 3.;
+        if unclipped_capture
+            && self.capture_target.as_ref().is_none_or(|t| {
+                t.width() != output.width as u64 || t.height() != output.height as u64
+            })
+        {
+            let desc = metal::TextureDescriptor::new();
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            desc.set_width(output.width as u64);
+            desc.set_height(output.height as u64);
+            desc.set_storage_mode(metal::MTLStorageMode::Private);
+            desc.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            self.capture_target = Some(self.metal.new_texture(&desc));
+        }
+        let present = |target: &metal::TextureRef, params: &crate::OverlayParams| {
+            let desc = metal::RenderPassDescriptor::new();
+            let color = desc.color_attachments().object_at(0).unwrap();
+            color.set_texture(Some(target));
+            color.set_load_action(metal::MTLLoadAction::Clear);
+            color.set_store_action(metal::MTLStoreAction::Store);
+            let pass = command.new_render_command_encoder(desc);
+            pass.set_render_pipeline_state(&self.pipeline);
+            pass.set_fragment_texture(0, Some(&source));
+            pass.set_fragment_bytes(
+                0,
+                size_of_val(params) as u64,
+                (params as *const crate::OverlayParams).cast(),
+            );
+            pass.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+            pass.end_encoding();
+        };
+        present(destination, &params);
+        let read = |texture: &metal::TextureRef| {
             let b = self.metal.new_buffer(
                 output.width as u64 * output.height as u64 * 8,
                 metal::MTLResourceOptions::StorageModeShared,
             );
             let blit = command.new_blit_command_encoder();
             blit.copy_from_texture_to_buffer(
-                destination,
+                texture,
                 0,
                 0,
                 metal::MTLOrigin { x: 0, y: 0, z: 0 },
@@ -1084,7 +1114,26 @@ impl Engine {
                 metal::MTLBlitOption::None,
             );
             blit.end_encoding();
-            Some(b)
+            b
+        };
+        #[cfg(test)]
+        let mut presented = None;
+        let readback = if unclipped_capture {
+            let target = self.capture_target.as_ref().unwrap();
+            present(
+                target,
+                &crate::OverlayParams {
+                    output: [0.; 4],
+                    ..params
+                },
+            );
+            #[cfg(test)]
+            {
+                presented = Some(read(destination));
+            }
+            Some(read(target))
+        } else if capture {
+            Some(read(destination))
         } else {
             None
         };
@@ -1095,6 +1144,8 @@ impl Engine {
             command,
             surface,
             readback,
+            #[cfg(test)]
+            presented,
             width: output.width,
             height: output.height,
             failures,
@@ -2145,34 +2196,40 @@ mod paused_media_tests {
 mod viewer_output_tests {
     use super::*;
     use crate::color::Mastering;
-    /// An SDR project's view shows its delivery: a white solid pushed to
-    /// twice white (one stop of exposure) shows as white, as the SDR file
-    /// holds it; the EDR view keeps the light above white.
-    #[test]
-    fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
-        let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+    /// `n` white solids `w` px wide, every other `w` px from x = 0, one stop
+    /// over white (2.0 encoded), on black, in a 64 × 36 composition.
+    fn columns(n: usize, w: f64) -> Scene {
         let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
-        let transform = [
-            ("position.x", 32.),
-            ("position.y", 18.),
-            ("anchor.x", 0.),
-            ("anchor.y", 0.),
-            ("scale.x", 100.),
-            ("scale.y", 100.),
-            ("rotation", 0.),
-            ("opacity", 100.),
-        ]
-        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
-        .join(",");
-        let exposure = ch(1.);
+        let layers = (0..n)
+            .map(|i| {
+                // The anchor (0, 0) is the solid's top-left corner.
+                let x = 2. * w * i as f64;
+                let transform = [
+                    ("position.x", x),
+                    ("position.y", 0.),
+                    ("anchor.x", 0.),
+                    ("anchor.y", 0.),
+                    ("scale.x", 100.),
+                    ("scale.y", 100.),
+                    ("rotation", 0.),
+                    ("opacity", 100.),
+                ]
+                .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+                .join(",");
+                format!(
+                    r##"{{"id":"s{i}","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+                    "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":{w},"h":36}},
+                    "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{}}}}}]}}"##,
+                    ch(1.)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let project = format!(
             r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
-            "layers":[{{"id":"s","type":"solid","name":"white","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
-              "p":{{{transform}}},"masks":[],"d":{{"color":"#FFFFFF","w":64,"h":36}},
-              "fx":[{{"id":"e","type":"color","on":true,"p":{{"exposure":{exposure}}}}}]}}],
-            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+            "layers":[{layers}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
         );
-        let scene = Scene {
+        Scene {
             doc: Arc::new(pm_model::Document::new(
                 Some(pm_model::canonical::canonical_project(
                     pm_model::json::parse(&project).unwrap(),
@@ -2182,41 +2239,69 @@ mod viewer_output_tests {
             comp: "C".into(),
             media: Default::default(),
             content: 1,
-        };
-        let output = Output {
-            width: 64,
-            height: 36,
+        }
+    }
+    fn halves(b: &metal::Buffer, len: usize) -> Vec<[f64; 3]> {
+        let values = unsafe { std::slice::from_raw_parts(b.contents().cast::<u16>(), len * 4) };
+        values
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]].map(|v| half::f16::from_bits(v).to_f64()))
+            .collect()
+    }
+    /// (capture readback, presented picture) at the middle of the drawable.
+    fn draw(
+        engine: &mut Engine,
+        scene: &Scene,
+        spec: FrameSpec,
+        mastering: Mastering,
+    ) -> ([f64; 3], Option<[f64; 3]>) {
+        engine.mastering = mastering;
+        let sub = engine
+            .frame(scene, spec, None, &Default::default(), true, Arc::default())
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+        assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+        let (w, h) = (sub.width as usize, sub.height as usize);
+        let at = (h / 2) * w + w / 2;
+        (
+            sub.pixels()[at],
+            sub.presented.as_ref().map(|b| halves(b, w * h)[at]),
+        )
+    }
+    fn output(width: u32, height: u32) -> Output {
+        Output {
+            width,
+            height,
             display: 0,
             headroom: 1.,
             crop: None,
-        };
-        let mut shown = |mastering| {
-            engine.mastering = mastering;
-            let sub = engine
-                .frame(
-                    &scene,
-                    FrameSpec::exact(Ticks::ZERO, output),
-                    None,
-                    &Default::default(),
-                    true,
-                    Arc::default(),
-                )
-                .unwrap()
-                .unwrap();
-            sub.commit();
-            sub.complete().unwrap();
-            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
-            sub.pixels()[18 * 64 + 32]
-        };
-        let edr = shown(Mastering::Edr);
+        }
+    }
+    /// An SDR project's view shows its delivery: a white solid pushed to
+    /// twice white (one stop of exposure) shows as white, as the SDR file
+    /// holds it; the EDR view keeps the light above white. A capture is the
+    /// engine's frame, not the display's picture: it keeps the light.
+    #[test]
+    fn an_sdr_view_shows_light_above_white_as_the_sdr_delivery_does() {
+        let mut engine = Engine::new(Gpu::new("sdr-view-test").unwrap()).unwrap();
+        let scene = columns(1, 64.);
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (edr, _) = draw(&mut engine, &scene, spec, Mastering::Edr);
         assert!(
             edr.iter().all(|c| *c > 1.5),
             "EDR keeps light above white: {edr:?}"
         );
-        let sdr = shown(Mastering::LinearP3);
+        let (captured, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
         assert!(
-            sdr.iter().all(|c| (*c - 1.).abs() < 0.002),
-            "the SDR view shows white: {sdr:?}"
+            shown.iter().all(|c| (*c - 1.).abs() < 0.002),
+            "the SDR view shows white: {shown:?}"
+        );
+        assert!(
+            captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
+            "a capture is the engine's frame: {captured:?} vs {edr:?}"
         );
     }
 }
