@@ -703,9 +703,26 @@ pub fn transition_at<'d>(
 /// its `viewportPadding` values, any other the whole frame; chained reads
 /// add up.
 pub fn chain_padding(steps: &[EffectStep]) -> Padding {
+    padding_with(steps, 0)
+}
+
+/// Beyond its declared spread, each pass of a viewport-safe effect may read
+/// one texel of a grid down to 1/4 resolution: a bilinear tap, an area
+/// downsample or an upsample of an intermediate target. A declared spread
+/// is the kernel's reach; these footprints add up over the passes.
+const PASS_SUPPORT: u32 = 4;
+
+/// The padding a region's pass renders a chain over so the region equals
+/// the whole frame: [`chain_padding`] plus each pass's sampling support.
+pub fn region_padding(steps: &[EffectStep]) -> Padding {
+    padding_with(steps, PASS_SUPPORT)
+}
+
+fn padding_with(steps: &[EffectStep], support: u32) -> Padding {
     steps.iter().fold(Padding::NONE, |acc, step| {
         acc.then(if step.viewport_safe {
-            Padding::Pixels(step.padding.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32)
+            let spread = step.padding.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32;
+            Padding::Pixels(spread.saturating_add(support * u32::from(step.passes.max(1))))
         } else {
             Padding::Full
         })

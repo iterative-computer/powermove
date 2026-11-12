@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use pm_eval::node::Got;
-use pm_eval::{CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
+use pm_eval::{CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine, JsValue};
 use pm_expr::{Context, Dialect, Expression, Host, JsStr, JsonHost, JsonRef, Shape, Value};
 use pm_model::JsString;
 
@@ -95,6 +95,17 @@ fn js_str(s: &JsString) -> JsStr {
 impl CompiledExpression for Compiled {
     fn needs_idx(&self) -> bool {
         self.0.needs_idx()
+    }
+
+    fn dependencies(&self) -> ExprDeps {
+        let reach = self.0.reach();
+        ExprDeps {
+            layer: reach.layer,
+            comp: reach.comp,
+            params: reach.params,
+            index: reach.index,
+            document: reach.document,
+        }
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {

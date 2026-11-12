@@ -52,6 +52,30 @@ impl Region {
         }
     }
 
+    /// The region widened to the frame's `grid` in GL order: its left
+    /// column and bottom row (GL row 0 is the frame's bottom) become
+    /// multiples of `grid`, its right column and top row multiples of `grid`
+    /// or the frame's edge. An effect's normalized coordinates and
+    /// reduced-resolution grids follow its input texture; with the crop on
+    /// the frame's grid, a crop's pixels and texels sit where the whole
+    /// frame's do, and a crop reaching a frame edge ends on it as the whole
+    /// frame does.
+    pub fn align(self, grid: u32, full: (u32, u32)) -> Region {
+        let down = |v: u32| v / grid * grid;
+        let up = |v: u32, end: u32| v.div_ceil(grid).saturating_mul(grid).min(end);
+        let x0 = down(self.x);
+        let x1 = up(self.x + self.width, full.0);
+        // GL rows from the bottom.
+        let below = down(full.1 - self.y - self.height);
+        let top = up(full.1 - self.y, full.1);
+        Region {
+            x: x0,
+            y: full.1 - top,
+            width: x1 - x0,
+            height: top - below,
+        }
+    }
+
     /// The origin in GL row order (row 0 at the bottom of the frame).
     pub fn gl_origin(self, full_height: u32) -> (i32, i32) {
         (
@@ -114,6 +138,47 @@ mod tests {
         assert_eq!(
             Region::full(40, 30).grow(Padding::Pixels(5), (40, 30)),
             Region::full(40, 30)
+        );
+    }
+
+    #[test]
+    fn alignment_follows_the_frames_gl_grid() {
+        // 100 × 90: GL row 0 is top-down row 89.
+        let r = Region {
+            x: 21,
+            y: 5,
+            width: 30,
+            height: 40,
+        };
+        // Columns 16..64; GL rows 45..85 widen to 32..90 (the top edge).
+        assert_eq!(
+            r.align(16, (100, 90)),
+            Region {
+                x: 16,
+                y: 0,
+                width: 48,
+                height: 58
+            }
+        );
+        // A region at the right and bottom edges ends on them.
+        let edge = Region {
+            x: 90,
+            y: 80,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(
+            edge.align(16, (100, 90)),
+            Region {
+                x: 80,
+                y: 74,
+                width: 20,
+                height: 16
+            }
+        );
+        assert_eq!(
+            Region::full(100, 90).align(16, (100, 90)),
+            Region::full(100, 90)
         );
     }
 
