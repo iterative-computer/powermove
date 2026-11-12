@@ -1201,19 +1201,43 @@ fn work_before_disposal() -> (
     });
     (hook, written)
 }
+/// A Trash hook that counts its calls and moves nothing.
+fn counted_trash() -> (
+    pm_kernel::project_io::TrashHook,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let hook = pm_kernel::project_io::TrashHook(std::sync::Arc::new(move |_: &Path| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(std::io::Error::other("not in this test"))
+    }));
+    (hook, calls)
+}
+/// Saves `n` times with a new name each time.
+fn save_times(k: &mut Kernel, session: &SessionHandle, n: usize, disk: &str) {
+    for i in 0..n {
+        rename_comp(k, "P", &format!("Save {i}"));
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{disk}: {e}"));
+    }
+}
 /// A version a save no longer needs (the one an earlier save replaced and
-/// retained, beside the project or in the backups) is read again before it
-/// goes, and a program that still has it open can write into it right after
-/// that read. So it is never unlinked: it goes to the Trash, intact, with
-/// whatever it holds by then. Where there is no Trash it stays where it is
-/// and the Error Log lists it.
+/// retained, beside the project or in the backups) is read again as it
+/// goes, and when it holds exactly what its record says it is removed in
+/// that same call. Nothing reaches the Trash and nothing is left beside the
+/// project: a professional who saves every minute does not fill their
+/// Trash with hidden versions.
 #[test]
-fn a_version_a_save_no_longer_needs_goes_to_the_trash_with_what_was_written_into_it() {
+fn a_version_unchanged_when_it_goes_is_removed_and_nothing_reaches_the_trash() {
     let mut disks = vec![("an atomic exchange", Default::default())];
     disks.extend(disks_without_an_exchange());
     for (disk, hooks) in disks {
         for backups in [false, true] {
-            let dir = common::TempDir::new("disposal");
+            let dir = common::TempDir::new("disposal-unchanged");
             fs::create_dir_all(dir.path("job")).unwrap();
             let file = dir.path("job/cut.pmv");
             fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
@@ -1223,84 +1247,97 @@ fn a_version_a_save_no_longer_needs_goes_to_the_trash_with_what_was_written_into
             } else {
                 kernel(&native)
             };
-            let (hook, written) = work_before_disposal();
+            let (trash, calls) = counted_trash();
+            let disposed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = disposed.clone();
             k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
-                before_disposal: Some(hook),
+                trash: Some(trash),
+                before_disposal: Some(std::sync::Arc::new(move |_: &Path| {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })),
                 ..hooks.clone()
             });
             let (session, _) = open_file(&mut k, &file);
             // Enough saves for the backups to prune a version this project's
             // saves moved there.
-            for n in 0..14 {
-                rename_comp(&mut k, "P", &format!("Save {n}"));
-                let plan = k
-                    .prepare_session_save(session.clone(), None, false)
-                    .unwrap();
-                k.finish_session_save(plan.run())
-                    .unwrap_or_else(|e| panic!("{disk}: {e}"));
-                if !backups && n == 2 {
-                    break;
-                }
-            }
-            let written = written.lock().unwrap().clone();
-            assert!(
-                !written.is_empty(),
-                "{disk} {backups}: something was disposed of"
+            save_times(&mut k, &session, if backups { 14 } else { 3 }, disk);
+            let order = std::sync::atomic::Ordering::SeqCst;
+            assert!(disposed.load(order) > 0, "{disk} {backups}: something went");
+            assert_eq!(
+                calls.load(order),
+                0,
+                "{disk} {backups}: the Trash is never asked"
             );
-            let trashed = common::trashed(&native.join("Trash"));
-            for work in &written {
-                assert!(
-                    trashed.contains(work),
-                    "{disk} {backups}: the work written last is in the Trash"
-                );
-            }
+            assert_eq!(
+                visible_siblings(&file),
+                [""; 0].map(Path::new),
+                "{disk} {backups}"
+            );
+            assert_eq!(private_leftovers(&file), [""; 0], "{disk} {backups}");
         }
     }
-    // No Trash: the version stays, and the Error Log says so.
-    let dir = common::TempDir::new("disposal-none");
-    fs::create_dir_all(dir.path("job")).unwrap();
-    let file = dir.path("job/cut.pmv");
-    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
-    let mut k = Kernel::new(KernelConfig {
-        journal_root: Some(dir.path("native/journals")),
-        ..Default::default()
-    });
-    k.shell(ShellCall::AttachLibrary {
-        profile: dir.path("native"),
-        format: DiskFormat::V1_2,
-        electron_profile: None,
-    })
-    .unwrap();
-    let (hook, written) = work_before_disposal();
-    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
-        before_disposal: Some(hook),
-        ..Default::default()
-    });
-    let (session, _) = open_file(&mut k, &file);
-    for name in ["One", "Two"] {
-        rename_comp(&mut k, "P", name);
-        let plan = k
-            .prepare_session_save(session.clone(), None, false)
-            .unwrap();
-        k.finish_session_save(plan.run()).unwrap();
-    }
-    let written = written.lock().unwrap().clone();
-    assert_eq!(written.len(), 1);
-    assert!(
-        private_versions(&file).contains(&written[0]),
-        "kept where it was"
-    );
-    assert!(
-        k.take_log().iter().any(|l| l.contains("Trash")),
-        "and listed"
-    );
 }
-/// Recovery disposes of files too: the cut-short copy it takes back from
-/// under the project's name, and the save's own staged file once the path
-/// holds a copy of it. Each was read a moment before; each goes to the
-/// Trash with whatever was written into it since.
+/// A version that was written into after it was retained (a program that
+/// still had it open, a sync client) is found changed when it is to go: it
+/// is never removed. It is kept beside the project under a plain name and
+/// the person is told; nothing goes to the Trash.
 #[test]
-fn files_recovery_disposes_of_go_to_the_trash_with_what_was_written_into_them() {
+fn a_version_changed_before_it_goes_is_kept_beside_the_project_and_told() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        for backups in [false, true] {
+            let dir = common::TempDir::new("disposal-changed");
+            fs::create_dir_all(dir.path("job")).unwrap();
+            let file = dir.path("job/cut.pmv");
+            fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+            let native = dir.path("native");
+            let mut k = if backups {
+                kernel_with_backups(&native)
+            } else {
+                kernel(&native)
+            };
+            let (trash, calls) = counted_trash();
+            let (hook, written) = work_before_disposal();
+            k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+                trash: Some(trash),
+                before_disposal: Some(hook),
+                ..hooks.clone()
+            });
+            let (session, _) = open_file(&mut k, &file);
+            save_times(&mut k, &session, if backups { 14 } else { 3 }, disk);
+            let written = written.lock().unwrap().clone();
+            assert!(!written.is_empty(), "{disk} {backups}");
+            let kept: Vec<_> = visible_siblings(&file)
+                .iter()
+                .map(|p| fs::read(p).unwrap())
+                .collect();
+            for work in &written {
+                assert!(kept.contains(work), "{disk} {backups}: kept beside");
+            }
+            let told = kept_beside(&mut k, &session);
+            for work in &written {
+                assert!(
+                    told.iter().any(|(_, path)| path
+                        .as_ref()
+                        .is_some_and(|p| fs::read(p).is_ok_and(|b| b == *work))),
+                    "{disk} {backups}: and told: {told:?}"
+                );
+            }
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{disk} {backups}: nothing to the Trash"
+            );
+        }
+    }
+}
+/// Recovery removes files too: the cut-short copy it takes back from under
+/// the project's name, and the save's own staged file once the path holds a
+/// copy of it. Each is read again as it goes; written into before that, it
+/// is never removed: it stays in the project's folder for the person.
+#[test]
+fn files_recovery_finds_changed_when_they_go_are_kept() {
     for case in ["partial copy", "staged duplicate"] {
         let dir = common::TempDir::new("recovery-disposal");
         fs::create_dir_all(dir.path("job")).unwrap();
@@ -1317,8 +1354,10 @@ fn files_recovery_disposes_of_go_to_the_trash_with_what_was_written_into_them() 
             fs::copy(&file, record.with_extension("tmp")).unwrap();
         }
         let mut k = kernel(&native);
+        let (trash, calls) = counted_trash();
         let (hook, written) = work_before_disposal();
         k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            trash: Some(trash),
             before_disposal: Some(hook),
             ..child_disk("no-exclusive")
         });
@@ -1329,10 +1368,17 @@ fn files_recovery_disposes_of_go_to_the_trash_with_what_was_written_into_them() 
         });
         let written = written.lock().unwrap().clone();
         assert_eq!(written.len(), 1, "{case}");
+        let in_folder: Vec<_> = fs::read_dir(dir.path("job"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+            .map(|p| fs::read(p).unwrap())
+            .collect();
         assert!(
-            common::trashed(&native.join("Trash")).contains(&written[0]),
-            "{case}: in the Trash, with the work"
+            in_folder.contains(&written[0]),
+            "{case}: in the project's folder, under a name the person finds"
         );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{case}");
     }
 }
 /// Every private file beside `file` (staged, moved aside, retained): what

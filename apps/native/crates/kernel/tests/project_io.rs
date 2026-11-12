@@ -541,7 +541,8 @@ fn backups_keep_the_replaced_version() {
     let (path, mut store) = edited_copy(&dir);
     let original = read(&path);
     let policy = BackupPolicy::new(dir.path("Backups"));
-    // Versions a save moved into the backups go to the Trash when pruned.
+    // A version a save moved into the backups is removed when pruned,
+    // unchanged; nothing reaches the Trash.
     let hooks = pm_kernel::project_io::PublishHooks {
         trash: Some(common::trash(&dir.path("Trash"))),
         ..Default::default()
@@ -591,10 +592,7 @@ fn backups_keep_the_replaced_version() {
     )
     .unwrap();
     assert_eq!(list_backups(&policy).unwrap().len(), 2);
-    assert!(
-        common::trashed(&dir.path("Trash")).contains(&original),
-        "the oldest version is in the Trash, not deleted"
-    );
+    assert_eq!(common::trashed(&dir.path("Trash")), Vec::<Vec<u8>>::new());
 }
 
 /// A structural edit (layer order) is saved in the old leaf-patch history

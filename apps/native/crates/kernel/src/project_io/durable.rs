@@ -1193,20 +1193,28 @@ pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
     if rename_private(destination, &taken, hooks).is_err() {
         return;
     }
-    if begins(whole, &taken) {
-        // A copy under a public name may have been opened there: to the
-        // Trash, never unlinked (left under its private name otherwise).
-        let _ = dispose(&taken, hooks);
-    } else if place_new(&taken, destination, None, hooks).is_err() {
-        let _ = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
+    // The incomplete copy, still exactly a beginning of the whole file when
+    // it goes; anything else (it landed there, or was written into since)
+    // goes back under the name, or beside it if the name was taken again.
+    let ours = begins(whole, &taken) && dispose(&taken, &|part, _| begins_file(whole, part), hooks);
+    if !ours
+        && place_new(&taken, destination, None, hooks).is_err()
+        && let Err(left) = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
             Ok(())
-        });
+        })
+    {
+        trash_or_leave(left, hooks);
     }
 }
 
 /// Whether `part`'s bytes are the beginning (or all) of `whole`'s.
 pub(super) fn begins(whole: &Path, part: &Path) -> bool {
-    let (Ok(whole), Ok(part)) = (File::open(whole), File::open(part)) else {
+    File::open(part).is_ok_and(|part| begins_file(whole, &part))
+}
+
+/// Whether the bytes behind `part` are the beginning (or all) of `whole`'s.
+fn begins_file(whole: &Path, part: &File) -> bool {
+    let Ok(whole) = File::open(whole) else {
         return false;
     };
     let (mut a, mut b) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
@@ -1225,19 +1233,63 @@ pub(super) fn begins(whole: &Path, part: &Path) -> bool {
 }
 
 /// Disposes of `path`, a file that was a version of the project (a
-/// replaced version, a copy that was under the project's name) or a file
-/// this app cannot prove is its own untouched temporary file. It is never
-/// unlinked: whoever still had it open may have written work into it after
-/// it was last read, and a hash says nothing about the next moment. It goes
-/// to the person's Trash, intact, whatever it holds by then; the person
-/// empties the Trash. Where there is no Trash (no host Trash, a volume
-/// without one), it stays where it is: `None`, for the caller to keep it
-/// named and list it.
-pub(super) fn dispose(path: &Path, hooks: &PublishHooks) -> Option<PathBuf> {
+/// replaced version, a copy that was under the project's name, a staged
+/// file recovery found duplicated) under a private name, if it is still
+/// exactly what its record says. It is read again at this moment, through
+/// a freshly opened descriptor (`unchanged` judges what it holds), and the
+/// descriptor's stat must be the same before and after that read and the
+/// same as the name's: then it is unlinked at once, in this call, and
+/// `true` is returned. Anything else (changed, unreadable, replaced) is
+/// never unlinked: `false`, and the caller keeps it beside the project
+/// ([`keep_or_trash`]).
+///
+/// What remains (docs/native/p0-decisions.md): a program still holding a
+/// descriptor to the file, which writes into it in the instant between
+/// this check and the unlink, loses that write.
+pub(super) fn dispose(
+    path: &Path,
+    unchanged: &dyn Fn(&File, &FileStat) -> bool,
+    hooks: &PublishHooks,
+) -> bool {
     if let Some(hook) = &hooks.before_disposal {
         hook(path);
     }
-    (hooks.trash.as_ref()?.0)(path).ok()
+    let Ok(Some(named)) = lstat_file(path) else {
+        return false;
+    };
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(before) = file.metadata().map(|m| stat_of(&m)) else {
+        return false;
+    };
+    if !before.same_file(&named) || !unchanged(&file, &before) {
+        return false;
+    }
+    let after = file.metadata().map(|m| stat_of(&m)).ok();
+    after.as_ref() == Some(&before) && fs::remove_file(path).is_ok()
+}
+
+/// For [`dispose`]: the file holds exactly the bytes with `hash` (and is
+/// `size` long, where the record says).
+pub(super) fn holds_hash<'a>(
+    hash: &'a str,
+    size: Option<u64>,
+) -> impl Fn(&File, &FileStat) -> bool + 'a {
+    move |file, stat| {
+        size.is_none_or(|size| stat.size == size)
+            && hash_reader(file, Path::new("")).is_ok_and(|h| hex(&h.finalize()) == hash)
+    }
+}
+
+/// A file [`dispose`] found changed, that could not be kept beside the
+/// project: it goes to the person's Trash, or stays where it is where there
+/// is none. Returns where it is now, for the person to be told.
+pub(super) fn trash_or_leave(path: PathBuf, hooks: &PublishHooks) -> PathBuf {
+    match &hooks.trash {
+        Some(trash) => (trash.0)(&path).unwrap_or(path),
+        None => path,
+    }
 }
 
 /// How the destination may be written.
@@ -1648,8 +1700,9 @@ pub(crate) struct Published {
     /// The published file, held open since it was confirmed under the
     /// name and confirmed again after the save's last step.
     pub installed: Option<Installed>,
-    /// Earlier versions this save no longer needs that could not be moved
-    /// to the Trash: they stay where they are, for the person.
+    /// Earlier versions found changed when they were to go, that could not
+    /// be kept beside the project: where they are now (the Trash, or where
+    /// they were), for the person.
     pub untrashed: Vec<PathBuf>,
     /// The file is installed but the folder did not sync after it: why.
     /// Nothing else was done (the replaced version stays named by the
@@ -2137,9 +2190,7 @@ fn publish_now(
     (published.changed, published.untrashed) = transaction::prune_retained(destination, &tx, hooks);
     if let Some(policy) = host.backups {
         let just_written = published.backup.as_deref().or(host.backup);
-        let (changed, untrashed) = retain(policy, just_written, hooks).unwrap_or_default();
-        published.untrashed.extend(untrashed);
-        for changed in changed {
+        for changed in retain(policy, just_written, hooks).unwrap_or_default() {
             match tx.keep_file(changed.clone(), "other version") {
                 Ok((kept, Placed::Moved)) => published.changed.push(kept),
                 // Its bytes are beside the project as a copy, or could not
@@ -2293,6 +2344,11 @@ fn stamp_millis(stamp: &[u8]) -> i64 {
 
 /// A name this app gives a backup, the whole name and nothing else:
 /// `^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.pmv(?:-\d+)?$`.
+/// Whether `name` is the file name of a version in a project's backups.
+pub(super) fn is_backup_name(name: &str) -> bool {
+    !name.contains('/') && backup_key(name).is_some()
+}
+
 fn backup_key(name: &str) -> Option<BackupKey> {
     let b = name.as_bytes();
     let shape = b"dddd-dd-ddTdd-dd-dd-dddZ.pmv";
@@ -2823,10 +2879,10 @@ pub(crate) fn retain(
     policy: &BackupPolicy,
     just_written: Option<&Path>,
     hooks: &PublishHooks,
-) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProjectIoError> {
-    let (mut changed, mut untrashed) = (Vec::new(), Vec::new());
+) -> Result<Vec<PathBuf>, ProjectIoError> {
+    let mut changed = Vec::new();
     let Some(dir) = open_backups(policy, false)? else {
-        return Ok((changed, untrashed));
+        return Ok(changed);
     };
     let folder_err = |e| io_err(&policy.directory, e);
     let keep = just_written.and_then(Path::file_name);
@@ -2849,12 +2905,10 @@ pub(crate) fn retain(
             // it since it was replaced.
             let path = policy.directory.join(&name);
             if let Some(hash) = retained_hash(&path) {
-                if hash_file(&path).ok() != Some(hash) {
-                    changed.push(path);
-                } else if dispose(&path, hooks).is_some() {
+                if dispose(&path, &holds_hash(&hash, None), hooks) {
                     removed = true;
                 } else {
-                    untrashed.push(path);
+                    changed.push(path);
                 }
                 continue;
             }
@@ -2888,7 +2942,7 @@ pub(crate) fn retain(
     if removed {
         dir.sync().map_err(folder_err)?;
     }
-    Ok((changed, untrashed))
+    Ok(changed)
 }
 
 /// A full disk must not cost the user their current work: frees `needed`

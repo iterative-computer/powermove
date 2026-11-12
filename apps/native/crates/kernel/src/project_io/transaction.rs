@@ -29,7 +29,8 @@ use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
     FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, folder_sync,
-    is_uuid_v4, keep_beside, lstat_file, place_new, probing, rename_private, sync_file, withdraw,
+    holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file, place_new, probing,
+    rename_private, sync_file, trash_or_leave, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -310,7 +311,9 @@ fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> 
         Some(
             "aside" | "install" | "exchanged" | "installed" | "restore" | "restored" | "chosen",
         ) => true,
-        Some("keep") => own("from") && kept("to"),
+        // A version from the project's backups found changed is kept beside
+        // the project too: its source is named by its backup file name.
+        Some("keep") => (own("from") || text("from").is_some_and(is_backup_name)) && kept("to"),
         Some("kept") => kept("to"),
         Some("retained") => own("name"),
         Some("settled") => step.get("holds").is_none() || text("holds").is_some(),
@@ -1114,11 +1117,20 @@ fn settle_one(
         (_, Holds::Nothing) => true,
         _ if record.retains(&record.staged) => true,
         // Installed by a copy: the save's own staged file, whose bytes the
-        // path holds. Read a moment ago is all that is known of it now: to
-        // the Trash, or retained where there is none.
+        // path holds. Removed if it still holds exactly those when it goes;
+        // otherwise kept beside the project and told.
         (Holds::New, Holds::New) => {
-            if dispose(&record.staged, hooks).is_none() {
-                tx.retain(&record.staged, Some(&record.new));
+            if !dispose(
+                &record.staged,
+                &holds_hash(&record.new, Some(record.size)),
+                hooks,
+            ) {
+                match tx.keep(record.staged.clone(), "other version") {
+                    Ok(kept) => left.push(LeftAside::Kept(kept)),
+                    Err(staged) => {
+                        trash_or_leave(staged, hooks);
+                    }
+                }
             }
             true
         }
@@ -1251,11 +1263,11 @@ pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
 /// save of `destination` replaced and retained beside it (and every
 /// original of a file that could only be copied to its name) is read
 /// again. One that still holds exactly the bytes it was retained with is
-/// moved to the person's Trash ([`dispose`]), never unlinked; with no Trash
-/// it stays retained and is returned in the second list. One that changed
+/// removed in the same call as that read ([`dispose`]). One that changed
 /// since (something wrote into it after it was replaced) holds work nobody
 /// read: it is kept beside the project as "other version" (recorded in the
-/// record that names it) and returned in the first. `current` is the
+/// record that names it) and returned in the first list; where it cannot be
+/// kept there it goes to the Trash (or stays) and is returned in the second. `current` is the
 /// record of the save that runs the pass.
 pub(super) fn prune_retained(
     destination: &Path,
@@ -1273,31 +1285,29 @@ pub(super) fn prune_retained(
         };
         let mut gone = true;
         for (path, hash) in &record.retained {
-            let same = match lstat_file(path) {
-                Ok(None) => continue,
-                Ok(Some(_)) => FileVersion::read(path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|now| now.hash == *hash),
-                Err(_) => false,
-            };
-            if same {
-                if dispose(path, hooks).is_none() {
-                    untrashed.push(path.clone());
-                    gone = false;
-                }
-            } else {
-                match tx.keep_file(path.clone(), "other version") {
-                    Ok((kept, placed)) => {
-                        changed.push(kept);
-                        // Its name holds a copy: the file itself stays
-                        // retained, with what it holds now.
-                        if placed == Placed::Copied {
-                            tx.retain(path, None);
-                            gone = false;
-                        }
+            if matches!(lstat_file(path), Ok(None)) {
+                continue;
+            }
+            // Read again as it goes, and removed only if unchanged.
+            if dispose(path, &holds_hash(hash, None), hooks) {
+                continue;
+            }
+            // Something wrote into it since it was retained: work nobody
+            // read, kept beside the project and told.
+            match tx.keep_file(path.clone(), "other version") {
+                Ok((kept, placed)) => {
+                    changed.push(kept);
+                    // Its name holds a copy: the file itself stays
+                    // retained, with what it holds now.
+                    if placed == Placed::Copied {
+                        tx.retain(path, None);
+                        gone = false;
                     }
-                    Err(_) => gone = false,
+                }
+                Err(path) => {
+                    let now = trash_or_leave(path.clone(), hooks);
+                    gone &= now != path;
+                    untrashed.push(now);
                 }
             }
         }

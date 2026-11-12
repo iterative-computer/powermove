@@ -2759,13 +2759,14 @@ impl Kernel {
         self.save_published(id);
         Ok(())
     }
-    /// Earlier versions a save no longer needed stay where they are when
-    /// they cannot go to the Trash: the Error Log lists them for the person.
+    /// Earlier versions found changed when a save was to remove them, that
+    /// could not be kept beside the project: the Error Log says where they
+    /// are (the Trash, or where they were).
     fn log_untrashed(&mut self, untrashed: &[PathBuf]) {
         for path in untrashed {
             self.log(format!(
-                "An earlier version of a project is no longer needed but could not be moved to \
-                 the Trash (the volume may have none); it was left as it is: {}",
+                "An earlier version of a project was changed after it was saved and could not \
+                 be kept next to the project; it is here: {}",
                 path.display()
             ));
         }
