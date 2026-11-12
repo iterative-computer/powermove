@@ -365,6 +365,7 @@ impl Controller {
             project.clone(),
             self.profile.clone(),
             self.job_overrides.clone(),
+            crate::mcp_services::Capture::ExtensionSnapshot,
         )
         .ok();
         let host = ExtensionHost::start(HostConfig {

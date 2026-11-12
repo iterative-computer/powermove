@@ -136,6 +136,8 @@ pub struct Controller {
     pub mcp: Arc<crate::mcp::Host>,
     /// Every open document's override answers, for agents' jobs.
     pub job_overrides: crate::raster_overrides::OverrideWindows,
+    /// The project and revision Home's poster was last written from.
+    pub poster_revision: Option<((String, u64), std::time::Instant)>,
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
@@ -549,6 +551,7 @@ impl Controller {
             reopening_stopped: false,
             mcp,
             job_overrides: Default::default(),
+            poster_revision: None,
             window_key: 0,
             close_pending: false,
             closing_note: None,
@@ -1765,6 +1768,7 @@ impl Controller {
                             "Saved to a recovery copy; original was not overwritten".into()
                         });
                         v.load_recent(cx);
+                        v.write_poster(cx);
                     }
                     other => v.message = format!("Save failed; recovery data retained: {other:?}"),
                 }
