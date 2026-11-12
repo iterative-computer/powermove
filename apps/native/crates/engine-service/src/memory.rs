@@ -22,6 +22,10 @@ pub struct CacheUsage {
     pub binding_bytes: u64,
     /// Metal-device allocation, including work in flight; overlaps caches.
     pub gpu_allocated_bytes: u64,
+    /// Times a closed document's caches, programs and override answers were
+    /// released since launch. Showing another composition of an open
+    /// document never adds to it.
+    pub project_releases: u64,
 }
 
 impl CacheUsage {

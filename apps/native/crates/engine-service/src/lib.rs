@@ -415,6 +415,18 @@ struct State {
     halted: Option<String>,
     subscribers: Vec<async_channel::Sender<()>>,
 }
+impl State {
+    /// Takes a view out. Its document is closed (its caches, programs and
+    /// override answers go) only if no other view shows it by then.
+    fn remove_view(&mut self, id: u64) {
+        if let Some(view) = self.views.remove(&id) {
+            let doc = view.stamp.doc_id;
+            if !self.views.values().any(|v| v.stamp.doc_id == doc) {
+                self.retired_documents.insert(doc);
+            }
+        }
+    }
+}
 type ScopeTap = (
     pm_render::scopes::ScopeConfig,
     async_channel::Sender<ScopeResult>,
@@ -422,6 +434,8 @@ type ScopeTap = (
 struct Shared {
     state: Mutex<State>,
     memory: Mutex<memory::CacheUsage>,
+    /// Times a closed document's caches were released (`CacheUsage`).
+    project_releases: std::sync::atomic::AtomicU64,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
@@ -842,18 +856,18 @@ impl Viewer {
     }
     pub fn retire(&self) {
         let mut state = self.shared.state.lock().unwrap();
-        if let Some(view) = state.views.remove(&self.id) {
-            let doc = view.stamp.doc_id;
-            if !state.views.values().any(|v| v.stamp.doc_id == doc) {
-                state.retired_documents.insert(doc);
-            }
-        }
+        state.remove_view(self.id);
         state.notify();
         drop(state);
+        self.retired();
+    }
+    /// This view left `State::views`: its scope tap goes, the worker wakes.
+    fn retired(&self) {
         let mut scopes = self.shared.scopes.lock().unwrap();
         if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
             *scopes = None;
         }
+        drop(scopes);
         self.shared.wake.try_send(()).ok();
     }
 }
@@ -902,13 +916,20 @@ impl EngineService {
     }
     /// The renderer's latest cache counters (not OS or allocator footprint).
     pub fn memory_usage(&self) -> memory::CacheUsage {
-        self.shared.memory.lock().unwrap().clone()
+        memory::CacheUsage {
+            project_releases: self
+                .shared
+                .project_releases
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ..self.shared.memory.lock().unwrap().clone()
+        }
     }
     fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             memory: Mutex::default(),
+            project_releases: Default::default(),
             wake,
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
@@ -985,6 +1006,19 @@ impl EngineService {
         self.shared.device.lock().unwrap().clone()
     }
     pub fn viewer(&self, config: ViewerConfig) -> Result<Viewer> {
+        self.place(config, None)
+    }
+    /// `old`'s place shows `config` from now on (another composition of its
+    /// document, or another document). The two change places in one step: a
+    /// document that stays open is never without a view, so it keeps its
+    /// caches, programs, override answers and background fill, and the worker
+    /// keeps its device. On an error `old` is still in place.
+    pub fn replace_viewer(&self, old: &Viewer, config: ViewerConfig) -> Result<Viewer> {
+        let viewer = self.place(config, Some(old.id))?;
+        old.retired();
+        Ok(viewer)
+    }
+    fn place(&self, config: ViewerConfig, replaces: Option<u64>) -> Result<Viewer> {
         config.output.validate()?;
         ensure!(
             config.rate.exact_frame_ticks().is_some(),
@@ -1009,7 +1043,11 @@ impl EngineService {
             );
         }
         let mut state = self.shared.state.lock().unwrap();
-        ensure!(state.views.len() < 8, "at most eight concurrent viewers");
+        let replaced = replaces.filter(|id| state.views.contains_key(id));
+        ensure!(
+            state.views.len() - usize::from(replaced.is_some()) < 8,
+            "at most eight concurrent viewers"
+        );
         state.next += 1;
         state.content += 1;
         let id = state.next;
@@ -1064,6 +1102,10 @@ impl EngineService {
                 paths,
             },
         );
+        // After the new view is in: the document they share stays open.
+        if let Some(old) = replaced {
+            state.remove_view(old);
+        }
         state.notify();
         self.shared.wake.try_send(()).ok();
         Ok(Viewer {
@@ -1781,6 +1823,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     shared.disk.forget_document(doc);
                 }
                 engine.release_project_memory();
+                shared
+                    .project_releases
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if last_view_closed {
                     played_since_idle = false;
                     // Metal command queues and wgpu encoder pools retain
@@ -2943,6 +2988,9 @@ mod worker_tests {
     }
 
     fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
+        service.viewer(shapes_config(layer)).unwrap()
+    }
+    fn shapes_config(layer: Option<metal::MetalLayer>) -> ViewerConfig {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
         #[cfg(feature = "kernel")]
         let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
@@ -2955,24 +3003,22 @@ mod worker_tests {
                 1,
             )),
         };
-        service
-            .viewer(ViewerConfig {
-                composition: snapshot.open_comp().unwrap(),
-                snapshot,
-                media: Default::default(),
-                output: Output {
-                    width: 160,
-                    height: 90,
-                    display: 1,
-                    headroom: 1.,
-                    crop: None,
-                },
-                layer,
-                rate: pm_time::Rate::FPS_30,
-                end: None,
-                audio: false,
-            })
-            .unwrap()
+        ViewerConfig {
+            composition: snapshot.open_comp().unwrap(),
+            snapshot,
+            media: Default::default(),
+            output: Output {
+                width: 160,
+                height: 90,
+                display: 1,
+                headroom: 1.,
+                crop: None,
+            },
+            layer,
+            rate: pm_time::Rate::FPS_30,
+            end: None,
+            audio: false,
+        }
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -3712,6 +3758,101 @@ mod worker_tests {
         )));
         store.set_state(true, 1, 1);
         (store, asked)
+    }
+
+    /// Showing another composition of an open document (the editor's
+    /// composition switch, paused) never closes the document, whatever the
+    /// worker is doing at that moment (here: playing another window's
+    /// project, so it looks at its views all the time). Nothing of the
+    /// project is released, and its override layers still ask, and are drawn
+    /// from, the store the window's extensions hold from before the switch.
+    #[test]
+    fn a_composition_switch_keeps_the_document_and_its_override_answers() {
+        let service = EngineService::start(pm_gpu::Gpu::new("comp-switch-test").unwrap()).unwrap();
+        let other = shapes_viewer(&service, None);
+        other
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
+        other
+            .command(TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let config = shapes_config(None);
+        let mut v = service.viewer(config.clone()).unwrap();
+        let first = wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let doc = first.frame.unwrap().stamp.doc_id;
+        assert_ne!(other.stamp().unwrap().doc_id, doc);
+        let (store, asked) = overridden(&service, &v);
+        for switch in 1..=40i64 {
+            v = service.replace_viewer(&v, config.clone()).unwrap();
+            // The frame at a new time lands only once every override layer
+            // in it was asked for and answered through the window's store.
+            let at = Ticks::new(switch * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+            v.command(TransportCommand::Seek {
+                time: at,
+                mode: pm_protocol::clock::SeekMode::Exact,
+            })
+            .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut answered = 0;
+            loop {
+                let needs = std::mem::take(&mut *asked.lock().unwrap());
+                answered += needs.len();
+                if !needs.is_empty() {
+                    store.answer_all(
+                        1,
+                        1,
+                        needs
+                            .into_iter()
+                            .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                            .collect(),
+                    );
+                }
+                let status = v.status();
+                if answered > 0
+                    && status
+                        .frame
+                        .as_ref()
+                        .is_some_and(|f| f.gpu_ok && f.time == at && !f.stand_ins)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "switch {switch}: {answered} override layers asked the window's store: {status:?}"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                Arc::ptr_eq(&service.compat(doc), &store),
+                "switch {switch} gave the document another answer store"
+            );
+            assert_eq!(
+                service.memory_usage().project_releases,
+                0,
+                "switch {switch} released the open project's memory"
+            );
+        }
+        v.retire();
+        // A document whose last view closed is released, once, and its
+        // answers go with it: a later view of it would ask another store,
+        // which the window's extensions never hear from. That is why a
+        // switch replaces the view instead of retiring it first.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while service.memory_usage().project_releases != 1 {
+            assert!(std::time::Instant::now() < deadline, "never released");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!Arc::ptr_eq(&service.compat(doc), &store));
+        other.retire();
     }
 
     /// A capture is an exact read: full resolution and paused whatever the
