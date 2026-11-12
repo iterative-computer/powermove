@@ -259,6 +259,9 @@ fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<b
         ],
     )
 }
+/// Said once when a file in a folder a sync client keeps opens in place.
+const SYNCED_FOLDER: &str = "In a synced folder: a change made on another computer is noticed when you save, and both versions are kept.";
+
 /// Whether a background recovery-data failure for `project` leaves the work
 /// in the window showing `shown` unprotected.
 fn unprotects(project: &str, shown: Option<&str>) -> bool {
@@ -1490,10 +1493,16 @@ impl Controller {
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
                         // Media resolves on a worker after the project shows.
+                        let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
                         v.report_first_frame(cx);
                         v.load_recent(cx);
                         v.offer_stranded_copies(cx);
+                        // No lock reaches another computer through a sync
+                        // client: say what does guard the file.
+                        if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {
+                            v.message = SYNCED_FOLDER.into();
+                        }
                     }
                     // Already open in a window: that window comes forward.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {

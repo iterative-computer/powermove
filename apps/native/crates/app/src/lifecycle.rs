@@ -1108,8 +1108,10 @@ mod tests {
         answer(&k, ShellCall::ReleaseLibrary);
         assert!(k.published("test").is_none(), "the session is released");
         assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
-        let lock = pm_kernel::locks::project_lock_path(&file);
-        drop(pm_kernel::locks::FileLock::acquire(&lock).expect("its file lock is released"));
+        drop(
+            pm_kernel::locks::lock_project(&dir.path().join("locks"), &file)
+                .expect("its file lock is released"),
+        );
         assert!(
             !pm_kernel::journal::sessions(&dir.path().join("journals/test")).is_empty(),
             "the unsaved edit is kept for recovery"

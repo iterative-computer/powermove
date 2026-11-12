@@ -37,6 +37,10 @@ pub struct KernelConfig {
     /// Previous versions (`<root>/<project id>/`). Every production host sets
     /// this: a save without it deletes the file it replaces.
     pub backup_root: Option<PathBuf>,
+    /// Where local project locks live (`locks::lock_project`). `None`: a
+    /// `locks` folder beside the journals, or the user's temporary folder
+    /// when there are no journals either.
+    pub lock_root: Option<PathBuf>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
@@ -431,6 +435,24 @@ impl Kernel {
     #[doc(hidden)]
     pub fn set_publish_hooks(&mut self, hooks: crate::project_io::PublishHooks) {
         self.publish_hooks = hooks;
+    }
+    /// Exclusive use of the project file `path` ([`crate::locks::lock_project`]).
+    pub(crate) fn lock_project(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<crate::locks::FileLock> {
+        crate::locks::lock_project(&self.lock_root(), path)
+    }
+    /// Where this kernel's local project locks live.
+    pub fn lock_root(&self) -> PathBuf {
+        self.config
+            .lock_root
+            .clone()
+            .or_else(|| {
+                let journals = self.config.journal_root.as_ref()?;
+                Some(journals.parent()?.join("locks"))
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("com.powermove.locks"))
     }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()

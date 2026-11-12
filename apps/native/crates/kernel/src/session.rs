@@ -755,7 +755,7 @@ impl Kernel {
             if locks::open_decision(path, None) != OpenDecision::Writable {
                 return Err(failure("Choose a writable local destination"));
             }
-            lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
+            lock = Some(self.lock_project(path).map_err(failure)?);
         } else if !matches!(
             self.sessions[&session.project].destination,
             Destination::File(_)
@@ -1246,7 +1246,7 @@ impl Kernel {
                         } else {
                             decision = locks::open_decision(path, electron_profile.as_deref());
                             if decision == OpenDecision::Writable {
-                                match FileLock::acquire(&locks::project_lock_path(path)) {
+                                match self.lock_project(path) {
                                     Ok(l) => {
                                         lock = Some(l);
                                         crate::project_io::remove_abandoned_temps(path);
@@ -1291,7 +1291,7 @@ impl Kernel {
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
                 if decision == OpenDecision::Writable {
-                    match FileLock::acquire(&locks::project_lock_path(&path)) {
+                    match self.lock_project(&path) {
                         Ok(l) => {
                             lock = Some(l);
                             // Staging files a save cut short by Quit Now left.
@@ -1835,7 +1835,7 @@ impl Kernel {
                     "Choose a writable local destination: {decision:?}"
                 )));
             }
-            new_lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
+            new_lock = Some(self.lock_project(path).map_err(failure)?);
         }
         let mut recovery_copy = None;
         let mut displaced = None;
@@ -2321,7 +2321,7 @@ impl Kernel {
         let Ok(Some(moved)) = version.moved() else {
             return;
         };
-        let Ok(lock) = FileLock::acquire(&locks::project_lock_path(&moved.path)) else {
+        let Ok(lock) = self.lock_project(&moved.path) else {
             return;
         };
         let path = moved.path.clone();

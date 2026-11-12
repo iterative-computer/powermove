@@ -306,7 +306,14 @@ fn save_as_pmv_and_changed_file_fall_back_to_a_recovery_slot() {
         replace: false,
     })
     .unwrap();
-    assert!(dir.path("export.pmvlock").exists());
+    assert!(
+        !dir.path("export.pmvlock").exists(),
+        "nothing is written beside the project"
+    );
+    assert!(
+        lock_project(&k.lock_root(), &file).is_err(),
+        "the saved file is locked"
+    );
     let mut old = common::open_store(&file);
     assert_eq!(common::opacity_of(&old, "layer0"), Some(60.0));
     old.undo().unwrap();
@@ -1790,8 +1797,80 @@ fn lock_child_process() {
         return;
     };
     let expected = std::env::var("PM_KERNEL_TEST_LOCK_EXPECT").unwrap();
-    let result = FileLock::acquire(Path::new(&path));
+    // A project file's lock when its lock folder is given, else a record lock.
+    let result = match std::env::var_os("PM_KERNEL_TEST_LOCK_ROOT") {
+        Some(root) => lock_project(Path::new(&root), Path::new(&path)),
+        None => FileLock::acquire(Path::new(&path)),
+    };
     assert_eq!(result.is_ok(), expected == "acquired");
+}
+fn child_project_lock(root: &Path, file: &Path, expected: &str) {
+    let result = Process::new(std::env::current_exe().unwrap())
+        .args(["--exact", "lock_child_process"])
+        .env("PM_KERNEL_TEST_LOCK", file)
+        .env("PM_KERNEL_TEST_LOCK_ROOT", root)
+        .env("PM_KERNEL_TEST_LOCK_EXPECT", expected)
+        .stdout(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+/// A project on a volume only this Mac writes is locked in the profile, not
+/// beside the file. Nothing is written into the project's folder, so a sync
+/// client has no lock file to upload or to replace; replacing a file that
+/// sits where the lock used to be changes nothing. Another process is
+/// excluded while the project is open, across a save (which replaces the
+/// file's inode), and until it closes; then the lock leaves no file behind.
+#[test]
+fn a_project_lock_is_in_the_profile_and_cannot_be_replaced_underneath() {
+    let dir = common::TempDir::new("local-lock");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let root = k.lock_root();
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    let beside = |dir: &common::TempDir| {
+        let mut names: Vec<_> = fs::read_dir(dir.path("job"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        beside(&dir),
+        ["cut.pmv"],
+        "only the project is in its folder"
+    );
+    child_project_lock(&root, &file, "blocked");
+    // What a sync client could do to a lock file beside the project.
+    land(&project_lock_path(&file), b"");
+    child_project_lock(&root, &file, "blocked");
+    fs::remove_file(project_lock_path(&file)).unwrap();
+    edit(&mut k, "P", 20.0);
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    assert_eq!(
+        beside(&dir),
+        ["cut.pmv"],
+        "a save leaves nothing else either"
+    );
+    child_project_lock(&root, &file, "blocked");
+    k.shell(ShellCall::Close(session)).unwrap();
+    child_project_lock(&root, &file, "acquired");
+    assert_eq!(
+        fs::read_dir(&root).unwrap().count(),
+        0,
+        "a released lock leaves no file"
+    );
 }
 fn child_lock(path: &Path, expected: &str) {
     let result = Process::new(std::env::current_exe().unwrap())
@@ -1850,7 +1929,7 @@ fn a_locked_file_opens_as_a_named_copy_and_never_saves_over_the_source() {
     let file = dir.path("original.pmv");
     fs::write(&file, PROJECT).unwrap();
     let bytes = fs::read(&file).unwrap();
-    let _lock = FileLock::acquire(&project_lock_path(&file)).unwrap();
+    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
     let mut k = kernel(&dir.path("native"));
     let ShellReply::Opened {
         session, decision, ..
@@ -1890,7 +1969,11 @@ fn an_external_file_opens_in_place_and_its_library_entry_keeps_its_name() {
         panic!()
     };
     assert_eq!(decision, OpenDecision::Writable);
-    assert!(project_lock_path(&file).exists(), "held under its .pmvlock");
+    assert!(
+        !project_lock_path(&file).exists(),
+        "no lock beside the file"
+    );
+    assert!(lock_project(&k.lock_root(), &file).is_err(), "held");
     edit(&mut k, "F", 20.0);
     k.shell(ShellCall::Save(session.clone())).unwrap();
     k.shell(ShellCall::Close(session)).unwrap();
@@ -2369,7 +2452,7 @@ fn copy_journals_follow_the_copy_slot_after_a_crash() {
     let dir = common::TempDir::new("copy-crash");
     let file = dir.path("external.pmv");
     fs::write(&file, PROJECT).unwrap();
-    let _lock = FileLock::acquire(&project_lock_path(&file)).unwrap();
+    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
     let profile = dir.path("native");
     let mut k = kernel(&profile);
     open(&mut k, "P", SessionSource::File(file));
@@ -2398,7 +2481,7 @@ fn embedded_media_in_a_copy_survives_removal_of_the_original_file() {
     let dir = common::TempDir::new("copy-media");
     let file = dir.path("external.pmv");
     fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
-    let _lock = FileLock::acquire(&project_lock_path(&file)).unwrap();
+    let _lock = lock_project(&dir.path("native/locks"), &file).unwrap();
     let profile = dir.path("native");
     let mut k = kernel(&profile);
     let h = open(&mut k, "P", SessionSource::File(file.clone()));
@@ -2737,10 +2820,8 @@ fn recovering_a_file_from_recents_recovers_it_in_place() {
     );
     let rows = LibraryStore::open(&profile).projects().unwrap();
     assert_eq!(rows.len(), 1, "no recovery copy: {rows:?}");
-    let lock = parse(&fs::read_to_string(project_lock_path(&file)).unwrap()).unwrap();
-    assert_eq!(
-        lock.get("pid").and_then(Value::as_f64),
-        Some(f64::from(std::process::id())),
+    assert!(
+        lock_project(&k.lock_root(), &file).is_err(),
         "the file stays held in place"
     );
     k.shell(ShellCall::Save(session.clone())).unwrap();
