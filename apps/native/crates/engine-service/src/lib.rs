@@ -1555,7 +1555,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
-    let mut played_since_idle = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
         // Objects Metal and Core Animation autorelease on this thread outside
@@ -1860,7 +1859,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .project_releases
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if last_view_closed {
-                    played_since_idle = false;
                     // Metal command queues and wgpu encoder pools retain
                     // their playback high-water storage after caches empty.
                     // No viewer uses this device now; retire those owners as
@@ -2416,7 +2414,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
             {
-                played_since_idle = true;
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
                     r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
@@ -2714,23 +2711,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         audio.send(audio::AudioCtl::MemoryPressure);
                     }
                 }
-            }
-            if played_since_idle
-                && engine.idle_memory_released()
-                && flights.is_empty()
-                && runtime.values().all(|r| !r.transport.running())
-            {
-                match engine.renew_idle() {
-                    Ok(next) => {
-                        engine = next;
-                        *shared.device.lock().unwrap() = engine.metal().to_owned();
-                    }
-                    Err(error) => eprintln!(
-                        "Viewer cleanup could not renew stopped recording pools: {error:#}"
-                    ),
-                }
-                played_since_idle = false;
-                crate::memory::pressure_relief();
             }
             let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }

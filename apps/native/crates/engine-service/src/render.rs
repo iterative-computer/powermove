@@ -368,10 +368,6 @@ impl Engine {
         false
     }
 
-    pub fn idle_memory_released(&self) -> bool {
-        self.idle_released
-    }
-
     pub fn release_project_memory(&mut self) {
         objc2::rc::autoreleasepool(|_| self.release_project_memory_inner());
         crate::memory::pressure_relief();
@@ -467,14 +463,6 @@ impl Engine {
         }
         next.set_compat(self.compat.clone());
         next.disk = self.disk.clone();
-        Ok(next)
-    }
-    /// A stopped viewer keeps its already-presented drawable. Retire the
-    /// recording pools without making that still redraw or starting a
-    /// repeated idle-cleanup cycle; the next requested frame warms normally.
-    pub fn renew_idle(&self) -> Result<Self> {
-        let mut next = self.rebuild()?;
-        next.idle_released = true;
         Ok(next)
     }
     pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {

@@ -278,9 +278,14 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
     }
 }
 
+/// A stop releases what is idle (targets, read-ahead) and keeps the engine:
+/// its device, compiled programs and pipelines stay, so the next play
+/// starts warm. (Renewing the device two seconds after every stop gave the
+/// recording pools' high-water storage back, and made every play after a
+/// pause compile and upload everything again.) The still stays as it was.
 #[test]
-fn stopped_playback_retires_recording_pools_without_changing_the_still() {
-    let service = EngineService::start(pm_gpu::Gpu::new("stopped-pools-test").unwrap()).unwrap();
+fn a_stop_releases_idle_targets_and_keeps_the_engine_warm() {
+    let service = EngineService::start(pm_gpu::Gpu::new("stopped-warm-test").unwrap()).unwrap();
     let viewer = service.viewer(config(snapshot())).unwrap();
     viewer
         .command(C::Play {
@@ -303,14 +308,21 @@ fn stopped_playback_retires_recording_pools_without_changing_the_still() {
     }
     viewer.capture_next().unwrap();
     let pixels = wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while service.memory_usage().targets_created != 0 {
-        assert!(
-            Instant::now() < deadline,
-            "stopped recording pools stayed live"
-        );
+    let created = service.memory_usage().targets_created;
+    assert!(created > 0);
+    // The idle release (two seconds after the last frame), and well past it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while service.memory_usage().target_pool_idle != 0 {
+        assert!(Instant::now() < deadline, "idle targets stayed");
         std::thread::sleep(Duration::from_millis(10));
     }
+    std::thread::sleep(Duration::from_secs(3));
+    let after = service.memory_usage();
+    assert_eq!(after.target_pool_idle, 0);
+    assert_eq!(
+        after.targets_created, created,
+        "the same engine: nothing was made again, and no new one took its place"
+    );
     assert_eq!(
         viewer.status().frame.unwrap().pixels.as_ref(),
         Some(&pixels)
