@@ -522,7 +522,12 @@ impl SourceCache {
                 Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
                 Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
             }
-        } else if crate::chromium::decodes(&info.codec) && crate::chromium::plays_today(&info) {
+        } else if stream.is_none()
+            && crate::chromium::decodes(&info.codec)
+            && crate::chromium::plays_today(&info)
+        {
+            // (Chromium reads a file's first audio stream only: a stream
+            // asked for by index is decoded as itself, by our FFmpeg.)
             // Today's own FFmpeg where this process has it (the app's
             // engine processes); our FFmpeg elsewhere (the CLI, tests) and
             // for files longer than today plays at all.
