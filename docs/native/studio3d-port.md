@@ -2399,7 +2399,7 @@ noise certification and release-build/on-screen acceptance remain outstanding.
 The UI reads the resolved quality object and calls the existing quality
 command; no panel, control or layout is introduced here.
 
-#### Round 2 candidate: Metal OIDN binding and deployment blocker
+#### Round 2 rejected: Metal OIDN misses the real-export improvement rule
 
 The candidate explicitly requests Metal device type 5, uses OIDN-owned device
 buffers, and retains explicit CPU device type 1 fallback. It never binds Rust
@@ -2431,4 +2431,26 @@ the app's Info.plist and linker target require macOS 14.0. The bundle helper
 reports this mismatch. Rebuild TBB/OIDN with a macOS 14 deployment target and
 repeat relocation/fallback verification before distributing it. No minimum OS
 increase, release or notarization is performed here. The candidate remains
-unshipped pending native timing, image gates and the 15% real-export stop rule.
+unshipped; the deployment rebuild belongs to a separate follow-up.
+
+The completed comparison uses the selected R1 policy, the **same executable
+and project hashes**, 30 animated-camera frames and identical measured sample
+counts. Every GPU frame reports Metal with no CPU fallback:
+
+| Matched warm-cache 1080p export | CPU OIDN | Metal OIDN |
+|---|---:|---:|
+| Real export s/frame | 3.223 | 2.894 |
+| Trace ms/frame | 2093 | 2089 |
+| Denoise ms/frame, including guides and transfers | 851 | 532 |
+
+The real-export gain is **10.2%**, below the approved 15% rule. **R2 is
+reverted and this speed line is closed.** The GPU binding, automatic device
+preference, packaging hook and device diagnostics are not retained in the
+shipping source. The prototype and evidence remain outside Git.
+
+The first comparison against R1's colder 3.450 s/frame run suggested 16.1%,
+but included different renderer startup costs. Repeating CPU after the GPU
+run removes that cache bias. The native CPU path already uses balanced OIDN,
+half-resolution guide prefilters and cropped beauty work; GPU transfer/guide
+work and two noisy layers limit its application gain despite the larger
+standalone OIDN benchmark gain. Image thresholds and references are unchanged.
