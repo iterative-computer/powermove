@@ -949,7 +949,7 @@ impl Kernel {
                 return Err(failure(e));
             }
         };
-        let displaced = receipt.displaced.clone();
+        let displaced = self.note_changed(&session.project, &receipt);
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
         self.refuse_faulted(&session.project)?;
@@ -2053,10 +2053,19 @@ impl Kernel {
                 self.mark_save_point(id, &plan.document, plan.revision)?;
             }
             let p = self.project_mut(id).unwrap();
+            let mut changed = Vec::new();
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
+                changed = receipt.changed.clone();
                 p.store_mut().finish_save(receipt)
             });
+            // A retained version found changed is another version to tell
+            // about: at once where nothing else is, at the next open else.
+            let mut changed = changed.into_iter();
+            if displaced.is_none() {
+                displaced = changed.next();
+            }
+            self.note_kept(id, changed.map(|kept| kept_row("other", Some(&kept))));
             if result.is_ok() {
                 self.save_published(id);
             }
@@ -2499,6 +2508,8 @@ impl Kernel {
         project_io::Host {
             hooks: &self.publish_hooks,
             profile: self.profile_dir(),
+            backups: None,
+            backup: None,
         }
     }
     /// Private files beside a project that no save's record names are never
@@ -2534,6 +2545,19 @@ impl Kernel {
         {
             self.project_mut(id).unwrap().store_mut().file_moved(now);
         }
+    }
+    /// The other version a save kept beside the project that its reply
+    /// names: the one found at the path, else the first of the versions an
+    /// earlier save had retained and this one found changed. The rest are
+    /// told at the next open.
+    fn note_changed(&mut self, id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
+        let mut changed = receipt.changed.iter();
+        let displaced = receipt
+            .displaced
+            .clone()
+            .or_else(|| changed.next().cloned());
+        self.note_kept(id, changed.map(|kept| kept_row("other", Some(kept))));
+        displaced
     }
     /// Remembers files kept beside session `id`'s project file until the
     /// person is told (`ShellCall::KeptBeside`); the file's entry keeps them

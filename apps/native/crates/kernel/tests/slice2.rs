@@ -980,12 +980,59 @@ fn disks_without_an_exchange() -> [(&'static str, pm_kernel::project_io::Publish
         ),
     ]
 }
-/// The names a save may leave beside `file` and must not: its staging file
-/// and the file it moved aside.
+/// The private files a save keeps beside `file` on purpose: the version it
+/// replaced, retained under the save's private name until a later save has
+/// read it again, and that save's record, which says so.
+fn retained(file: &Path) -> Vec<std::path::PathBuf> {
+    let dir = file.parent().unwrap();
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let record = entry.unwrap().path();
+        let name = record.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.starts_with('.') && name.ends_with(".save")) {
+            continue;
+        }
+        let text = fs::read_to_string(&record).unwrap();
+        let kept: Vec<_> = text
+            .lines()
+            .filter_map(|line| parse(line.split_once(' ')?.1).ok())
+            .filter(|step| step.get("step").and_then(Value::as_str) == Some("retained"))
+            .filter_map(|step| Some(dir.join(step.get("name")?.as_str()?)))
+            .filter(|path| path.exists())
+            .collect();
+        if !kept.is_empty() {
+            found.extend(kept);
+            found.push(record);
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+/// What the files retained beside `file` hold.
+fn retained_versions(file: &Path) -> Vec<Vec<u8>> {
+    retained(file)
+        .into_iter()
+        .filter(|p| !p.to_string_lossy().ends_with(".save"))
+        .map(|p| fs::read(p).unwrap())
+        .collect()
+}
+/// The version a save replaced and retained beside `file`: its bytes.
+fn retained_version(file: &Path) -> Vec<u8> {
+    let mut kept = retained_versions(file);
+    assert_eq!(kept.len(), 1, "one replaced version is retained");
+    kept.remove(0)
+}
+/// The names a save may leave beside `file` and must not: its staging file,
+/// a file it moved aside, or a record, other than what it retains on
+/// purpose ([`retained`]).
 fn private_leftovers(file: &Path) -> Vec<String> {
+    let retained = retained(file);
     fs::read_dir(file.parent().unwrap())
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|e| e.unwrap().path())
+        .filter(|p| !retained.contains(p))
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .filter(|n| {
             n.starts_with('.')
                 && [".tmp", ".aside", ".partial", ".save"]
@@ -993,6 +1040,214 @@ fn private_leftovers(file: &Path) -> Vec<String> {
                     .any(|e| n.ends_with(e))
         })
         .collect()
+}
+/// A kernel that keeps the versions its saves replace, as the app does.
+fn kernel_with_backups(path: &Path) -> Kernel {
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(path.join("journals")),
+        backup_root: Some(path.join("backups")),
+        ..Default::default()
+    });
+    k.shell(ShellCall::AttachLibrary {
+        profile: path.into(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    k
+}
+/// The version a save replaced is read and found to be the one the session
+/// had; a hash taken then says nothing about a moment later. Another program
+/// that still has that file open (or a sync client that swaps its private
+/// name) can write work into it afterwards. So the replaced file is never
+/// removed by the save that replaced it: it is retained, and the next save
+/// reads it again before it goes. Work written into it meanwhile is found
+/// then and kept beside the project under a plain name the save reports.
+#[test]
+fn work_written_into_the_replaced_file_after_it_was_read_is_never_removed() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        let dir = common::TempDir::new("retained");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            // Written through the file itself, as a program that had it
+            // open would: the same file, new bytes.
+            after_judged: Some(std::sync::Arc::new(|replaced| {
+                fs::write(replaced, b"unread work").unwrap()
+            })),
+            ..hooks.clone()
+        });
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{disk}: {e}"));
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "{disk}");
+        assert_eq!(
+            retained_version(&file),
+            b"unread work",
+            "{disk}: the replaced file is still there, with what was written into it"
+        );
+        let one = fs::read(&file).unwrap();
+        // The next save reads the retained file again before pruning it.
+        k.set_publish_hooks(hooks);
+        rename_comp(&mut k, "P", "Two");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let ShellReply::Saved {
+            displaced: Some(kept),
+            ..
+        } = k
+            .finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{disk}: {e}"))
+        else {
+            panic!("{disk}: the save says a changed version was kept")
+        };
+        assert_eq!(fs::read(&kept).unwrap(), b"unread work", "{disk}");
+        assert_eq!(
+            visible_siblings(&file),
+            std::slice::from_ref(&kept),
+            "{disk}"
+        );
+        assert_eq!(saved_name(&file).as_deref(), Some("Two"), "{disk}");
+        let now = retained_versions(&file);
+        assert!(
+            now.contains(&one),
+            "{disk}: and the version this save replaced is retained in its turn"
+        );
+        // Where a file can only be given a name by copying it, the file
+        // that was written into stays too until it was read once more.
+        assert!(
+            now.iter().all(|v| *v == one || v == b"unread work"),
+            "{disk}"
+        );
+        assert_eq!(private_leftovers(&file), [""; 0], "{disk}");
+        let two = fs::read(&file).unwrap();
+        rename_comp(&mut k, "P", "Three");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let saved = k.finish_session_save(plan.run()).unwrap();
+        assert!(
+            matches!(
+                saved,
+                ShellReply::Saved {
+                    displaced: None,
+                    ..
+                }
+            ),
+            "{disk}: {saved:?}"
+        );
+        assert_eq!(retained_version(&file), two, "{disk}");
+        assert_eq!(fs::read(&kept).unwrap(), b"unread work", "{disk}");
+        assert_eq!(visible_siblings(&file), [kept], "{disk}");
+        assert_eq!(private_leftovers(&file), [""; 0], "{disk}");
+    }
+}
+/// A save keeps the version it replaced until the next save stands and has
+/// read it again: one previous version beside the project, never a pile.
+#[test]
+fn a_replaced_version_is_retained_until_the_next_save_has_read_it_again() {
+    for (disk, hooks) in disks_without_an_exchange() {
+        let dir = common::TempDir::new("retained-plain");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut previous = fs::read(&file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        k.set_publish_hooks(hooks);
+        let (session, _) = open_file(&mut k, &file);
+        for name in ["One", "Two", "Three"] {
+            rename_comp(&mut k, "P", name);
+            let plan = k
+                .prepare_session_save(session.clone(), None, false)
+                .unwrap();
+            let saved = k.finish_session_save(plan.run()).unwrap();
+            assert!(
+                matches!(
+                    saved,
+                    ShellReply::Saved {
+                        displaced: None,
+                        ..
+                    }
+                ),
+                "{disk}: {saved:?}"
+            );
+            assert_eq!(retained_version(&file), previous, "{disk} {name}");
+            assert_eq!(retained(&file).len(), 2, "{disk} {name}: it and its record");
+            assert_eq!(private_leftovers(&file), [""; 0], "{disk} {name}");
+            assert_eq!(visible_siblings(&file), [""; 0].map(Path::new), "{disk}");
+            previous = fs::read(&file).unwrap();
+        }
+    }
+}
+/// Where the app's backups are on the project's volume, the replaced file
+/// itself becomes the backup of record (in place of the copy made before the
+/// save), so nothing stays beside the project, and work written into it
+/// after it was read is in the backups. When that backup's turn to be
+/// pruned comes it is read again: changed, it is not deleted but kept
+/// beside the project.
+#[test]
+fn the_replaced_file_becomes_the_backup_and_a_changed_one_is_never_pruned() {
+    let dir = common::TempDir::new("retained-backups");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    let mut k = kernel_with_backups(&native);
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        after_judged: Some(std::sync::Arc::new(|replaced| {
+            fs::write(replaced, b"unread work").unwrap()
+        })),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    let backups = || -> Vec<Vec<u8>> {
+        fs::read_dir(native.join("backups/P"))
+            .unwrap()
+            .map(|e| fs::read(e.unwrap().path()).unwrap())
+            .collect()
+    };
+    assert_eq!(
+        backups(),
+        [b"unread work".to_vec()],
+        "the one backup of that save is the replaced file itself"
+    );
+    assert_eq!(retained(&file), [""; 0].map(Path::new));
+    assert_eq!(private_leftovers(&file), [""; 0]);
+    k.set_publish_hooks(Default::default());
+    let mut told = None;
+    for n in 0..12 {
+        assert_eq!(visible_siblings(&file), [""; 0].map(Path::new), "save {n}");
+        rename_comp(&mut k, "P", &format!("Next {n}"));
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        if let ShellReply::Saved {
+            displaced: Some(kept),
+            ..
+        } = k.finish_session_save(plan.run()).unwrap()
+        {
+            told = Some(kept);
+        }
+    }
+    let kept = told.expect("the save that would have pruned it says it was kept");
+    assert_eq!(fs::read(&kept).unwrap(), b"unread work");
+    assert_eq!(visible_siblings(&file), [kept]);
+    assert_eq!(backups().len(), 12, "the others are pruned as before");
+    assert!(!backups().contains(&b"unread work".to_vec()));
 }
 /// Save works on a disk without the atomic exchange (an exFAT or HFS+ drive,
 /// a FAT32 card, a network share), by the app's save route and by the
@@ -2950,10 +3205,10 @@ fn a_project_lock_is_in_the_profile_and_cannot_be_replaced_underneath() {
         .prepare_session_save(session.clone(), None, false)
         .unwrap();
     k.finish_session_save(plan.run()).unwrap();
-    assert_eq!(
-        beside(&dir),
-        ["cut.pmv"],
-        "a save leaves nothing else either"
+    assert!(
+        !project_lock_path(&file).exists() && private_leftovers(&file).is_empty(),
+        "a save leaves no lock beside the project either: {:?}",
+        beside(&dir)
     );
     child_project_lock(&root, &file, "blocked");
     k.shell(ShellCall::Close(session)).unwrap();

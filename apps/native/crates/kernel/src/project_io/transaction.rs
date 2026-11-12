@@ -205,6 +205,9 @@ pub(crate) struct Record {
     /// moved aside to.
     pub staged: PathBuf,
     pub aside: PathBuf,
+    /// The files retained under a private name beside the project and the
+    /// hash each held when it was.
+    retained: Vec<(PathBuf, String)>,
     steps: Vec<Value>,
 }
 
@@ -278,10 +281,36 @@ impl Record {
             old: text("old").map(str::to_owned),
             new: text("new")?.to_owned(),
             size: text("size")?.parse().ok()?,
+            // The last line about a file says what it was retained with.
+            retained: [&staged, &aside]
+                .into_iter()
+                .filter_map(|path| {
+                    let hash = steps.iter().rev().find_map(|s| {
+                        let text = |key: &str| s.get(key).and_then(Value::as_str);
+                        (text("step") == Some("retained")
+                            && text("name").map(OsStr::new) == path.file_name())
+                        .then(|| text("hash"))
+                        .flatten()
+                    })?;
+                    Some((path.clone(), hash.to_owned()))
+                })
+                .collect(),
             staged,
             aside,
             steps,
         })
+    }
+    /// Whether `path` is retained under its private name.
+    fn retains(&self, path: &Path) -> bool {
+        self.retained.iter().any(|(retained, _)| retained == path)
+    }
+    /// Whether everything this record still names is a retained file:
+    /// nothing to settle, only to prune later.
+    fn only_retains(&self) -> bool {
+        !self.retained.is_empty()
+            && [&self.staged, &self.aside]
+                .into_iter()
+                .all(|p| self.retains(p) || matches!(lstat_file(p), Ok(None)))
     }
     fn has(&self, step: &str) -> bool {
         self.steps
@@ -295,7 +324,10 @@ pub(super) struct Transaction {
     file: File,
     record: PathBuf,
     destination: PathBuf,
-    pub hooks: PublishHooks,
+    hooks: PublishHooks,
+    /// A file this record names is retained under its private name, or
+    /// could not be given the name it should have: the record stays with it.
+    retains: bool,
 }
 
 impl Transaction {
@@ -357,6 +389,7 @@ impl Transaction {
             record,
             destination: destination.to_owned(),
             hooks: host.hooks.clone(),
+            retains: false,
         };
         tx.reached("begin");
         Ok(tx)
@@ -369,6 +402,7 @@ impl Transaction {
             record: record.path.clone(),
             destination: destination.to_owned(),
             hooks: hooks.clone(),
+            retains: !record.retained.is_empty(),
         })
     }
 
@@ -412,9 +446,89 @@ impl Transaction {
         self.step_with("keep", members)
     }
 
-    /// The save left nothing beside the project: its record goes.
-    pub fn close(self) {
-        let _ = fs::remove_file(&self.record);
+    /// A file this save's record names stays under its private name though
+    /// it should not (it could not be put back, or given a name the person
+    /// finds): the record stays, and the next open settles it.
+    pub fn strand(&mut self) {
+        self.retains = true;
+    }
+
+    /// The name this save moves the replaced file aside to.
+    pub fn aside(&self) -> PathBuf {
+        self.record.with_extension(ASIDE)
+    }
+
+    /// Records that the file under the private name `path` stays there,
+    /// holding `hash` (read now when the caller did not): a version a save
+    /// replaced, or the original of a file that could only be copied to its
+    /// new name. It is not removed now; a later save's retention pass reads
+    /// it again and removes it only if it still holds exactly that
+    /// ([`prune_retained`]).
+    pub fn retain(&mut self, path: &Path, hash: Option<&str>) {
+        let Some(hash) = hash
+            .map(str::to_owned)
+            .or_else(|| super::durable::hash_file(path).ok())
+        else {
+            // Not readable now: it stays, named by the record, unpruned.
+            self.retains = true;
+            return;
+        };
+        let mut members = Map::new();
+        members.insert(
+            "name",
+            Value::from(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        );
+        members.insert("hash", Value::from(hash));
+        let _ = self.step_with("retained", members);
+        self.retains = true;
+    }
+
+    /// Gives `held`, a file under a private name, a name the person finds
+    /// beside the project ([`keep_beside`]), recording each name before it
+    /// is tried. `label` is `other version` (a file that was under the
+    /// project's name and is not the version the save could replace) or
+    /// `recovered` (this save's own finished file). Where the name could
+    /// only be given to a copy, another version's original stays under its
+    /// private name, retained; the save's own staged file goes.
+    pub fn keep(&mut self, held: PathBuf, label: &str) -> Result<PathBuf, PathBuf> {
+        let (to, placed) = self
+            .keep_file(held.clone(), label)
+            .inspect_err(|_| self.strand())?;
+        if placed == Placed::Copied {
+            if label == "recovered" {
+                let _ = fs::remove_file(&held);
+            } else {
+                self.retain(&held, None);
+            }
+        }
+        Ok(to)
+    }
+
+    /// [`Self::keep`] without deciding what becomes of the file under its
+    /// old name when the new one holds a copy: says how it was placed.
+    pub fn keep_file(&mut self, held: PathBuf, label: &str) -> Result<(PathBuf, Placed), PathBuf> {
+        let why = if label == "recovered" {
+            "unfinished"
+        } else {
+            "other"
+        };
+        let (destination, hooks) = (self.destination.clone(), self.hooks.clone());
+        keep_beside(held, &destination, label, &hooks, &mut |from, to| {
+            self.keeping(from, to, why)
+        })
+    }
+
+    /// The save has nothing left to do: its record goes, unless a file it
+    /// names is retained under its private name.
+    pub fn finish(self) {
+        if !self.retains {
+            let _ = fs::remove_file(&self.record);
+        }
         self.reached("closed");
     }
 }
@@ -586,13 +700,17 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
             .undecided
             .push(leftover(&path, "record", Undecided::Unreadable, None));
     }
-    let several = records.len() > 1;
     for record in &records {
         named.extend([
             record.path.clone(),
             record.staged.clone(),
             record.aside.clone(),
         ]);
+    }
+    // A record that only keeps a replaced version is not a cut-short save.
+    let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
+    let several = records.len() > 1;
+    for record in &records {
         let unresolved = if several {
             Some(Undecided::Several)
         } else {
@@ -600,7 +718,7 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
         };
         if let Some(why) = unresolved {
             for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
-                if matches!(lstat_file(path), Ok(Some(_)) | Err(_)) {
+                if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_)) | Err(_)) {
                     settled
                         .undecided
                         .push(leftover(path, role, why, Some(record)));
@@ -646,18 +764,21 @@ fn settle_one(
     let mut at_path = holds(destination, record);
     let aside = holds(&record.aside, record);
     let staged = holds(&record.staged, record);
+    let old = record.old.as_deref();
     let mut unresolved = None;
 
     // The last saved version goes back under a name that holds nothing.
-    let mut aside_settled = aside == Holds::Nothing;
-    if at_path == Holds::Nothing && aside == Holds::Old {
+    let mut aside_settled = aside == Holds::Nothing || record.retains(&record.aside);
+    if !aside_settled && at_path == Holds::Nothing && aside == Holds::Old {
         if tx.step("restore").is_err() {
             return Some(Undecided::Unknown);
         }
-        match place_new(&record.aside, destination, record.old.as_deref(), hooks) {
+        match place_new(&record.aside, destination, old, hooks) {
             Ok(placed) => {
+                // Back as a copy: the file itself stays, for a later save
+                // to read again and prune.
                 if placed == Placed::Copied {
-                    let _ = fs::remove_file(&record.aside);
+                    tx.retain(&record.aside, old);
                 }
                 let _ = tx.step("restored");
                 left.push(LeftAside::Restored);
@@ -678,21 +799,18 @@ fn settle_one(
     }
     if !aside_settled {
         aside_settled = match (at_path, aside) {
-            // The path holds the same bytes: the one aside is a duplicate.
-            (Holds::Old, Holds::Old) | (Holds::New, Holds::Old) => {
-                fs::remove_file(&record.aside).is_ok()
+            // The version the save replaced (the path holds the save), or a
+            // second copy of what the path holds: retained, not removed.
+            (Holds::Old | Holds::New, Holds::Old) => {
+                tx.retain(&record.aside, old);
+                true
             }
             // The path holds the save, or something else took it: a file
             // that was under the project's name is kept where it is found.
-            (Holds::New, _) | (Holds::Other, Holds::Old) => keep_beside(
-                record.aside.clone(),
-                destination,
-                "other version",
-                hooks,
-                &mut |from, to| tx.keeping(from, to, "other"),
-            )
-            .map(|kept| left.push(LeftAside::Kept(kept)))
-            .is_ok(),
+            (Holds::New, _) | (Holds::Other, Holds::Old) => tx
+                .keep(record.aside.clone(), "other version")
+                .map(|kept| left.push(LeftAside::Kept(kept)))
+                .is_ok(),
             // Unknown bytes, and the path does not hold this save.
             _ => false,
         };
@@ -705,40 +823,97 @@ fn settle_one(
     // take the path, the file an exchange displaced, or a duplicate.
     let staged_settled = match (at_path, staged) {
         (_, Holds::Nothing) => true,
-        // Installed by a copy; or the exchange displaced the old version.
-        (Holds::New, Holds::New) | (Holds::New | Holds::Old, Holds::Old) => {
-            fs::remove_file(&record.staged).is_ok()
+        _ if record.retains(&record.staged) => true,
+        // Installed by a copy: the save's own staged file, whose bytes the
+        // path holds.
+        (Holds::New, Holds::New) => fs::remove_file(&record.staged).is_ok(),
+        // The exchange displaced the version the save replaced: retained,
+        // under the name a replaced file has.
+        (Holds::New | Holds::Old, Holds::Old) => {
+            let free = matches!(lstat_file(&record.aside), Ok(None));
+            if free && fs::rename(&record.staged, &record.aside).is_ok() {
+                tx.retain(&record.aside, old);
+            } else {
+                tx.retain(&record.staged, old);
+            }
+            true
         }
         // An exchange hands back whatever was under the name.
-        (Holds::New, Holds::Other) | (Holds::Other, Holds::Old) if record.exchange => keep_beside(
-            record.staged.clone(),
-            destination,
-            "other version",
-            hooks,
-            &mut |from, to| tx.keeping(from, to, "other"),
-        )
-        .map(|kept| left.push(LeftAside::Kept(kept)))
-        .is_ok(),
+        (Holds::New, Holds::Other) | (Holds::Other, Holds::Old) if record.exchange => tx
+            .keep(record.staged.clone(), "other version")
+            .map(|kept| left.push(LeftAside::Kept(kept)))
+            .is_ok(),
         // The version the save was replacing is nowhere: not decided here.
         (Holds::Nothing, Holds::New) if record.old.is_some() => false,
-        (_, Holds::New) if aside_settled => keep_beside(
-            record.staged.clone(),
-            destination,
-            "recovered",
-            hooks,
-            &mut |from, to| tx.keeping(from, to, "unfinished"),
-        )
-        .map(|kept| left.push(LeftAside::Unfinished(kept)))
-        .is_ok(),
+        (_, Holds::New) if aside_settled => tx
+            .keep(record.staged.clone(), "recovered")
+            .map(|kept| left.push(LeftAside::Unfinished(kept)))
+            .is_ok(),
         _ => false,
     };
     if !staged_settled {
         unresolved = Some(Undecided::Unknown);
     }
     if unresolved.is_none() {
-        tx.close();
+        tx.finish();
     }
     unresolved
+}
+
+/// The retention pass a save runs once it stands: every version an earlier
+/// save of `destination` replaced and retained beside it (and every
+/// original of a file that could only be copied to its name) is read
+/// again. One that still holds exactly the bytes it was retained with is
+/// removed, with its record. One that changed since (something wrote into
+/// it after it was replaced) holds work nobody read: it is kept beside the
+/// project as "other version" (recorded in the record that names it) and
+/// returned. `current` is the record of the save that runs the pass.
+pub(super) fn prune_retained(
+    destination: &Path,
+    current: &Transaction,
+    hooks: &PublishHooks,
+) -> Vec<PathBuf> {
+    let mut changed = Vec::new();
+    let (records, _) = records_of(destination);
+    for record in records {
+        if record.path == current.record || !record.only_retains() {
+            continue;
+        }
+        let Ok(mut tx) = Transaction::resume(&record, destination, hooks) else {
+            continue;
+        };
+        let mut gone = true;
+        for (path, hash) in &record.retained {
+            let same = match lstat_file(path) {
+                Ok(None) => continue,
+                Ok(Some(_)) => FileVersion::read(path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|now| now.hash == *hash),
+                Err(_) => false,
+            };
+            if same {
+                gone &= fs::remove_file(path).is_ok();
+            } else {
+                match tx.keep_file(path.clone(), "other version") {
+                    Ok((kept, placed)) => {
+                        changed.push(kept);
+                        // Its name holds a copy: the file itself stays
+                        // retained, with what it holds now.
+                        if placed == Placed::Copied {
+                            tx.retain(path, None);
+                            gone = false;
+                        }
+                    }
+                    Err(_) => gone = false,
+                }
+            }
+        }
+        if gone {
+            let _ = fs::remove_file(&record.path);
+        }
+    }
+    changed
 }
 
 /// A copy that was cut short: the record says a file was about to be placed
@@ -779,6 +954,7 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
 /// `undecided`), without moving anything.
 pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     let (records, unreadable) = records_of(destination);
+    let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
     let mut found: Vec<_> = unreadable
         .iter()
         .map(|path| leftover(path, "record", Undecided::Unreadable, None))
@@ -790,7 +966,7 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     };
     for record in &records {
         for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
-            if matches!(lstat_file(path), Ok(Some(_))) {
+            if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_))) {
                 found.push(leftover(path, role, why, Some(record)));
             }
         }
@@ -820,28 +996,27 @@ pub(crate) fn use_leftover(
     take_back_copies(record, destination, hooks);
     tx.step("chosen")?;
     if place_new(chosen, destination, None, hooks)? == Placed::Copied {
-        // The copy was read back and holds the same bytes.
-        let _ = fs::remove_file(chosen);
+        // The name holds a verified copy: the file itself stays, for a
+        // later save to read again and prune.
+        tx.retain(chosen, None);
     }
     let mut left = Vec::new();
     let mut settled = true;
-    for (path, label, why) in [
-        (&record.aside, "other version", "other"),
-        (&record.staged, "recovered", "unfinished"),
+    for (path, label) in [
+        (&record.aside, "other version"),
+        (&record.staged, "recovered"),
     ] {
-        if path != chosen && matches!(lstat_file(path), Ok(Some(_))) {
-            match keep_beside(path.clone(), destination, label, hooks, &mut |from, to| {
-                tx.keeping(from, to, why)
-            }) {
-                Ok(kept) if why == "other" => left.push(LeftAside::Kept(kept)),
-                Ok(kept) => left.push(LeftAside::Unfinished(kept)),
+        if path != chosen && !record.retains(path) && matches!(lstat_file(path), Ok(Some(_))) {
+            match tx.keep(path.clone(), label) {
+                Ok(kept) if label == "recovered" => left.push(LeftAside::Unfinished(kept)),
+                Ok(kept) => left.push(LeftAside::Kept(kept)),
                 // Still under its private name, which the record names.
                 Err(_) => settled = false,
             }
         }
     }
     if settled {
-        tx.close();
+        tx.finish();
     }
     let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
     Ok(left)

@@ -250,6 +250,10 @@ pub struct SaveReceipt {
     /// after the last check, or cannot be read), kept beside the project
     /// under this name. The person must be told.
     pub displaced: Option<PathBuf>,
+    /// Versions an earlier save had replaced and kept, found changed since
+    /// (something wrote into them after they were replaced): kept beside
+    /// the project under these names. The person must be told.
+    pub changed: Vec<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -896,6 +900,8 @@ impl SavePlan {
         let host = durable::Host {
             hooks: &self.options.hooks,
             profile: self.options.profile.as_deref(),
+            backups: self.options.backups.as_ref(),
+            backup: backup.as_deref(),
         };
         let published = durable::publish(temp, dest, &publish, &file_hash, &host);
         if published.is_err()
@@ -917,9 +923,7 @@ impl SavePlan {
             }
         }
         let published = published?;
-        if let Some(policy) = &self.options.backups {
-            let _ = durable::retain(policy, backup.as_deref());
-        }
+        let backup = published.backup.or(backup);
 
         let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
         // Held from here on, so the session can follow this file if it is
@@ -969,6 +973,7 @@ impl SavePlan {
             reused_media_bytes,
             backup,
             displaced: published.displaced,
+            changed: published.changed,
             ticket: self.ticket.clone(),
         })
     }

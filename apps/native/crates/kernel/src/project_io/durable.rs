@@ -681,6 +681,10 @@ pub struct PublishHooks {
     /// project's own name, or the name a kept file gets): after every look
     /// at that name, immediately before the call that takes it.
     pub before_install: Option<PublishHook>,
+    /// Called with the private name of the file a save replaced, right
+    /// after that file was read and found to be the version the save could
+    /// replace.
+    pub after_judged: Option<PublishHook>,
     /// Called with a step's name and the destination when a save's record
     /// reaches that step (`begin`, `aside`, `install`, `exchanged`,
     /// `restore`, `keep`, `closed`, ...): the step is recorded, and not yet
@@ -704,6 +708,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("between_renames", &self.between_renames.is_some())
             .field("after_exchange", &self.after_exchange.is_some())
             .field("before_install", &self.before_install.is_some())
+            .field("after_judged", &self.after_judged.is_some())
             .field("step", &self.step.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
@@ -1134,15 +1139,16 @@ fn local_stamp() -> String {
 /// file found at the project's path that is not the version the save could
 /// replace, `recovered` for a finished save that could not take the path.
 /// `about_to` is told each name right before it is tried (a save's record
-/// keeps it). Returns where the file is: `Err` with its private name when it
-/// could not be given another (the record still names it there).
+/// keeps it). Returns where the file is and how it got there (a copy
+/// leaves the file under its private name too; nothing is removed here):
+/// `Err` with its private name when it could not be given another.
 pub(super) fn keep_beside(
     held: PathBuf,
     destination: &Path,
     label: &str,
     hooks: &PublishHooks,
     about_to: &mut dyn FnMut(&Path, &Path) -> Result<(), ProjectIoError>,
-) -> Result<PathBuf, PathBuf> {
+) -> Result<(PathBuf, Placed), PathBuf> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let stem = destination
         .file_stem()
@@ -1164,12 +1170,7 @@ pub(super) fn keep_beside(
             break;
         }
         match place_new(&held, &to, None, hooks) {
-            Ok(Placed::Moved) => return Ok(to),
-            // The copy was read back and holds the file's bytes.
-            Ok(Placed::Copied) => {
-                let _ = fs::remove_file(&held);
-                return Ok(to);
-            }
+            Ok(placed) => return Ok((to, placed)),
             Err(ProjectIoError::DestinationExists(_)) => continue,
             Err(_) => break,
         }
@@ -1188,22 +1189,6 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
         .is_some_and(is_uuid_v4)
 }
 
-/// Puts the file a save moved aside back under the project's name, which
-/// must hold nothing ([`place_new`]: never over a file that landed there).
-/// True when the name now holds a copy: the same bytes, another file.
-fn put_back(
-    aside: &Path,
-    destination: &Path,
-    hooks: &PublishHooks,
-) -> Result<bool, ProjectIoError> {
-    let copied = place_new(aside, destination, None, hooks)? == Placed::Copied;
-    // The copy was read back and holds the same bytes: the private name goes.
-    if copied {
-        let _ = fs::remove_file(aside);
-    }
-    Ok(copied)
-}
-
 /// Replaces the file at `destination` with the staged `temp` on a volume
 /// without an atomic exchange, in two steps, each recorded in the save's
 /// record `tx` before it is taken:
@@ -1220,11 +1205,12 @@ fn put_back(
 /// (another version landed after the last check) it is kept beside the
 /// project under a plain name and reported ([`Published::displaced`]).
 ///
-/// The file moved aside is removed only once it was read and found to hold
-/// `expected`'s bytes, and the new file is at the path. Any other failure
+/// The file moved aside is never removed here: read and found to hold
+/// `expected`'s bytes, it is retained ([`retire`]). A failure to install
 /// puts it back. A process killed on the way leaves the record and the
 /// files it names for the next open ([`super::transaction::settle`]).
-/// `settled` is cleared when a file of this save stays under a private name.
+/// A file of this save that stays under a private name it should not have
+/// strands the record ([`Transaction::strand`]).
 fn replace_aside(
     temp: TempFile,
     destination: &Path,
@@ -1232,9 +1218,9 @@ fn replace_aside(
     incoming: &FileStat,
     new_hash: &str,
     tx: &mut Transaction,
-    settled: &mut bool,
+    host: &Host,
 ) -> Result<Published, ProjectIoError> {
-    let hooks = &tx.hooks.clone();
+    let hooks = host.hooks;
     let dir = destination.parent().unwrap_or(Path::new("."));
     let aside = temp.path.with_extension(transaction::ASIDE);
     tx.step("aside")?;
@@ -1256,13 +1242,19 @@ fn replace_aside(
         Ok(placed) => Some(placed),
         // Something landed at the path since it was emptied: it stays.
         Err(ProjectIoError::DestinationExists(_)) => None,
-        // Not installed and nothing arrived: what was at the path goes back.
+        // Not installed and nothing arrived: what was at the path goes back
+        // (never over a file that landed there since).
         Err(e) => {
-            return Err(match put_back(&aside, destination, hooks) {
-                Ok(true) => ProjectIoError::PutBack(Box::new(e)),
-                Ok(false) => e,
+            return Err(match place_new(&aside, destination, None, hooks) {
+                // Back as a copy, the same bytes in another file: the file
+                // that was moved aside stays, for a later save to prune.
+                Ok(Placed::Copied) => {
+                    tx.retain(&aside, None);
+                    ProjectIoError::PutBack(Box::new(e))
+                }
+                Ok(Placed::Moved) => e,
                 Err(_) => {
-                    *settled = false;
+                    tx.strand();
                     ProjectIoError::Conflict {
                         message: format!(
                             "The project file could not be replaced ({e}), and the file that \
@@ -1287,19 +1279,13 @@ fn replace_aside(
         .flatten()
         .is_some_and(|moved| moved.hash == expected.hash);
     let mut published = Published::default();
-    let mut keep = |held: PathBuf, label: &str, why: &str| {
-        keep_beside(held, destination, label, hooks, &mut |from, to| {
-            tx.keeping(from, to, why)
-        })
-        .unwrap_or_else(|private| {
-            *settled = false;
-            private
-        })
+    let keep = |tx: &mut Transaction, held: PathBuf, label: &str| {
+        tx.keep(held, label).unwrap_or_else(|private| private)
     };
     if replaced {
-        let _ = fs::remove_file(&aside);
+        published.backup = retire(aside, &expected.hash, tx, host);
     } else {
-        published.displaced = Some(keep(aside, "other version", "other"));
+        published.displaced = Some(keep(tx, aside, "other version"));
     }
     match installed {
         // The staged file is the project file now.
@@ -1307,7 +1293,7 @@ fn replace_aside(
         // The project file is a verified copy of it.
         Some(Placed::Copied) => drop(temp),
         None => {
-            let kept = keep(temp.keep(), "recovered", "unfinished");
+            let kept = keep(tx, temp.keep(), "recovered");
             let _ = sync_directory(dir);
             return Err(ProjectIoError::KeptBeside { kept });
         }
@@ -1331,6 +1317,11 @@ pub(crate) struct Published {
     /// after the last check, or cannot be read). Ours is published; that
     /// version is kept here, beside it.
     pub displaced: Option<PathBuf>,
+    /// Versions an earlier save had replaced and retained, found changed
+    /// since (something wrote into them): kept beside the project here.
+    pub changed: Vec<PathBuf>,
+    /// The replaced version itself, where it is the backup of record now.
+    pub backup: Option<PathBuf>,
 }
 
 /// What a publication needs from its host besides the files.
@@ -1339,6 +1330,129 @@ pub(crate) struct Host<'a> {
     pub hooks: &'a PublishHooks,
     /// The profile folder of the instance that saves (a record names it).
     pub profile: Option<&'a Path>,
+    /// Where replaced versions are kept, and the copy of the version being
+    /// replaced that this save made there before it began.
+    pub backups: Option<&'a BackupPolicy>,
+    pub backup: Option<&'a Path>,
+}
+
+/// The extended attribute a retained version carries in the backups: the
+/// hash it was read with when it was replaced.
+const RETAINED_HASH: &str = "com.powermove.version-sha256";
+
+#[cfg(target_os = "macos")]
+fn set_retained_hash(path: &Path, hash: &str) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let name = std::ffi::CString::new(RETAINED_HASH)?;
+    // SAFETY: valid C strings and a buffer of the stated length.
+    let rc = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            hash.as_ptr().cast(),
+            hash.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The hash a retained version in the backups was read with, if it is one.
+#[cfg(target_os = "macos")]
+fn retained_hash(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let name = std::ffi::CString::new(RETAINED_HASH).ok()?;
+    let mut buf = [0u8; 64];
+    // SAFETY: valid C strings and a buffer of the stated length.
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    (n == 64).then(|| String::from_utf8_lossy(&buf).into_owned())
+}
+#[cfg(not(target_os = "macos"))]
+fn retained_hash(_: &Path) -> Option<String> {
+    None
+}
+
+/// Moves `displaced`, the version a save replaced, into the backups in
+/// place of `copy` (the copy of it that save made there before it began),
+/// if both are on one volume: an exclusive rename, the file itself, marked
+/// with the hash it was read with. `None` when it stays where it is.
+#[cfg(target_os = "macos")]
+fn into_backups(displaced: &Path, copy: &Path, hash: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let folder = copy.parent()?;
+    let name = copy.file_name()?.to_str()?;
+    let key = backup_key(name)?;
+    if fs::metadata(displaced).ok()?.dev() != fs::metadata(folder).ok()?.dev() {
+        return None;
+    }
+    set_retained_hash(displaced, hash).ok()?;
+    let stamp = name.split_once(".pmv")?.0;
+    for collision in key.collision + 1..key.collision + 100 {
+        let to = folder.join(format!("{stamp}.pmv-{collision}"));
+        match sys::renamex(displaced, &to, sys::RENAME_EXCL) {
+            Ok(()) => {
+                // The copy made before the save is the app's own, and the
+                // file it was a copy of is here now.
+                let _ = fs::remove_file(copy);
+                let _ = File::open(folder).and_then(|f| f.sync_all());
+                return Some(to);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+#[cfg(not(target_os = "macos"))]
+fn into_backups(_: &Path, _: &Path, _: &str) -> Option<PathBuf> {
+    None
+}
+
+/// What becomes of `displaced`, the version a save replaced, once it was
+/// read and found to hold exactly the bytes the session read (`hash`). It
+/// is not removed: something may still write into it (a program that had
+/// it open, a sync client replacing its private name), and a hash taken a
+/// moment ago says nothing about the next moment. It becomes the backup of
+/// record in the backups folder where that is on the same volume
+/// ([`into_backups`]; returns where), and otherwise stays beside the
+/// project under the save's private name, which the record keeps naming.
+/// Either way it is only ever removed by a later save's retention pass,
+/// which reads it again first and keeps a changed one as "other version"
+/// ([`retain`], [`transaction::prune_retained`]).
+fn retire(displaced: PathBuf, hash: &str, tx: &mut Transaction, host: &Host) -> Option<PathBuf> {
+    if let Some(hook) = &host.hooks.after_judged {
+        hook(&displaced);
+    }
+    if let Some(moved) = host
+        .backup
+        .and_then(|copy| into_backups(&displaced, copy, hash))
+    {
+        return Some(moved);
+    }
+    let aside = tx.aside();
+    let beside = if displaced != aside && rename_private(&displaced, &aside, host.hooks).is_ok() {
+        aside
+    } else {
+        displaced
+    };
+    tx.retain(&beside, Some(hash));
+    None
 }
 
 /// `publishFile`: atomically publishes `temp` (already flushed) at
@@ -1396,9 +1510,6 @@ pub(crate) fn publish(
         host,
     )?;
     let mut published = Published::default();
-    // Cleared when a file of this save stays under a private name: the
-    // record then stays too, for the next open.
-    let mut settled = true;
     let exchanged = route == Route::Exchange && {
         if let Some(hook) = &hooks.before_exchange {
             hook(destination);
@@ -1406,7 +1517,7 @@ pub(crate) fn publish(
         match swap_files(&temp.path, destination, hooks) {
             Ok(exchanged) => exchanged,
             Err(e) => {
-                tx.close();
+                tx.finish();
                 return Err(e);
             }
         }
@@ -1420,7 +1531,7 @@ pub(crate) fn publish(
                 hook(destination);
             }
             // `temp.path` now names the displaced file: the version we were
-            // allowed to replace (removed when `temp` drops), or one to keep.
+            // allowed to replace (retained), or one to keep beside.
             let replaced = FileVersion::read(&temp.path)
                 .ok()
                 .flatten()
@@ -1430,16 +1541,9 @@ pub(crate) fn publish(
                         && d.stat.same_permissions(&expected.stat)
                 });
             if replaced {
-                drop(temp);
+                published.backup = retire(temp.keep(), &expected.hash, &mut tx, host);
             } else {
-                let kept = keep_beside(
-                    temp.keep(),
-                    destination,
-                    "other version",
-                    hooks,
-                    &mut |from, to| tx.keeping(from, to, "other"),
-                );
-                settled = kept.is_ok();
+                let kept = tx.keep(temp.keep(), "other version");
                 published.displaced = Some(kept.unwrap_or_else(|private| private));
             }
             // The path must still hold the file just published.
@@ -1449,9 +1553,7 @@ pub(crate) fn publish(
                 .is_some_and(|now| now.same_identity(&incoming))
             {
                 let _ = sync_directory(dir);
-                if settled {
-                    tx.close();
-                }
+                tx.finish();
                 return Err(match published.displaced {
                     Some(recovery_path) => ProjectIoError::Conflict {
                         message: "The project file was replaced by something else while it was \
@@ -1471,13 +1573,11 @@ pub(crate) fn publish(
                 &incoming,
                 new_hash,
                 &mut tx,
-                &mut settled,
+                host,
             ) {
                 Ok(aside) => published = aside,
                 Err(e) => {
-                    if settled {
-                        tx.close();
-                    }
+                    tx.finish();
                     return Err(e);
                 }
             }
@@ -1496,7 +1596,7 @@ pub(crate) fn publish(
                     if matches!(e, ProjectIoError::DestinationExists(_))
                         || matches!(lstat_file(destination), Ok(None))
                     {
-                        tx.close();
+                        tx.finish();
                     }
                     return Err(e);
                 }
@@ -1504,9 +1604,25 @@ pub(crate) fn publish(
         }
     }
     sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
-    if settled {
-        tx.close();
+    // The save stands. Versions earlier saves retained are read again and
+    // go; one that changed since is kept beside the project instead.
+    published.changed = transaction::prune_retained(destination, &tx, hooks);
+    if let Some(policy) = host.backups {
+        let just_written = published.backup.as_deref().or(host.backup);
+        for changed in retain(policy, just_written).unwrap_or_default() {
+            match tx.keep_file(changed.clone(), "other version") {
+                Ok((kept, Placed::Moved)) => published.changed.push(kept),
+                // Its bytes are beside the project as a copy, or could not
+                // be brought there: the file keeps them in the backups,
+                // under a name the retention pass never prunes.
+                other => {
+                    published.changed.extend(other.ok().map(|(kept, _)| kept));
+                    let _ = fs::rename(&changed, changed.with_extension("changed.pmv"));
+                }
+            }
+        }
     }
+    tx.finish();
     Ok(published)
 }
 
@@ -2108,6 +2224,9 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
 /// Keep the newest versions within the budgets (always the newest
 /// `min_versions` in save order, and always `just_written`) and delete older
 /// ones, as the old app pruned its backups after each save (v1.2.0 kept 5).
+/// A version that is the replaced file itself ([`into_backups`]) and no
+/// longer holds the bytes it was replaced with is not deleted: it is
+/// returned, for the caller to keep beside the project.
 /// Generations earlier builds moved to `archived/` are older than every kept
 /// one and go too, so a project's backups stay bounded. Only regular files
 /// with the exact names the app writes are deleted; recovery copies
@@ -2116,9 +2235,10 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
 pub(crate) fn retain(
     policy: &BackupPolicy,
     just_written: Option<&Path>,
-) -> Result<(), ProjectIoError> {
+) -> Result<Vec<PathBuf>, ProjectIoError> {
+    let mut changed = Vec::new();
     let Some(dir) = open_backups(policy, false)? else {
-        return Ok(());
+        return Ok(changed);
     };
     let folder_err = |e| io_err(&policy.directory, e);
     let keep = just_written.and_then(Path::file_name);
@@ -2136,6 +2256,14 @@ pub(crate) fn retain(
         if index >= policy.min_versions
             && (index >= policy.max_versions || bytes > policy.max_bytes)
         {
+            // A version a save replaced and moved here is the file itself:
+            // read again before it goes, and kept if something wrote into
+            // it since it was replaced.
+            let path = policy.directory.join(&name);
+            if retained_hash(&path).is_some_and(|hash| hash_file(&path).ok() != Some(hash)) {
+                changed.push(path);
+                continue;
+            }
             dir.unlink(&name).map_err(folder_err)?;
             removed = true;
         }
@@ -2164,7 +2292,7 @@ pub(crate) fn retain(
     if removed {
         dir.sync().map_err(folder_err)?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// A full disk must not cost the user their current work: frees `needed`
