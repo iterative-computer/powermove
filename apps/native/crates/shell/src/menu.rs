@@ -300,7 +300,6 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("previousTab"),
                 Item::command("Move Tab to New Window", "moveTabToNewWindow", ""),
                 Item::role("Merge All Windows", "mergeAllWindows:", ""),
-                Item::role("Show Tab Bar", "toggleTabBar:", ""),
                 Item::role("Show All Tabs", "toggleTabOverview:", ""),
                 sep(),
                 Item::command("Store", "store", ""),
