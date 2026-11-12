@@ -726,6 +726,152 @@ fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
         assert!(started.elapsed() < Duration::from_secs(10), "{line}");
         assert_eq!(status.state, JobState::Failed, "{line}: {status:?}");
         let message = status.error.unwrap().message;
+        eprintln!("MESSAGE {message}");
         assert!(message.contains(reason), "{line}: {message}");
+    }
+}
+
+/// File `n`'s colour in a coded sequence: far apart in 8 bits, so a lossy
+/// 4:2:0 delivery still names its frame.
+fn sequence_colour(n: u16) -> [u16; 3] {
+    [n * 9_000, 60_000 - n * 9_000, 20_000 + n * 5_000]
+}
+/// Six 16-bit frames `shot.0001.png`… read in place at 15 fps (the small
+/// file a sequence asset retains), and the fixture with one layer of it
+/// filling the frame.
+fn with_sequence(dir: &Path) -> (String, MediaCatalog) {
+    for n in 1..=6u16 {
+        let mut bytes = Vec::new();
+        for _ in 0..320 * 180 {
+            for code in sequence_colour(n) {
+                bytes.extend_from_slice(&code.to_be_bytes());
+            }
+        }
+        let file = std::fs::File::create(dir.join(format!("shot.{n:04}.png"))).unwrap();
+        let mut encoder = png::Encoder::new(file, 320, 180);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&bytes).unwrap();
+    }
+    let manifest = pm_media::image::sequence::Manifest {
+        powermove_image_sequence: 1,
+        dir: dir.into(),
+        prefix: "shot.".into(),
+        suffix: ".png".into(),
+        padding: 4,
+        first: 1,
+        last: 6,
+        rate: [15, 1],
+    };
+    let retained = dir.join("retained");
+    std::fs::write(&retained, manifest.to_bytes()).unwrap();
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    project["assets"] = serde_json::json!({"seq": {
+        "id": "seq", "name": "shot.[0001-0006].png", "kind": "video", "format": "png",
+        "w": 320, "h": 180, "dur": 0.4, "fps": 15, "hasAudio": false, "persisted": true,
+        "imageSequence": {"fps": 15, "frames": 6, "first": 1, "last": 6}
+    }});
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lseq".into();
+    layer["type"] = "video".into();
+    layer["dur"] = 0.4.into();
+    layer["p"]["position.x"]["v"] = 320.into();
+    layer["p"]["position.y"]["v"] = 180.into();
+    layer["p"]["opacity"]["v"] = 100.into();
+    layer["d"] = serde_json::json!({"asset": "seq", "w": 640, "h": 360, "fit": "stretch"});
+    project["layers"] = serde_json::json!([layer]);
+    let mut media = MediaCatalog::default();
+    media.originals.insert("seq".into(), retained);
+    (project.to_string(), media)
+}
+/// The centre pixel of every frame of a delivered movie, as 16-bit RGB.
+fn centres(movie: &Path) -> Vec<[u16; 3]> {
+    let ffmpeg =
+        std::path::PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(movie)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb48le", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let frame = 320 * 180 * 6;
+    out.stdout
+        .chunks_exact(frame)
+        .map(|f| {
+            let at = (90 * 320 + 160) * 6;
+            [0, 2, 4].map(|c| u16::from_le_bytes([f[at + c], f[at + c + 1]]))
+        })
+        .collect()
+}
+/// An image sequence read in place exports through the export route as H.264
+/// and ProRes with each of its files at its own times (15 fps into 30: file
+/// n on frames 2(n-1) and 2(n-1)+1); a file deleted from its folder fails
+/// the export naming it, and no movie is published.
+#[test]
+fn an_image_sequence_read_in_place_exports_its_frames_at_their_times() {
+    use pm_protocol::{color::QuickTimeTag, priority::ProResProfile};
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    let video = OutputColor::Rec709QuickTime {
+        candidate: QuickTimeTag::Cicp1_13_1,
+    };
+    let formats = [
+        ("h264.mp4", ExportFormat::H264),
+        (
+            "prores.mov",
+            ExportFormat::ProRes {
+                profile: ProResProfile::Hq,
+            },
+        ),
+    ];
+    let request = |name: &str, format: ExportFormat| {
+        let mut request = request_for(&project, dir.path().join(name), 1);
+        request.originals = media.originals.clone();
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = format;
+        settings.color = video;
+        settings.alpha = AlphaOutput::None;
+        settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+        request
+    };
+    for (name, format) in formats {
+        let status = finish(request(name, format));
+        assert_eq!(status.state, JobState::Done, "{name}: {status:?}");
+        let shown = centres(&dir.path().join(name));
+        assert_eq!(shown.len(), 12, "{name}");
+        for (k, got) in shown.iter().enumerate() {
+            let want = sequence_colour(k as u16 / 2 + 1);
+            for c in 0..3 {
+                assert!(
+                    (i32::from(got[c]) - i32::from(want[c])).abs() < 2_000,
+                    "{name} frame {k}: {got:?}, file {} is {want:?}",
+                    k / 2 + 1
+                );
+            }
+        }
+    }
+    std::fs::remove_file(frames.join("shot.0004.png")).unwrap();
+    for (name, format) in formats {
+        let name = format!("missing-{name}");
+        let status = finish(request(&name, format));
+        assert_eq!(status.state, JobState::Failed, "{name}: {status:?}");
+        assert_eq!(
+            status.error.unwrap().message,
+            "Frame 4 of an image sequence is missing: shot.0004.png. Render it into the \
+             sequence’s folder, or relink the sequence.",
+            "{name}"
+        );
+        assert!(!dir.path().join(&name).exists(), "{name}");
     }
 }

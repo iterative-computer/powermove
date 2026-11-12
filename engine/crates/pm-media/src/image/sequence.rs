@@ -115,6 +115,9 @@ pub struct Manifest {
     pub padding: usize,
     pub first: i64,
     pub last: i64,
+    /// Frames per second, `[num, den]` (24000/1001 for 23.976): the rate
+    /// the sequence was imported at, which a proxy of it is made at.
+    pub rate: [u32; 2],
 }
 
 /// How a manifest's bytes begin.
@@ -124,7 +127,13 @@ impl Manifest {
     /// The pattern of explicitly chosen frames. Every chosen file must be
     /// the one its number names under one padding, so that the pattern
     /// finds exactly them (and frames rendered into a gap later).
-    pub fn of(sequence: &ImageSequence) -> Result<Self> {
+    pub fn of(sequence: &ImageSequence, rate: pm_time::Rate) -> Result<Self> {
+        let rate = [rate.num(), rate.den()].map(|v| u32::try_from(v).unwrap_or(0));
+        if rate.contains(&0) {
+            return Err(MediaError::invalid(
+                "image sequence: frame rate out of range",
+            ));
+        }
         let names: Vec<(&str, &str, &str)> = sequence
             .frames
             .iter()
@@ -152,6 +161,7 @@ impl Manifest {
             padding,
             first: sequence.first(),
             last: sequence.last(),
+            rate,
         };
         for ((number, path), (p, _, s)) in sequence.frames.iter().zip(&names) {
             if *p != prefix || *s != suffix || manifest.file(*number) != *path {
@@ -219,7 +229,10 @@ impl Manifest {
         file.take(64 << 10).read_to_end(&mut bytes)?;
         let manifest: Manifest = serde_json::from_slice(&bytes)
             .map_err(|e| MediaError::invalid(format!("image sequence: {e}")))?;
-        if manifest.powermove_image_sequence != 1 || manifest.last < manifest.first {
+        if manifest.powermove_image_sequence != 1
+            || manifest.last < manifest.first
+            || manifest.rate.contains(&0)
+        {
             return Err(MediaError::invalid("image sequence: unknown format"));
         }
         Ok(Some(manifest))
@@ -351,7 +364,9 @@ mod tests {
                 path
             })
             .collect();
-        let m = Manifest::of(&ImageSequence::from_paths(&paths).unwrap()).unwrap();
+        let rate = pm_time::Rate::FPS_23_976;
+        let m = Manifest::of(&ImageSequence::from_paths(&paths).unwrap(), rate).unwrap();
+        assert_eq!(m.rate, [24000, 1001]);
         assert_eq!((m.padding, m.first, m.last, m.frames()), (3, 9, 12, 4));
         assert_eq!(m.file(11), dir.path().join("Shot_v2.011.EXR"));
         assert_eq!(m.name(), "Shot_v2.[009-012].EXR");
@@ -369,6 +384,6 @@ mod tests {
                 path
             })
             .collect();
-        assert!(Manifest::of(&ImageSequence::from_paths(&mixed).unwrap()).is_err());
+        assert!(Manifest::of(&ImageSequence::from_paths(&mixed).unwrap(), rate).is_err());
     }
 }

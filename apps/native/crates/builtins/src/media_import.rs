@@ -290,7 +290,14 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
     use pm_media::image::sequence::{ImageSequence, Manifest};
     order_sequence(paths)?;
     let chosen = ImageSequence::from_paths(paths).map_err(|e| e.to_string())?;
-    let manifest = Manifest::of(&chosen).map_err(|_| {
+    // 23.976 is 24000/1001: the clip's length and frames stay on the grid.
+    let rate = pm_time::SUPPORTED_RATES
+        .into_iter()
+        .find(|r| (r.to_f64() - sequence.fps).abs() < 1e-3)
+        .or_else(|| pm_time::Rate::new((sequence.fps * 1000.0).round() as i64, 1000).ok())
+        .ok_or("Choose a frame rate above 0")?;
+    let fps = rate.to_f64();
+    let manifest = Manifest::of(&chosen, rate).map_err(|_| {
         "Choose frames numbered the same way (for example frame_0001.png)".to_owned()
     })?;
     if let Ok(mut progress) = sequence.progress.lock() {
@@ -310,12 +317,6 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
         .map(|m| m.len())
         .sum();
     let frames = manifest.frames();
-    // 23.976 is 24000/1001: the clip's length and frames stay on the grid.
-    let fps = pm_time::SUPPORTED_RATES
-        .iter()
-        .map(|r| r.to_f64())
-        .find(|r| (r - sequence.fps).abs() < 1e-3)
-        .unwrap_or(sequence.fps);
     let asset = json!({
         "name": manifest.name(),
         "kind": "video",

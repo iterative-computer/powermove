@@ -480,6 +480,24 @@ fn status(
         preview: None,
     }
 }
+/// A file missing from an image sequence read in place stops the export
+/// in the person's words, naming the file: it is the media's state, not
+/// something the engine cannot draw.
+fn missing_frame(error: pm_export::render::JobError) -> anyhow::Error {
+    const MISSING: &str = " of the image sequence is missing: ";
+    if let pm_export::render::JobError::Unsupported(items) = &error
+        && let Some(item) = items.iter().find(|i| i.contains(MISSING))
+        && let Some(at) = item.rfind(": frame ")
+    {
+        let (frame, file) = item[at + 2..].split_once(MISSING).unwrap_or_default();
+        let mut frame = frame.to_owned();
+        frame[..1].make_ascii_uppercase();
+        return anyhow::anyhow!(
+            "{frame} of an image sequence is missing: {file}. Render it into the sequence’s folder, or relink the sequence."
+        );
+    }
+    error.into()
+}
 /// An export refused because clips it draws are offline (audio it would
 /// hear still fails by name, even without offline clips). Its status error
 /// is [`ErrorCode::MediaOffline`] with the clips' assets, on which the Export
@@ -1057,7 +1075,8 @@ pub fn run_child() -> Result<()> {
                     None,
                 ));
             },
-        )?;
+        )
+        .map_err(missing_frame)?;
         Ok(delivered.path)
     });
     while !finished.load(Ordering::Acquire) && woken.recv().is_ok() {
