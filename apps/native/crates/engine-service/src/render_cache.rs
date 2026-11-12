@@ -81,6 +81,8 @@ const NEAR_AHEAD: f64 = 5.;
 /// A background fill waits paused for the person at most this long; then
 /// its child stops (and gives back its memory) until they are idle again.
 const PAUSED_AT_MOST: Duration = Duration::from_secs(20);
+/// The volume's free space is looked at again at most this often.
+const FLOOR_EVERY: Duration = Duration::from_secs(3);
 /// A background fill that failed is not tried again on the same state
 /// sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -139,6 +141,12 @@ pub struct FrameReport {
 /// A fill child's failure when the volume is nearly full.
 pub const DISK_FULL: &str =
     "Rendering stopped because the disk is almost full. Free some space and render again.";
+/// Background rendering leaves at least this much free on the volume that
+/// holds rendered frames: below it no fill starts and a running one stops.
+/// (A render the person asks for keeps the export's own reserve.)
+pub const BACKGROUND_FLOOR: u64 = 20 << 30;
+/// Why background rendering is not rendering while the volume is that full.
+pub const BACKGROUND_LOW_DISK: &str = "Background rendering is paused: less than 20 GB is free on the disk that holds rendered frames.";
 /// A fill child's failure when kept frames fill Settings › Media › Render Files Limit.
 pub const LIMIT_FULL: &str =
     "Kept rendered frames fill the Render Files Limit. Raise the limit or delete rendered frames.";
@@ -320,12 +328,15 @@ impl Known {
 pub struct Background {
     pub enabled: bool,
     pub delay: Duration,
+    /// Free space it leaves on the volume ([`BACKGROUND_FLOOR`]).
+    pub floor: u64,
 }
 impl Default for Background {
     fn default() -> Self {
         Self {
             enabled: true,
             delay: Duration::from_secs(5),
+            floor: BACKGROUND_FLOOR,
         }
     }
 }
@@ -387,6 +398,8 @@ struct State {
     notify: Option<Notify>,
     wake: Option<std::sync::mpsc::SyncSender<()>>,
     root: Option<(PathBuf, u64)>,
+    /// The volume's free space, as a test says it is.
+    free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     /// The folder whose files are named by their bytes
     /// ([`DiskFrames::set_content_named`]).
     content_named: Option<PathBuf>,
@@ -991,6 +1004,13 @@ impl DiskFrames {
             ..Fill::default()
         };
         let storage = state.storage;
+        // Background rendering stops at its floor; a render asked for keeps
+        // the export's reserve.
+        let reserve = if background {
+            state.background.floor
+        } else {
+            0
+        };
         // Probes measure frames at the size the viewer draws them.
         let probe_scale = state.viewer.map_or(1., |v| {
             (f64::from(v.width) / f64::from(size.width.max(1))).clamp(0.05, 1.)
@@ -1008,7 +1028,7 @@ impl DiskFrames {
             probe_scale,
         };
         let delay = self.inner.delay_ms.clone();
-        let started = fill_request(&source, rate, fill)
+        let started = fill_request(&source, rate, fill, reserve)
             .and_then(|request| {
                 let mut session = crate::jobs::JobSession::new(request);
                 if background {
@@ -1041,6 +1061,21 @@ impl DiskFrames {
         let running = self.inner.running.lock().unwrap().take();
         if let Some(running) = running {
             stop(running);
+        }
+    }
+
+    /// Free space on the volume that holds rendered frames.
+    fn free_space(&self) -> Option<u64> {
+        let (dir, free) = {
+            let state = self.inner.state.lock().unwrap();
+            (
+                state.root.as_ref().map(|r| r.0.clone())?,
+                state.free.clone(),
+            )
+        };
+        match free {
+            Some(free) => Some(free()),
+            None => crate::jobs::free_bytes(&dir).ok(),
         }
     }
 
@@ -1079,7 +1114,13 @@ impl DiskFrames {
             let state = self.inner.state.lock().unwrap();
             (
                 state.fill.generation,
-                state.fill.error.is_some(),
+                // Stopped at the floor is not a failure to wait out: it
+                // goes on as soon as there is room.
+                state
+                    .fill
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e != BACKGROUND_LOW_DISK),
                 state.fill.ended,
             )
         };
@@ -1100,6 +1141,36 @@ impl DiskFrames {
         let (Some(host), true, true) = (host, allowed, idle) else {
             return;
         };
+        // Never below the floor: nothing starts, and the bars say why
+        // (looked at every few seconds; rendering goes on once there is room).
+        let low = match watch.floor {
+            Some((at, low)) if at.elapsed() < FLOOR_EVERY => low,
+            _ => {
+                let low = self.free_space().is_some_and(|free| free < config.floor);
+                watch.floor = Some((Instant::now(), low));
+                low
+            }
+        };
+        if low {
+            self.with(|s| {
+                let said = s.fill.background
+                    && s.fill.generation == generation
+                    && s.fill.error.as_deref() == Some(BACKGROUND_LOW_DISK);
+                if !said {
+                    s.fill = Fill {
+                        serial: s.fill.serial + 1,
+                        generation,
+                        background: true,
+                        error: Some(BACKGROUND_LOW_DISK.to_owned()),
+                        disk_full: true,
+                        ended: Some(Instant::now()),
+                        ..Fill::default()
+                    };
+                }
+                ((), !said)
+            });
+            return;
+        }
         if fill.1 && fill.0 == generation && fill.2.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
             return;
         }
@@ -1410,6 +1481,9 @@ struct Watch {
     active_at: Instant,
     /// When the current stretch of activity began (`None` while idle).
     active_since: Option<Instant>,
+    /// When the volume's free space was last looked at, and whether it
+    /// was under [`BACKGROUND_FLOOR`].
+    floor: Option<(Instant, bool)>,
 }
 
 /// The background scheduler: looks ten times a second while the cache lives.
@@ -1418,6 +1492,7 @@ fn schedule(inner: Weak<Inner>) {
         seen: 0,
         active_at: Instant::now(),
         active_since: None,
+        floor: None,
     };
     loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -1448,6 +1523,7 @@ fn fill_request(
     source: &Source,
     rate: Rate,
     fill: CacheFill,
+    reserve: u64,
 ) -> anyhow::Result<crate::jobs::ExportRequest> {
     use pm_protocol::{
         color::{OutputColor, Precision},
@@ -1502,7 +1578,7 @@ fn fill_request(
             definitions: source.definitions.clone(),
             ..Default::default()
         },
-        disk_reserve: crate::jobs::DISK_RESERVE,
+        disk_reserve: reserve.max(crate::jobs::DISK_RESERVE),
         // Cached frames are exact: a missing effect is never left out.
         bypass_missing_effects: false,
         without_offline: true,
@@ -1564,6 +1640,14 @@ fn run_fill(
         if let Some((error, disk_full)) = end {
             state.fill.running = false;
             state.fill.queued.clear();
+            // Background rendering stopped at its floor says so in its
+            // own words (the child's are an export's).
+            let error =
+                if state.fill.background && disk_full && error.as_deref() != Some(LIMIT_FULL) {
+                    Some(BACKGROUND_LOW_DISK.to_owned())
+                } else {
+                    error
+                };
             state.fill.error = error;
             state.fill.disk_full = disk_full;
             state.fill.ended = Some(Instant::now());
@@ -2696,7 +2780,7 @@ mod tests {
             definitions: vec![],
             doc_id: 1,
         };
-        let mut request = fill_request(&source, Rate::FPS_30, frames).unwrap();
+        let mut request = fill_request(&source, Rate::FPS_30, frames, 0).unwrap();
         request.cache = None;
         request.destination = out.path().join("still");
         if let pm_protocol::priority::JobSpec::Export { settings, .. } = &mut request.spec {
@@ -2764,6 +2848,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(100),
+            floor: 0,
         });
         disk.set_background_host(Some(BackgroundHost {
             executable: job_binary(),
@@ -3024,6 +3109,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(200),
+            floor: 0,
         });
         disk.set_background_host(Some(BackgroundHost {
             executable: job_binary(),
@@ -3043,6 +3129,52 @@ mod tests {
             fills,
             "nothing left"
         );
+    }
+
+    /// Background rendering never takes the volume below its floor: with
+    /// less free it starts nothing and the bars say why, and it goes on by
+    /// itself once there is room.
+    #[test]
+    fn background_rendering_stops_at_its_free_space_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        disk.set_activity(crate::jobs::Activity::default());
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        let at = Ticks::new(Rate::FPS_30.frame_start(50).unwrap()).unwrap();
+        disk.measured(disk.frame_id(&scene, at).unwrap(), DROPPED_US);
+        // Just under the floor.
+        let free = Arc::new(std::sync::atomic::AtomicU64::new((8 << 30) - 1));
+        let says = free.clone();
+        disk.inner.state.lock().unwrap().free =
+            Some(Arc::new(move || says.load(Ordering::Acquire)));
+        disk.set_background(Background {
+            enabled: true,
+            delay: Duration::from_millis(100),
+            floor: 8 << 30,
+        });
+        disk.set_background_host(Some(BackgroundHost {
+            executable: job_binary(),
+            pin: Arc::new(|_, _| {}),
+            busy: Arc::new(|| false),
+        }));
+        let bars = settle(&disk, |b| b.error.is_some());
+        assert_eq!(bars.error.as_deref(), Some(BACKGROUND_LOW_DISK));
+        assert!(
+            bars.disk_full && bars.background && !bars.running,
+            "{bars:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(present(&disk).is_empty(), "nothing was rendered");
+        assert!(disk.inner.running.lock().unwrap().is_none(), "no child ran");
+        // Room again: it starts rendering by itself, and the note goes.
+        free.store(64 << 30, Ordering::Release);
+        let bars = settle(&disk, |b| b.error.is_none() && b.running);
+        assert!(!bars.disk_full, "{bars:?}");
+        disk.set_background_host(None);
     }
 
     /// Any viewer activity pauses a background fill at once (no frame
@@ -3067,6 +3199,7 @@ mod tests {
         disk.set_background(Background {
             enabled: true,
             delay: Duration::from_millis(300),
+            floor: 0,
         });
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exporting = busy.clone();

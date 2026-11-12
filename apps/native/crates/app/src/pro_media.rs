@@ -189,6 +189,7 @@ impl Preferences {
         pm_engine_service::render_cache::Background {
             enabled: self.background_render,
             delay: std::time::Duration::from_secs(u64::from(self.background_delay_s)),
+            floor: pm_engine_service::render_cache::BACKGROUND_FLOOR,
         }
     }
 
@@ -1690,9 +1691,15 @@ impl crate::session::Controller {
                 "options":options.into_iter().map(|(v, label)| serde_json::json!({"v":v,"label":label})).collect::<Vec<_>>()})
         };
         let mut rows: Vec<serde_json::Value> = prefs.rows().into_iter().map(row).collect();
+        // Background rendering stopped at its free-space floor says so
+        // where it is switched on and off.
+        let paused = crate::render_frames::background_paused_note();
         rows.extend(prefs.playback_rows().into_iter().map(|r| {
             let switch = r.0 == "media.backgroundRender";
             let mut r = row(r);
+            if let (true, Some(note)) = (switch, &paused) {
+                r["detail"] = note.as_str().into();
+            }
             r["section"] = "general".into();
             r["group"] = "Playback".into();
             r["control"] = if switch { "switch" } else { "choice" }.into();

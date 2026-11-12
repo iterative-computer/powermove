@@ -384,7 +384,7 @@ fn disk_reserve() -> u64 {
 /// Space an export may use on the volume that will hold `destination` (its
 /// nearest existing ancestor: a PNG folder does not exist yet). This is the
 /// figure Finder shows: free space plus what macOS purges on demand.
-fn free_bytes(destination: &Path) -> Result<u64> {
+pub(crate) fn free_bytes(destination: &Path) -> Result<u64> {
     use objc2_foundation::{NSNumber, NSString, NSURL};
     let volume = destination
         .ancestors()
