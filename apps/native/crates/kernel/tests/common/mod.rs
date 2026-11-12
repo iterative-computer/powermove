@@ -31,10 +31,15 @@ impl TempDir {
     }
 
     /// Every entry name, sorted (to spot leftover temp files).
+    /// What is in the folder, other than what a save keeps beside a
+    /// project on purpose: the version it replaced, under the save's
+    /// private name (`.<file>.<uuid>.aside`), and the record that says so
+    /// (`.save`). A staging file or anything else left behind is listed.
     pub fn entries(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(&self.0)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| !(n.starts_with('.') && (n.ends_with(".aside") || n.ends_with(".save"))))
             .collect();
         names.sort();
         names
