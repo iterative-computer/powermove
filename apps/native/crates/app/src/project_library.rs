@@ -1223,6 +1223,7 @@ impl Render for ProjectLibrary {
                         default: false,
                         destructive: false,
                         inline: false,
+                        quiet: false,
                         tint: None,
                         symbol: Some("⌘F"),
                     },
@@ -1259,6 +1260,7 @@ impl Render for ProjectLibrary {
                             destructive: false,
                             // Sort is a quiet pop-up beside the layout toggle.
                             inline: matches!(kind, Kind::Popup),
+                            quiet: matches!(kind, Kind::Popup),
                             tint: primary.then_some(tokens.colors.accent),
                             symbol: primary.then_some("plus"),
                         },
@@ -1743,6 +1745,7 @@ impl Render for ProjectLibrary {
                                 default: false,
                                 destructive: false,
                                 inline: false,
+                                quiet: false,
                                 tint,
                                 symbol: None,
                             },
