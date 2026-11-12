@@ -180,8 +180,9 @@ impl Controller {
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
-                // Normal Home actions replace this window's project through
-                // settle_open, which saves and releases its previous session.
+                // Open in New Window: a window of its own. Any other Home
+                // open is this window's (`adopt_reply`: a tab of it when it
+                // already shows a project).
                 Outbound::Opened {
                     reply,
                     name,
@@ -251,6 +252,13 @@ impl Controller {
                 && !self.reopening
                 && self.opening_name.is_none()
                 && !self.recovery_pending)
+    }
+    /// The shell window id of this editor (for joining its tab group).
+    pub(crate) fn shell_window_id(&self, cx: &App) -> u64 {
+        self.shell
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map_or(0, |s| s.read(cx).window_id)
     }
     /// Home for the shell to draw in place of the docks, or `None`.
     pub(crate) fn home_element(

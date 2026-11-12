@@ -61,8 +61,9 @@ pub enum ShellCall {
     /// External files are never written: their unsaved work stays in the
     /// journal and the next open asks the person about it.
     PrepareQuit,
-    /// The last call of a quit: flush and unlock the library (no open
-    /// sessions may remain). Later library calls fail.
+    /// The last call of a quit: flush and unlock the library. A session
+    /// still open is closed as `DeferClose` closes it. Later library calls
+    /// fail.
     ReleaseLibrary,
     AbortSave {
         session: SessionHandle,
@@ -463,8 +464,16 @@ impl Kernel {
                 Ok(result)
             }
             ShellCall::ReleaseLibrary => {
-                if !self.sessions.is_empty() {
-                    return Err(failure("Close every project before releasing the library"));
+                // A quit closed every project a window shows before this. One
+                // still open has no window to ask in (an agent's project
+                // nobody showed, an open nothing adopted): it leaves as a
+                // deferred close leaves it, its acknowledged edits durable in
+                // its journal for the next open to offer, its file as saved.
+                // Refusing here refused every later quit as well.
+                let unshown: Vec<String> = self.sessions.keys().cloned().collect();
+                for project in unshown {
+                    self.flush_project(&project)?;
+                    self.remove_closed_project(&project);
                 }
                 if let Some(writer) = self.library.take() {
                     let flushed = writer.flush();

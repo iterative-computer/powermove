@@ -382,3 +382,82 @@ fn media_is_prepared_beside_a_layer_the_renderer_cannot_draw() {
     );
     assert!(renderer.finish_media_preparation().is_empty());
 }
+
+/// A viewer frame (preview media) that first draws a large ordinary still
+/// decodes nothing on its own thread once the still was prepared ahead: the
+/// worker read the file's facts and decoded the preview at the size the draw
+/// reads. Unprepared, the same frame decodes it itself (the hitch at a cut
+/// to a still), and both draw the same pixels.
+#[test]
+fn a_prepared_still_is_not_decoded_by_the_viewer_frame_that_first_draws_it() {
+    let _serial = serial_preparation();
+    let dir = tempfile::tempdir().unwrap();
+    let (sw, sh) = (2048u32, 1536u32);
+    let rgba: Vec<u8> = (0..sh)
+        .flat_map(|y| {
+            (0..sw).flat_map(move |x| [(x / 8) as u8, (y / 6) as u8, ((x + y) / 16) as u8, 255])
+        })
+        .collect();
+    let (w, h) = (512, 384);
+    let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+    let time = pm_protocol::common::Ticks::new(0).unwrap();
+    let mut drawn = Vec::new();
+    for prepared in [false, true] {
+        // A file of its own: a file's facts are read once per process.
+        let path = dir.path().join(format!("large-{prepared}.png"));
+        let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), sw, sh);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&rgba)
+            .unwrap();
+        let mut project = doc::project(
+            w,
+            h,
+            2.0,
+            doc::no_fill(),
+            vec![doc::layer(
+                "still",
+                "image",
+                json!({"asset":"pic","w":w,"h":h}),
+                f64::from(w) / 2.0,
+                f64::from(h) / 2.0,
+                2.0,
+            )],
+        );
+        doc::asset(&mut project, "pic", "image", "png", sw, sh, 2.0);
+        let document = doc::load(&project);
+        let mut assets = MapResolver::default();
+        assets.paths.insert("pic".into(), path);
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_preview_media(true);
+        if prepared {
+            let preparation = renderer
+                .prepare_media(&document, "Ptest-root", time, &request, &assets)
+                .unwrap();
+            assert!(
+                preparation.failures.is_empty(),
+                "{:?}",
+                preparation.failures
+            );
+            assert!(renderer.finish_media_preparation().is_empty());
+        }
+        let before = pm_perf::snapshot();
+        let frame = renderer
+            .render(&document, "Ptest-root", time, &request, &assets)
+            .unwrap();
+        let decodes = pm_perf::snapshot()
+            .since(&before)
+            .get(pm_perf::Counter::StillDecodes);
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        if prepared {
+            assert_eq!(decodes, 0, "the frame decoded a still prepared for it");
+        } else {
+            assert!(decodes >= 1, "an unprepared frame decodes its still");
+        }
+        drawn.push(renderer.read_rgba(&frame).unwrap());
+    }
+    assert!(drawn[0] == drawn[1], "a prepared still drew other pixels");
+}
