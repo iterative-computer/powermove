@@ -94,6 +94,19 @@ Real system material through AppKit, for what the system itself makes glass:
   the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
   own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
   and hidden from the menus and by their tabs, not from the toolbar.
+- The project strip (Home and the open projects, in the toolbar's leading
+  glass) is one control drawn in cells. Every cell stands 4 pt inside the
+  glass on all four sides, so a pill's corner is the glass's corner less the
+  inset. Tabs share one width: the widest while there is room, then narrower
+  together down to a readable least; past that the strip shows the run that
+  holds the selected tab and a pull-down lists every project. A title stands
+  in the middle of its tab and is cut in the middle, keeping the start and
+  the end of a name. The leading slot holds the close button (under the
+  pointer) or the edited dot and is always kept, so the title never moves.
+  The selected cell is a raised neutral pill; the one under the pointer a
+  wash of the same shape; hairlines part resting tabs and vanish beside
+  either. The pull-down and New Project are round targets after the last
+  rule. A tab is carried along the strip to reorder it.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
   light tint of the window colour) in a column under the GPUI view, which
   leaves that column unpainted.
