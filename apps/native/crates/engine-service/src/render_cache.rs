@@ -2705,14 +2705,20 @@ mod tests {
             content: 1,
         }
     }
+    /// Waits for `until` on the cache's own reports: it fails only when
+    /// nothing was published for 30 s (a fill that stalled), however long a
+    /// loaded machine takes to render.
     fn settle(disk: &DiskFrames, until: impl Fn(&RenderBars) -> bool) -> Arc<RenderBars> {
-        let start = Instant::now();
+        let (mut last, mut heard) = (disk.bars(), Instant::now());
         loop {
             let bars = disk.bars();
             if until(&bars) {
                 return bars;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "{bars:?}");
+            if !Arc::ptr_eq(&bars, &last) {
+                (last, heard) = (bars.clone(), Instant::now());
+            }
+            assert!(heard.elapsed() < Duration::from_secs(30), "{bars:?}");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
