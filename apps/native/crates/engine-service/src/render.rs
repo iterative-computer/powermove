@@ -472,6 +472,9 @@ impl Engine {
 
     fn govern_memory_inner(&mut self) {
         use std::sync::atomic::Ordering;
+        if let Some(disk) = &self.disk {
+            disk.memory_pressure(crate::memory::pressure());
+        }
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
@@ -504,7 +507,7 @@ impl Engine {
         let u = self.memory_usage();
         self.memory_client
             .report(pm_protocol::lease::LeaseCategories {
-                frame_cache: crate::memory::bytes(u.decoded_frame_bytes),
+                frame_cache: crate::memory::bytes(u.decoded_frame_bytes + u.disk_read_ahead_bytes),
                 render_cache: crate::memory::bytes(
                     u.pyramid_bytes
                         + u.target_pool_bytes

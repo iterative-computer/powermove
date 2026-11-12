@@ -61,6 +61,15 @@ const READY_FRAMES: usize = 8;
 const READERS: usize = 3;
 /// Frames kept read at a paused playhead, so a play starts from them.
 const WARM: i64 = 3;
+/// The most the reader holds: read frames, and for every read asked for or
+/// in flight its decoded frame and its coded bytes (twice the frame at
+/// most). Look-ahead is what fits: six frames ahead at 1080p (as measured
+/// for playback without a dropped frame), three at 4K, one frame at a time
+/// at 8K. Half under memory pressure; at Critical only the frame the
+/// playhead is on.
+pub(crate) const READ_AHEAD_BYTES: u64 = 256 << 20;
+/// The most kept read while stopped ([`WARM`] frames of 1080p).
+const WARM_BYTES: u64 = 64 << 20;
 /// How long a playing frame waits for its frame on disk to be read. A
 /// frame is on disk because drawing it takes longer than its interval, so
 /// a short wait for the reader always beats drawing it again.
@@ -571,23 +580,40 @@ impl DiskFrames {
     /// reads beyond them are fenced by the wanted range. Authored/kept
     /// files and scene identity stay.
     pub(crate) fn release_idle_reads(&self) {
-        let (generation, at) = self.with(|s| ((s.generation, s.last_read), false));
-        match at {
-            Some(n) => self.inner.reader.keep(generation, n, n + WARM - 1),
-            None => self.inner.reader.clear(generation),
+        let (generation, at, size) = self.with(|s| {
+            (
+                (s.generation, s.last_read, s.frames.as_ref().map(|f| f.size)),
+                false,
+            )
+        });
+        match (at, size) {
+            (Some(n), Some(size)) => {
+                let warm = WARM.min((WARM_BYTES / frame_bytes(size)) as i64);
+                self.inner.reader.keep(generation, n, n + warm - 1)
+            }
+            _ => self.inner.reader.clear(generation),
         }
     }
 
+    /// Every byte the reader holds or is about to: read frames, and reads
+    /// asked for or in flight ([`READ_AHEAD_BYTES`]).
     pub(crate) fn ready_bytes(&self) -> u64 {
-        self.inner
-            .reader
-            .ready
-            .lock()
-            .unwrap()
-            .frames
-            .iter()
-            .map(|(_, bytes)| bytes.len() as u64)
-            .sum()
+        self.inner.reader.ready.lock().unwrap().held()
+    }
+
+    /// The process's memory pressure, as the engine sees it at every frame:
+    /// the reader's budget follows it at once (frames beyond it are
+    /// dropped, reads not yet started are cancelled).
+    pub(crate) fn memory_pressure(&self, level: crate::memory::Pressure) {
+        self.inner.reader.pressure(level);
+    }
+
+    /// The reader's budget at no pressure (tests: a small lease).
+    #[cfg(test)]
+    pub(crate) fn set_read_budget(&self, bytes: u64) {
+        let mut ready = self.inner.reader.ready.lock().unwrap();
+        ready.cap = bytes;
+        ready.trim();
     }
 
     /// Called (on any thread, never blocking) whenever the render bar changes.
@@ -1440,6 +1466,8 @@ impl DiskFrames {
         }
         state.backward &= !still;
         let size = frames.size;
+        // As far ahead as the reader's budget holds frames of this size.
+        let ahead = ahead.min(self.inner.reader.fit(size));
         // The frame, then the next ones in the direction of motion.
         let window = if state.backward {
             (n - ahead + 1).max(0)..=n
@@ -1462,7 +1490,9 @@ impl DiskFrames {
             .reader
             .want(generation, *window.start(), *window.end());
         for (k, key) in asks {
-            self.inner.reader.ask(generation, k, key, &cache, size);
+            self.inner
+                .reader
+                .ask(generation, k, key, &cache, size, k == n);
         }
         Some((size, Held { generation, id }, n, found))
     }
@@ -1859,7 +1889,6 @@ struct Ask {
 }
 /// A read frame: the generation it was asked at, and its index.
 type ReadId = (u64, i64);
-#[derive(Default)]
 struct Ready {
     frames: VecDeque<(ReadId, Arc<Vec<u8>>)>,
     asked: HashSet<(u64, i64)>,
@@ -1868,7 +1897,84 @@ struct Ready {
     wanted: Option<(u64, i64, i64)>,
     /// Frames a read found missing or damaged on disk.
     gone: Vec<ReadId>,
+    /// [`READ_AHEAD_BYTES`], and the memory pressure that scales it.
+    cap: u64,
+    pressure: crate::memory::Pressure,
+    /// One frame's bytes at the size last asked for.
+    frame: u64,
+    /// The most ever held (tests).
+    peak: u64,
 }
+impl Default for Ready {
+    fn default() -> Self {
+        Self {
+            frames: VecDeque::new(),
+            asked: HashSet::new(),
+            wanted: None,
+            gone: Vec::new(),
+            cap: READ_AHEAD_BYTES,
+            pressure: crate::memory::Pressure::Normal,
+            frame: 0,
+            peak: 0,
+        }
+    }
+}
+/// A frame's decoded bytes (RGBA16F).
+fn frame_bytes(size: Size) -> u64 {
+    (u64::from(size.width) * u64::from(size.height) * 8).max(1)
+}
+impl Ready {
+    fn budget(&self) -> u64 {
+        match self.pressure {
+            crate::memory::Pressure::Normal => self.cap,
+            crate::memory::Pressure::Warning => self.cap / 2,
+            crate::memory::Pressure::Critical => 0,
+        }
+    }
+    /// Read frames, and twice a frame (decoded, and its coded bytes at
+    /// most) for every read asked for or in flight.
+    fn held(&self) -> u64 {
+        self.frames
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum::<u64>()
+            + self.asked.len() as u64 * 2 * self.frame
+    }
+    fn in_window(&self, (generation, n): ReadId) -> bool {
+        self.wanted
+            .is_some_and(|(g, first, last)| g == generation && (first..=last).contains(&n))
+    }
+    /// Back within the budget: frames outside the wanted range go first,
+    /// then the furthest from where it starts. The frame it starts at stays
+    /// (the picture on screen is read from it).
+    fn trim(&mut self) {
+        let budget = self.budget();
+        if self.held() <= budget {
+            return;
+        }
+        let keep: Vec<bool> = self
+            .frames
+            .iter()
+            .map(|(id, _)| self.in_window(*id))
+            .collect();
+        let mut keep = keep.into_iter();
+        self.frames.retain(|_| keep.next().unwrap_or(false));
+        while self.held() > budget && self.frames.len() > 1 {
+            let first = self.wanted.map_or(0, |(_, first, _)| first);
+            let furthest = self
+                .frames
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, ((_, n), _))| (n - first).abs())
+                .map(|(i, _)| i);
+            match furthest {
+                Some(i) => self.frames.remove(i),
+                None => break,
+            };
+        }
+    }
+}
+
 impl Reader {
     /// The thread holds only the ready list: dropping the cache's last
     /// owner closes the channel and ends it.
@@ -2007,8 +2113,35 @@ impl Reader {
         let mut ready = self.ready.lock().unwrap();
         *ready = Ready {
             wanted: Some((generation, 1, 0)),
+            cap: ready.cap,
+            pressure: ready.pressure,
+            peak: ready.peak,
             ..Default::default()
         };
+    }
+    /// How many frames of `size` the budget holds read (at least the one
+    /// the playhead is on).
+    fn fit(&self, size: Size) -> i64 {
+        let ready = self.ready.lock().unwrap();
+        ((ready.budget() / frame_bytes(size)) as i64).max(1)
+    }
+    fn pressure(&self, level: crate::memory::Pressure) {
+        let mut ready = self.ready.lock().unwrap();
+        if ready.pressure == level {
+            return;
+        }
+        ready.pressure = level;
+        // Reads asked for and not started are cancelled by the range: at
+        // Critical only the frame it starts at is wanted.
+        if level == crate::memory::Pressure::Critical
+            && let Some((g, first, last)) = ready.wanted
+            && last > first
+        {
+            ready.wanted = Some((g, first, first));
+        }
+        ready.trim();
+        drop(ready);
+        self.ended.notify_all();
     }
     /// The frames of `generation` reads found missing or damaged since the
     /// last call.
@@ -2023,14 +2156,45 @@ impl Reader {
     fn want(&self, generation: u64, first: i64, last: i64) {
         self.ready.lock().unwrap().wanted = Some((generation, first, last));
     }
-    fn ask(&self, generation: u64, n: i64, key: RenderKey, cache: &Arc<RenderCache>, size: Size) {
+    /// Asks for frame `n` if the budget admits another read (`head`: the
+    /// frame the playhead is on, read whatever the budget: everything else
+    /// read gives way to it). A frame not admitted is asked again at the
+    /// next frame.
+    fn ask(
+        &self,
+        generation: u64,
+        n: i64,
+        key: RenderKey,
+        cache: &Arc<RenderCache>,
+        size: Size,
+        head: bool,
+    ) {
         let id = (generation, n);
         {
             let mut ready = self.ready.lock().unwrap();
             if ready.asked.contains(&id) || ready.frames.iter().any(|(i, _)| *i == id) {
                 return;
             }
+            ready.frame = frame_bytes(size);
+            let need = 2 * ready.frame;
+            if ready.held() + need > ready.budget() {
+                // Frames outside the wanted range make room first.
+                let keep: Vec<bool> = ready
+                    .frames
+                    .iter()
+                    .map(|(i, _)| ready.in_window(*i))
+                    .collect();
+                let mut keep = keep.into_iter();
+                ready.frames.retain(|_| keep.next().unwrap_or(false));
+            }
+            if ready.held() + need > ready.budget() {
+                if !head || !ready.asked.is_empty() {
+                    return;
+                }
+                ready.frames.clear();
+            }
             ready.asked.insert(id);
+            ready.peak = ready.peak.max(ready.held());
         }
         let ask = Ask {
             id,
@@ -3434,6 +3598,87 @@ mod tests {
             fills,
             "nothing left"
         );
+    }
+
+    /// Reading rendered frames ahead is bounded in bytes, not in frames:
+    /// what the reader holds (read frames, and for each read asked for or in
+    /// flight its decoded frame and coded bytes) stays within its budget
+    /// whatever the frame's size. A frame as large as the budget (an 8K
+    /// frame is 265 MB of the 256 MiB) plays one frame at a time; under
+    /// Critical memory pressure only the frame the playhead is on is read,
+    /// what was read ahead goes and queued reads are cancelled.
+    #[test]
+    fn read_ahead_is_bounded_in_bytes() {
+        let size = |w, h| Size::new(w, h);
+        let reader = Reader::start();
+        assert_eq!(reader.fit(size(1920, 1080)).min(AHEAD), AHEAD);
+        assert_eq!(reader.fit(size(3840, 2160)), 4);
+        assert_eq!(reader.fit(size(7680, 4320)), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+        ready(&disk);
+        let times: Vec<Ticks> = (10..22).map(|n| write_frame(&disk, n)).collect();
+        let frame = frame_bytes(size(640, 360));
+        let held = || disk.ready_bytes();
+        let peak = || disk.inner.reader.ready.lock().unwrap().peak;
+        let frames = || disk.inner.reader.ready.lock().unwrap().frames.len();
+        let play = |range: std::ops::Range<usize>| {
+            for at in range {
+                let start = Instant::now();
+                while !matches!(
+                    disk.read_within(&scene, times[at], PATIENCE),
+                    Read::Frame(..)
+                ) {
+                    assert!(start.elapsed() < Duration::from_secs(5), "frame {at}");
+                }
+            }
+        };
+        // A budget a little under one frame, as 256 MiB is to an 8K frame.
+        disk.set_read_budget(frame * 97 / 100);
+        play(0..4);
+        assert!(peak() <= 2 * frame, "{} of {frame}", peak());
+        assert_eq!(frames(), 1, "one frame at a time");
+        // Room for four frames: never more held than that.
+        disk.set_read_budget(4 * frame);
+        disk.inner.reader.ready.lock().unwrap().peak = 0;
+        play(4..8);
+        assert!(peak() <= 4 * frame, "{} of {}", peak(), 4 * frame);
+        // The default budget reads this size six ahead, as before.
+        disk.set_read_budget(READ_AHEAD_BYTES);
+        play(8..9);
+        let start = Instant::now();
+        while frames() < 4 {
+            assert!(start.elapsed() < Duration::from_secs(5), "read ahead");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Critical pressure: only the frame the playhead is on stays, and
+        // nothing more is read ahead of it.
+        disk.memory_pressure(crate::memory::Pressure::Critical);
+        assert!(frames() <= 1, "what was read ahead goes at once");
+        // A read already in flight ends and is dropped; queued ones never
+        // start.
+        let start = Instant::now();
+        while held() > frame {
+            assert!(start.elapsed() < Duration::from_secs(5), "{} held", held());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        play(9..11);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(frames() <= 1 && held() <= 2 * frame, "{} held", held());
+        // Pressure over: it reads ahead again.
+        disk.memory_pressure(crate::memory::Pressure::Normal);
+        play(10..11);
+        let start = Instant::now();
+        while frames() < 2 {
+            assert!(start.elapsed() < Duration::from_secs(5), "read ahead again");
+            disk.read_within(&scene, times[10], Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// A rendered frame damaged on disk (a flipped byte, a cut payload, a
