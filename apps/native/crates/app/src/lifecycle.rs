@@ -59,6 +59,8 @@ struct QuitCoordinator {
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
+    /// The running-export question is on screen.
+    asking_exports: bool,
     /// A second Quit's prompt is showing: the window and its sheet, ended
     /// before the app terminates (AppKit refuses to while a sheet is up).
     asking_now: Option<(
@@ -102,11 +104,79 @@ fn cancel_quit(cx: &mut App) {
         }
     });
 }
+/// The exports a quit would stop: every export that has not ended.
+fn running_exports(
+    tasks: &[pm_promedia::tasks::Task],
+) -> Vec<(pm_promedia::tasks::TaskId, String)> {
+    tasks
+        .iter()
+        .filter(|t| t.kind == pm_promedia::tasks::TaskKind::Export && !t.state.terminal())
+        .map(|t| (t.id, t.title.clone()))
+        .collect()
+}
+/// The question a quit asks while an export runs: quitting would stop it.
+fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, button) = match titles {
+        [one] if !one.is_empty() => (
+            format!("“{one}” is still exporting."),
+            "Stop Export and Quit",
+        ),
+        [_] => ("An export is still running.".into(), "Stop Export and Quit"),
+        many => (
+            format!("{} exports are still running.", many.len()),
+            "Stop Exports and Quit",
+        ),
+    };
+    Alert::new(
+        message,
+        "If you quit now, the export stops and its unfinished file is removed. Your projects are not affected.",
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new(button, true),
+        ],
+    )
+}
 pub fn begin_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
     if q.quitting {
         return ask_quit_now(cx);
     }
+    if q.asking_exports {
+        return;
+    }
+    // An export that is running is asked about before anything closes.
+    let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
+    let window = q
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    if let (false, Some(window)) = (exporting.is_empty(), window) {
+        cx.global_mut::<QuitCoordinator>().asking_exports = true;
+        let titles: Vec<String> = exporting.iter().map(|(_, title)| title.clone()).collect();
+        let answer = export_quit_alert(&titles).sheet(&window);
+        cx.spawn(async move |cx| {
+            let stop = answer.recv().await.ok().flatten() == Some(true);
+            cx.update(|cx| {
+                cx.global_mut::<QuitCoordinator>().asking_exports = false;
+                if stop {
+                    for (id, _) in exporting {
+                        crate::export_coordinator::cancel_export(id);
+                    }
+                    start_quit(cx);
+                } else {
+                    cancel_quit(cx);
+                }
+            });
+        })
+        .detach();
+        return;
+    }
+    start_quit(cx);
+}
+fn start_quit(cx: &mut App) {
+    let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
@@ -392,6 +462,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             queue: Vec::new(),
             quitting: false,
             discard: false,
+            asking_exports: false,
             asking_now: None,
             host,
         });
@@ -907,6 +978,41 @@ mod tests {
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
         assert_eq!(quit_waits_for(Dirty, false, false, false), None);
+    }
+    /// A quit while an export runs asks first: Cancel is the default, and
+    /// only exports that have not ended count.
+    #[test]
+    fn a_quit_during_an_export_asks_before_stopping_it() {
+        use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec};
+        let mut tasks = BackgroundTasks::default();
+        let mut add = |kind, title: &str| {
+            tasks
+                .enqueue(
+                    "w".into(),
+                    "p".into(),
+                    TaskSpec {
+                        title: title.into(),
+                        kind,
+                        unit: ProgressUnit::Frames,
+                        priority: 0,
+                        total: 10,
+                    },
+                )
+                .unwrap()
+        };
+        let export = add(TaskKind::Export, "Launch Film");
+        add(TaskKind::Proxy, "clip");
+        let done = add(TaskKind::Export, "Old");
+        tasks.cancel(done).unwrap();
+        let running = running_exports(&tasks.all());
+        assert_eq!(running, [(export, "Launch Film".to_owned())]);
+        let alert = export_quit_alert(&["Launch Film".to_owned()]);
+        assert_eq!(alert.message, "“Launch Film” is still exporting.");
+        assert_eq!(alert.labels(), ["Cancel", "Stop Export and Quit"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        let two = export_quit_alert(&["a".to_owned(), "b".to_owned()]);
+        assert_eq!(two.labels(), ["Cancel", "Stop Exports and Quit"]);
     }
     /// A quit asks every window with unsaved changes before it closes a
     /// clean one (windows are taken from the end).
