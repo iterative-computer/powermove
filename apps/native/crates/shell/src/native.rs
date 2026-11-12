@@ -3352,15 +3352,29 @@ impl Host {
                     msg_send![&*self.window,moveTabToNewWindow:std::ptr::null::<AnyObject>()];
             },
             "blurField" => {
-                if !self
+                let Some(editor) = self
                     .window
                     .firstResponder()
-                    .as_ref()
-                    .is_some_and(|r| unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] })
-                {
+                    .filter(|r| unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] })
+                else {
                     return false;
+                };
+                // A search field hears the key itself: it tells its view
+                // (which clears the search or closes the field), then gives
+                // the keyboard back. Any other field just gives it back.
+                let search = unsafe {
+                    let delegate: *mut AnyObject = msg_send![&*editor, delegate];
+                    !delegate.is_null()
+                        && msg_send![delegate, isKindOfClass: NSSearchField::class()]
+                };
+                if search {
+                    unsafe {
+                        let _: () =
+                            msg_send![&*editor, doCommandBySelector: sel!(cancelOperation:)];
+                    }
+                } else {
+                    self.window.makeFirstResponder(Some(&self.gpui));
                 }
-                self.window.makeFirstResponder(Some(&self.gpui));
             }
             name if name.starts_with("context") => {
                 // The field being edited may sit in another window (the

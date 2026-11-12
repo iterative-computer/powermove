@@ -590,6 +590,18 @@ impl SurfaceView {
             },
         ));
         control.update(cx, |v, _| v.display(display.as_deref()));
+        // A search field starts with its node's text at the host's revision
+        // of it, so only a newer host value replaces what is typed: a first
+        // update that came after the first keystroke emptied the field.
+        if let Some(revision) = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("hostValue"))
+            .and_then(Value::as_u64)
+        {
+            let text = value.as_str().unwrap_or_default().to_owned();
+            control.update(cx, |v, _| v.host_text(&text, revision));
+        }
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
         }
