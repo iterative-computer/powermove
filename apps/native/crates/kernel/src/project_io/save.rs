@@ -150,6 +150,8 @@ pub struct SaveOptions {
     /// The profile folder of the instance that saves: a save's record names
     /// who is saving.
     pub profile: Option<PathBuf>,
+    /// Asked for a coordinated write around the publication.
+    pub coordinator: Option<durable::SharedWriteCoordinator>,
 }
 
 /// The `history` member a plan writes.
@@ -899,6 +901,7 @@ impl SavePlan {
         };
         let host = durable::Host {
             hooks: &self.options.hooks,
+            coordinator: self.options.coordinator.as_ref(),
             profile: self.options.profile.as_deref(),
             backups: self.options.backups.as_ref(),
             backup: backup.as_deref(),

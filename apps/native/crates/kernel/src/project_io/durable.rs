@@ -1324,16 +1324,59 @@ pub(crate) struct Published {
     pub backup: Option<PathBuf>,
 }
 
+/// The system's way for programs to take turns at a file (on macOS,
+/// `NSFileCoordinator`). A save asks for a coordinated write of the project
+/// file around the steps that move files, and so does recovery.
+///
+/// What that covers: every program that takes part in file coordination.
+/// A file provider (iCloud Drive, a sync client built on the system's
+/// provider interface) and any app that presents the file wait for the
+/// write to finish, and an app holding unsaved changes to the file is asked
+/// to write them first, so the save's own check then finds them. What it
+/// does not cover: a program that writes the file with plain system calls
+/// (a script, a sync client that does not use the provider interface), and
+/// anything on another machine, such as a second computer on a shared
+/// volume. Those are what the rest of the save is built for: no step
+/// replaces or removes a file it has not read.
+pub trait WriteCoordinator: Send + Sync {
+    /// Runs `work` exactly once: inside a coordinated write of `path` when
+    /// one is granted within a bounded wait (`work(true)`), and without one
+    /// otherwise (`work(false)`). A save is never refused for want of it.
+    fn coordinate(&self, path: &Path, work: &mut dyn FnMut(bool));
+}
+
+/// A [`WriteCoordinator`] a kernel and its saves share.
+#[derive(Clone)]
+pub struct SharedWriteCoordinator(pub Arc<dyn WriteCoordinator>);
+impl std::fmt::Debug for SharedWriteCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WriteCoordinator")
+    }
+}
+
 /// What a publication needs from its host besides the files.
 #[derive(Clone, Copy)]
 pub(crate) struct Host<'a> {
     pub hooks: &'a PublishHooks,
+    /// Asked for a coordinated write around the steps that move files.
+    pub coordinator: Option<&'a SharedWriteCoordinator>,
     /// The profile folder of the instance that saves (a record names it).
     pub profile: Option<&'a Path>,
     /// Where replaced versions are kept, and the copy of the version being
     /// replaced that this save made there before it began.
     pub backups: Option<&'a BackupPolicy>,
     pub backup: Option<&'a Path>,
+}
+
+impl Host<'_> {
+    /// Runs `work` once, inside a coordinated write of `path` where the
+    /// host has a coordinator and it grants one ([`WriteCoordinator`]).
+    pub fn coordinated(&self, path: &Path, work: &mut dyn FnMut(bool)) {
+        match self.coordinator {
+            Some(coordinator) => coordinator.0.coordinate(path, work),
+            None => work(false),
+        }
+    }
 }
 
 /// The extended attribute a retained version carries in the backups: the
@@ -1481,6 +1524,29 @@ fn retire(displaced: PathBuf, hash: &str, tx: &mut Transaction, host: &Host) -> 
 /// back only if the path still holds ours, so a put-back that lost that race
 /// would displace a third version, unread, from the place it arrived at.
 pub(crate) fn publish(
+    temp: TempFile,
+    destination: &Path,
+    mode: &Publish,
+    new_hash: &str,
+    host: &Host,
+) -> Result<Published, ProjectIoError> {
+    // From the last check of the file to the last move, inside a
+    // coordinated write where the system grants one.
+    let mut temp = Some(temp);
+    let mut published = None;
+    host.coordinated(destination, &mut |_| {
+        if let Some(temp) = temp.take() {
+            published = Some(publish_now(temp, destination, mode, new_hash, host));
+        }
+    });
+    published.unwrap_or_else(|| {
+        Err(ProjectIoError::Invalid(
+            "The save could not start: the file coordinator did not run it.".into(),
+        ))
+    })
+}
+
+fn publish_now(
     temp: TempFile,
     destination: &Path,
     mode: &Publish,

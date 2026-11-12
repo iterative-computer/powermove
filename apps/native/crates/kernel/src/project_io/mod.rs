@@ -57,7 +57,7 @@ pub use durable::{
     temporary_sibling,
 };
 pub(crate) use durable::{Host, remove_abandoned_temps};
-pub use durable::{PublishHook, PublishHooks, StepHook};
+pub use durable::{PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, WriteCoordinator};
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
 pub(crate) use transaction::{leftovers, pending, settle, use_leftover};

@@ -41,6 +41,11 @@ pub struct KernelConfig {
     /// `locks` folder beside the journals, or the user's temporary folder
     /// when there are no journals either.
     pub lock_root: Option<PathBuf>,
+    /// The system's file coordination, asked for a coordinated write around
+    /// every save's publication and every recovery move
+    /// ([`crate::project_io::WriteCoordinator`]). `None`: saves are not
+    /// coordinated (tests, hosts without one).
+    pub write_coordinator: Option<crate::project_io::SharedWriteCoordinator>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
@@ -431,8 +436,12 @@ impl Kernel {
             backups,
             hooks: self.publish_hooks.clone(),
             profile: self.profile_dir().map(Into::into),
+            coordinator: self.config.write_coordinator.clone(),
             ..Default::default()
         }
+    }
+    pub(crate) fn write_coordinator(&self) -> Option<&crate::project_io::SharedWriteCoordinator> {
+        self.config.write_coordinator.as_ref()
     }
     /// The profile folder this kernel keeps its journals in.
     pub(crate) fn profile_dir(&self) -> Option<&std::path::Path> {

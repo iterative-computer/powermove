@@ -1151,6 +1151,91 @@ fn work_written_into_the_replaced_file_after_it_was_read_is_never_removed() {
         assert_eq!(private_leftovers(&file), [""; 0], "{disk}");
     }
 }
+/// A coordinator as the app supplies one: grants every write (or none),
+/// and notes what the project file held when the work began and ended.
+struct Coordinator {
+    grants: bool,
+    seen: std::sync::Mutex<Vec<Coordinated>>,
+}
+/// A coordinated write: of which file, and the name of the composition in
+/// it when the work began and when it ended (`None`: no file there).
+type Coordinated = (std::path::PathBuf, Option<String>, Option<String>);
+impl pm_kernel::project_io::WriteCoordinator for Coordinator {
+    fn coordinate(&self, path: &Path, work: &mut dyn FnMut(bool)) {
+        let holds = |path: &Path| path.exists().then(|| saved_name(path)).flatten();
+        let before = holds(path);
+        work(self.grants);
+        let entry = (path.to_owned(), before, holds(path));
+        self.seen.lock().unwrap().push(entry);
+    }
+}
+fn coordinated_kernel(path: &Path, grants: bool) -> (Kernel, std::sync::Arc<Coordinator>) {
+    let coordinator = std::sync::Arc::new(Coordinator {
+        grants,
+        seen: Default::default(),
+    });
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(path.join("journals")),
+        write_coordinator: Some(pm_kernel::project_io::SharedWriteCoordinator(
+            coordinator.clone(),
+        )),
+        ..Default::default()
+    });
+    k.shell(ShellCall::AttachLibrary {
+        profile: path.into(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    (k, coordinator)
+}
+/// A save's publication runs inside a coordinated write of the project
+/// file (other programs that take part in file coordination wait for it,
+/// and are asked to write their own changes first), and so do the moves a
+/// recovery makes at the next open. When the system does not grant one in
+/// time the save and the recovery go ahead all the same: nobody is kept
+/// from saving by another program that will not answer.
+#[test]
+fn a_save_and_a_recovery_run_inside_a_coordinated_write_or_go_ahead_without() {
+    for grants in [true, false] {
+        let dir = common::TempDir::new("coordinated");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        let (mut k, coordinator) = coordinated_kernel(&native, grants);
+        let (session, _) = open_file(&mut k, &file);
+        assert_eq!(
+            *coordinator.seen.lock().unwrap(),
+            [],
+            "an open with nothing to settle asks for nothing"
+        );
+        let before = saved_name(&file);
+        rename_comp(&mut k, "P", "One");
+        let plan = k.prepare_session_save(session, None, false).unwrap();
+        k.finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("grants {grants}: {e}"));
+        assert_eq!(
+            *coordinator.seen.lock().unwrap(),
+            [(file.clone(), before, Some("One".to_owned()))],
+            "grants {grants}: the file was replaced inside the coordinated write"
+        );
+        drop(k);
+        // The moves of a recovery, too.
+        let crashed = dir.path("job/crashed.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &crashed).unwrap();
+        let original = saved_name(&crashed);
+        let crash_profile = dir.path("native-crash");
+        assert!(killed_between_renames(&crash_profile, &crashed, false));
+        let (mut k, coordinator) = coordinated_kernel(&crash_profile, grants);
+        prepare(&mut k, "P", SessionSource::File(crashed.clone()));
+        assert_eq!(
+            *coordinator.seen.lock().unwrap(),
+            [(crashed.clone(), None, original)],
+            "grants {grants}: the last saved version was put back inside one"
+        );
+    }
+}
 /// A save keeps the version it replaced until the next save stands and has
 /// read it again: one previous version beside the project, never a pile.
 #[test]

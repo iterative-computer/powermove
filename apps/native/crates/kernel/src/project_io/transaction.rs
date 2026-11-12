@@ -710,21 +710,34 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
     // A record that only keeps a replaced version is not a cut-short save.
     let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
     let several = records.len() > 1;
-    for record in &records {
-        let unresolved = if several {
-            Some(Undecided::Several)
-        } else {
-            settle_one(record, destination, host, &mut settled.left)
-        };
-        if let Some(why) = unresolved {
-            for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
-                if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_)) | Err(_)) {
-                    settled
-                        .undecided
-                        .push(leftover(path, role, why, Some(record)));
+    // Recovery's moves are made inside a coordinated write where the system
+    // grants one; nothing is asked for when there is nothing to settle.
+    let settle_all = |left: &mut Vec<LeftAside>, undecided: &mut Vec<Leftover>| {
+        for record in &records {
+            let unresolved = if several {
+                Some(Undecided::Several)
+            } else {
+                settle_one(record, destination, host, left)
+            };
+            if let Some(why) = unresolved {
+                for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
+                    if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_)) | Err(_)) {
+                        undecided.push(leftover(path, role, why, Some(record)));
+                    }
                 }
             }
         }
+    };
+    if !records.is_empty() {
+        let (mut left, mut undecided) = (Vec::new(), Vec::new());
+        let mut once = Some(());
+        host.coordinated(destination, &mut |_| {
+            if once.take().is_some() {
+                settle_all(&mut left, &mut undecided);
+            }
+        });
+        settled.left = left;
+        settled.undecided.extend(undecided);
     }
     settled.unrecorded = private_files(destination)
         .into_iter()
@@ -979,6 +992,24 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
 /// nothing, and the other files that record names get names the person
 /// finds. Nothing is removed. Call it while holding the project's lock.
 pub(crate) fn use_leftover(
+    destination: &Path,
+    chosen: &Path,
+    host: &Host,
+) -> Result<Vec<LeftAside>, ProjectIoError> {
+    let mut used = None;
+    host.coordinated(destination, &mut |_| {
+        if used.is_none() {
+            used = Some(use_leftover_now(destination, chosen, host));
+        }
+    });
+    used.unwrap_or_else(|| {
+        Err(ProjectIoError::Invalid(
+            "The file coordinator did not run.".into(),
+        ))
+    })
+}
+
+fn use_leftover_now(
     destination: &Path,
     chosen: &Path,
     host: &Host,

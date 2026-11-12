@@ -2507,6 +2507,7 @@ impl Kernel {
     pub(crate) fn host(&self) -> project_io::Host<'_> {
         project_io::Host {
             hooks: &self.publish_hooks,
+            coordinator: self.write_coordinator(),
             profile: self.profile_dir(),
             backups: None,
             backup: None,
