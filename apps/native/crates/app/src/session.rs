@@ -1416,12 +1416,12 @@ impl Controller {
             gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
             return;
         }
-        if let Some(window) = cx
-            .windows()
-            .into_iter()
-            .find(|w| w.window_id().as_u64() == key)
-        {
-            let _ = window.update(cx, |_, w, _| w.activate());
+        // Only while the app is active, as for this window: activating the
+        // window activates the app, which would bring a background app (a
+        // launch restoring its windows that is also handed one of their
+        // files, an agent's open) in front of the one the person is using.
+        if let Some(editor) = crate::entry::editor(key, cx) {
+            gpui_macos::child_window::raise_if_active(&editor.read(cx).host.borrow().window);
         }
     }
     /// An internal error stopped this window's project: the kernel takes no
