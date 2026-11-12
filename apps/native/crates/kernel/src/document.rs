@@ -246,7 +246,8 @@ pub struct DocumentStore {
     /// Whether the file's `history` member needs an archive before a save
     /// replaces it ([`Self::file_history_needs_archive`]), for the member
     /// and open composition it was judged with.
-    archive_judged: std::sync::Mutex<Option<(crate::history::CompactJson, Option<String>, bool)>>,
+    archive_judged:
+        Arc<std::sync::Mutex<Option<(crate::history::CompactJson, Option<String>, bool)>>>,
     selection: Selection,
     queries: QueryContext,
     gesture: Option<Gesture>,

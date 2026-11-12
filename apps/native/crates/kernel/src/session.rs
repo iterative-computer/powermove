@@ -1589,6 +1589,13 @@ impl Kernel {
                 _ => false,
             };
         let mut info = self.open_known(&id, source, known)?;
+        // What the first save would work out about a long undo history on
+        // this thread is worked out beside it instead, from now.
+        if let Some(p) = self.project(&id) {
+            let _ = std::thread::Builder::new()
+                .name("pm-save-warmup".into())
+                .spawn(p.store().save_warmup());
+        }
         let slot_current = slot_current
             && !info.history_rejected
             && !self.project(&id).unwrap().store().upgraded_on_open();
