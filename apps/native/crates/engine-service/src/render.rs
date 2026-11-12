@@ -155,15 +155,14 @@ impl FrameSpec {
         Ok(request)
     }
 
-    /// Frames while playing, and a drag's reduced frames (a preview the
-    /// final resampler redraws once the playhead settles), take the
-    /// playback resampler (pm-render's rule for scrub frames); paused
-    /// frames, drags at full resolution (which nothing redraws), and exact
-    /// reads such as captures, the final one.
+    /// A drag's reduced frames (a preview the final resampler redraws once
+    /// the playhead settles) take the playback resampler; every frame a
+    /// person watches, playing or paused, and exact reads such as captures
+    /// take the final one (Lanczos-3), so footage and precomps don't sharpen
+    /// when playback stops. Its cost on a real project's playing frames was
+    /// within run-to-run noise.
     fn sampling(&self) -> pm_render::sampling::Sampling {
-        if !self.exact
-            && (self.moment == Moment::Playing || (self.moment == Moment::Scrub && self.scale < 1.))
-        {
+        if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
         } else {
             pm_render::sampling::Sampling::Final
@@ -1483,7 +1482,7 @@ mod sampling_tests {
     use pm_render::sampling::Sampling;
 
     #[test]
-    fn only_frames_a_final_one_replaces_take_the_playback_resampler() {
+    fn only_reduced_drag_frames_take_the_playback_resampler() {
         let output = Output {
             width: 64,
             height: 36,
@@ -1497,7 +1496,8 @@ mod sampling_tests {
             exact: false,
             ..FrameSpec::exact(Ticks::new(0).unwrap(), output)
         };
-        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Playback);
+        assert_eq!(spec(Moment::Playing, 1.).sampling(), Sampling::Final);
+        assert_eq!(spec(Moment::Playing, 0.5).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Scrub, 0.5).sampling(), Sampling::Playback);
         assert_eq!(spec(Moment::Scrub, 1.).sampling(), Sampling::Final);
         assert_eq!(spec(Moment::Paused, 0.5).sampling(), Sampling::Final);
