@@ -118,8 +118,14 @@ pub struct MediaFacts {
     /// aperture, rotation): the asset's `w` and `h`.
     pub display_size: Option<[u32; 2]>,
     /// The program length in seconds with this reading (a conformed rate
-    /// changes it): the asset's `dur`.
+    /// changes it): the asset's `dur`. For a file with a picture, from the
+    /// start of its first frame to the end of its last.
     pub duration: Option<f64>,
+    /// Where the selected audio stream ends on that timeline, in seconds:
+    /// the asset's `audioDur`. The stream's own length placed by its own
+    /// start, not the container's duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_duration: Option<f64>,
 }
 
 impl Validate for MediaFacts {

@@ -152,11 +152,7 @@ fn metadata(path: &Path, kind: &str, size: u64) -> Result<Value, String> {
     });
     if kind == "video" {
         asset["hasAudio"] = json!(facts.audio.is_some());
-        asset["audioDur"] = json!(if facts.audio.is_some() {
-            facts.duration.unwrap_or(0.)
-        } else {
-            0.
-        });
+        asset["audioDur"] = json!(facts.audio_duration.unwrap_or(0.));
     }
     if kind == "image" {
         asset["format"] = json!(extension(path));

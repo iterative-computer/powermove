@@ -1167,6 +1167,7 @@ pub fn responses() -> Vec<Envelope> {
                 issues: vec![],
                 display_size: Some([1920, 1080]),
                 duration: Some(12.5),
+                audio_duration: None,
             })),
         ),
         response(

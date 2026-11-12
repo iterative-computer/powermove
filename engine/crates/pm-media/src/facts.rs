@@ -142,6 +142,29 @@ fn audio_metadata(p: &MediaProbe) -> Option<AudioFacts> {
     })
 }
 
+/// Where the selected audio stream ends on the clip's timeline, in seconds:
+/// its own length from its own first timestamp, measured from the first
+/// presented video frame when the file has a picture.
+fn audio_duration(p: &MediaProbe) -> Option<f64> {
+    let stream = p.audio_stream.and_then(|i| p.streams.get(i))?;
+    stream.audio.as_ref()?;
+    let unit = stream.timebase[0] as f64 / stream.timebase[1] as f64;
+    let start = stream.start_pts.unwrap_or(0) as f64 * unit;
+    let length = match stream.duration_pts {
+        Some(d) => d as f64 * unit,
+        // Containers that keep only their own duration (Matroska): from the
+        // container's start to its end, less what precedes this stream.
+        None => {
+            let container_start = p.start_us.unwrap_or(0) as f64 / 1e6;
+            p.duration_us? as f64 / 1e6 - (start - container_start)
+        }
+    };
+    let origin = p.video.as_ref().map_or(start, |v| {
+        v.start_pts as f64 * v.timebase[0] as f64 / v.timebase[1] as f64
+    });
+    Some((start - origin + length).max(0.0))
+}
+
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
     let Some(a) = p
         .audio_stream
@@ -325,6 +348,7 @@ fn video_facts(
         issues,
         display_size: Some([w, h]),
         duration,
+        audio_duration: audio_duration(p),
     }
 }
 
@@ -397,6 +421,7 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
         issues,
         display_size: Some([w, h]),
         duration: None,
+        audio_duration: None,
     })
 }
 
@@ -423,6 +448,7 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
         issues,
         display_size: None,
         duration: p.duration_us.map(|d| d as f64 / 1e6),
+        audio_duration: audio_duration(p),
     }
 }
 

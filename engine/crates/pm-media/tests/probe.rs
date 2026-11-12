@@ -277,3 +277,44 @@ fn content_hash_and_fingerprint() {
         *blake3::hash(&std::fs::read(&f).unwrap()).as_bytes()
     );
 }
+
+/// Import metadata comes from each stream's own timestamps: the clip runs
+/// from its first frame's start to its last frame's end wherever the
+/// container starts counting, and the soundtrack's length is its own, not
+/// the container's.
+#[test]
+fn durations_are_the_streams_own() {
+    let dir = tmp_dir();
+    let make = |name: &str, video: &str, audio: &str, mux: &[&str]| {
+        let path = dir.path().join(name);
+        let status = Command::new(ffmpeg_bin())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=64x64:rate=25:duration={video}"))
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!(
+                "sine=frequency=440:sample_rate=48000:duration={audio}"
+            ))
+            .args(["-pix_fmt", "yuv420p", "-c:v", "mpeg4", "-q:v", "4"])
+            .args(mux)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        pm_media::facts::media_facts(&path, None).unwrap()
+    };
+    // A two-second picture with half a second of sound.
+    let short = make("short-sound.mov", "2", "0.5", &["-c:a", "pcm_s16le"]);
+    assert_eq!(short.duration, Some(2.0));
+    assert_eq!(short.audio_duration, Some(0.5));
+    // A transport stream starts both streams near 1.4 s: the clip is still
+    // two seconds long and the sound still ends where it ends.
+    let ts = make(
+        "camera.ts",
+        "2",
+        "1",
+        &["-c:v", "mpeg2video", "-c:a", "mp2", "-b:a", "192k"],
+    );
+    assert_eq!(ts.duration, Some(2.0));
+    let sound = ts.audio_duration.unwrap();
+    assert!((sound - 1.0).abs() < 0.05, "{sound}");
+}
