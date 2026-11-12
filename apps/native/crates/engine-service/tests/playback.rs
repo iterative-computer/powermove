@@ -357,7 +357,10 @@ fn a_fixed_quality_renders_every_frame_at_that_resolution() {
 
 /// View › Media: a clip whose original is missing plays its proxy in
 /// Automatic, is offline in Originals, and a proxy is never counted as an
-/// original.
+/// original. The viewer's picture follows the mode (read here through the
+/// scopes, which analyze the picture on screen); a capture is a delivery
+/// picture and reads originals whatever the mode, so the clip is offline
+/// in it.
 #[test]
 fn media_modes_choose_proxies_and_originals_per_clip() {
     let s = project("clip");
@@ -365,13 +368,30 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     media.proxies.insert("clip".into(), fixture("h264-aac.mp4"));
     let service = service("media-modes");
     let v = service.viewer(config(s, media, output(320, 180))).unwrap();
+    let (frames, scope) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
     let settled = |v: &Viewer, why: &str| {
         let stamp = v.stamp().unwrap();
         wait(v, why, |s| {
             s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
         })
     };
-    v.capture_next().unwrap();
+    // The next reading of a paused picture at the composition's size (the
+    // refinement the viewer settles on) that `accept`s.
+    let reading = |why: &str, accept: &dyn Fn(&pm_render::scopes::ScopeFrame) -> bool| {
+        let start = Instant::now();
+        loop {
+            if let Ok(frame) = scope.try_recv() {
+                let frame = frame.unwrap();
+                if frame.pixels == 640 * 360 && accept(&frame) {
+                    return frame;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "{why}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
     let status = settled(&v, "Automatic");
     assert!(
         status.layer_failures.is_empty(),
@@ -379,8 +399,7 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 1);
-    let proxy_frame = status.frame.clone().unwrap().pixels;
-    v.capture_next().unwrap();
+    let proxy_picture = reading("the proxy's picture", &|_| true);
     v.media_mode(MediaMode::Originals).unwrap();
     let status = settled(&v, "Originals");
     // Offline in Originals: the clip draws its Media Offline card (not a
@@ -391,15 +410,14 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 0);
-    let card_frame = status.frame.clone().unwrap().pixels.expect("captured");
+    let card_picture = reading("the card replaces the proxy", &|f| *f != proxy_picture);
+    v.capture_next().unwrap();
+    let captured = wait(&v, "a capture in Originals", |s| {
+        s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+    });
+    let card_frame = captured.frame.unwrap().pixels.expect("captured");
     assert!(card(at(&card_frame, 310, 170)));
     assert!(red(at(&card_frame, 60, 90)));
-    assert_ne!(
-        Some(&card_frame),
-        proxy_frame.as_ref(),
-        "the card replaces the proxy"
-    );
-    v.capture_next().unwrap();
     v.media_mode(MediaMode::ProxyOnly).unwrap();
     let status = settled(&v, "Proxy Only");
     assert!(
@@ -409,8 +427,21 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     );
     assert_eq!(status.proxied, 1);
     // Back to a readable file: the card goes away.
-    let back = status.frame.clone().unwrap().pixels.expect("captured");
-    assert_ne!(back, card_frame, "the proxy replaces the card");
+    reading("the proxy replaces the card", &|f| *f == proxy_picture);
+    assert_ne!(card_picture, proxy_picture);
+    // A capture reads originals: the clip has none, so it is offline in the
+    // captured picture although the viewer plays its proxy.
+    v.capture_next().unwrap();
+    let stamp = v.stamp().unwrap();
+    let captured = wait(&v, "a capture in Proxy Only", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+    });
+    let delivered = captured.frame.unwrap().pixels.expect("captured");
+    assert!(card(at(&delivered, 310, 170)));
+    assert!(red(at(&delivered, 60, 90)));
+    v.scopes(None).unwrap();
 
     let mut both = MediaCatalog::default();
     both.originals.insert("a".into(), "/original.mov".into());
