@@ -156,6 +156,19 @@ counters! {
     /// Vector (shape, mask, path, SVG) textures found.
     VectorCacheHits = "cache.vector.hits",
     VectorCacheMisses = "cache.vector.misses",
+    /// Vector misses made together by one batch (counted in the misses
+    /// too), and the batches that made them.
+    VectorBatchedScenes = "cache.vector.batched",
+    VectorBatches = "cache.vector.batches",
+    /// Missing scenes a batch left to resolve alone: past the frame's
+    /// scratch bound, past a device limit, or not placed on its pages.
+    VectorBatchRefusedScratch = "cache.vector.batch_refused_scratch",
+    VectorBatchRefusedLimit = "cache.vector.batch_refused_limit",
+    VectorBatchUnplaced = "cache.vector.batch_unplaced",
+    /// Batches split in two because the whole was past the scratch bound.
+    VectorBatchSplits = "cache.vector.batch_splits",
+    /// Times the vector cache released its scene scratch.
+    VectorScratchClears = "cache.vector.scratch_clears",
     /// Text runs found rendered.
     TextCacheHits = "cache.text.hits",
     TextCacheMisses = "cache.text.misses",
@@ -171,6 +184,8 @@ counters! {
     /// Pooled render targets reused / allocated.
     TargetPoolHits = "cache.target_pool.hits",
     TargetPoolMisses = "cache.target_pool.misses",
+    /// Idle pooled targets released (past the free budget, trimmed, or idle).
+    TargetPoolEvictions = "cache.target_pool.evictions",
     /// SVG source rasters reused across output translations and rotations.
     SvgRasterHits = "cache.svg_raster.hits",
     SvgRasterMisses = "cache.svg_raster.misses",

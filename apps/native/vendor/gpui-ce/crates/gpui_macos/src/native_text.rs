@@ -13,6 +13,9 @@ use std::{
     rc::{Rc, Weak},
 };
 
+/// The tag of a field in which Escape cancels the edit; see
+/// `NativeTextSlot::set_escape_cancels`.
+pub const ESCAPE_CANCELS: isize = 0x504d_4543;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextKind {
     Primary,
@@ -342,7 +345,11 @@ impl TextDelegate {
             s.emit(TextEvent::Submitted(s.editor.value()));
             return true;
         }
-        if command == objc2::sel!(cancelOperation:) && self.ivars().kind.dense() {
+        let cancels = match &self.ivars().editor {
+            Editor::Field(field) => field.tag() == ESCAPE_CANCELS,
+            Editor::Multiline(_) => false,
+        };
+        if command == objc2::sel!(cancelOperation:) && (self.ivars().kind.dense() || cancels) {
             self.ivars().finish(true);
             if let Some(w) = view.window() {
                 w.makeFirstResponder(Some(&self.ivars().gpui));
@@ -547,6 +554,13 @@ impl NativeTextSlot {
         }
     }
     /// Placeholder for single-line fields (AppKit draws it while editing).
+    /// Escape in this field cancels the edit (the view hears `Cancelled`:
+    /// a search clears itself) instead of committing what was typed.
+    pub fn set_escape_cancels(&self, cancels: bool) {
+        if let Editor::Field(v) = &self.state.editor {
+            v.setTag(if cancels { ESCAPE_CANCELS } else { 0 });
+        }
+    }
     pub fn set_placeholder(&self, text: &str) {
         if let Editor::Field(v) = &self.state.editor {
             v.setPlaceholderString(Some(&NSString::from_str(text)));

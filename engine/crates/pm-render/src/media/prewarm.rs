@@ -270,6 +270,14 @@ impl MediaCache {
                     .filter(|(seen, _)| *seen == current)
                     .map(|(_, src)| src.clone());
                 if let Some(src) = &existing {
+                    // PM_FIX_COLD_DRAWN: a source this renderer has drawn
+                    // recently is warm (its scrub worker owns its decoder),
+                    // whatever the converted-frame cache still holds.
+                    if pm_media::decode::diag::knob("PM_FIX_COLD_DRAWN") == Some(1)
+                        && self.source_seen.contains_key(&v.path)
+                    {
+                        continue;
+                    }
                     let has_frame = match &cached_paths {
                         Some(paths) => paths.contains(v.path.as_path()),
                         None => self.frames.keys().any(|key| key.path == v.path),
@@ -303,6 +311,8 @@ impl MediaCache {
         if jobs.len() < 2 {
             return;
         }
+        pm_media::decode::diag::bump(&pm_media::decode::diag::OPEN_COLD_FRAMES, 1);
+        pm_media::decode::diag::bump(&pm_media::decode::diag::OPEN_COLD_JOBS, jobs.len() as u64);
         // One worker per core at most: probes, indexes and decoder startup
         // are CPU work, and 50-clip projects must not start 50 at once.
         let workers = std::thread::available_parallelism()
