@@ -32,6 +32,26 @@ pub fn close_state(p: Option<&Published>, opening: bool, saving: bool) -> CloseS
         CloseState::Clean
     }
 }
+/// What a Quit waits for at a window that cannot close this moment, when
+/// that is work which ends on its own: a save in flight, a project still
+/// opening, another project operation. The quit goes on when it has ended
+/// (a second Quit offers to quit now meanwhile). `None`: nothing to wait
+/// for, or the window is asking the person something (a recovery choice, an
+/// alert, an open edit), which only they can end.
+fn quit_waits_for(
+    state: CloseState,
+    opening: bool,
+    asking: bool,
+    fenced: bool,
+) -> Option<&'static str> {
+    match state {
+        CloseState::Saving => Some("finishing the save"),
+        CloseState::Busy if opening && !asking => Some("finishing opening the project"),
+        CloseState::Busy | CloseState::Stopped => None,
+        CloseState::Dirty | CloseState::Clean if fenced => Some("finishing a project operation"),
+        CloseState::Dirty | CloseState::Clean => None,
+    }
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -543,13 +563,32 @@ impl Controller {
         if p.is_none() {
             self.session = None;
         }
-        let state = close_state(
-            p.as_deref(),
-            self.opening
-                || self.recovery_pending
-                || !crate::alert::dismiss_notice(&self.host.borrow().window),
-            self.save_pending,
-        );
+        let asking =
+            self.recovery_pending || !crate::alert::dismiss_notice(&self.host.borrow().window);
+        let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
+        // A quit is not refused because of work that ends on its own: it
+        // waits (saying what for) and goes on when the work has ended.
+        let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
+            && self.mcp.operation_in_progress();
+        if intent == Intent::Quit
+            && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
+        {
+            self.closing_note = Some(closing(Intent::Quit, work));
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    // Cancelled meanwhile: nothing to go on with.
+                    if cx.global::<QuitCoordinator>().quitting {
+                        v.request_close(Intent::Quit, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         match state {
             CloseState::Saving => {
                 self.message =
@@ -805,6 +844,36 @@ mod tests {
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// A Quit at a window that is opening a project, saving, or behind
+    /// another project operation waits for it; one at a window that asks
+    /// the person something, or has an edit open, does not.
+    #[test]
+    fn a_quit_waits_for_work_that_ends_on_its_own() {
+        use CloseState::*;
+        assert_eq!(
+            quit_waits_for(Busy, true, false, false),
+            Some("finishing opening the project")
+        );
+        assert_eq!(
+            quit_waits_for(Saving, false, false, false),
+            Some("finishing the save")
+        );
+        assert_eq!(
+            quit_waits_for(Clean, false, false, true),
+            Some("finishing a project operation")
+        );
+        assert_eq!(
+            quit_waits_for(Dirty, false, false, true),
+            Some("finishing a project operation")
+        );
+        // A recovery choice or an alert on screen, an open edit, a stopped
+        // project, and a window that can simply close.
+        assert_eq!(quit_waits_for(Busy, true, true, false), None);
+        assert_eq!(quit_waits_for(Busy, false, false, false), None);
+        assert_eq!(quit_waits_for(Stopped, false, false, false), None);
+        assert_eq!(quit_waits_for(Clean, false, false, false), None);
+        assert_eq!(quit_waits_for(Dirty, false, false, false), None);
     }
     /// A quit the project library refuses is asked about, never only
     /// refused: Cancel is the default, and quitting anyway is offered with
