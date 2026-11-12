@@ -2187,3 +2187,70 @@ The original walkthrough profile and the verified recovered portable project
 are preserved. All application windows and workers launched by this lane are
 closed. Unshipped engine source and a detailed resumption handoff are saved
 outside Git; the worktree is left clean on the compiling native branch.
+
+
+### Overnight speed rounds: fixed baseline (2026-11-12)
+
+The owner approved scene-class budgets at full 1920×1080: Draft ≤1 s/frame
+on every measured scene; Production ≤3 s/frame on standard products and
+≤8 s/frame on glass, polished chrome and caustics. Final is unlimited. The
+environment budget follows its first measurement. These are release-build,
+real-video-export gates over at least 30 frames. The estimate must be within
+−20%/+30% of actual time. Full output size remains the default; any 75% option
+requires an explicit export override. Each speed round must improve the real
+product export by at least 15% or be reverted; at most four speed rounds.
+Temporal reuse and a wavefront rewrite remain outside this effort.
+
+The restarted machine lost the old walkthrough benchmark. The replacement is
+an explicitly new, reproducible bottle product shot, not the recovered user's
+project. `studio-fixtures` emits synthetic OBJ geometry; the kernel's
+`studio3d_benchmarks` example builds portable projects with ordinary imports,
+material/light/camera commands and save/reopen verification. Hero uses a
+uniform emitting screen instead of its original wallpaper; native glass
+roughness uses the contract minimum of 0.02. The environment is terrain with
+320 conifers, sky and sun. All four projects have an animated camera push-in,
+so held-frame reuse cannot make these measurements artificially free.
+
+Round 0 uses one frozen native **development** binary (SHA-256
+`caa519c6aa362f0f65b996da2541b3f933f4f844f43813e2d3aff99c60753742`),
+Production 32–256 spp, 3% convergence and eight total bounces, with CPU OIDN.
+Each row is a real 30-frame 1080p video export, including motion blur, audio,
+readback and video encoding. This engineering baseline is **not** release
+acceptance. Instrumented sample-count readback adds approximately 51–55 ms
+per frame and is included consistently in these totals.
+
+| Scene | Real export s/frame | Mean actual spp | Trace ms/frame | Guides + readback ms/frame | CPU OIDN ms/frame |
+|---|---:|---:|---:|---:|---:|
+| New bottle product shot | 10.361 | 79.75 | 8960 | 155 | 976 |
+| Hero | 4.587 | 38.60 | 3115 | 172 | 1098 |
+| Chrome set, including glass | 27.779 | 116.91 | 25790 | 271 | 1335 |
+| Terrain + 320 conifers | 72.524 | 144.39 | 70897 | 292 | 938 |
+
+Two-frame **diagnostic** fixed-32-spp exports, using the same binary, isolate
+warm tracing from startup and denoising. Eight-bounce tracing takes 1.113 s
+for the bottle, 1.077 s for Hero, 3.257 s for chrome and 9.323 s for the
+forest. Six bounces takes 1.087 s for the bottle, only 2.3% faster than eight.
+Thus the adaptive tail, sparse remaining pixels and convergence policy
+explain much more of the bottle's inflated per-sample cost than its last two
+bounce slots. These two-frame diagnostics are not speed-gate measurements.
+
+The automated noise suite now renders each accepted frame with seeds 0 and
+19, denoises both, and requires direct luma difference RMS <0.006 over
+reference-smooth pixels, both whole image and object ROI (>100 pixels).
+This catches low-frequency boiling as well as grain. Existing still limits
+remain unchanged: whole/ROI RMS <0.02, smooth noise <0.006, block bias p95
+<0.012. References remain independent 4096-spp Monte Carlo, with independently
+rotated emitter/photon IDs. No reference or threshold relaxation is allowed.
+The new direct-difference full-HD gate has not yet been certified on this
+baseline; the earlier small-image test predates this stronger flicker check.
+
+Reproduce the synthetic inputs with `cargo run -p pm-studio --bin
+studio-fixtures -- <inputs>`, then from the native workspace run `cargo run
+-p pm-kernel --example studio3d_benchmarks -- <inputs> <projects>`. Build and
+snapshot the native executable together with `pm-glsl-compiler` while holding
+the shared build lock, so another worktree cannot replace the measured binary.
+Run `python3 apps/native/scripts/studio3d-export-perf.py --exe <snapshot>
+--project <projects>/product-shot.pmv --out <new-evidence-directory> --frames
+30 --sample-counts`; unbundled snapshots may supply `--library-dir <ffmpeg-lib>`.
+`--fixed-spp 32 --bounces 8` is diagnostic only. Evidence stays outside Git.
+All generation/build/render commands require the shared lock and storage floor.

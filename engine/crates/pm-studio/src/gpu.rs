@@ -84,6 +84,9 @@ pub struct PresentTarget<'a> {
 /// guide-pass GPU completion; normal rendering does not add that barrier.
 #[derive(Clone,Copy,Debug,Default,serde::Serialize)]
 pub struct PipelineTimings {
+    pub sample_mean: Option<f64>,
+    pub sample_p95: Option<u32>,
+    pub sample_statistics_ms: f64,
     pub trace_ms:f64,
     /// Queued Live: trace_ms is submission time; guides_ms includes trace completion.
     pub trace_deferred:bool,
@@ -940,6 +943,16 @@ impl Renderer {
         if let Some(progress)=progress { let _=progress(spp-left,spp); }
         let elapsed=start.elapsed().as_secs_f64()*1000.;
         self.timings.trace_ms=elapsed;
+        if !self.live && self.samples>0 && std::env::var_os("STUDIO_SAMPLE_COUNTS").is_some() {
+            let start=Instant::now();let counts=self.sample_counts();
+            let mut hist=vec![0usize;4097];let mut sum=0.;
+            for n in counts.iter().copied(){sum+=f64::from(n);hist[(n as usize).min(4096)]+=1;}
+            let mut total=0;let mut p95=0;
+            for (n,count) in hist.iter().enumerate(){total+=count;if total*100>=counts.len()*95 {p95=n as u32;break;}}
+            self.timings.sample_mean=Some(sum/counts.len().max(1) as f64);
+            self.timings.sample_p95=Some(p95);
+            self.timings.sample_statistics_ms=start.elapsed().as_secs_f64()*1000.;
+        }
         self.timings.trace_deferred=!wait;
         elapsed
     }
@@ -1194,7 +1207,7 @@ impl Renderer {
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
-        let mut timings=PipelineTimings {trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,convergence_check_ms:self.timings.convergence_check_ms,..Default::default()};
+        let mut timings=PipelineTimings {sample_mean:self.timings.sample_mean,sample_p95:self.timings.sample_p95,sample_statistics_ms:self.timings.sample_statistics_ms,trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,convergence_check_ms:self.timings.convergence_check_ms,..Default::default()};
         let (w, h) = (self.width, self.height);
         if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;

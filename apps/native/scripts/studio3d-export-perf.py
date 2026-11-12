@@ -93,9 +93,13 @@ def main():
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory outside Git")
-    parser.add_argument("--frames", type=int, default=3)
+    parser.add_argument("--frames", type=int, default=30)
+    parser.add_argument("--library-dir", type=Path, help="FFmpeg libraries for an unbundled benchmark snapshot")
+    parser.add_argument("--sample-counts", action="store_true", help="record measured per-pixel counts and readback overhead")
+    parser.add_argument("--fixed-spp", type=int, help="diagnostic fixed samples with the chosen preset's other settings")
     parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--start", type=float, default=0)
+    parser.add_argument("--bounces", type=int, help="diagnostic total bounce limit")
     parser.add_argument("--preset", choices=["draft", "preview", "production", "final"], default="production")
     parser.add_argument("--prepare-only", action="store_true", help="validate the isolated MCP setup without rendering")
     parser.add_argument("--secondary-tree", action="store_true", help="explicit experimental engine A/B")
@@ -104,6 +108,10 @@ def main():
     args = parser.parse_args()
     if args.frames < 1 or not math.isfinite(args.fps) or args.fps <= 0 or not math.isfinite(args.start) or args.start < 0:
         parser.error("frames/fps must be positive; start must be nonnegative")
+    if args.fixed_spp is not None and not 1 <= args.fixed_spp <= 4096:
+        parser.error("fixed spp must be 1..4096")
+    if args.bounces is not None and not 1 <= args.bounces <= 32:
+        parser.error("bounces must be 1..32")
     if not args.prepare_only and free_bytes() < 5_000_000_000:
         raise SystemExit("Below 5 GB: no export started")
     repo = Path(__file__).resolve().parents[3]
@@ -123,9 +131,16 @@ def main():
     profile = out / "profile"
     profile.mkdir()
     env = dict(os.environ, STUDIO_TIMINGS="1", PM_EXPORT_PROFILE="1")
+    if args.library_dir:
+        env["DYLD_LIBRARY_PATH"] = str(args.library_dir.resolve(strict=True))
+    if args.sample_counts:
+        env["STUDIO_SAMPLE_COUNTS"] = "1"
     env["STUDIO_SECONDARY_LIGHT_TREE"] = "1" if args.secondary_tree else "0"
     env["STUDIO_SINGLE_LIGHT_TREE"] = "1" if args.single_tree else "0"
     env["STUDIO_STRATIFIED_LIGHTS"] = "1" if args.stratified_lights else "0"
+    def interrupted(signum, frame):
+        raise InterruptedError(f"Profiler interrupted by signal {signum}")
+    signal.signal(signal.SIGTERM, interrupted)
     started = time.monotonic()
     with (out / "native.log").open("wb") as log:
         process = subprocess.Popen([str(executable), "--powermove-mcp", "--profile", str(profile), str(cloned)],
@@ -148,15 +163,36 @@ def main():
                 return
             if free_bytes() < 5_000_000_000:
                 raise RuntimeError("Below 5 GB: no export started")
+            export_quality=args.preset
+            if args.fixed_spp is not None or args.bounces is not None:
+                export_quality={"preset":args.preset}
+                if args.fixed_spp is not None:
+                    export_quality.update(minSamples=args.fixed_spp,maxSamples=args.fixed_spp,noiseThreshold=0)
+                if args.bounces is not None:
+                    export_quality["maxBounces"]=args.bounces
             result = client.tool("export_video", {"name": "Studio performance", "range": "work", "audio": True,
-                                                   "motionBlur": True, "studioQuality": args.preset})
+                                                   "motionBlur": True, "studioQuality": export_quality})
             while result.get("status") == "running":
                 time.sleep(0.2)
                 result = client.tool("export_video", {"jobId": result["jobId"]})
             done = time.monotonic()
             if result.get("status") not in (None, "completed", "complete", "success", "succeeded"):
                 raise RuntimeError(f"Export did not complete: {result}")
-            report = {"executable_sha256": executable_hash, "input_sha256": source_hash, "preset": args.preset, "frames": args.frames,
+            timing_log=(out / "native.log").read_text(errors="replace")
+            frames=[]
+            for line in timing_log.splitlines():
+                if not line.startswith("STUDIO_FRAME_TIMING "):
+                    continue
+                frame={}
+                for field in ["prepare_ms","total_ms","trace_ms","guides_ms","guide_readback_ms","denoise_ms","sample_statistics_ms"]:
+                    match=re.search(r"\b"+field+r"[=:]\s*([0-9.eE+-]+)",line)
+                    if match:frame[field]=float(match[1])
+                for field in ["sample_mean","sample_p95"]:
+                    match=re.search(r"\b"+field+r": Some\(([0-9.eE+-]+)\)",line)
+                    if match:frame[field]=float(match[1])
+                frames.append(frame)
+            report = {"frame_timings":frames,"executable_sha256": executable_hash, "input_sha256": source_hash, "preset": args.preset, "frames": args.frames,
+                      "fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
                       "secondary_light_tree": args.secondary_tree,
                       "single_light_tree": args.single_tree,
                       "stratified_lights": args.stratified_lights,

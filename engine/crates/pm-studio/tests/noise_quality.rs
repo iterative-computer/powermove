@@ -10,6 +10,9 @@ use pm_studio::{
 use std::time::Instant;
 
 fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f64, usize) {
+    metrics_with_guide(actual, reference, reference, w, h)
+}
+fn metrics_with_guide(actual: &[u8], reference: &[u8], guide: &[u8], w: usize, h: usize) -> (f64,f64,f64,usize) {
     let luma =
         |p: &[u8]| (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.;
     let r: Vec<_> = reference.chunks_exact(4).map(luma).collect();
@@ -18,6 +21,7 @@ fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f6
         .zip(&r)
         .map(|(a, r)| luma(a) - r)
         .collect();
+    let g:Vec<_>=guide.chunks_exact(4).map(luma).collect();
     let mut smooth = vec![false; w * h];
     let mut squared = 0.;
     let mut noise = 0.;
@@ -25,14 +29,14 @@ fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f6
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let i = y * w + x;
-            if reference[i * 4 + 3] < 250 {
+            if guide[i * 4 + 3] < 250 {
                 continue;
             }
             squared += error[i] * error[i];
             let neighbors = [i - 1, i + 1, i - w, i + w];
             if neighbors
                 .iter()
-                .all(|j| reference[j * 4 + 3] >= 250 && (r[i] - r[*j]).abs() < 0.025)
+                .all(|j| guide[j * 4 + 3] >= 250 && (g[i] - g[*j]).abs() < 0.025)
             {
                 smooth[i] = true;
                 let mean = neighbors.iter().map(|j| error[*j]).sum::<f64>() / 4.;
@@ -54,7 +58,7 @@ fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f6
         }
     }
     biases.sort_by(f64::total_cmp);
-    let valid = reference
+    let valid = guide
         .chunks_exact(4)
         .filter(|p| p[3] >= 250)
         .count()
@@ -69,6 +73,26 @@ fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f6
         n,
     )
 }
+fn flicker_difference(actual:&[u8],second:&[u8],guide:&[u8],w:usize,h:usize)->(f64,usize) {
+    let luma=|p:&[u8]|(0.2126*p[0] as f64+0.7152*p[1] as f64+0.0722*p[2] as f64)/255.;
+    let mut sum=0.;let mut count=0;
+    for y in 1..h-1 {for x in 1..w-1 {
+        let i=y*w+x;let g=&guide[4*i..4*i+4];
+        if g[3]<250 {continue;}
+        if [i-1,i+1,i-w,i+w].iter().any(|j|guide[4*j+3]<250 || (luma(g)-luma(&guide[4*j..4*j+4])).abs()>=0.025){continue;}
+        let delta=luma(&actual[4*i..4*i+4])-luma(&second[4*i..4*i+4]);sum+=delta*delta;count+=1;
+    }}
+    ((sum/count.max(1) as f64).sqrt(),count)
+}
+#[test]
+fn flicker_detects_smooth_boil_not_only_high_frequency_speckle() {
+    let a=vec![128u8;32*32*4];let mut guide=a.clone();let mut b=a.clone();
+    for p in guide.chunks_exact_mut(4){p[3]=255;}
+    for p in b.chunks_exact_mut(4){p[..3].fill(132);}
+    assert!(flicker_difference(&a,&a,&guide,32,32).0<1e-12);
+    assert!(flicker_difference(&a,&b,&guide,32,32).0>0.006);
+}
+
 fn save(name: &str, w: u32, h: u32, pixels: &[u8]) {
     let Some(root) = std::env::var_os("PM_STUDIO_NOISE_OUT") else {
         return;
@@ -161,9 +185,27 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 })
                 .0;
             let counts = renderer.sample_counts();
+            let ids=renderer.first_hit_ids();
+            let frame_ms=start.elapsed().as_secs_f64()*1000.;
+            renderer.set_time_seed(19);
+            renderer.trace(max_samples,8,true,0);
+            let second=renderer.finish_with_layers(&|color,shade,a,n|{
+                denoiser.run_layers_interruptible(&mut [color,shade],a,n,4,w as usize,h as usize,None)
+            }).0;
+            renderer.set_time_seed(0);
+            let flicker=flicker_difference(&actual,&second,&reference,w as usize,h as usize);
+            let mut roi=reference.clone();
+            for (p,id) in roi.chunks_exact_mut(4).zip(ids.iter().copied()) {
+                if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){p[3]=0;}
+            }
+            let flicker_roi=flicker_difference(&actual,&second,&roi,w as usize,h as usize);
+            println!("FLICKER_GATE {}",serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"seeds":[0,19],"whole":flicker,"object":flicker_roi,"smooth_difference_rms_limit":0.006}));
+            if ![flicker,flicker_roi].iter().all(|&(r,n)|r<0.006&&n>100){
+                failures.push(format!("{name}/{quality} flicker whole={flicker:?} object={flicker_roi:?}"));
+            }
             let object_metrics=if w>=1920 {
-                let ids=renderer.first_hit_ids();let mut masked=reference.clone();
-                for (pixel,id) in masked.chunks_exact_mut(4).zip(ids) {
+                let mut masked=reference.clone();
+                for (pixel,id) in masked.chunks_exact_mut(4).zip(ids.iter().copied()) {
                     if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){pixel[3]=0;}
                 }
                 Some(metrics(&actual,&masked,w as usize,h as usize))
@@ -171,7 +213,7 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
             let (rms, noise, bias, pixels) = metrics(&actual, &reference, w as usize, h as usize);
             println!(
                 "NOISE_GATE {}",
-                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":start.elapsed().as_secs_f64()*1000.})
+                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":frame_ms})
             );
             save(&format!("{name}-{quality}"), w, h, &actual);
             // Normalized sRGB code-value limits catch speckle and low-frequency
