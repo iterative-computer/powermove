@@ -19895,6 +19895,8 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
                   "label": "Search media",
                   "metadata": {
                     "hostValue": 0,
+                    "placeholder": "Search",
+                    "search": true,
                   },
                   "preventDefault": {
                     "keydown": [

@@ -248,8 +248,10 @@ impl Render for TextField {
                     self.tokens.metrics.field
                 }))
             })
-            // A well with a unit trades side padding for the value's room.
-            .px(px(if bare {
+            // Every value starts on one inset down a column; a well with a
+            // unit trades its trailing padding for the value's room.
+            .pl(px(if bare { 0. } else { self.tokens.metrics.gap }))
+            .pr(px(if bare {
                 0.
             } else if self.unit.is_some() {
                 self.tokens.space.xs
@@ -267,7 +269,7 @@ impl Render for TextField {
             })
             .text_color(rgb(self.tokens.colors.text))
             .text_size(px(self.tokens.typography.body))
-            .font_family(".AppleSystemUIFont")
+            .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
