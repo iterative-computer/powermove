@@ -103,23 +103,26 @@ outer shadows under the whole element, so translucent surfaces (`Panel`,
 Real system material through AppKit, for what the system itself makes glass:
 
 - Toolbar and title bar controls: the window's `NSToolbar` in the regular
-  unified style, at the system's own height and spacing. Its items are Home,
-  the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
-  own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
+  unified style, at the system's own height and spacing. Its items are the
+  project strip (Home and the window's tab group drawn by `Host::sync_tabs`;
+  AppKit's own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
   and hidden from the menus and by their tabs, not from the toolbar.
-- The project strip (Home and the open projects, in the toolbar's leading
-  glass) is one control drawn in cells. Every cell stands 4 pt inside the
-  glass on all four sides, so a pill's corner is the glass's corner less the
-  inset. Tabs share one width: the widest while there is room, then narrower
-  together down to a readable least; past that the strip shows the run that
-  holds the selected tab and a pull-down lists every project. A title stands
-  in the middle of its tab and is cut in the middle, keeping the start and
-  the end of a name. The leading slot holds the close button (under the
-  pointer) or the edited dot and is always kept, so the title never moves.
-  The selected cell is a raised neutral pill; the one under the pointer a
-  wash of the same shape; hairlines part resting tabs and vanish beside
-  either. The pull-down and New Project are round targets after the last
-  rule, each in a cell that shows the strip's wash under the pointer. A tab is carried along the strip to reorder it.
+- The project strip (Home, the open projects, New Project) is not glass: it
+  is an unbordered toolbar item of quiet cells straight on the bar, 4 pt
+  apart, each the control height with an 8 pt corner. A tab is as wide as
+  its title asks (14 pt inside each end, at most 180); short of room the
+  long titles narrow together, cut in the middle so the start and the end
+  of a name stay; past the narrowest the strip shows the run that holds the
+  selected tab and a quiet pull-down lists every project. One neutral ink
+  fills the showing project's cell (8 %) and the cell under the pointer;
+  nothing else has a fill, an edge or a shadow. The showing title is the
+  primary ink, the others muted, all in one size and weight. An edited
+  project carries a 6 pt dot before its title. Under the pointer the close
+  button slides in from the trailing end while the title's end fades out
+  under it (a mask), so the title never moves. Home is a glyph cell before
+  the first tab, New Project one after the last. A tab is carried along the
+  strip to reorder it and changes places with a neighbour once its leading
+  edge passes that tab's middle.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
   heavy tint of the window colour) in a column under the GPUI view, which
   leaves that column unpainted. The glass runs on under the content sheet's

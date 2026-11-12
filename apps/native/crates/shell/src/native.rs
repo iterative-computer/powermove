@@ -16,7 +16,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::{CAGradientLayer, CATransaction};
 use pm_design::{Accessibility, Material, Scheme, Surface, Tokens};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
@@ -833,19 +834,19 @@ struct Tab {
     selected: bool,
 }
 struct TabIvars {
-    /// The close button in the leading slot; Home has none.
+    /// A project tab's close button, at the trailing end under the pointer.
+    /// Home and the strip's own buttons have none.
     close: Option<Retained<NSButton>>,
-    /// The title (a project) or the glyph button (Home): its ink follows
-    /// the cell's state.
+    /// The title (a project) or the glyph button (Home, the strip's own
+    /// buttons): its ink follows the cell's state.
     label: Retained<NSView>,
+    /// The title's mask: its end fades out under the close button.
+    fade: Option<Retained<CAGradientLayer>>,
     edited: bool,
     selected: Cell<bool>,
     hovered: Cell<bool>,
     /// Carried along the strip by the pointer.
     lifted: Cell<bool>,
-    /// One of the strip's own buttons (every project, a new one): quieter
-    /// ink than a tab's.
-    tool: Cell<bool>,
 }
 define_class!(
     /// One cell of the toolbar's project strip: a project tab (its title,
@@ -908,6 +909,7 @@ impl TabView {
         frame: NSRect,
         label: Retained<NSView>,
         close: Option<Retained<NSButton>>,
+        fade: Option<Retained<CAGradientLayer>>,
         edited: bool,
         selected: bool,
     ) -> Retained<Self> {
@@ -916,44 +918,70 @@ impl TabView {
                 super(Self::alloc(mtm).set_ivars(TabIvars {
                     close,
                     label,
+                    fade,
                     edited,
                     selected: Cell::new(selected),
                     hovered: Cell::new(false),
                     lifted: Cell::new(false),
-                    tool: Cell::new(false),
                 })),
                 initWithFrame: frame
             ]
         }
     }
     fn hover(&self, hovered: bool) {
-        let TabIvars { close, edited, .. } = self.ivars();
         self.ivars().hovered.set(hovered);
-        if let Some(close) = close {
-            let (name, points) = if hovered || !edited {
-                ("xmark", 8.5)
-            } else {
-                ("circle.fill", 6.)
-            };
-            let config =
-                NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
-                    NSFontWeightSemibold
-                });
-            let image = symbol(name, "Close Project");
-            close.setImage(Some(
-                &image.imageWithSymbolConfiguration(&config).unwrap_or(image),
-            ));
-            close.setHidden(!hovered && !edited);
-        }
+        self.reveal(hovered, true);
         self.restyle();
+    }
+    /// The close button slides in from the trailing end while the title's
+    /// end fades out under it, so the title itself never moves. Reduce
+    /// Motion (and a tab just built) places both at once.
+    fn reveal(&self, shown: bool, glide: bool) {
+        let TabIvars {
+            close, fade, label, ..
+        } = self.ivars();
+        let Some(close) = close else {
+            return;
+        };
+        let glide =
+            glide && !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        let seconds = if glide { 0.16 } else { 0. };
+        let rest = self.bounds().size.width - TAB_CLOSE_PAD - TAB_CLOSE;
+        let to = NSPoint::new(
+            if shown { rest } else { rest + TAB_CLOSE_SLIDE },
+            close.frame().origin.y,
+        );
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(seconds);
+        unsafe {
+            let animator: Retained<NSButton> = msg_send![&**close, animator];
+            animator.setFrameOrigin(to);
+            animator.setAlphaValue(if shown { 1. } else { 0. });
+        }
+        NSAnimationContext::endGrouping();
+        if let Some(fade) = fade {
+            let frame = label.frame();
+            let at = |x: f64| ((x - frame.origin.x) / frame.size.width.max(1.)).clamp(0., 1.);
+            let (from, to) = if shown {
+                (at(rest - TAB_FADE), at(rest))
+            } else {
+                (1., 1.)
+            };
+            let stops = [0., from, to, 1.].map(NSNumber::new_f64);
+            CATransaction::begin();
+            CATransaction::setAnimationDuration(seconds);
+            fade.setLocations(Some(&NSArray::from_retained_slice(&stops)));
+            CATransaction::commit();
+        }
     }
     fn select(&self, selected: bool) {
         if self.ivars().selected.replace(selected) != selected {
             self.restyle();
         }
     }
-    /// The ink of the title or glyph for the cell's state, and a repaint of
-    /// the cell and of the strip's separators beside it.
+    /// The ink of the title or glyph for the cell's state, and a repaint.
+    /// The showing project's title is the primary ink; every other title
+    /// and glyph is muted, and a step quieter in a background window.
     fn restyle(&self) {
         let TabIvars {
             label,
@@ -970,82 +998,62 @@ impl TabView {
         if let Some(text) = label.downcast_ref::<NSTextField>() {
             text.setTextColor(Some(&ink));
         } else if let Some(button) = label.downcast_ref::<NSButton>() {
-            // A glyph is the toolbar's glyph ink, as New Project's beside
-            // the tabs: the pill alone says Home is showing.
-            let glyph = if active && !self.ivars().tool.get() {
-                NSColor::labelColor()
-            } else {
-                ink
-            };
-            button.setContentTintColor(Some(&glyph));
+            button.setContentTintColor(Some(&ink));
         }
         if let Some(close) = close {
             close.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
         }
         self.setNeedsDisplay(true);
-        if let Some(strip) = unsafe { self.superview() } {
-            strip.setNeedsDisplay(true);
-        }
     }
+    /// One soft neutral fill, straight on the toolbar: the showing project
+    /// (or Home), the cell under the pointer, and a step deeper for a tab
+    /// carried along the strip. No edge, no shadow, never the accent. An
+    /// edited project carries a dot before its title.
     fn draw(&self) {
         let TabIvars {
             selected,
             hovered,
             lifted,
+            edited,
             ..
         } = self.ivars();
-        let raised = selected.get() || lifted.get();
-        if !raised && !hovered.get() {
-            return;
-        }
         let dark = dark_appearance(self);
         let active = self.window().is_none_or(|w| w.isMainWindow());
         let bounds = self.bounds();
-        let radius = bounds.size.height / 2.;
-        let white = |white: f64, alpha: f64| {
-            NSColor::colorWithSRGBRed_green_blue_alpha(white, white, white, alpha)
-        };
-        let pill = |rect: NSRect, radius: f64| {
-            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius)
-        };
-        if !raised {
-            // Under the pointer: a wash of the pill's shape.
-            white(if dark { 1. } else { 0. }, if dark { 0.07 } else { 0.05 }).setFill();
-            pill(bounds, radius).fill();
-            return;
+        if selected.get() || hovered.get() || lifted.get() {
+            let shape = || {
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                    bounds, TAB_RADIUS, TAB_RADIUS,
+                )
+            };
+            if lifted.get() {
+                // Carried over its neighbours: their titles do not show
+                // through it.
+                NSColor::windowBackgroundColor().setFill();
+                shape().fill();
+            }
+            let ink = if dark { 1. } else { 0. };
+            let alpha = match (lifted.get(), active) {
+                (true, _) => TAB_FILL * 1.75,
+                (false, true) => TAB_FILL,
+                (false, false) => TAB_FILL * 0.6,
+            };
+            NSColor::colorWithSRGBRed_green_blue_alpha(ink, ink, ink, alpha).setFill();
+            shape().fill();
         }
-        // Raised and neutral, never the accent: a lift of the glass in dark,
-        // paper with a hairline in light. Quieter in a background window.
-        let (fill, edge) = match (dark, active) {
-            (true, true) => (white(1., 0.16), white(1., 0.1)),
-            (true, false) => (white(1., 0.1), white(1., 0.06)),
-            (false, true) => (white(1., 0.96), white(0., 0.1)),
-            (false, false) => (white(1., 0.7), white(0., 0.07)),
-        };
-        if !dark {
-            // A soft contact shadow under the paper pill.
-            NSGraphicsContext::saveGraphicsState_class();
-            let shadow = NSShadow::new();
-            shadow.setShadowColor(Some(&white(0., if active { 0.16 } else { 0.08 })));
-            shadow.setShadowOffset(NSSize::new(0., -0.5));
-            shadow.setShadowBlurRadius(1.5);
-            shadow.set();
-            fill.setFill();
-            pill(bounds, radius).fill();
-            NSGraphicsContext::restoreGraphicsState_class();
+        if *edited {
+            if active {
+                NSColor::secondaryLabelColor()
+            } else {
+                NSColor::tertiaryLabelColor()
+            }
+            .setFill();
+            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(TAB_PAD, ((bounds.size.height - TAB_DOT) / 2.).round()),
+                NSSize::new(TAB_DOT, TAB_DOT),
+            ))
+            .fill();
         }
-        fill.setFill();
-        pill(bounds, radius).fill();
-        let ring = pill(
-            NSRect::new(
-                NSPoint::new(0.25, 0.25),
-                NSSize::new(bounds.size.width - 0.5, bounds.size.height - 0.5),
-            ),
-            radius - 0.25,
-        );
-        ring.setLineWidth(0.5);
-        edge.setStroke();
-        ring.stroke();
     }
 }
 /// Whether `view` draws in a dark appearance.
@@ -1055,56 +1063,15 @@ fn dark_appearance(view: &NSView) -> bool {
         .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&list))
         .is_some_and(|n| n.to_string().contains("Dark"))
 }
-struct StripIvars {
-    /// No separators while a tab is carried along the strip.
-    carrying: Cell<bool>,
-}
 define_class!(
-    /// The project strip: the tabs in a row, then the pull-down that lists
-    /// every project (once they no longer fit) and New Project. It draws the
-    /// hairlines that part resting tabs; a selected, hovered or carried tab
-    /// has none beside it.
+    /// The project strip, straight on the toolbar with no glass of its own:
+    /// Home, the tabs in a row, then the pull-down that lists every project
+    /// (once they no longer fit) and New Project. Each is a quiet cell.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMShellTabStrip"]
-    #[ivars = StripIvars]
     struct TabStrip;
-    impl TabStrip {
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _: NSRect) {
-            if self.ivars().carrying.get() {
-                return;
-            }
-            let tabs = strip_tabs(self);
-            let quiet = |tab: &TabView| {
-                let i = tab.ivars();
-                !(i.selected.get() || i.hovered.get() || i.lifted.get())
-            };
-            let dark = dark_appearance(self);
-            let ink = if dark { 1. } else { 0. };
-            NSColor::colorWithSRGBRed_green_blue_alpha(ink, ink, ink, if dark { 0.14 } else { 0.12 })
-                .setFill();
-            let height = self.bounds().size.height;
-            let rule = (height * 0.5).round();
-            for (i, tab) in tabs.iter().enumerate() {
-                // After the last tab the rule parts the tabs from the
-                // strip's own buttons.
-                let (next, gap) = match tabs.get(i + 1) {
-                    Some(next) => (quiet(next), TAB_GAP),
-                    None => (true, TAB_TOOLS_GAP),
-                };
-                if !(quiet(tab) && next) {
-                    continue;
-                }
-                let frame = tab.frame();
-                let x = (frame.origin.x + frame.size.width + gap / 2. - 0.5).floor() + 0.25;
-                NSBezierPath::fillRect(NSRect::new(
-                    NSPoint::new(x, (height - rule) / 2.),
-                    NSSize::new(0.5, rule),
-                ));
-            }
-        }
-    }
+    impl TabStrip {}
 );
 /// The project tabs of `strip`, in the order they stand.
 fn strip_tabs(strip: &NSView) -> Vec<Retained<TabView>> {
@@ -1208,10 +1175,6 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             cell.ivars().lifted.set(on);
             cell.setNeedsDisplay(true);
         }
-        if let Some(strip) = strip.downcast_ref::<TabStrip>() {
-            strip.ivars().carrying.set(on);
-            strip.setNeedsDisplay(true);
-        }
     };
     button.highlight(true);
     let mut target = index;
@@ -1244,11 +1207,15 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         }
         let x = (home.x + by).clamp(first, last.max(first));
         tab.setFrameOrigin(NSPoint::new(x, home.y));
-        let centre = x + width / 2.;
+        // Tabs are as wide as their titles: it changes places with a
+        // neighbour once the edge it leads with passes that tab's middle.
         let landing = frames
             .iter()
             .enumerate()
-            .filter(|(i, f)| *i != index && f.origin.x + f.size.width / 2. < centre)
+            .filter(|(i, f)| {
+                let middle = f.origin.x + f.size.width / 2.;
+                (*i < index && middle <= x) || (*i > index && middle < x + width)
+            })
             .count();
         if landing != target {
             target = landing;
@@ -1374,33 +1341,54 @@ fn review_drag(strip: &NSView, number: isize, right: bool, hold: f64, press: boo
     let down = event(NSEventType::LeftMouseDown, from.x);
     after(0.05, Box::new(move || button.mouseDown(&down)));
 }
-/// The tabs the strip shows: where the run starts in the group, how many,
-/// the one width they all share, and whether the rest go to the pull-down.
-/// Every tab is the same width: `TAB_MAX` while there is room, then they
+/// The widest any tab may be for `natural` widths, each held to it, to fit
+/// `room` with the gaps between them: `TAB_MAX` while everything fits, else
+/// the long titles narrow together and the short ones keep their width.
+fn tab_cap(natural: &[f64], room: f64) -> f64 {
+    let mut sorted: Vec<f64> = natural.iter().map(|n| n.min(TAB_MAX)).collect();
+    sorted.sort_by(f64::total_cmp);
+    let mut left = room - sorted.len().saturating_sub(1) as f64 * TAB_GAP;
+    for (i, n) in sorted.iter().enumerate() {
+        let rest = (sorted.len() - i) as f64;
+        if n * rest > left {
+            return (left / rest).floor();
+        }
+        left -= n;
+    }
+    TAB_MAX
+}
+/// The tabs the strip shows: where the run starts in the group, the width of
+/// each tab in it, and whether the rest go to the pull-down. A tab is as
+/// wide as its title asks, up to `TAB_MAX`; short of room the long ones
 /// narrow together down to `TAB_MIN`; past that the strip shows the run that
 /// holds the selected tab, widened to fill what the pull-down leaves.
-fn tab_layout(count: usize, selected: usize, room: f64) -> (usize, usize, f64, bool) {
-    let count = count.max(1);
-    let each = |shown: usize, room: f64| {
-        ((room - shown.saturating_sub(1) as f64 * TAB_GAP) / shown as f64).floor()
+fn tab_layout(natural: &[f64], selected: usize, room: f64) -> (usize, Vec<f64>, bool) {
+    let count = natural.len();
+    if count == 0 {
+        return (0, vec![], false);
+    }
+    let selected = selected.min(count - 1);
+    let held = |cap: f64, run: &[f64]| run.iter().map(|n| n.min(cap)).collect::<Vec<_>>();
+    let cap = tab_cap(natural, room);
+    if cap >= TAB_MIN || count == 1 {
+        return (0, held(cap.max(TAB_MIN), natural), false);
+    }
+    let room = room - TAB_MORE;
+    let least = held(TAB_MIN, natural);
+    let fits = |from: usize, to: usize| {
+        least[from..=to].iter().sum::<f64>() + (to - from) as f64 * TAB_GAP <= room
     };
-    let overflow = each(count, room) < TAB_MIN;
-    let (shown, room) = if overflow {
-        let room = room - TAB_MORE;
-        (
-            (((room + TAB_GAP) / (TAB_MIN + TAB_GAP)).floor() as usize).clamp(1, count),
-            room,
-        )
-    } else {
-        (count, room)
-    };
-    let start = (selected + 1).saturating_sub(shown).min(count - shown);
-    (
-        start,
-        shown,
-        each(shown, room).clamp(TAB_MIN, TAB_MAX),
-        overflow,
-    )
+    // The run slides only as far as it must to hold the selected tab.
+    let mut start = 0;
+    while start < selected && !fits(start, selected) {
+        start += 1;
+    }
+    let mut end = selected;
+    while end + 1 < count && fits(start, end + 1) {
+        end += 1;
+    }
+    let run = &natural[start..=end];
+    (start, held(tab_cap(run, room).max(TAB_MIN), run), true)
 }
 /// Hides AppKit's own tab bar in `window`'s title bar. The project tabs are
 /// drawn in the toolbar from the same tab group; the system's row under the
@@ -1500,31 +1488,33 @@ fn move_tab(window: &NSWindow, by: isize) {
     hide_system_tab_bar(window);
 }
 /// Widest a project tab grows; its title truncates in the middle.
-const TAB_MAX: f64 = 168.;
-/// Narrowest: the close slot and enough of a name to tell projects apart.
-const TAB_MIN: f64 = 104.;
-const TAB_GAP: f64 = 2.;
-/// The strip's cells stand this far inside the toolbar's glass on every
-/// side, so a pill's corner is the glass's corner less the inset.
-const TAB_INSET: f64 = 4.;
-/// Home's cell: a glyph in a pill of the tabs' height.
-const TAB_HOME: f64 = 36.;
-/// A tab's leading slot (the close button, or the edited dot) and what its
-/// title keeps clear of the other end. A title stands in the middle of its
-/// tab while that keeps it clear of the slot; a longer one starts at the
-/// slot and runs to `TAB_PAD` from the trailing end. The slot is always
-/// kept, so the title never moves when the button shows.
-const TAB_SLOT: f64 = 20.;
-const TAB_PAD: f64 = 8.;
-/// Between the last tab and the strip's own buttons, with the rule in it.
-const TAB_TOOLS_GAP: f64 = 8.;
-/// The pull-down that lists every project once they no longer fit, with the
-/// space after it.
-const TAB_MORE: f64 = 30.;
-/// Where the strip starts before the toolbar has laid it out (the window
-/// buttons and Home), the tools' width before they exist, and the clear
-/// space kept between the strip and the tools.
-const TAB_LEADING: f64 = 138.;
+const TAB_MAX: f64 = 180.;
+/// Narrowest a long title's tab gets: enough of a name to tell projects apart.
+const TAB_MIN: f64 = 96.;
+/// Between the strip's cells.
+const TAB_GAP: f64 = 4.;
+/// A cell's corner, and the alpha of the one neutral ink that fills the
+/// showing project's cell and the cell under the pointer.
+const TAB_RADIUS: f64 = 8.;
+const TAB_FILL: f64 = 0.08;
+/// A title stands this far inside each end of its tab.
+const TAB_PAD: f64 = 14.;
+/// An edited project's dot before its title, and the space after the dot.
+const TAB_DOT: f64 = 6.;
+const TAB_DOT_GAP: f64 = 6.;
+/// The close button: its side, how far it stands from the tab's trailing
+/// end, how far it slides in, and how much of the title fades out before it.
+const TAB_CLOSE: f64 = 16.;
+const TAB_CLOSE_PAD: f64 = 8.;
+const TAB_CLOSE_SLIDE: f64 = 6.;
+const TAB_FADE: f64 = 14.;
+/// The pull-down that lists every project once they no longer fit: a cell
+/// of the control height and the gap after it.
+const TAB_MORE: f64 = 32.;
+/// Where the strip starts before the toolbar has laid it out (after the
+/// window buttons), the tools' width before they exist, and the clear space
+/// kept between the strip and the tools.
+const TAB_LEADING: f64 = 92.;
 const TAB_TOOLS: f64 = 300.;
 const TAB_CLEAR: f64 = 16.;
 /// How far the pointer travels on a tab before it is a drag, not a click.
@@ -1532,11 +1522,12 @@ const TAB_DRAG_SLOP: f64 = 4.;
 struct ToolbarState {
     target: Retained<Target>,
     tokens: Tokens,
-    /// The project tabs (the window's tab group), in the leading area.
+    /// The project strip (Home, the window's tab group, New Project), in
+    /// the leading area.
     tabs: Retained<NSView>,
     tabs_width: Retained<NSLayoutConstraint>,
+    /// Home's cell, the strip's first.
     home: Retained<TabView>,
-    home_item: Retained<NSView>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -1565,10 +1556,12 @@ fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
     // Home and the tabs lead; the tools are the centred item between two
     // flexible spaces; Export, a space, then Panels and Settings trail.
-    v.insert(2, NSString::from_str(&f.to_string()));
-    v.insert(4, NSString::from_str(&f.to_string()));
+    // Home is the strip's first cell, not an item of its own.
+    v.remove(0);
+    v.insert(1, NSString::from_str(&f.to_string()));
+    v.insert(3, NSString::from_str(&f.to_string()));
     v.insert(
-        7,
+        6,
         NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
     );
     NSArray::from_retained_slice(&v)
@@ -1595,12 +1588,8 @@ impl ToolbarDelegate {
         unsafe {
             msg_send![
                 super(Self::alloc(mtm).set_ivars({
-                    let tabs: Retained<TabStrip> = msg_send![
-                        super(TabStrip::alloc(mtm).set_ivars(StripIvars {
-                            carrying: Cell::new(false),
-                        })),
-                        initWithFrame: NSRect::ZERO
-                    ];
+                    let tabs: Retained<TabStrip> =
+                        msg_send![super(TabStrip::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO];
                     let tabs: Retained<NSView> = Retained::into_super(tabs);
                     let tabs_width = tabs.widthAnchor().constraintEqualToConstant(TAB_MIN);
                     tabs_width.setActive(true);
@@ -1608,7 +1597,7 @@ impl ToolbarDelegate {
                         .constraintEqualToConstant(tokens.metrics.control as f64)
                         .setActive(true);
                     // Home is the strip's first cell: a glyph button in
-                    // a cell that draws the same pill and wash as a tab.
+                    // a cell that draws the same fill as a tab.
                     let home = NSButton::buttonWithImage_target_action(
                         &toolbar_symbol("house", "Projects", &tokens),
                         Some(&target),
@@ -1621,39 +1610,24 @@ impl ToolbarDelegate {
                     home.setToolTip(Some(&NSString::from_str("Projects")));
                     home.setAccessibilityLabel(Some(&NSString::from_str("Projects")));
                     let height = tokens.metrics.control as f64;
-                    home.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(TAB_HOME, height)));
+                    let square = NSRect::new(NSPoint::ZERO, NSSize::new(height, height));
+                    home.setFrame(square);
                     let home_cell = TabView::new(
                         mtm,
-                        NSRect::new(NSPoint::new(TAB_INSET, 0.), NSSize::new(TAB_HOME, height)),
+                        square,
                         Retained::into_super(Retained::into_super(home.clone())),
+                        None,
                         None,
                         false,
                         false,
                     );
                     home_cell.addSubview(&home);
                     home_cell.restyle();
-                    let home_item = NSView::initWithFrame(
-                        NSView::alloc(mtm),
-                        NSRect::new(
-                            NSPoint::ZERO,
-                            NSSize::new(TAB_INSET + TAB_HOME + TAB_GAP, height),
-                        ),
-                    );
-                    home_item
-                        .widthAnchor()
-                        .constraintEqualToConstant(TAB_INSET + TAB_HOME + TAB_GAP)
-                        .setActive(true);
-                    home_item
-                        .heightAnchor()
-                        .constraintEqualToConstant(height)
-                        .setActive(true);
-                    home_item.addSubview(&home_cell);
                     ToolbarState {
                         target,
                         tabs,
                         tabs_width,
                         home: home_cell,
-                        home_item,
                         tokens,
                     }
                 })),
@@ -1731,14 +1705,12 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
         }
-        if name == "home" {
-            item.setView(Some(&self.ivars().home_item));
-            item.setLabel(&NSString::from_str("Projects"));
-            return Some(item);
-        }
         if name == "title" {
-            // The open projects, as v1 had them in its title bar.
+            // Home and the open projects, as v1 had them in its title bar:
+            // quiet cells straight on the bar, so the item is unbordered
+            // (the system gives it no glass).
             item.setView(Some(&self.ivars().tabs));
+            item.setBordered(false);
             item.setLabel(&NSString::from_str("Projects"));
             return Some(item);
         }
@@ -2563,8 +2535,8 @@ impl Host {
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
         let height = t.metrics.control as f64;
         // The tools stay in the middle of the bar however many projects are
-        // open: the strip has what lies between its own leading edge and the
-        // tools, less New Project.
+        // open: the tabs have what lies between the strip's leading edge and
+        // the tools, less Home and New Project.
         let leading = self
             .tabs
             .convertRect_toView(self.tabs.bounds(), None)
@@ -2581,7 +2553,7 @@ impl Host {
         let room = (self.window.frame().size.width / 2.
             - (tools.max(TAB_TOOLS) / 2. + TAB_CLEAR)
             - leading.max(TAB_LEADING)
-            - (TAB_TOOLS_GAP + height + TAB_INSET))
+            - 2. * (height + TAB_GAP))
             .max(TAB_MIN)
             .floor();
         if *self.tabs_shown.borrow() == (tabs.clone(), room) {
@@ -2611,13 +2583,57 @@ impl Host {
             item.setTag(tag);
             item
         };
+        // A cell that is not a tab stands in a holder: the strip's own
+        // children are its tabs only (the order a drag reads).
+        let square = NSSize::new(height, height);
+        let holder = |x: f64, width: f64| {
+            let view = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)),
+            );
+            self.tabs.addSubview(&view);
+            view
+        };
+        // Home, the strip's first cell: a quiet glyph.
+        holder(0., height).addSubview(&self._delegate.ivars().home);
+        // A title in one size and weight whatever its state, so a tab is as
+        // wide showing as not. A label keeps `LABEL_PAD` clear inside each
+        // end of its frame.
+        const LABEL_PAD: f64 = 2.;
+        let lead = |tab: &Tab| {
+            TAB_PAD
+                + if tab.edited {
+                    TAB_DOT + TAB_DOT_GAP
+                } else {
+                    0.
+                }
+        };
+        let labels: Vec<(Retained<NSTextField>, NSSize)> = tabs
+            .iter()
+            .map(|tab| {
+                let label = NSTextField::labelWithString(&NSString::from_str(&tab.title), mtm);
+                label.setFont(Some(&NSFont::systemFontOfSize_weight(
+                    t.typography.title as f64,
+                    unsafe { NSFontWeightRegular },
+                )));
+                label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+                label.setAccessibilityElement(false);
+                let natural = label.fittingSize();
+                (label, natural)
+            })
+            .collect();
+        let natural: Vec<f64> = tabs
+            .iter()
+            .zip(&labels)
+            .map(|(tab, (_, size))| (lead(tab) + size.width - 2. * LABEL_PAD + TAB_PAD).ceil())
+            .collect();
         // With more projects than fit at the narrowest width, the strip
         // shows the run that holds the selected one and a pull-down lists
         // them all.
         let selected = tabs.iter().position(|t| t.selected).unwrap_or(0);
-        let (start, shown, width, overflow) = tab_layout(tabs.len(), selected, room);
-        let mut x = 0.;
-        for tab in tabs.iter().skip(start).take(shown) {
+        let (start, widths, overflow) = tab_layout(&natural, selected, room);
+        let mut x = height + TAB_GAP;
+        for ((tab, (label, size)), width) in tabs.iter().zip(&labels).skip(start).zip(widths) {
             let title = NSString::from_str(&tab.title);
             let button: Retained<TabButton> = unsafe {
                 msg_send![
@@ -2628,7 +2644,7 @@ impl Host {
                 ]
             };
             // The button is the whole cell and draws nothing: the cell
-            // draws the pill, the label the title.
+            // draws the fill, the label the title.
             button.setTransparent(true);
             button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
             button.setTag(tab.window);
@@ -2648,36 +2664,40 @@ impl Host {
                 tab.window,
             ));
             unsafe { button.setMenu(Some(&menu)) };
-            // The title: centred between the two slots while it fits, else
-            // from the leading slot on, cut in the middle so the start and
-            // the end of a name both stay.
-            let label = NSTextField::labelWithString(&title, mtm);
-            label.setFont(Some(&NSFont::systemFontOfSize_weight(
-                t.typography.title as f64,
-                unsafe {
-                    if tab.selected {
-                        NSFontWeightMedium
-                    } else {
-                        NSFontWeightRegular
-                    }
-                },
-            )));
-            label.setAlignment(NSTextAlignment::Center);
-            label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-            label.setAccessibilityElement(false);
-            // A label keeps `LABEL_PAD` clear inside each end of its frame.
-            const LABEL_PAD: f64 = 2.;
-            let natural = label.fittingSize();
-            let span = natural
-                .width
-                .min(width - TAB_SLOT - TAB_PAD + 2. * LABEL_PAD);
+            // The title starts on the tab's inset (after the edited dot)
+            // and is cut in the middle when the tab is narrower than it, so
+            // the start and the end of a name both stay.
+            let from = lead(tab) - LABEL_PAD;
             label.setFrame(NSRect::new(
-                NSPoint::new(
-                    ((width - span) / 2.).max(TAB_SLOT - LABEL_PAD).floor(),
-                    ((height - natural.height) / 2.).floor(),
+                NSPoint::new(from, ((height - size.height) / 2.).floor()),
+                NSSize::new(
+                    (width - from - TAB_PAD + LABEL_PAD).min(size.width),
+                    size.height,
                 ),
-                NSSize::new(span, natural.height),
             ));
+            // Its end fades out under the close button: a mask, so the
+            // title never moves.
+            let fade = CAGradientLayer::new();
+            let stop = |color: Retained<NSColor>| -> Retained<AnyObject> {
+                let color = color.CGColor();
+                unsafe { Retained::retain((&*color as *const _ as *mut AnyObject).cast()).unwrap() }
+            };
+            let (ink, clear) = (stop(NSColor::blackColor()), stop(NSColor::clearColor()));
+            unsafe {
+                fade.setColors(Some(&NSArray::from_retained_slice(&[
+                    ink.clone(),
+                    ink,
+                    clear.clone(),
+                    clear,
+                ])));
+            }
+            fade.setStartPoint(NSPoint::new(0., 0.5));
+            fade.setEndPoint(NSPoint::new(1., 0.5));
+            fade.setFrame(NSRect::new(NSPoint::ZERO, label.frame().size));
+            label.setWantsLayer(true);
+            if let Some(layer) = label.layer() {
+                unsafe { layer.setMask(Some(&fade)) };
+            }
             let close = unsafe {
                 NSButton::buttonWithImage_target_action(
                     &glyph("xmark", "Close Project", 8.5),
@@ -2691,58 +2711,48 @@ impl Host {
             close.setToolTip(Some(&NSString::from_str("Close Project")));
             close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab.close")));
             close.setFrame(NSRect::new(
-                NSPoint::new((TAB_SLOT - 16.) / 2. + 2., (height - 16.) / 2.),
-                NSSize::new(16., 16.),
+                NSPoint::new(width - TAB_CLOSE_PAD - TAB_CLOSE, (height - TAB_CLOSE) / 2.),
+                NSSize::new(TAB_CLOSE, TAB_CLOSE),
             ));
             let view = TabView::new(
                 mtm,
                 NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)),
                 Retained::into_super(Retained::into_super(label.clone())),
                 Some(close.clone()),
+                Some(fade),
                 tab.edited,
                 tab.selected,
             );
-            view.addSubview(&label);
+            view.addSubview(label);
             view.addSubview(&button);
             view.addSubview(&close);
             self.tabs.addSubview(&view);
-            view.hover(false);
+            view.reveal(false, false);
+            view.restyle();
             x += width + TAB_GAP;
         }
-        // The strip's own buttons, after the rule: every project, then a
-        // new one. Each is a round target of the tabs' height in a cell of
-        // its own, so the pointer finds the strip's wash under it, never
-        // the toolbar's bezel. The cells stand in a holder: the strip's
-        // tabs are its own children only.
-        let mut x = x - TAB_GAP + TAB_TOOLS_GAP;
-        let start = x;
-        let tools = NSView::initWithFrame(
-            NSView::alloc(mtm),
-            NSRect::new(
-                NSPoint::new(start, 0.),
-                NSSize::new(if overflow { TAB_MORE } else { 0. } + height, height),
-            ),
-        );
-        self.tabs.addSubview(&tools);
+        // The strip's own buttons after the last tab: every project (once
+        // they no longer fit), then a new one. Each is a quiet glyph in a
+        // cell of its own, so the pointer finds the strip's fill under it.
         let tool = |button: &NSButton, x: f64| {
-            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(height, height)));
+            button.setFrame(NSRect::new(NSPoint::ZERO, square));
             let cell = TabView::new(
                 mtm,
-                NSRect::new(NSPoint::new(x - start, 0.), NSSize::new(height, height)),
+                NSRect::new(NSPoint::ZERO, square),
                 Retained::into_super(Retained::into_super(objc2::Message::retain(button))),
+                None,
                 None,
                 false,
                 false,
             );
-            cell.ivars().tool.set(true);
             cell.addSubview(button);
             cell.restyle();
-            tools.addSubview(&cell);
+            holder(x, height).addSubview(&cell);
         };
         if overflow {
             let more = NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
-                NSRect::new(NSPoint::new(x, 0.), NSSize::new(height, height)),
+                NSRect::new(NSPoint::ZERO, square),
                 true,
             );
             more.setBordered(false);
@@ -2773,7 +2783,7 @@ impl Host {
             more.setToolTip(Some(&NSString::from_str("All Projects")));
             more.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tabs.all")));
             tool(&more, x);
-            x += TAB_MORE;
+            x += height + TAB_GAP;
         }
         let add = unsafe {
             NSButton::buttonWithImage_target_action(
@@ -2788,8 +2798,7 @@ impl Host {
         add.setToolTip(Some(&NSString::from_str("New Project")));
         add.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.newProject")));
         tool(&add, x);
-        self.tabs_width.setConstant(x + height + TAB_INSET);
-        self.tabs.setNeedsDisplay(true);
+        self.tabs_width.setConstant(x + height);
         *self.tabs_shown.borrow_mut() = (tabs, room);
     }
     /// Home over the window: the Home item reads selected, and the
@@ -5370,58 +5379,65 @@ mod viewer_window_tests {
 mod tab_layout_tests {
     use super::{TAB_GAP, TAB_MAX, TAB_MIN, TAB_MORE, tab_layout};
 
-    fn span(shown: usize, width: f64) -> f64 {
-        shown as f64 * width + (shown - 1) as f64 * TAB_GAP
+    fn span(widths: &[f64]) -> f64 {
+        widths.iter().sum::<f64>() + (widths.len() - 1) as f64 * TAB_GAP
     }
 
     #[test]
-    fn tabs_with_room_are_all_at_their_widest() {
-        assert_eq!(tab_layout(1, 0, 600.), (0, 1, TAB_MAX, false));
-        assert_eq!(tab_layout(3, 1, 600.), (0, 3, TAB_MAX, false));
+    fn tabs_with_room_are_as_wide_as_their_titles_ask() {
+        assert_eq!(
+            tab_layout(&[90., 120., 60.], 1, 600.),
+            (0, vec![90., 120., 60.], false)
+        );
+        // A long name is held to the widest a tab grows.
+        assert_eq!(tab_layout(&[400.], 0, 600.), (0, vec![TAB_MAX], false));
     }
 
     #[test]
-    fn tabs_narrow_together_to_fill_the_room() {
+    fn long_titles_narrow_together_and_short_ones_keep_their_width() {
         let room = 520.;
-        let (start, shown, width, overflow) = tab_layout(4, 2, room);
-        assert_eq!((start, shown, overflow), (0, 4, false));
-        assert!(width < TAB_MAX && width >= TAB_MIN);
-        assert!(span(shown, width) <= room && span(shown, width) > room - 4.);
+        let (start, widths, overflow) = tab_layout(&[180., 180., 60., 180.], 2, room);
+        assert_eq!((start, overflow), (0, false));
+        assert_eq!(widths[2], 60.);
+        assert!(widths[0] < TAB_MAX && widths[0] >= TAB_MIN);
+        assert_eq!((widths[0], widths[1]), (widths[1], widths[3]));
+        assert!(span(&widths) <= room && span(&widths) > room - 4.);
     }
 
     #[test]
     fn more_projects_than_fit_show_the_run_that_holds_the_selected_one() {
-        let room = 366.;
+        let (room, natural) = (366., [150.; 11]);
         for selected in [0, 5, 10] {
-            let (start, shown, width, overflow) = tab_layout(11, selected, room);
+            let (start, widths, overflow) = tab_layout(&natural, selected, room);
             assert!(overflow);
-            assert!((start..start + shown).contains(&selected));
-            assert!(start + shown <= 11);
-            assert!(width >= TAB_MIN);
+            assert!((start..start + widths.len()).contains(&selected));
+            assert!(start + widths.len() <= 11);
+            assert!(widths.iter().all(|w| *w >= TAB_MIN));
             assert!(
-                span(shown, width) <= room - TAB_MORE,
+                span(&widths) <= room - TAB_MORE,
                 "the pull-down has its place"
             );
             assert!(
-                span(shown, width) > room - TAB_MORE - shown as f64,
+                span(&widths) > room - TAB_MORE - widths.len() as f64,
                 "the run fills what the pull-down leaves"
             );
         }
         // The run slides only as far as it must: the selected tab is its last.
-        let (start, shown, ..) = tab_layout(11, 5, room);
-        assert_eq!(start + shown, 6);
+        let (start, widths, _) = tab_layout(&natural, 5, room);
+        assert_eq!(start + widths.len(), 6);
     }
 
     #[test]
     fn the_pull_down_appears_only_when_the_narrowest_tabs_do_not_fit() {
-        let fits = span(4, TAB_MIN);
-        assert!(!tab_layout(4, 0, fits).3);
-        assert!(tab_layout(5, 0, fits).3);
+        let fits = span(&[TAB_MIN; 4]);
+        assert!(!tab_layout(&[200.; 4], 0, fits).2);
+        assert!(tab_layout(&[200.; 5], 0, fits).2);
+        // Short titles need no pull-down in the same room.
+        assert!(!tab_layout(&[70.; 5], 0, fits).2);
     }
 
     #[test]
     fn one_tab_in_no_room_is_still_a_tab() {
-        let (start, shown, width, _) = tab_layout(1, 0, 10.);
-        assert_eq!((start, shown, width), (0, 1, TAB_MIN));
+        assert_eq!(tab_layout(&[150.], 0, 10.), (0, vec![TAB_MIN], false));
     }
 }
