@@ -126,9 +126,12 @@ fn cache_key_includes_every_content_coordinate() {
         moment: policy::Moment::Paused,
         scale: 1f64.to_bits(),
         sampling: pm_render::sampling::Sampling::Final,
+        inputs: 5,
     };
     for other in [
         policy::CacheKey { content: 2, ..k },
+        // A media file saved again by another app.
+        policy::CacheKey { inputs: 6, ..k },
         policy::CacheKey { revision: 4, ..k },
         policy::CacheKey { width: 101, ..k },
         policy::CacheKey { height: 101, ..k },

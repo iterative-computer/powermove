@@ -274,6 +274,13 @@ impl DiskUpload {
         self.time == time && disk.held(scene, time) == Some(self.held)
     }
 }
+/// A set of media files as the engine last looked at them.
+struct MediaSeen {
+    media: Arc<pm_export::render::MediaPaths>,
+    /// Their stamps' digest ([`crate::render_cache::media_identity`]).
+    identity: u64,
+    looked: Instant,
+}
 struct CachedFrame {
     key: crate::policy::CacheKey,
     surface: Arc<ExportedSurface>,
@@ -305,6 +312,8 @@ pub struct Engine {
     pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
+    /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
+    media_seen: Vec<MediaSeen>,
     offscreen: Option<metal::Texture>,
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
@@ -446,6 +455,7 @@ impl Engine {
     fn release_project_memory_inner(&mut self) {
         self.release_idle_memory_inner();
         self.renderer.release_project_memory();
+        self.media_seen.clear();
         self.compat_document = None;
         self.resources = Arc::default();
         self.studio_content = None;
@@ -674,6 +684,7 @@ impl Engine {
             pipeline,
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
+            media_seen: Vec::new(),
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
@@ -746,6 +757,73 @@ impl Engine {
     }
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+    }
+    /// The key a frame of `spec` is kept in memory under.
+    fn cache_key(
+        &mut self,
+        scene: &Scene,
+        spec: &FrameSpec,
+        size: Size,
+    ) -> crate::policy::CacheKey {
+        crate::policy::CacheKey {
+            content: scene.content,
+            revision: scene.doc.revision(),
+            time: spec.time.get(),
+            width: size.width,
+            height: size.height,
+            crop: spec.output.crop,
+            moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
+            inputs: self.observed_inputs(scene),
+        }
+    }
+    /// What a frame of `scene` reads besides its document, as observed: its
+    /// media files (looked at every 2 s, as the disk render cache looks)
+    /// and the override wrappers answering. A frame kept in memory is the
+    /// picture of one such state, as a frame on disk is: a file saved again
+    /// by another app is another state, whose frames are drawn. (Fonts and
+    /// the output tone retire every kept frame when they change.)
+    fn observed_inputs(&mut self, scene: &Scene) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let at = self
+            .media_seen
+            .iter()
+            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media);
+        let fresh = at.is_some_and(|at| {
+            self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
+        });
+        let media = if let (Some(at), true) = (at, fresh) {
+            self.media_seen[at].identity
+        } else {
+            let identity = match &self.disk {
+                Some(disk) => disk.media_identity(&scene.media),
+                None => crate::render_cache::media_identity(&scene.media, None),
+            };
+            let before = at.map(|at| self.media_seen.remove(at).identity);
+            if before.is_some_and(|before| before != identity) {
+                // Kept draws name their files, not what was in them.
+                self.renderer.clear_draw_reuse();
+            }
+            // A main viewer and a popout, each playing and paused.
+            if self.media_seen.len() >= 4 {
+                self.media_seen.remove(0);
+            }
+            self.media_seen.push(MediaSeen {
+                media: scene.media.clone(),
+                identity,
+                looked: Instant::now(),
+            });
+            identity
+        };
+        let overrides = self
+            .compat_document
+            .as_ref()
+            .filter(|store| store.producing_now())
+            .map(|store| store.cache_identity());
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (media, overrides).hash(&mut hash);
+        hash.finish()
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
     pub fn media_landed(&self) -> u64 {
@@ -986,19 +1064,10 @@ impl Engine {
         let size = spec.size_in(scene);
         let drawn_whole = spec.whole_composition(scene).is_some();
         let hdr = self.sync_hdr(scene);
-        let key = crate::policy::CacheKey {
-            content: scene.content,
-            revision: scene.doc.revision(),
-            time: time.get(),
-            width: size.width,
-            height: size.height,
-            crop: output.crop,
-            moment: spec.moment,
-            scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
-        };
-        // A revision or size change retires all old cached frames. Leases held
-        // by submitted consumers still protect their storage until completion.
+        let key = self.cache_key(scene, &spec, size);
+        // A revision, size or observed-input change retires all old cached
+        // frames. Leases held by submitted consumers still protect their
+        // storage until completion.
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
         let hit = (self.cache_enabled && !spec.exact)
@@ -1426,17 +1495,7 @@ impl Engine {
         self.sync_studio(scene)?;
         self.sync_fonts();
         let size = spec.size_in(scene);
-        let key = crate::policy::CacheKey {
-            content: scene.content,
-            revision: scene.doc.revision(),
-            time: spec.time.get(),
-            width: size.width,
-            height: size.height,
-            crop: spec.output.crop,
-            moment: spec.moment,
-            scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
-        };
+        let key = self.cache_key(scene, &spec, size);
         if self.cache.iter().any(|c| c.key == key) {
             return Ok(true);
         }

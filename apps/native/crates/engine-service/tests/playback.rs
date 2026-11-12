@@ -592,3 +592,116 @@ fn a_current_main_project_draws_and_names_what_this_build_bypasses() {
         "drawing never rewrites the document"
     );
 }
+
+/// A 64 × 64 still of one grey level.
+fn grey_still(path: &std::path::Path, level: u8) {
+    let (w, h) = (64u32, 64u32);
+    let size = 54 + w * 3 * h;
+    let mut b = Vec::with_capacity(size as usize);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&size.to_le_bytes());
+    b.extend_from_slice(&[0; 4]);
+    b.extend_from_slice(&54u32.to_le_bytes());
+    b.extend_from_slice(&40u32.to_le_bytes());
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(h as i32).to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    b.extend_from_slice(&[0; 24]);
+    b.resize(size as usize, level);
+    std::fs::write(path, b).unwrap();
+}
+/// A short composition filled by one linked still, looping.
+fn looping_still(service: &EngineService, still: &std::path::Path) -> Viewer {
+    let s = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":128,"h":72,"fps":30,"dur":0.2,"bg":"#000000",
+        "layers":[{{"id":"i","type":"image","name":"still","from":0,"dur":0.2,"on":true,"solo":false,"mblur":false,
+          "p":{{{}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":64,"h":64}}}}],
+        "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"still","w":64,"h":64,"dur":0}}}},
+        "markers":[],"work":[0,0.2],"params":{{}}}}"##,
+        transform(32., 4.)
+    ));
+    let mut media = MediaCatalog::default();
+    media.originals.insert("pic".into(), still.to_path_buf());
+    let range = pm_protocol::common::TickRange {
+        start: Ticks::ZERO,
+        end: Ticks::new(TICKS_PER_SECOND / 5).unwrap(),
+    };
+    let v = service
+        .viewer(ViewerConfig {
+            end: Some(range.end.get()),
+            ..config(s, media, output(128, 72))
+        })
+        .unwrap();
+    wait(&v, "first frame", |s| s.frame.is_some());
+    v.command(C::SetLoop { range: Some(range) }).unwrap();
+    v.command(C::Play {
+        rate: PlaybackRate::NORMAL,
+    })
+    .unwrap();
+    v
+}
+
+/// A still saved again by another app while its composition loops. The
+/// loop's frames are kept in memory and nothing in the document changed, yet
+/// the picture on screen (which the scopes read) becomes the new file's: a
+/// frame kept in memory is the picture of the media as it was observed.
+#[test]
+fn a_looping_frame_follows_a_still_saved_again_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let still = dir.path().join("still.bmp");
+    grey_still(&still, 40);
+    let service = service("live-media");
+    let v = looping_still(&service, &still);
+    let (frames, inbox) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    // The scope's reading of a frame presented from now on.
+    let shown = |inbox: &async_channel::Receiver<ScopeResult>| {
+        while inbox.try_recv().is_ok() {}
+        let start = Instant::now();
+        loop {
+            if let Ok(frame) = inbox.try_recv() {
+                return frame.unwrap().luma_histogram;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "no frame was analyzed"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    wait(&v, "a looped frame presented from memory", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.moment == Moment::Playing && f.cache_hit)
+    });
+    let dark = shown(&inbox);
+    grey_still(&still, 220);
+    // Media is looked at every 2 s.
+    let start = Instant::now();
+    let now = loop {
+        let now = shown(&inbox);
+        if now != dark {
+            break now;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "the loop keeps presenting the still as it was"
+        );
+    };
+    // And it stays: no frame of the old still is left to come round again.
+    let until = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < until {
+        assert_eq!(shown(&inbox), now, "an old frame came round again");
+    }
+    // It is what a viewer that never saw the dark still plays.
+    let fresh_service = self::service("live-media-fresh");
+    let fresh = looping_still(&fresh_service, &still);
+    let (frames, fresh_inbox) = async_channel::bounded(1);
+    fresh
+        .scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    assert_eq!(now, shown(&fresh_inbox));
+    assert_eq!(v.status().error, None);
+}

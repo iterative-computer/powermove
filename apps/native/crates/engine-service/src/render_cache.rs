@@ -51,7 +51,7 @@ use crate::render::Scene;
 /// coded losslessly (`crate::frame_codec`).
 pub const FORMAT: &str = "rgba16f-export-lzfse-v4";
 /// Media stamps are looked at again at most this often.
-const MEDIA_RECHECK: Duration = Duration::from_secs(2);
+pub(crate) const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
 const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
@@ -696,6 +696,12 @@ impl DiskFrames {
             s.content_named = dir;
             ((), false)
         });
+    }
+
+    /// [`media_identity`] with this cache's content-named folder.
+    pub(crate) fn media_identity(&self, media: &pm_export::render::MediaPaths) -> u64 {
+        let content_named = self.with(|s| (s.content_named.clone(), false));
+        media_identity(media, content_named.as_deref())
     }
 
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
@@ -2409,6 +2415,18 @@ fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -
         .values()
         .map(|p| stamp(p, content_named))
         .collect()
+}
+
+/// A digest of the stamps of `media`'s files: what a frame kept in memory
+/// was drawn from.
+pub(crate) fn media_identity(
+    media: &pm_export::render::MediaPaths,
+    content_named: Option<&Path>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    stamps(media, content_named).hash(&mut hash);
+    hash.finish()
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
