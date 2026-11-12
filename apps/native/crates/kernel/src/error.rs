@@ -166,10 +166,10 @@ pub enum ProjectIoError {
         message: String,
         recovery_path: std::path::PathBuf,
     },
-    /// The destination's volume cannot replace a file conditionally, so the
-    /// file was left exactly as it is. The open document is untouched; use
-    /// Save As.
-    NoSafeReplace,
+    /// Another version took the destination while the save was replacing
+    /// the file there (between moving the old file aside and installing the
+    /// new one). It was left in place; this save's file is kept beside it.
+    KeptBeside { kept: std::path::PathBuf },
     /// Our file was published but the final directory sync failed. Your
     /// edits stay open (and dirty); save again to confirm.
     Finalize(String),
@@ -179,6 +179,16 @@ pub enum ProjectIoError {
     NoDestination,
     /// The receipt belongs to another document session.
     WrongDocument,
+}
+
+/// Introduces the path in [`ProjectIoError::KeptBeside`]'s text.
+const KEPT_BESIDE: &str = "Your save is kept beside it at ";
+
+/// Where a failed save kept its file, read from the failure's text
+/// ([`ProjectIoError::KeptBeside`]) once it has become a message.
+pub fn kept_beside(message: &str) -> Option<std::path::PathBuf> {
+    let (_, path) = message.split_once(KEPT_BESIDE)?;
+    Some(std::path::PathBuf::from(path))
 }
 
 impl fmt::Display for ProjectIoError {
@@ -206,9 +216,11 @@ impl fmt::Display for ProjectIoError {
                 "{message} The other version was preserved at {}",
                 recovery_path.display()
             ),
-            ProjectIoError::NoSafeReplace => f.write_str(
-                "This disk cannot replace a file safely, so the project file was left as it \
-                 is. Your edits are still open. Use Save As to save them as a new file.",
+            ProjectIoError::KeptBeside { kept } => write!(
+                f,
+                "Another version of the project file arrived while it was being saved and \
+                 was left in place. {KEPT_BESIDE}{}",
+                kept.display()
             ),
             ProjectIoError::Finalize(m) => write!(
                 f,

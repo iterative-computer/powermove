@@ -104,9 +104,6 @@ pub enum WriteFailure {
     ReadOnlyDisk,
     Missing,
     ChangedElsewhere,
-    /// The disk has no way to replace a file without risking another
-    /// version of it, so Save leaves the file alone there.
-    NoSafeReplace,
     InProgress,
     Other,
 }
@@ -120,8 +117,6 @@ impl WriteFailure {
             Self::ReadOnlyDisk
         } else if has(&["permission denied", "not permitted", "os error 13"]) {
             Self::NotAllowed
-        } else if has(&["cannot replace a file safely"]) {
-            Self::NoSafeReplace
         } else if has(&["changed outside powermove", "other version was preserved"]) {
             Self::ChangedElsewhere
         } else if has(&["no such file", "os error 2)", "not found"]) {
@@ -142,9 +137,6 @@ impl WriteFailure {
             }
             Self::ChangedElsewhere => {
                 "The file was moved, deleted or changed by something else since you opened it."
-            }
-            Self::NoSafeReplace => {
-                "This disk can’t replace a file safely, so the file was left as it is."
             }
             Self::InProgress => "Another save hadn’t finished.",
             Self::Other => "Something went wrong while writing it.",
@@ -267,10 +259,6 @@ mod write_failure_tests {
             (
                 "/x/cut.pmv: No such file or directory (os error 2)",
                 WriteFailure::Missing,
-            ),
-            (
-                &pm_kernel::ProjectIoError::NoSafeReplace.to_string(),
-                WriteFailure::NoSafeReplace,
             ),
             (
                 "A save to this project file is already in progress.",

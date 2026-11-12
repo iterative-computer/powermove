@@ -1108,7 +1108,13 @@ impl Kernel {
             SessionSource::Library { profile, project }
                 if project == id && self.owns_library(&profile) =>
             {
-                match self.file_entry(&project).filter(|p| p.is_file()) {
+                // A file a save was cut short on is still that file: its last
+                // saved version waits beside its path, and the file route
+                // puts it back.
+                match self
+                    .file_entry(&project)
+                    .filter(|p| p.is_file() || project_io::left_aside(p))
+                {
                     Some(path) => SessionSource::File(path),
                     None => SessionSource::Library { profile, project },
                 }
@@ -1296,6 +1302,9 @@ impl Kernel {
                             lock = Some(l);
                             // Staging files a save cut short by Quit Now left.
                             crate::project_io::remove_abandoned_temps(&path);
+                            // The version a save moved aside and never got
+                            // to replace is the file again.
+                            project_io::settle_asides(&path, &self.publish_hooks);
                         }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
@@ -2309,9 +2318,12 @@ impl Kernel {
     /// with no name any more is left to the save to report (Save As still
     /// works from the descriptor the session holds).
     fn follow_file(&mut self, id: &str) {
-        let Some(Destination::File(_)) = self.sessions.get(id).map(|s| &s.destination) else {
+        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
             return;
         };
+        // A save that could not put the file back under its name left it
+        // aside: it is put back now, not followed to its private name.
+        project_io::settle_asides(path, &self.publish_hooks);
         let Some(version) = self
             .project(id)
             .and_then(|p| p.store().file().version.clone())

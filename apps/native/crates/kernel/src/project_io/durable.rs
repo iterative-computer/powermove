@@ -13,10 +13,11 @@
 //!   only by proof of identical bytes (a full re-hash); a timestamp tolerance
 //!   or an equal hash on a *different* inode never excuses anything.
 //! * Replacing a file uses the macOS atomic exchange (`renamex_np` with
-//!   `RENAME_SWAP`) and then verifies the *displaced* file is exactly the
-//!   version we expected. If another writer got there first, our bytes are
-//!   swapped back; if that is not possible both versions are kept and the
-//!   error names the recovery file.
+//!   `RENAME_SWAP`) and then judges the *displaced* file: the version we
+//!   expected is dropped, anything else is kept beside the project. Where
+//!   the volume has no exchange the file is moved aside under a private name
+//!   and the new one installed at the empty path ([`replace_aside`]). No
+//!   route removes a file before it was read and found to be that version.
 //! * A first save never overwrites: exclusive rename (`RENAME_EXCL`) or a
 //!   hard link, both of which fail if anything appeared at the destination.
 
@@ -253,6 +254,7 @@ impl FileVersion {
             return Ok(None);
         };
         if !is_document_place(&path)
+            || is_aside_name(&path)
             || !at.same_identity(&self.stat)
             || self.held_unchanged()?.is_none()
         {
@@ -618,9 +620,12 @@ pub struct PublishHooks {
     /// The volume has neither an exclusive rename nor hard links (exFAT).
     pub no_exclusive: bool,
     /// Called with the destination after its last check, right before the
-    /// staged file is exchanged with it.
+    /// file there is taken (exchanged with the staged file, or moved aside).
     pub before_exchange: Option<PublishHook>,
-    /// Called with the destination right after the exchange.
+    /// Called with the destination while it holds nothing: the file was
+    /// moved aside and the staged one is not installed yet.
+    pub between_renames: Option<PublishHook>,
+    /// Called with the destination right after the staged file is there.
     pub after_exchange: Option<PublishHook>,
 }
 impl std::fmt::Debug for PublishHooks {
@@ -630,6 +635,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("exchange_renames", &self.exchange_renames)
             .field("no_exclusive", &self.no_exclusive)
             .field("before_exchange", &self.before_exchange.is_some())
+            .field("between_renames", &self.between_renames.is_some())
             .field("after_exchange", &self.after_exchange.is_some())
             .finish()
     }
@@ -697,16 +703,19 @@ fn volume_of(dir: &Path) -> Option<(u64, String)> {
     Some((dev, mounted))
 }
 
-/// Whether the volume `destination` is on really exchanges two names
-/// atomically, proven by doing it: two one-byte staging files are exchanged
-/// and each must come back under the other's name. The call's own answer is not
-/// proof. One filesystem driver answers it with success and renames instead,
-/// which destroys whatever was at the destination (measured on a FAT32
-/// volume). A volume proven once is not probed again while it stays mounted.
-/// An error is the staging files' own (a folder that cannot be written).
-pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
-    static PROVEN: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
-    let simulated = hooks.no_exchange || hooks.exchange_renames;
+/// What mounted volumes were proven to do or not to do ([`exchanges`],
+/// [`excludes`]). A volume is not probed again while it stays mounted.
+type Proven = std::sync::Mutex<Vec<((u64, String), bool)>>;
+
+/// Runs `probe` on two one-byte staging files beside `destination` unless
+/// the volume's answer is known. An error is the staging files' own (a
+/// folder that cannot be written) and is not remembered.
+fn proven(
+    cache: &Proven,
+    destination: &Path,
+    simulated: bool,
+    probe: impl FnOnce(&TempFile, &TempFile) -> Result<bool, ProjectIoError>,
+) -> Result<bool, ProjectIoError> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let volume = volume_of(if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -715,9 +724,9 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
     });
     if !simulated
         && let Some(volume) = &volume
-        && PROVEN.lock().unwrap().contains(volume)
+        && let Some((_, does)) = cache.lock().unwrap().iter().find(|(v, _)| v == volume)
     {
-        return Ok(true);
+        return Ok(*does);
     }
     // Told apart by a byte of content each: an empty file has no stable
     // inode number on FAT-family volumes.
@@ -727,17 +736,85 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
         file.write_all(text).map_err(|e| io_err(&temp.path, e))?;
         Ok(temp)
     };
-    let (a, b) = (stage(b"a")?, stage(b"b")?);
-    let holds = |path: &Path, text: &[u8]| fs::read(path).is_ok_and(|read| read == text);
-    let works =
-        swap_files(&a.path, &b.path, hooks)? && holds(&a.path, b"b") && holds(&b.path, b"a");
-    if works
-        && !simulated
-        && let Some(volume) = volume
-    {
-        PROVEN.lock().unwrap().push(volume);
+    let does = probe(&stage(b"a")?, &stage(b"b")?)?;
+    if !simulated && let Some(volume) = volume {
+        cache.lock().unwrap().push((volume, does));
     }
-    Ok(works)
+    Ok(does)
+}
+
+fn holds(path: &Path, text: &[u8]) -> bool {
+    fs::read(path).is_ok_and(|read| read == text)
+}
+
+/// Whether the volume `destination` is on really exchanges two names
+/// atomically, proven by doing it: two one-byte staging files are exchanged
+/// and each must come back under the other's name. The call's own answer is not
+/// proof. One filesystem driver answers it with success and renames instead,
+/// which destroys whatever was at the destination (measured on a FAT32
+/// volume).
+pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    static PROVEN: Proven = std::sync::Mutex::new(Vec::new());
+    let simulated = hooks.no_exchange || hooks.exchange_renames;
+    proven(&PROVEN, destination, simulated, |a, b| {
+        Ok(swap_files(&a.path, &b.path, hooks)? && holds(&a.path, b"b") && holds(&b.path, b"a"))
+    })
+}
+
+/// Whether the volume `destination` is on has a rename that refuses a name
+/// something holds, proven by doing it: onto a taken name it must fail and
+/// leave both files, and onto a free name it must rename. (One volume type
+/// refuses the taken name and then cannot do the rename at all: exFAT.)
+fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    static PROVEN: Proven = std::sync::Mutex::new(Vec::new());
+    if hooks.no_exclusive {
+        return Ok(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        proven(&PROVEN, destination, false, |a, b| {
+            let refused = sys::renamex(&a.path, &b.path, sys::RENAME_EXCL)
+                .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
+                && holds(&a.path, b"a")
+                && holds(&b.path, b"b");
+            let free = TempFile {
+                path: temporary_sibling(destination),
+                keep: false,
+            };
+            Ok(refused
+                && sys::renamex(&a.path, &free.path, sys::RENAME_EXCL).is_ok()
+                && holds(&free.path, b"a"))
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (destination, &PROVEN);
+        Ok(false)
+    }
+}
+
+/// Renames `from` to the name `to`, which nothing may hold: by the exclusive
+/// rename where the volume has one ([`excludes`]), which fails rather than
+/// replace a file that appeared there. A volume without one (exFAT) gets a
+/// plain rename only after the name was looked at and found free. A file
+/// that lands between that look and the rename is replaced unread: the gap
+/// such a volume leaves, as narrow as two system calls.
+fn rename_new(from: &Path, to: &Path, hooks: &PublishHooks) -> Result<(), ProjectIoError> {
+    let taken = || ProjectIoError::DestinationExists(to.display().to_string());
+    if excludes(to, hooks)? {
+        #[cfg(target_os = "macos")]
+        return match sys::renamex(from, to, sys::RENAME_EXCL) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(taken()),
+            Err(e) => Err(io_err(from, e)),
+        };
+    }
+    match fs::symlink_metadata(to) {
+        Ok(_) => return Err(taken()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(to, e)),
+    }
+    fs::rename(from, to).map_err(|e| io_err(from, e))
 }
 
 /// `installFile`: exclusive rename where supported. `Ok(false)` to fall back.
@@ -746,7 +823,7 @@ fn install_exclusive(
     destination: &Path,
     hooks: &PublishHooks,
 ) -> Result<bool, ProjectIoError> {
-    if hooks.no_exclusive {
+    if !excludes(destination, hooks)? {
         return Ok(false);
     }
     #[cfg(target_os = "macos")]
@@ -879,13 +956,14 @@ fn local_stamp() -> String {
     backup_stamp(now as i64 * 1000)
 }
 
-/// Keeps the file an exchange displaced when it is not the version the save
-/// was allowed to replace: renamed, never over anything, to
-/// `<name> (other version <date time>).<ext>` beside the project, where the
-/// person finds it. Where that cannot be done it keeps a hidden name no
-/// sweep removes (`<staging name>.conflict.pmv`). Returns where it is.
-fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> PathBuf {
-    let held = temp.keep();
+/// Gives `held`, a file under a private name beside `destination`, a name
+/// the person finds: `<name> (<label> <date time>).<ext>`, never over
+/// anything. `label` says what it is: `other version` for a file found at
+/// the project's path that is not the version the save could replace,
+/// `recovered` for a finished save that could not take the path. Where that
+/// cannot be done it keeps a hidden name no sweep removes
+/// (`<private name>.conflict.pmv`). Returns where it is.
+fn keep_beside(held: PathBuf, destination: &Path, label: &str, hooks: &PublishHooks) -> PathBuf {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let stem = destination
         .file_stem()
@@ -893,7 +971,7 @@ fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> P
         .to_string_lossy();
     let stamp = local_stamp();
     for n in 1..=50 {
-        let mut name = format!("{stem} (other version {stamp}");
+        let mut name = format!("{stem} ({label} {stamp}");
         if n > 1 {
             name.push_str(&format!(" {n}"));
         }
@@ -903,10 +981,10 @@ fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> P
             name.push_str(&extension.to_string_lossy());
         }
         let to = dir.join(name);
-        match install_exclusive(&held, &to, hooks) {
-            Ok(true) => return to,
+        match rename_new(&held, &to, hooks) {
+            Ok(()) => return to,
             Err(ProjectIoError::DestinationExists(_)) => continue,
-            _ => break,
+            Err(_) => break,
         }
     }
     let mut hidden = held.clone().into_os_string();
@@ -916,6 +994,208 @@ fn keep_displaced(temp: TempFile, destination: &Path, hooks: &PublishHooks) -> P
         Ok(()) => hidden,
         Err(_) => held,
     }
+}
+
+/// Whether `entry` is the private name a save gives a file beside the file
+/// named `name`: `.<name>.<uuid v4><suffix>`, exactly.
+fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
+    entry
+        .strip_prefix('.')
+        .and_then(|e| e.strip_prefix(name))
+        .and_then(|e| e.strip_prefix('.'))
+        .and_then(|e| e.strip_suffix(suffix))
+        .is_some_and(is_uuid_v4)
+}
+
+/// Whether `path` is a name a file waits under while a save replaces it
+/// ([`replace_aside`]). It is never a project's own name: a session whose
+/// file sits under one is not following a rename.
+fn is_aside_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| {
+            name.starts_with('.')
+                && name
+                    .strip_suffix(ASIDE)
+                    .and_then(|n| n.get(n.len().checked_sub(36)?..))
+                    .is_some_and(is_uuid_v4)
+        })
+}
+const ASIDE: &str = ".aside";
+
+/// The files a save moved aside from `destination` and did not get to settle
+/// (`.<file name>.<uuid v4>.aside`), newest first.
+fn asides_of(destination: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(name)) = (
+        destination.parent(),
+        destination.file_name().and_then(OsStr::to_str),
+    ) else {
+        return Vec::new();
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let Ok(Some(dir)) = Dir::open(parent) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = dir
+        .entries()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(entry, kind)| {
+            matches!(kind, Kind::File { .. })
+                && entry
+                    .to_str()
+                    .is_some_and(|e| private_sibling(e, name, ASIDE))
+        })
+        .filter_map(|(entry, _)| {
+            let path = parent.join(entry);
+            Some((fs::symlink_metadata(&path).ok()?.modified().ok()?, path))
+        })
+        .collect();
+    found.sort_by(|a, b| b.cmp(a));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Whether a save of `destination` that was cut short left a file aside.
+pub(crate) fn left_aside(destination: &Path) -> bool {
+    !asides_of(destination).is_empty()
+}
+
+/// What [`settle_asides`] did with a file a save had moved aside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeftAside {
+    /// The project's path held nothing: the file moved aside (the version
+    /// that save was replacing) is the project file again.
+    Restored,
+    /// The path holds a file: the one moved aside is kept beside it here.
+    Kept(PathBuf),
+    /// The finished file of the save that was cut short (it holds the work
+    /// that save was writing), kept beside the project here.
+    Unfinished(PathBuf),
+}
+
+/// A save on a volume without an atomic exchange moves the project file
+/// aside and installs the new one at the empty path ([`replace_aside`]). Cut
+/// short between the two (a crash, a disk pulled), it leaves the path empty
+/// and the last saved version under a private name. This puts that version
+/// back at the path, never over anything; where the path holds a file it
+/// gives the one aside a name the person finds instead. The file that save
+/// had finished and not installed (its staging file: written, synced and
+/// verified before anything was moved) gets a plain name too. Nothing is
+/// removed. Call it while holding the project's lock, so no save of this
+/// project is between its two renames.
+pub(crate) fn settle_asides(destination: &Path, hooks: &PublishHooks) -> Vec<LeftAside> {
+    let mut settled = Vec::new();
+    for aside in asides_of(destination) {
+        let restored = matches!(lstat_file(destination), Ok(None))
+            && rename_new(&aside, destination, hooks).is_ok();
+        let staged = aside.with_extension("tmp");
+        settled.push(if restored {
+            LeftAside::Restored
+        } else {
+            LeftAside::Kept(keep_beside(aside, destination, "other version", hooks))
+        });
+        if matches!(lstat_file(&staged), Ok(Some(stat)) if stat.size > 0) {
+            settled.push(LeftAside::Unfinished(keep_beside(
+                staged,
+                destination,
+                "recovered",
+                hooks,
+            )));
+        }
+    }
+    if !settled.is_empty() {
+        let _ = sync_directory(destination.parent().unwrap_or(Path::new(".")));
+    }
+    settled
+}
+
+/// Replaces the file at `destination` with the staged `temp` on a volume
+/// without an atomic exchange, by two renames:
+///
+/// 1. The file at the path is moved aside under a private name in the same
+///    folder. That takes whatever is there at that instant and destroys
+///    nothing. What was taken is then read: if it is not `expected` (another
+///    version landed after the last check) it is kept beside the project
+///    under a plain name and reported ([`Published::displaced`]).
+/// 2. The staged file is installed at the now empty path by a rename that
+///    refuses a taken name ([`rename_new`]). A file that landed there
+///    between the two renames stays; this save's file is kept beside it and
+///    the save fails naming it ([`ProjectIoError::KeptBeside`]).
+///
+/// The file moved aside is removed only once it was read and found to be
+/// `expected`, and the new file is at the path. Any other failure puts it
+/// back. A process killed between the renames leaves it under its private
+/// name for the next open ([`settle_asides`]).
+fn replace_aside(
+    temp: TempFile,
+    destination: &Path,
+    expected: &FileVersion,
+    incoming: &FileStat,
+    hooks: &PublishHooks,
+) -> Result<Published, ProjectIoError> {
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let aside = temp.path.with_extension(&ASIDE[1..]);
+    if let Some(hook) = &hooks.before_exchange {
+        hook(destination);
+    }
+    rename_new(destination, &aside, hooks).map_err(|e| match e {
+        // Gone since the last check: nothing was moved.
+        ProjectIoError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
+            ProjectIoError::ChangedOnDisk
+        }
+        other => other,
+    })?;
+    let replaced = check_version(&aside, Some(expected), true).is_ok();
+    if let Some(hook) = &hooks.between_renames {
+        hook(destination);
+    }
+    let installed = match rename_new(&temp.path, destination, hooks) {
+        Ok(()) => true,
+        // Something landed at the path between the two renames: it stays.
+        Err(ProjectIoError::DestinationExists(_)) => false,
+        // Not installed and nothing arrived: what was at the path goes back.
+        Err(e) => {
+            return Err(match rename_new(&aside, destination, hooks) {
+                Ok(()) => e,
+                Err(_) => ProjectIoError::Conflict {
+                    message: format!(
+                        "The project file could not be replaced ({e}), and the file that was \
+                         there could not be put back under its name."
+                    ),
+                    recovery_path: aside,
+                },
+            });
+        }
+    };
+    if let Some(hook) = &hooks.after_exchange {
+        hook(destination);
+    }
+    let mut published = Published::default();
+    if replaced {
+        let _ = fs::remove_file(&aside);
+    } else {
+        published.displaced = Some(keep_beside(aside, destination, "other version", hooks));
+    }
+    let staged = temp.keep();
+    if !installed {
+        let kept = keep_beside(staged, destination, "recovered", hooks);
+        let _ = sync_directory(dir);
+        return Err(ProjectIoError::KeptBeside { kept });
+    }
+    // The path must still hold the file just installed.
+    if !lstat_file(destination)
+        .ok()
+        .flatten()
+        .is_some_and(|now| now.same_identity(incoming))
+    {
+        let _ = sync_directory(dir);
+        return Err(ProjectIoError::ChangedOnDisk);
+    }
+    Ok(published)
 }
 
 /// What a publication left on disk besides the published file.
@@ -931,14 +1211,17 @@ pub(crate) struct Published {
 /// `destination`, whose content hash will be `new_hash`. On `Err` the
 /// destination holds what it held before, except for
 /// [`ProjectIoError::Finalize`] (our file is in place but the directory sync
-/// failed) and [`ProjectIoError::Conflict`] (something else replaced our
-/// file right after it was published; both other versions are kept).
+/// failed), [`ProjectIoError::Conflict`] (something else replaced our
+/// file right after it was published; both other versions are kept) and
+/// [`ProjectIoError::KeptBeside`] (another version took the path while the
+/// file was being replaced; it holds that version, ours is beside it).
 ///
-/// An existing file is replaced only by the atomic exchange, which takes
+/// An existing file is replaced by the atomic exchange, which takes
 /// whatever is at the path at that instant and hands it back to be judged.
-/// Where the volume has none (see [`exchanges`]), nothing is replaced
-/// ([`ProjectIoError::NoSafeReplace`]): checking the file and then renaming
-/// over it would destroy a version that arrived in between, unread.
+/// Where the volume has none (see [`exchanges`]) it is moved aside and the
+/// new file installed at the empty path ([`replace_aside`]). Neither checks
+/// the file and then renames over it, which would destroy a version that
+/// arrived in between, unread.
 ///
 /// The exchange is never undone. When the file it hands back is not the
 /// version this save could replace, that file is kept beside the project
@@ -962,14 +1245,16 @@ pub(crate) fn publish(
     let mut published = Published::default();
     match expected {
         Some(expected) => {
-            if !exchanges(destination, hooks)? {
-                return Err(ProjectIoError::NoSafeReplace);
-            }
-            if let Some(hook) = &hooks.before_exchange {
-                hook(destination);
-            }
-            if !swap_files(&temp.path, destination, hooks)? {
-                return Err(ProjectIoError::NoSafeReplace);
+            let exchanged = exchanges(destination, hooks)? && {
+                if let Some(hook) = &hooks.before_exchange {
+                    hook(destination);
+                }
+                swap_files(&temp.path, destination, hooks)?
+            };
+            if !exchanged {
+                published = replace_aside(temp, destination, expected, &incoming, hooks)?;
+                sync_directory(dir).map_err(|e| ProjectIoError::Finalize(e.to_string()))?;
+                return Ok(published);
             }
             if let Some(hook) = &hooks.after_exchange {
                 hook(destination);
@@ -987,7 +1272,12 @@ pub(crate) fn publish(
             if replaced {
                 drop(temp);
             } else {
-                published.displaced = Some(keep_displaced(temp, destination, hooks));
+                published.displaced = Some(keep_beside(
+                    temp.keep(),
+                    destination,
+                    "other version",
+                    hooks,
+                ));
             }
             // The path must still hold the file just published.
             if !lstat_file(destination)
@@ -1197,14 +1487,7 @@ pub(crate) fn remove_abandoned_temps(destination: &Path) -> usize {
     let Some(name) = name.to_str() else {
         return 0;
     };
-    let ours = |entry: &str| {
-        entry
-            .strip_prefix('.')
-            .and_then(|e| e.strip_prefix(name))
-            .and_then(|e| e.strip_prefix('.'))
-            .and_then(|e| e.strip_suffix(".tmp"))
-            .is_some_and(is_uuid_v4)
-    };
+    let ours = |entry: &str| private_sibling(entry, name, ".tmp");
     let Ok(Some(dir)) = Dir::open(parent) else {
         return 0;
     };

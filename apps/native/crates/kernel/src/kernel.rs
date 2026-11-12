@@ -130,7 +130,7 @@ pub struct Kernel {
     history_max_bytes: usize,
     history_max_entries: usize,
     pub(crate) trimmed_projects: Vec<String>,
-    publish_hooks: crate::project_io::PublishHooks,
+    pub(crate) publish_hooks: crate::project_io::PublishHooks,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,

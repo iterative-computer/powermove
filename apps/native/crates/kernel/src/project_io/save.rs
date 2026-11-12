@@ -32,7 +32,9 @@
 //!   pass. Media is copied range to range, never loaded whole.
 //! * **Durable.** `F_FULLFSYNC`, then a read-back verification
 //!   ([`VerifyLevel`]), then an atomic publication (exchange + verification
-//!   of the displaced file, or exclusive install), then a directory sync.
+//!   of the displaced file; on a volume without an exchange the old file is
+//!   moved aside and the new one installed exclusively; a new file is
+//!   installed exclusively), then a directory sync.
 //! * **A failed save changes nothing.** Disk full, a vanished or corrupt
 //!   media source, failed verification, or a conflicting change on disk all
 //!   remove the temp file and leave the previous file byte-identical.
@@ -632,12 +634,6 @@ impl SavePlan {
                 Publish::CreateNew
             }
         };
-        // A disk that cannot replace a file conditionally is refused before
-        // anything is staged beside the project or copied to its backups.
-        if matches!(publish, Publish::Replace(_)) && !durable::exchanges(dest, &self.options.hooks)?
-        {
-            return Err(ProjectIoError::NoSafeReplace);
-        }
         let previous = match &publish {
             Publish::Replace(v) => Some(v),
             Publish::CreateNew => None,
