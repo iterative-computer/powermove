@@ -455,7 +455,10 @@ export function ToolbarItem(props: Common & { active?: boolean }) {
     { ...rest, "aria-pressed": active },
     {
       ...target,
-      color: token(active ? "colors.accent" : "colors.secondary"),
+      // Active is the neutral selected state: primary ink on the wash a
+      // selected row has, never the accent.
+      color: token(active ? "colors.text" : "colors.secondary"),
+      ...(active ? { background: token("colors.selected_fill") } : {}),
       symbolSize: token("metrics.symbol_toolbar"),
     },
   );
