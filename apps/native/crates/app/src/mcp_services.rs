@@ -710,6 +710,11 @@ impl MediaImporter for EngineJobs {
         {
             metadata["audioStreams"] = streams;
         }
+        // As a person's import: a new clip's times address the file's
+        // presentation; a replaced asset keeps the reading it was edited with.
+        if request.replace.is_none() && matches!(kind, "video" | "audio") {
+            metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
+        }
         let catalog =
             pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog

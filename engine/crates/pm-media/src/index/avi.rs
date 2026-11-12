@@ -225,6 +225,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         samples,
         frames,
         config: CodecConfig::default(),
+        edits: Default::default(),
         nal_codec: None,
         stats: IndexStats {
             detail: Some(format!("{source} index, stream {number}")),

@@ -9,6 +9,7 @@
 //! chroma upsampling); the color conversion is the source pass.
 
 use pm_gpu::Target;
+use pm_media::clip::ClipTiming;
 use pm_media::decode::service::MediaSource;
 use pm_media::interlace::{self, DeinterlaceOutput, FieldOverride, FieldPlan};
 use pm_media::interpret::Interpretation;
@@ -16,15 +17,29 @@ use pm_media::interpret::VideoReading;
 use pm_media::probe::FieldInfo;
 use pm_time::{Rate, Tick};
 
-/// An asset record's `interpret` member (Interpret Footage overrides), or
-/// `None` when it has none. Members that cannot be used read as "as the
-/// file says" (the sheet and validation report them).
+/// How an asset record says its file is read: the `interpret` member
+/// (Interpret Footage overrides; members that cannot be used read as "as
+/// the file says", and the sheet and validation report them) and the
+/// record's `timing` member ([`clip_timing`]). `None` when the record
+/// overrides nothing and its times are an older project's.
 pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
-    let member = pm_eval::node::member(Some(record), "interpret")?;
-    let text = pm_model::json::write::to_canonical_string(member);
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let (interp, _) = Interpretation::from_json(&value);
+    let mut interp = pm_eval::node::member(Some(record), "interpret")
+        .and_then(|member| {
+            let text = pm_model::json::write::to_canonical_string(member);
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            Some(Interpretation::from_json(&value).0)
+        })
+        .unwrap_or_default();
+    interp.clip = clip_timing(Some(record));
     (!interp.is_empty()).then_some(interp)
+}
+
+/// Which reading of its file's timestamps an asset's stored times address
+/// (`pm_media::clip`): the record's `timing` member.
+pub fn clip_timing(record: Option<&pm_model::Node>) -> ClipTiming {
+    ClipTiming::of_asset(pm_eval::node::number(pm_eval::node::member(
+        record, "timing",
+    )))
 }
 
 /// Persisted animated imports can identify their sequence by format even
@@ -77,6 +92,8 @@ pub struct Timing {
     pub fields: FieldPlan,
     /// A conformed frame rate (Interpret Footage): frame n shows from n / rate.
     pub conformed: Option<Rate>,
+    /// The asset's reading of the file's timestamps.
+    pub clip: ClipTiming,
 }
 
 impl Timing {
@@ -94,6 +111,7 @@ impl Timing {
                 },
             },
             conformed: reading.conformed(),
+            clip: reading.clip,
         }
     }
 
@@ -106,6 +124,7 @@ impl Timing {
         Timing {
             fields: interlace::plan(&info, FieldOverride::Auto, composition, source_rate),
             conformed: reading.conformed(),
+            clip: reading.clip,
         }
     }
 
@@ -146,15 +165,22 @@ impl Timing {
                 Some(Pick { frame, second })
             }
             None if field_rate => {
-                let (frame, second) =
-                    interlace::select_field(&src.pts, src.index.timebase, src.rate(), t)?;
+                let pts = src.clip_pts(self.clip);
+                let picked = interlace::select_field(pts, src.index.timebase, src.rate(), t);
+                let (frame, second) = match self.clip {
+                    ClipTiming::Presentation => picked?,
+                    // The first shown frame holds before its own time.
+                    ClipTiming::Legacy => picked
+                        .filter(|(frame, _)| *frame >= src.legacy.head)
+                        .unwrap_or((src.legacy.head, 0)),
+                };
                 Some(Pick {
                     frame,
                     second: second == 1,
                 })
             }
             None => Some(Pick {
-                frame: src.select(t)?,
+                frame: src.select_as(self.clip, t)?,
                 second: false,
             }),
         }

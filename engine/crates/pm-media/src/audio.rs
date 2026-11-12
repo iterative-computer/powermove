@@ -212,12 +212,14 @@ impl AudioStreamInfo {
     }
 }
 
-/// Where program sample 0 of an open stream sits on its file's clip
-/// timeline ([`AudioStreamInfo::clip_lead`]), from the same frame index the
-/// picture is shown by. 0 for a file without a picture, and for one whose
-/// picture cannot be indexed (nothing to stay in sync with).
-pub fn clip_lead(info: &AudioStreamInfo) -> i64 {
-    if !info.has_picture {
+/// Where program sample 0 of an open stream sits on the clip timeline an
+/// asset with `timing` addresses. An older project's source time is the
+/// program sample itself: no offset. Otherwise
+/// [`AudioStreamInfo::clip_lead`] from the same frame index the picture is
+/// shown by; 0 for a file without a picture, and for one whose picture
+/// cannot be indexed (nothing to stay in sync with).
+pub fn clip_lead(info: &AudioStreamInfo, timing: crate::clip::ClipTiming) -> i64 {
+    if timing == crate::clip::ClipTiming::Legacy || !info.has_picture {
         return 0;
     }
     match crate::probe::clip_origin(&info.path) {

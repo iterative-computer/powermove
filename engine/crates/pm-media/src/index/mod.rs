@@ -86,6 +86,16 @@ pub struct Frame {
     pub pts: i64,
 }
 
+/// What an edit list means for the presented frames beyond their times.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditFacts {
+    /// When a sample straddles the start of the first media edit: how long
+    /// after that start the next sample begins (index units), else 0. The
+    /// straddled sample is presented from the edit's start for this long.
+    pub head_gap: i64,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum IndexSource {
@@ -222,6 +232,9 @@ pub struct FrameIndex {
     /// Presented frames in presentation order.
     pub frames: Vec<Frame>,
     pub config: CodecConfig,
+    /// MOV/MP4 edit lists.
+    #[serde(default)]
+    pub edits: EditFacts,
     /// Set when NAL types were read (H.264, HEVC).
     pub nal_codec: Option<NalCodec>,
     pub stats: IndexStats,
@@ -621,6 +634,7 @@ mod tests {
             samples,
             frames: vec![],
             config: CodecConfig::default(),
+            edits: Default::default(),
             nal_codec: None,
             stats: IndexStats::default(),
         };

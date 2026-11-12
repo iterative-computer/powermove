@@ -7,6 +7,7 @@ use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
 use super::{Backend, DecoderInfo, StreamSpec, open};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
+use crate::clip::{ClipTiming, LegacyMap};
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input, PacketReader};
 use crate::frame::DecodedFrame;
@@ -44,6 +45,9 @@ pub struct MediaSource {
     pub pts: Vec<i64>,
     /// The container timestamp of clip time 0 (the first presented frame).
     pub origin_pts: i64,
+    /// The same frames as older projects address them
+    /// ([`ClipTiming::Legacy`]).
+    pub legacy: LegacyMap,
 }
 
 impl MediaSource {
@@ -106,6 +110,7 @@ impl MediaSource {
         };
         let origin_pts = index.origin_pts();
         let pts = index.frames.iter().map(|f| f.pts - origin_pts).collect();
+        let legacy = LegacyMap::of(&index);
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
@@ -116,6 +121,7 @@ impl MediaSource {
             color: video.color.interpreted,
             pts,
             origin_pts,
+            legacy,
             index,
             probe,
         }))
@@ -129,6 +135,29 @@ impl MediaSource {
     /// (ticks; tick 0 is the first presented frame). `None` before it.
     pub fn select(&self, t: Tick) -> Option<usize> {
         select_frame(&self.pts, self.index.timebase, self.nominal.rate, t)
+    }
+
+    /// Presented frame times in index units as `timing` reads the file.
+    pub fn clip_pts(&self, timing: ClipTiming) -> &[i64] {
+        match timing {
+            ClipTiming::Legacy => &self.legacy.pts,
+            ClipTiming::Presentation => &self.pts,
+        }
+    }
+
+    /// The presented frame an asset's source time `t` shows under its
+    /// `timing`. The legacy reading always shows a frame (the first one
+    /// holds before its own time); the presentation reading shows nothing
+    /// before the picture starts.
+    pub fn select_as(&self, timing: ClipTiming, t: Tick) -> Option<usize> {
+        match timing {
+            ClipTiming::Presentation => self.select(t),
+            ClipTiming::Legacy if self.legacy.pts.is_empty() => None,
+            ClipTiming::Legacy => Some(
+                select_frame(&self.legacy.pts, self.index.timebase, self.nominal.rate, t)
+                    .map_or(self.legacy.head, |n| n.max(self.legacy.head)),
+            ),
+        }
     }
 
     /// Clip time of presented frame `n`, in ticks.

@@ -2,7 +2,7 @@
 //! fragmented MP4 from `moof` headers. Only box headers and table payloads
 //! are read; media data is skipped.
 
-use super::{CodecConfig, Cur, Frame, FrameIndex, IndexSource, IndexStats, Loc, Sample};
+use super::{CodecConfig, Cur, EditFacts, Frame, FrameIndex, IndexSource, IndexStats, Loc, Sample};
 use crate::error::{MediaError, Result};
 use pm_time::Rational;
 use std::fs::File;
@@ -334,6 +334,9 @@ pub fn build(path: &Path, select: TrackSelect) -> Result<FrameIndex> {
         },
         track: track.id as u64,
         timebase: Rational::new(1, track.timescale as i64)?,
+        edits: EditFacts {
+            head_gap: head_gap(&samples, &track.edits),
+        },
         samples,
         frames,
         config,
@@ -657,6 +660,28 @@ fn rescale(v: i64, from: i64, to: i64) -> i64 {
     let n = v as i128 * to as i128;
     let d = from as i128;
     ((2 * n + d).div_euclid(2 * d)) as i64
+}
+
+/// How long after the start of the first media edit its first whole sample
+/// begins, when a sample straddles that start; 0 otherwise.
+pub fn head_gap(samples: &[Sample], edits: &[Edit]) -> i64 {
+    let Some(first) = edits.iter().find(|e| e.media_time != -1) else {
+        return 0;
+    };
+    let start = first.media_time;
+    if (first.rate, first.rate_fraction) != (1, 0)
+        || !samples
+            .iter()
+            .any(|s| s.cts < start && s.cts + s.duration.max(1) > start)
+    {
+        return 0;
+    }
+    samples
+        .iter()
+        .filter(|s| s.cts >= start)
+        .map(|s| s.cts - start)
+        .min()
+        .unwrap_or(0)
 }
 
 /// Applies an edit list with QuickTime semantics. Empty edits shift the

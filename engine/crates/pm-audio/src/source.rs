@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 
 use pm_media::audio::{AudioDecoder, AudioStreamInfo};
+use pm_media::clip::ClipTiming;
 
 use crate::error::{AudioError, Result};
 
@@ -145,7 +146,7 @@ impl Block {
 
 type BlockKey = (u64, u64);
 /// A file and its FFmpeg stream index (the best audio stream when `None`).
-type SourceKey = (PathBuf, Option<usize>);
+type SourceKey = (PathBuf, Option<usize>, ClipTiming);
 type SourceIdentity = (u64, Option<(u64, Option<std::time::SystemTime>)>);
 
 struct Entry {
@@ -487,10 +488,22 @@ impl SourceCache {
         self.blocking_lengths.store(blocking, Ordering::Relaxed);
     }
 
-    /// Opens (or returns the open) audio stream of a file; `stream` is the
-    /// FFmpeg stream index, the best audio stream when `None`.
+    /// Opens (or returns the open) audio stream of a file on its program
+    /// timeline, as an asset without a `timing` member reads it; `stream`
+    /// is the FFmpeg stream index, the best audio stream when `None`.
     pub fn open(&self, path: &Path, stream: Option<usize>) -> Result<Arc<Source>> {
-        let key = (path.to_owned(), stream);
+        self.open_as(path, stream, ClipTiming::Legacy)
+    }
+
+    /// [`Self::open`] as an asset with `timing` reads the file. Each reading
+    /// is its own source: decoded blocks are clip samples.
+    pub fn open_as(
+        &self,
+        path: &Path,
+        stream: Option<usize>,
+        timing: ClipTiming,
+    ) -> Result<Arc<Source>> {
+        let key = (path.to_owned(), stream, timing);
         let fingerprint = std::fs::metadata(path)
             .ok()
             .map(|m| (m.len(), m.modified().ok()));
@@ -553,7 +566,7 @@ impl SourceCache {
         };
         let source = Arc::new(Source {
             id,
-            lead: pm_media::audio::clip_lead(&info),
+            lead: pm_media::audio::clip_lead(&info, timing),
             info,
             decoder: Mutex::new(decoder),
         });
@@ -574,11 +587,11 @@ impl SourceCache {
         let mut sources = lock(&self.sources);
         let gone: Vec<u64> = sources
             .iter()
-            .filter(|((p, _), _)| p == path)
+            .filter(|((p, _, _), _)| p == path)
             .filter_map(|(_, s)| s.upgrade().map(|s| s.id))
             .collect();
-        sources.retain(|(p, _), _| p != path);
-        lock(&self.source_ids).retain(|(p, _), _| p != path);
+        sources.retain(|(p, _, _), _| p != path);
+        lock(&self.source_ids).retain(|(p, _, _), _| p != path);
         drop(sources);
         let mut blocks = lock(&self.blocks);
         let keys: Vec<BlockKey> = blocks

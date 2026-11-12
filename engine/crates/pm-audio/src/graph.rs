@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use pm_eval::retime::RetimeCache;
 use pm_eval::{Comp, Evaluator, JsValue, Scope, node};
+use pm_media::clip::ClipTiming;
 use pm_model::{Document, JsString, Node, NodeKind};
 
 use crate::conform::{self, Pitch};
@@ -64,6 +65,12 @@ fn selected_streams(record: Option<&Node>) -> Vec<Option<usize>> {
         .filter(|index| index.is_finite() && *index >= 0.0 && index.fract() == 0.0)
         .map(|index| Some(index as usize))
         .collect()
+}
+
+/// Which reading of its file's timestamps an asset's stored times address:
+/// the record's `timing` member (`pm_media::clip`).
+fn clip_timing(record: Option<&Node>) -> ClipTiming {
+    ClipTiming::of_asset(node::number(node::member(record, "timing")))
 }
 
 /// Nesting limit (`MAX_PRECOMP_DEPTH`).
@@ -538,6 +545,7 @@ impl<'d> Walk<'_, 'd> {
         // One voice per audio stream the asset plays: the first keeps the
         // layer's voice id, the others add their stream index.
         let record = node::member(node::member(Some(self.root), "assets"), asset.as_str());
+        let timing = clip_timing(record);
         for (nth, stream) in selected_streams(record).into_iter().enumerate() {
             let id = match (nth, stream) {
                 (1.., Some(index)) => format!("{id}:stream-{index}"),
@@ -557,7 +565,7 @@ impl<'d> Walk<'_, 'd> {
                 linear,
                 dynamic,
                 name.clone(),
-                (cache, &file, stream),
+                (cache, &file, stream, timing),
             )?;
         }
         Ok(())
@@ -581,10 +589,10 @@ impl<'d> Walk<'_, 'd> {
         linear: bool,
         dynamic: bool,
         name: String,
-        (cache, file, stream): (&SourceCache, &std::path::Path, Option<usize>),
+        (cache, file, stream, timing): (&SourceCache, &std::path::Path, Option<usize>, ClipTiming),
     ) -> Result<()> {
         let file = file.to_path_buf();
-        let source = match cache.open(&file, stream) {
+        let source = match cache.open_as(&file, stream, timing) {
             Ok(s) => s,
             // A video without a soundtrack has nothing to play.
             Err(AudioError::Media(pm_media::MediaError::Invalid(m)))

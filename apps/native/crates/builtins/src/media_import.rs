@@ -401,6 +401,12 @@ impl Builtins {
                             "sourcePath":path.to_string_lossy()}),
                     None => crate::data::wire(&metadata(&path, kind, size)?),
                 };
+                // A new clip's times address the file's presentation. A
+                // relinked asset keeps the reading its edits were made with:
+                // the merge leaves its `timing` member (or its absence) alone.
+                if request.replace.is_none() && matches!(kind, "video" | "audio") {
+                    asset["timing"] = json!(pm_media::clip::ClipTiming::imported());
+                }
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
                 }
@@ -630,6 +636,13 @@ mod tests {
         runtime: Builtins,
     }
     fn fixture() -> Fixture {
+        opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+        )
+        .0
+    }
+    /// A session on `project` and its handle.
+    fn opened(project: &str) -> (Fixture, SessionHandle) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let actor = KernelActor::spawn(KernelConfig {
@@ -646,11 +659,8 @@ mod tests {
             .wait()
             .unwrap()
             .unwrap();
-        let project = pm_model::json::parse(
-            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
-        )
-        .unwrap();
-        kernel
+        let project = pm_model::json::parse(project).unwrap();
+        let reply = kernel
             .shell(ShellCall::Open {
                 id: "p".into(),
                 source: SessionSource::New(project),
@@ -659,13 +669,17 @@ mod tests {
             .wait()
             .unwrap()
             .unwrap();
+        let ShellReply::Opened { session, .. } = reply else {
+            panic!("the project did not open");
+        };
         let runtime = Builtins::new(kernel, "p", || {}).unwrap();
-        Fixture {
+        let fixture = Fixture {
             _dir: dir,
             root,
             actor,
             runtime,
-        }
+        };
+        (fixture, session)
     }
     fn write(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = root.join(name);
@@ -831,6 +845,105 @@ mod tests {
             sequence_name(Path::new("/a/0001.png")),
             "Image sequence.webm"
         );
+    }
+
+    /// One second of silence, 8 kHz mono.
+    fn wav() -> Vec<u8> {
+        let data = vec![0u8; 16_000];
+        let mut out = b"RIFF".to_vec();
+        out.extend((36 + data.len() as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes());
+        out.extend([1, 0, 1, 0]);
+        out.extend(8_000u32.to_le_bytes());
+        out.extend(16_000u32.to_le_bytes());
+        out.extend([2, 0, 16, 0]);
+        out.extend(b"data");
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+
+    /// A new clip's times address its file's presentation (`timing`); a
+    /// relinked asset keeps the reading its edits were made with, present or
+    /// absent; and the member survives the project file.
+    #[test]
+    fn a_new_clip_is_stamped_with_its_timing_and_a_relink_never_changes_it() {
+        let (f, session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"old":{"id":"old","name":"Old.wav","kind":"audio","dur":1}},"comps":{},"layers":[]}"##,
+        );
+        let import = |name: &str, replace: Option<&str>| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![write(&f.root, name, &wav())],
+                        replace: replace.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        let timings = |project: &str| -> Vec<(String, Option<f64>)> {
+            let published = f.actor.handle().published(project).unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            pm_kernel::asset_order::keys(&root)
+                .into_iter()
+                .map(|id| {
+                    let asset = root.get("assets").unwrap().get(&id).unwrap();
+                    let name = asset.get("name").unwrap().as_str().unwrap().to_owned();
+                    (name, asset.get("timing").and_then(Value::as_f64))
+                })
+                .collect()
+        };
+        import("New.wav", None);
+        let expected = vec![
+            ("Old.wav".to_owned(), None),
+            ("New.wav".to_owned(), Some(2.)),
+        ];
+        assert_eq!(timings("p"), expected);
+        // Relink both: the older asset stays without the member, the new
+        // one keeps it.
+        let root = f.actor.handle().published("p").unwrap();
+        let new = pm_kernel::asset_order::keys(&root.snapshot.root().unwrap().to_value())
+            .into_iter()
+            .find(|id| id != "old")
+            .unwrap();
+        import("Old again.wav", Some("old"));
+        import("New again.wav", Some(&new));
+        let relinked = vec![
+            ("Old again.wav".to_owned(), None),
+            ("New again.wav".to_owned(), Some(2.)),
+        ];
+        assert_eq!(timings("p"), relinked);
+        // Saved and opened again, both records read the same.
+        let file = f.root.join("Film.pmv");
+        let kernel = f.actor.handle();
+        let save = ShellCall::SaveAs {
+            session: session.clone(),
+            path: file.clone(),
+            replace: false,
+        };
+        kernel.shell(save).wait().unwrap().unwrap();
+        kernel
+            .shell(ShellCall::Close(session))
+            .wait()
+            .unwrap()
+            .unwrap();
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::File(file),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert_eq!(timings("p"), relinked);
     }
 
     #[test]

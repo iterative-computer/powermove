@@ -1,8 +1,16 @@
-//! A clip's time 0 is its first presented video frame, whatever timestamp
+//! What an asset's source times select of its file's picture.
+//!
+//! With `timing: 2` a clip's time 0 is its first presented video frame, whatever timestamp
 //! the container gives it. Transport streams start around 1.4 s, program
 //! streams and fragmented MP4 at smaller offsets; none of that may show as
 //! a blank head or cost the tail. Distinct grey frames prove which source
 //! frame each composition frame shows, in the viewer and in export.
+//!
+//! Without the member the asset is an older project's: every trim, speed
+//! change and remap key shows the frame the earlier app showed for it
+//! (measured in that app's decoder): the frame whose container time covers
+//! the source time, the first frame held before its own time, and a sample
+//! straddling a head-trimming edit left out.
 
 mod support;
 
@@ -66,8 +74,9 @@ fn steps_clip(path: &std::path::Path, codec: &[&str], mux: &[&str]) {
     assert!(child.wait().unwrap().success());
 }
 
-/// The layer outlasts the source so the final frame must hold.
-fn document(trim: f64, speed: f64) -> serde_json::Value {
+/// The layer outlasts the source so the final frame must hold. `timing` is
+/// the asset record's member.
+fn document(trim: f64, speed: f64, timing: Option<u64>) -> serde_json::Value {
     let source_dur = FRAMES as f64 / f64::from(FPS);
     let dur = source_dur + 1.0;
     let v = layer(
@@ -82,8 +91,13 @@ fn document(trim: f64, speed: f64) -> serde_json::Value {
     doc["fps"] = json!(FPS);
     asset(&mut doc, "clip", "video", "mp4", SIDE, SIDE, source_dur);
     doc["assets"]["clip"]["fps"] = json!(FPS);
+    if let Some(timing) = timing {
+        doc["assets"]["clip"]["timing"] = json!(timing);
+    }
     doc
 }
+
+const VERSIONED: Option<u64> = Some(pm_media::clip::ASSET_TIMING);
 
 /// The source frame each composition frame shows (`None`: nothing drawn),
 /// read from the center pixel's level.
@@ -181,7 +195,7 @@ fn a_late_first_timestamp_is_clip_time_zero_on_every_surface() {
                     Some(((source * 25.0 + 1e-6).floor().max(0.0) as usize).min(FRAMES - 1))
                 })
                 .collect();
-            let doc = load(&document(trim, speed));
+            let doc = load(&document(trim, speed, VERSIONED));
             for (renderer, kind) in [
                 (&mut preview, OutputKind::Preview),
                 (&mut export, OutputKind::Final),
@@ -221,7 +235,7 @@ fn a_one_frame_movie_shows_its_frame() {
         if name != "one.ts" {
             assert_eq!(source.rate(), pm_time::Rate::FPS_25, "{name}");
         }
-        let doc = load(&document(0.0, 1.0));
+        let doc = load(&document(0.0, 1.0, VERSIONED));
         for (renderer, kind) in [
             (&mut preview, OutputKind::Preview),
             (&mut export, OutputKind::Final),
@@ -231,6 +245,208 @@ fn a_one_frame_movie_shows_its_frame() {
                 vec![Some(0); FRAMES + 2],
                 "{name}, {kind:?}"
             );
+        }
+    }
+}
+
+fn boxes(buf: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = vec![];
+    let mut at = from;
+    while at + 8 <= to {
+        let size = u32::from_be_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
+        assert!(
+            size >= 8 && at + size <= to,
+            "a plain 32-bit box is expected"
+        );
+        out.push((buf[at + 4..at + 8].try_into().unwrap(), at, size));
+        at += size;
+    }
+    out
+}
+
+fn wrap(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Rewrites the video track of an MP4 whose `moov` is its last box: `edits`
+/// replaces the edit list (`(media time or -1, movie-timescale duration)`
+/// entries at rate 1), `offset` gives every sample that composition offset.
+fn retime_track(src: &std::path::Path, dst: &std::path::Path, edits: &[(i32, u32)], offset: i32) {
+    fn rebuild(
+        buf: &[u8],
+        at: usize,
+        size: usize,
+        video: bool,
+        edits: &[(i32, u32)],
+        offset: i32,
+    ) -> Vec<u8> {
+        let mut out = vec![];
+        for (kind, at, size) in boxes(buf, at + 8, at + size) {
+            let raw = &buf[at..at + size];
+            match &kind {
+                b"trak" => {
+                    let video = raw
+                        .windows(8)
+                        .any(|w| w[..4] == [0; 4] && &w[4..] == b"vide");
+                    out.extend(wrap(&kind, &rebuild(buf, at, size, video, edits, offset)));
+                }
+                b"mdia" | b"minf" | b"stbl" if video => {
+                    out.extend(wrap(&kind, &rebuild(buf, at, size, video, edits, offset)));
+                }
+                b"edts" | b"ctts" if video => {}
+                b"tkhd" if video && !edits.is_empty() => {
+                    out.extend_from_slice(raw);
+                    let mut elst = vec![0, 0, 0, 0];
+                    elst.extend((edits.len() as u32).to_be_bytes());
+                    for (media_time, duration) in edits {
+                        elst.extend(duration.to_be_bytes());
+                        elst.extend(media_time.to_be_bytes());
+                        elst.extend([0, 1, 0, 0]);
+                    }
+                    out.extend(wrap(b"edts", &wrap(b"elst", &elst)));
+                }
+                b"stts" if video && offset != 0 => {
+                    out.extend_from_slice(raw);
+                    let entries = u32::from_be_bytes(raw[12..16].try_into().unwrap()) as usize;
+                    let samples: u32 = (0..entries)
+                        .map(|i| {
+                            u32::from_be_bytes(raw[16 + 8 * i..20 + 8 * i].try_into().unwrap())
+                        })
+                        .sum();
+                    let mut ctts = vec![1, 0, 0, 0, 0, 0, 0, 1];
+                    ctts.extend(samples.to_be_bytes());
+                    ctts.extend(offset.to_be_bytes());
+                    out.extend(wrap(b"ctts", &ctts));
+                }
+                _ => out.extend_from_slice(raw),
+            }
+        }
+        out
+    }
+    let buf = std::fs::read(src).unwrap();
+    let (kind, at, size) = *boxes(&buf, 0, buf.len()).last().unwrap();
+    assert_eq!(&kind, b"moov", "the fixture's moov must be its last box");
+    let mut out = buf[..at].to_vec();
+    out.extend(wrap(
+        b"moov",
+        &rebuild(&buf, at, size, false, edits, offset),
+    ));
+    std::fs::write(dst, out).unwrap();
+}
+
+/// An older project (no `timing` on the asset) keeps the frame each of its
+/// edits selected in the earlier app, for every way a file starts its
+/// picture away from timestamp zero.
+#[test]
+fn an_older_project_shows_the_frames_its_edits_selected() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-legacy-timing-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let h264: &[&str] = &["-c:v", "h264_videotoolbox", "-allow_sw", "1", "-b:v", "8M"];
+    let plain: &[&str] = &["-c:v", "mpeg4", "-q:v", "2", "-g", "6", "-bf", "0"];
+    let reordered: &[&str] = &["-c:v", "mpeg4", "-q:v", "2", "-g", "6", "-bf", "2"];
+    let vp9: &[&str] = &["-c:v", "libvpx-vp9", "-crf", "12", "-b:v", "0", "-g", "6"];
+    let frame = 1.0 / f64::from(FPS);
+    // 12800 units a second, 512 a frame.
+    let base = dir.0.join("zero.mp4");
+    steps_clip(&base, plain, &[]);
+    steps_clip(&dir.0.join("camera.ts"), h264, &[]);
+    steps_clip(
+        &dir.0.join("fragmented.mp4"),
+        reordered,
+        &["-movflags", "frag_keyframe+empty_moov+default_base_moof"],
+    );
+    // A converted camera file: the picture one frame after the file's start.
+    steps_clip(
+        &dir.0.join("converted.webm"),
+        vp9,
+        &["-output_ts_offset", "0.04"],
+    );
+    retime_track(
+        &base,
+        &dir.0.join("empty-edit.mp4"),
+        &[(-1, 400), (0, 800)],
+        0,
+    );
+    retime_track(&base, &dir.0.join("negative.mp4"), &[], -256);
+    // The edit starts half way through frame 2.
+    retime_track(&base, &dir.0.join("straddle.mp4"), &[(1280, 700)], 0);
+    retime_track(
+        &base,
+        &dir.0.join("empty-then-straddle.mp4"),
+        &[(-1, 400), (1280, 700)],
+        0,
+    );
+    // (file, the first frame shown, the source time at which it starts:
+    // `None` reads it from the container's first timestamp)
+    let cases: [(&str, usize, Option<f64>); 8] = [
+        ("zero.mp4", 0, Some(0.0)),
+        ("camera.ts", 0, None),
+        ("fragmented.mp4", 0, None),
+        ("converted.webm", 0, Some(0.04)),
+        ("empty-edit.mp4", 0, Some(0.4)),
+        ("negative.mp4", 0, Some(-0.02)),
+        ("straddle.mp4", 3, Some(0.0)),
+        ("empty-then-straddle.mp4", 3, Some(0.4)),
+    ];
+    let mut preview = Renderer::headless().unwrap();
+    let mut export = Renderer::headless().unwrap();
+    for (name, head, start) in cases {
+        let path = dir.0.join(name);
+        let source = pm_media::decode::service::MediaSource::open(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let start = start.unwrap_or_else(|| {
+            let tb = source.index.timebase;
+            let start = source.index.frames[0].pts as f64 * tb.num() as f64 / tb.den() as f64;
+            assert!(start > 0.0, "{name}: the fixture must start late ({start})");
+            start
+        });
+        // Frame k is on screen from `start + (k - head) / fps`; before the
+        // first one the earlier app showed that first frame.
+        let legacy = |u: f64| {
+            let k = ((u - start) / frame + 1e-4).floor().max(0.0) as usize + head;
+            Some(k.min(FRAMES - 1))
+        };
+        let remap = json!({ "v": 0.3, "expr": null, "kf": [
+            { "t": 0.0, "v": 0.3, "i": "a", "eo": [0.333, 0.0], "ei": [0.667, 1.0], "hold": true },
+            { "t": 0.42, "v": 0.62, "i": "b", "eo": [0.333, 0.0], "ei": [0.667, 1.0], "hold": true },
+        ]});
+        let edits: [(&str, f64, f64, bool); 4] = [
+            ("whole clip", 0.0, 1.0, false),
+            ("trimmed", 5.0 / 25.0 + 0.01, 1.0, false),
+            ("double speed", 2.0 / 25.0 + 0.01, 2.0, false),
+            ("remap keys", 0.0, 1.0, true),
+        ];
+        for (what, trim, speed, remapped) in edits {
+            let mut value = document(trim, speed, None);
+            if remapped {
+                value["layers"][0]["d"]["timeRemap"] = json!(true);
+                value["layers"][0]["d"]["sourceTime"] = remap.clone();
+            }
+            let expected: Vec<Option<usize>> = (0..FRAMES + 2)
+                .map(|n| {
+                    let t = n as f64 / 25.0;
+                    legacy(match remapped {
+                        true if t < 0.42 => 0.3,
+                        true => 0.62,
+                        false => trim + t * speed,
+                    })
+                })
+                .collect();
+            let doc = load(&value);
+            for (renderer, kind) in [
+                (&mut preview, OutputKind::Preview),
+                (&mut export, OutputKind::Final),
+            ] {
+                assert_eq!(
+                    shown(renderer, &doc, kind, &path),
+                    expected,
+                    "{name}, {what}, {kind:?}"
+                );
+            }
         }
     }
 }
