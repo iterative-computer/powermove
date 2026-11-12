@@ -385,6 +385,9 @@ struct State {
     notify: Option<Notify>,
     wake: Option<std::sync::mpsc::SyncSender<()>>,
     root: Option<(PathBuf, u64)>,
+    /// The folder whose files are named by their bytes
+    /// ([`DiskFrames::set_content_named`]).
+    content_named: Option<PathBuf>,
     cache: Option<Arc<RenderCache>>,
     /// Rises with every new observation, storage or deletion: fences
     /// fingerprints and indexes that started before it.
@@ -619,6 +622,19 @@ impl DiskFrames {
         }
     }
 
+    /// The folder whose files are named by their bytes (the app's media
+    /// cache objects). Such a file's name is its content; its modification
+    /// time is the media cache's recency mark, set again at every open, and
+    /// its inode changes when it is extracted again. Neither is part of a
+    /// frame's identity: with them, every launch orphaned the frames the
+    /// one before had rendered.
+    pub fn set_content_named(&self, dir: Option<PathBuf>) {
+        self.with(|s| {
+            s.content_named = dir;
+            ((), false)
+        });
+    }
+
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
     /// render cache). The same folder again finds its frames again (Clear…
     /// may have removed some). Disk work: call off the main thread.
@@ -713,7 +729,8 @@ impl DiskFrames {
         }
         drop(state);
         // A few stats, every 2 s at most, outside the lock.
-        let media = stamps(&scene.media);
+        let content_named = self.with(|s| (s.content_named.clone(), false));
+        let media = stamps(&scene.media, content_named.as_deref());
         let mut state = self.inner.state.lock().unwrap();
         state.media_checked = Some(Instant::now());
         if unchanged
@@ -1793,9 +1810,13 @@ fn composition(scene: &Scene) -> Option<(Size, Rate, i64)> {
     Some((Size::new(w.round() as u32, h.round() as u32), rate, count))
 }
 
-fn stamp(path: &Path) -> Stamp {
+fn stamp(path: &Path, content_named: Option<&Path>) -> Stamp {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok();
+    // Named by its bytes: its name (in the path) and length say it all.
+    if content_named.is_some() && path.parent() == content_named {
+        return (path.to_owned(), meta.as_ref().map_or(0, |m| m.len()), 0, 0);
+    }
     let modified = meta
         .as_ref()
         .and_then(|m| m.modified().ok())
@@ -1809,8 +1830,12 @@ fn stamp(path: &Path) -> Stamp {
     )
 }
 
-fn stamps(media: &pm_export::render::MediaPaths) -> Vec<Stamp> {
-    media.paths.values().map(|p| stamp(p)).collect()
+fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -> Vec<Stamp> {
+    media
+        .paths
+        .values()
+        .map(|p| stamp(p, content_named))
+        .collect()
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
@@ -1865,7 +1890,7 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
             let path = entry.path();
             match entry.file_type() {
                 Ok(t) if t.is_dir() && depth < 4 => walk(&path, out, depth + 1),
-                Ok(t) if t.is_file() => out.push(stamp(&path)),
+                Ok(t) if t.is_file() => out.push(stamp(&path, None)),
                 _ => {}
             }
         }
@@ -1885,31 +1910,106 @@ fn fonts_identity(hash: &mut blake3::Hasher) {
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
 fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v4");
-    hash.update(identity.comp.as_bytes());
-    // Frames are rendered as exported: with or without its motion blur.
-    hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
-    hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
-    for (asset, path) in &source.scene.media.paths {
-        hash.update(asset.as_bytes());
-        hash.update(path.as_os_str().as_encoded_bytes());
-        media_content(path, &mut hash);
+    let parts = fingerprint_parts(source, identity);
+    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v5");
+    for (_, part) in &parts {
+        hash.update(part);
     }
-    for (path, len, modified, inode) in &identity.media {
-        hash.update(path.as_os_str().as_encoded_bytes());
-        hash.update(&len.to_le_bytes());
-        hash.update(&modified.to_le_bytes());
-        hash.update(&inode.to_le_bytes());
+    let fingerprint = *hash.finalize().as_bytes();
+    // Which part of a state's identity changed (diagnostics only).
+    if let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") {
+        let mut path = PathBuf::from(trace).into_os_string();
+        path.push(".cache.jsonl");
+        let short = |digest: &[u8; 32]| digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+        let mut row: serde_json::Map<String, serde_json::Value> = parts
+            .iter()
+            .map(|(name, part)| ((*name).to_owned(), serde_json::Value::String(short(part))))
+            .collect();
+        row.insert(
+            "fingerprint".into(),
+            serde_json::Value::String(short(&fingerprint)),
+        );
+        row.insert("revision".into(), identity.revision.into());
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", serde_json::Value::Object(row));
+        }
     }
-    fonts_identity(&mut hash);
-    hash.update(format!("{:?}", identity.tone).as_bytes());
-    hash.update(renderer_identity().as_bytes());
-    // `CompatStore::cache_identity`: the wrappers' code and generation, or
-    // this process alone when their code is unknown.
-    if let Some(overrides) = identity.overrides {
-        hash.update(&overrides.to_le_bytes());
-    }
-    *hash.finalize().as_bytes()
+    fingerprint
+}
+
+/// What a composition state's frames depend on beyond its document, each
+/// part digested on its own.
+fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str, [u8; 32])> {
+    let part = |fill: &dyn Fn(&mut blake3::Hasher)| {
+        let mut hash = blake3::Hasher::new();
+        fill(&mut hash);
+        *hash.finalize().as_bytes()
+    };
+    vec![
+        (
+            "composition",
+            part(&|hash| {
+                hash.update(identity.comp.as_bytes());
+                // Frames are rendered as exported: with or without its motion blur.
+                hash.update(&[u8::from(export_motion_blur(&source.scene.doc))]);
+            }),
+        ),
+        (
+            "definitions",
+            part(&|hash| {
+                hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
+            }),
+        ),
+        (
+            "media",
+            part(&|hash| {
+                for (asset, path) in &source.scene.media.paths {
+                    hash.update(asset.as_bytes());
+                    hash.update(path.as_os_str().as_encoded_bytes());
+                    media_content(path, hash);
+                }
+            }),
+        ),
+        (
+            "media_stamps",
+            part(&|hash| {
+                for (path, len, modified, inode) in &identity.media {
+                    hash.update(path.as_os_str().as_encoded_bytes());
+                    hash.update(&len.to_le_bytes());
+                    hash.update(&modified.to_le_bytes());
+                    hash.update(&inode.to_le_bytes());
+                }
+            }),
+        ),
+        ("fonts", part(&|hash| fonts_identity(hash))),
+        (
+            "tone",
+            part(&|hash| {
+                hash.update(format!("{:?}", identity.tone).as_bytes());
+            }),
+        ),
+        (
+            "renderer",
+            part(&|hash| {
+                hash.update(renderer_identity().as_bytes());
+            }),
+        ),
+        // `CompatStore::cache_identity`: the wrappers' code and generation,
+        // or this process alone when their code is unknown.
+        (
+            "overrides",
+            part(&|hash| {
+                if let Some(overrides) = identity.overrides {
+                    hash.update(&overrides.to_le_bytes());
+                }
+            }),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -2149,6 +2249,54 @@ mod tests {
         let wanted = disk.inner.reader.ready.lock().unwrap().wanted;
         let generation = disk.inner.state.lock().unwrap().generation;
         assert_eq!(wanted, Some((generation, 34 - AHEAD + 1, 34)));
+    }
+
+    /// The app's media cache names a file by its bytes and marks its
+    /// recency in its modification time at every open: the frames rendered
+    /// from it stay the state's frames (every launch orphaned the last
+    /// one's). Any other file's modification time is still its identity.
+    #[test]
+    fn a_touched_media_cache_object_keeps_its_frames() {
+        let objects = tempfile::tempdir().unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        let fingerprint_after_touch = |file: &Path, content_named: Option<&Path>| {
+            std::fs::write(file, b"media bytes").unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let disk = DiskFrames::default();
+            disk.set_content_named(content_named.map(Path::to_owned));
+            disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+                .unwrap();
+            let scene = Scene {
+                media: Arc::new(pm_export::render::MediaPaths {
+                    paths: [("clip".to_owned(), file.to_owned())].into(),
+                    ..Default::default()
+                }),
+                ..scene()
+            };
+            let at = Ticks::new(0).unwrap();
+            let fingerprint = |disk: &DiskFrames| {
+                disk.observe(&scene, &[], None, None, None, 1, at);
+                ready(disk);
+                let state = disk.inner.state.lock().unwrap();
+                state.frames.as_ref().unwrap().fingerprint.unwrap()
+            };
+            let before = fingerprint(&disk);
+            // The next open: the recency mark moves, the bytes don't.
+            std::fs::File::options()
+                .append(true)
+                .open(file)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+                .unwrap();
+            disk.inner.state.lock().unwrap().media_checked = None;
+            (before, fingerprint(&disk))
+        };
+        let object = objects.path().join("0a1b2c.mp4");
+        let (before, after) = fingerprint_after_touch(&object, Some(objects.path()));
+        assert_eq!(before, after, "a media cache object");
+        let file = linked.path().join("clip.mp4");
+        let (before, after) = fingerprint_after_touch(&file, Some(objects.path()));
+        assert_ne!(before, after, "a linked file");
     }
 
     /// A playing frame gets its frame from disk on the first ask, waiting

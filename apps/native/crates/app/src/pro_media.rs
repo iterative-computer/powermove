@@ -1219,6 +1219,11 @@ impl ProMedia {
         self.inner.preferences()
     }
 
+    /// The media cache's content-addressed objects (named by their bytes).
+    pub fn objects(&self) -> &Path {
+        &self.inner.objects
+    }
+
     /// Where the media storage lives now (no file work).
     pub fn location(&self) -> PathBuf {
         storage_root(&self.inner.profile, &self.preferences())
