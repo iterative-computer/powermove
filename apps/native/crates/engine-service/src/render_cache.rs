@@ -3020,6 +3020,55 @@ mod tests {
         assert!(read_eventually(&disk, &edited, late).is_none());
     }
 
+    /// A rendered frame is missed when a layer its expression samples
+    /// changes, though that layer is drawn seconds away and named only
+    /// inside the expression; and when a layer added before it changes the
+    /// index its expression reads.
+    #[test]
+    fn an_edit_an_expression_reads_misses_the_rendered_frame() {
+        for (source, edit) in [
+            // L001 (0-1 s) samples L00d (2-3 s), whose value changes.
+            (
+                "sample('L00d', 'opacity', 0)",
+                (|p| p["layers"][0]["p"]["opacity"]["v"] = 10.into()) as fn(&mut serde_json::Value),
+            ),
+            // L001 reads its index; a layer drawn at 2-3 s is added before it.
+            ("idx * 10", |p| {
+                let mut added = p["layers"][0].clone();
+                added["id"] = "Ladded".into();
+                p["layers"].as_array_mut().unwrap().insert(0, added);
+            }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let disk = DiskFrames::default();
+            disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+                .unwrap();
+            let reading = |p: &mut serde_json::Value| {
+                let layers = p["layers"].as_array_mut().unwrap();
+                let l001 = layers.iter_mut().find(|l| l["id"] == "L001").unwrap();
+                l001["p"]["opacity"]["expr"] = source.into();
+            };
+            let scene = sequenced(reading);
+            disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+            ready(&disk);
+            // Frame 10 (0.33 s) draws L001 alone.
+            let early = write_frame(&disk, 10);
+            assert!(read_eventually(&disk, &scene, early).is_some());
+            let mut edited = sequenced(|p| {
+                reading(p);
+                edit(p);
+            });
+            edited.content = 2;
+            assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::new(0).unwrap()));
+            ready(&disk);
+            assert!(
+                read_eventually(&disk, &edited, early).is_none(),
+                "{source}: the frame rendered before the edit is shown after it"
+            );
+            assert!(present(&disk).is_empty(), "{source}");
+        }
+    }
+
     /// With raster overrides producing, an edit anywhere misses every
     /// frame: the override's reads of the document aren't tracked.
     #[test]
