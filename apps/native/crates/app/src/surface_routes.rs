@@ -29,6 +29,12 @@ impl Controller {
                 self.hide_home(cx)
             }
             "home" | "projects" => self.show_home(cx),
+            // The project's own tab pressed on Home.
+            "leaveHome" => {
+                if self.home_shown() && self.session.is_some() {
+                    self.hide_home(cx)
+                }
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {

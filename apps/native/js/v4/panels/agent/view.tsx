@@ -794,7 +794,7 @@ export function AgentView({
                 label="Stop current run"
                 title="Stop Current Run"
                 metadata={{ symbol: "stop.circle.fill" }}
-                style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
+                style={{ ...keep, symbolSize: t("metrics.symbol_action") }}
                 disabled={s.stopping}
                 onClick={() => {
                   if (!s.stopping) send({ type: "stop" });
@@ -806,7 +806,7 @@ export function AgentView({
                 label="Send"
                 title="Send"
                 metadata={{ symbol: "arrow.up.circle.fill" }}
-                style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
+                style={{ ...keep, symbolSize: t("metrics.symbol_action") }}
                 disabled={disabled || !s.sendable}
                 onClick={() => {
                   if (!disabled && s.sendable) send({ type: "submit" });

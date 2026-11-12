@@ -402,6 +402,20 @@ define_class!(
                     }
                 }
             }
+            // This window's own tab, pressed while Home shows over the
+            // project: back to the project (v1's title-bar tab).
+            let own = unsafe {
+                let in_window: bool = msg_send![sender, respondsToSelector: sel!(window)];
+                let window: *mut NSWindow = if in_window {
+                    msg_send![sender, window]
+                } else {
+                    std::ptr::null_mut()
+                };
+                window.as_ref().map(|w| w.windowNumber())
+            };
+            if own == Some(number) {
+                self.send(Command { name: "leaveHome".into(), args: vec![], token: None });
+            }
         }
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, sender: &AnyObject) {
@@ -1257,6 +1271,9 @@ impl ToolbarDelegate {
                     );
                     home.setBezelStyle(NSBezelStyle::Toolbar);
                     home.setButtonType(NSButtonType::PushOnPushOff);
+                    // Selection is neutral: without this an active window
+                    // fills the on state with the accent.
+                    home.setBezelColor(Some(&selected_color()));
                     home.setTag(TOOLBAR.iter().position(|n| *n == "home").unwrap() as isize);
                     home.setToolTip(Some(&NSString::from_str("Projects")));
                     home.setAccessibilityLabel(Some(&NSString::from_str("Projects")));
@@ -2109,11 +2126,8 @@ impl Host {
                 window: w.windowNumber(),
                 title: w.title().to_string(),
                 edited: w.isDocumentEdited(),
-                selected: if group.len() == 1 {
-                    true
-                } else {
-                    w.windowNumber() == selected
-                },
+                // On Home the lit item is Home: no project tab is selected.
+                selected: !self.home.get() && (group.len() == 1 || w.windowNumber() == selected),
             })
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
@@ -2194,6 +2208,9 @@ impl Host {
                 NSControlStateValueOff
             });
             button.setShowsBorderOnlyWhileMouseInside(!tab.selected);
+            // A selected tab is a neutral pill, never the accent an active
+            // window gives an on button.
+            button.setBezelColor(Some(&selected_color()));
             if tab.edited {
                 button.setImage(Some(&blank));
                 button.setImagePosition(NSCellImagePosition::ImageLeading);
@@ -4159,6 +4176,31 @@ pub fn accent_color() -> Retained<NSColor> {
             let names = NSArray::from_slice(&list);
             let dark_match = appearance
                 .bestMatchFromAppearancesWithNames(&names)
+                .is_some_and(|n| n.to_string().contains("Dark"));
+            // Both colours live as long as the block (captured).
+            let color: &NSColor = if dark_match { &dark } else { &light };
+            std::ptr::NonNull::from(color)
+        },
+    );
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+/// The fill of a selected tab, segment or toolbar toggle, in place of the
+/// accent an active window gives an "on" control: selection is neutral.
+/// AppKit draws the label on a coloured bezel in white, so the fill is the
+/// system's graphite selection: mid grey on a light ground, a lift on a dark.
+pub fn selected_color() -> Retained<NSColor> {
+    const LIGHT: (f64, f64) = (0., 0.45);
+    const DARK: (f64, f64) = (1., 0.2);
+    let of = |(white, alpha): (f64, f64)| {
+        NSColor::colorWithSRGBRed_green_blue_alpha(white, white, white, alpha)
+    };
+    let (light, dark) = (of(LIGHT), of(DARK));
+    let provider = block2::RcBlock::new(
+        move |appearance: std::ptr::NonNull<NSAppearance>| -> std::ptr::NonNull<NSColor> {
+            let appearance = unsafe { appearance.as_ref() };
+            let list = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
+            let dark_match = appearance
+                .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&list))
                 .is_some_and(|n| n.to_string().contains("Dark"));
             // Both colours live as long as the block (captured).
             let color: &NSColor = if dark_match { &dark } else { &light };
