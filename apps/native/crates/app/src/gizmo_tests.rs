@@ -29,6 +29,8 @@ struct Recorder {
     variant: RefCell<Option<String>>,
     /// Input times drag steps stamped for the viewer trace.
     stamps: RefCell<Vec<f64>>,
+    /// The composition size the viewer reports, when not 640 by 360.
+    size: Cell<Option<[f64; 2]>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -110,7 +112,7 @@ impl Host for Recording {
         Some(ViewFrame {
             origin: bounds.origin + point(px(20.), px(20.)),
             scale: 1.,
-            size: [640., 360.],
+            size: self.0.size.get().unwrap_or([640., 360.]),
         })
     }
     fn tool(&self, _: &App) -> Tool {
@@ -1458,4 +1460,63 @@ fn escape_during_a_marquee_keeps_the_selection(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let p = s.rig.kernel.published(PROJECT).unwrap();
     assert_eq!(p.selection.layers(), ["l0".to_string()]);
+}
+/// A layer is selected (the kernel's selection, as a click makes it) in a
+/// composition the viewer reports with no width, and one whose position is
+/// beyond what a float holds. The viewer's gizmos publish their overlay lines for it;
+/// what the editing viewer hands the engine from them (guides first, then
+/// the gizmo's lines, as `Controller::set_gizmos` does) is drawable, where
+/// unwrapping the lines as they came aborted the app on the main thread.
+#[gpui::test]
+fn a_selection_in_a_zero_size_or_far_off_composition_publishes_drawable_overlays(
+    cx: &mut TestAppContext,
+) {
+    use pm_engine_service::OverlayGeometry;
+    let drawable = |l: &OverlayLine| l.ends.iter().chain(&l.color).all(|v| v.is_finite());
+    let mut undrawable = 0;
+    for (project, size) in [
+        // The viewer reports a composition with no width (the size overlay
+        // math divides by); the stored project is an ordinary one, because
+        // this rig's panel mount refuses a stored width of 0.
+        (
+            project_of("shape").replace("Square", "No width"),
+            [0., 360.],
+        ),
+        (
+            project_of("shape").replace(r#""position.x":{"v":200"#, r#""position.x":{"v":1e42"#),
+            [640., 360.],
+        ),
+    ] {
+        assert_ne!(project, project_of("shape"), "the fixture was changed");
+        let mut s = unposed(cx, &project);
+        s.recorder.size.set(Some(size));
+        s.surface.update(&mut s.vcx, |s, cx| s.refresh(cx));
+        let surface = s.surface.clone();
+        settle(cx, move |cx| surface.read_with(cx, |s, _| s.idle()));
+        let lines = s.recorder.lines.borrow().clone();
+        undrawable += lines.iter().filter(|l| !drawable(l)).count();
+        if lines.iter().any(|l| !drawable(l)) {
+            assert!(
+                OverlayGeometry::new(lines.clone()).is_err(),
+                "taken as they came, these lines are refused"
+            );
+        }
+        let guides = crate::viewer2::overlay_lines(true, true);
+        // Never fails and never panics, whatever the lines hold.
+        let _published =
+            OverlayGeometry::lossy(guides.iter().copied().chain(lines.iter().copied()));
+        // What it keeps is exactly what the engine accepts.
+        let kept: Vec<OverlayLine> = guides
+            .iter()
+            .chain(lines.iter().filter(|l| drawable(l)))
+            .copied()
+            .take(OverlayGeometry::MAX_LINES)
+            .collect();
+        assert!(kept.len() >= guides.len(), "the guides are kept");
+        OverlayGeometry::new(kept).expect("drawable overlay geometry");
+    }
+    assert!(
+        undrawable > 0,
+        "the selection really produced lines that cannot be drawn"
+    );
 }
