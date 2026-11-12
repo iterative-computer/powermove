@@ -79,6 +79,12 @@ pub struct TextStats {
     pub cache_hits: u64,
     pub pages: u64,
     pub cpu_pages: u64,
+    /// Glyph outlines resolved and uploaded for direct coverage (a glyph the
+    /// direct cache did not hold).
+    pub glyph_uploads: u64,
+    /// Color glyph images converted and uploaded (an image the image cache
+    /// did not hold).
+    pub image_uploads: u64,
 }
 
 struct Cached {
@@ -987,6 +993,7 @@ impl TextGpu {
             view_formats: &[],
         });
         let data: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        self.stats.image_uploads += 1;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -1046,6 +1053,7 @@ impl TextGpu {
         planned: Vec<(pm_text::render::scene::CoverageLines, DirectPlan)>,
     ) -> Option<Vec<(wgpu::TextureView, DirectMeta)>> {
         let max_side = device.limits().max_texture_dimension_2d.max(1) as usize;
+        self.stats.glyph_uploads += planned.len() as u64;
         let mut out = Vec::with_capacity(planned.len());
         let mut chunk: Vec<(pm_text::render::scene::CoverageLines, DirectMeta, usize)> = Vec::new();
         let mut scratch = std::mem::take(&mut self.direct_scratch);
@@ -1480,6 +1488,20 @@ impl TextGpu {
         self.insert(plan, precision, working, raster);
         self.raster_pool.trim(CACHE_BYTES);
         Ok(view)
+    }
+
+    /// A frame's commands are submitted and own what they read: the rasters
+    /// it retired go, and the raster pool keeps at most [`CACHE_BYTES`] idle.
+    /// The glyph caches stay. Each holds at most its own cap
+    /// ([`CACHE_BYTES`] of rasters, [`IMAGE_CACHE_BYTES`] of color glyph
+    /// images, [`DIRECT_CACHE_BYTES`] of glyph outlines), so text a later
+    /// frame draws unchanged is neither resolved nor uploaded again.
+    pub fn end_frame(&mut self) {
+        for target in self.retired.drain(..) {
+            self.raster_pool.release(target);
+        }
+        self.retired_bytes = 0;
+        self.raster_pool.trim(CACHE_BYTES);
     }
 
     /// Evicts least recently used rasters until the cache holds at most
