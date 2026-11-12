@@ -387,6 +387,30 @@ pub(crate) fn probe_with_input(path: &Path) -> Result<(Probed, Input)> {
     probe_with_input_fingerprint(path, size, || crate::hash::sampled_fingerprint(path))
 }
 
+/// An audio stream whose container states no length of its own (Matroska
+/// keeps only the file's) is as long as its packets reach: never the
+/// file's length, which a longer picture sets. Left unknown when the
+/// packets cannot be read.
+fn measure_unstated_audio_lengths(input: &Input, streams: &mut [StreamProbe]) {
+    let unstated: Vec<usize> = streams
+        .iter()
+        .filter(|s| s.kind == StreamKind::Audio && s.audio.is_some() && s.duration_pts.is_none())
+        .map(|s| s.index)
+        .collect();
+    if unstated.is_empty() {
+        return;
+    }
+    let Ok(ends) = input.stream_ends(&unstated) else {
+        return;
+    };
+    for (index, end) in unstated.into_iter().zip(ends) {
+        let stream = &mut streams[index];
+        stream.duration_pts = end
+            .map(|end| end - stream.start_pts.unwrap_or(0))
+            .filter(|&d| d > 0);
+    }
+}
+
 fn probe_with_input_fingerprint(
     path: &Path,
     size: u64,
@@ -397,10 +421,11 @@ fn probe_with_input_fingerprint(
     let TimingProbe {
         duration_us,
         start_us,
-        streams,
+        mut streams,
         video_stream,
         audio_stream,
     } = input_timing(path, &input, &container);
+    measure_unstated_audio_lengths(&input, &mut streams);
     let (video, index) = match video_stream {
         Some(v) => {
             let (p, idx) = video_probe(path, &input, v)?;

@@ -198,8 +198,8 @@ impl Span {
                     pts: d,
                     timebase: s.timebase,
                 }),
-                // Matroska states no stream lengths: from the stream's own
-                // start to the container's end.
+                // A length neither stated nor measured from the packets:
+                // from the stream's own start to the container's end.
                 None => {
                     let start =
                         s.start_pts.unwrap_or(0) as i128 * s.timebase[0] as i128 * 1_000_000

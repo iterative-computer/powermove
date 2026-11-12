@@ -432,3 +432,63 @@ fn a_waveform_shows_the_sound_where_the_mix_plays_it() {
     );
     assert!(envelope[(4_800.0 * rate / f64::from(SR)) as usize] < 0.01);
 }
+
+/// Matroska keeps no length per stream: a ten-second picture with half a
+/// second of sound must not report ten seconds of sound. The imported
+/// sound length is where the mix stops playing it, read either way, for
+/// PCM, FLAC, AAC and Opus (the coded ones within one codec frame: their
+/// container times are whole milliseconds and the mix drops the priming).
+#[test]
+fn a_short_soundtrack_in_matroska_reports_its_own_length() {
+    let dir = temp_dir("clip-origin-mkv-short-sound");
+    let wav = dir.join("tone.wav");
+    write_wav(&wav, SR, &[tone(SR, 0.5, 1000.0, 0.5)]);
+    for (codec, slack) in [
+        ("pcm_s16le", 48.0),
+        ("flac", 48.0),
+        ("aac", 1024.0),
+        ("libopus", 960.0),
+    ] {
+        let file = dir.join(format!("short-{codec}.mkv"));
+        let status = std::process::Command::new(ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "color=gray:size=64x64:rate=25:duration=10",
+            ])
+            .arg("-i")
+            .arg(&wav)
+            .args(["-c:v", "mpeg4", "-q:v", "8", "-c:a", codec])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for (timing, member) in [
+            (pm_media::clip::ClipTiming::Presentation, r#","timing":2"#),
+            (pm_media::clip::ClipTiming::Legacy, ""),
+        ] {
+            let a = audio("A", "v", 0.0, 2.0, "", "");
+            let text = format!(
+                r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":2,"layers":[{a}],"comps":{{}},"assets":{{"v":{{"id":"v","kind":"video"{member}}}}},"params":{{}}}}"#
+            );
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+            let rig = Rig::new(&[("v", &file)]);
+            let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, 2 * SR as i64, 4096).remove(0);
+            let last = out.iter().rposition(|v| v.abs() > 1e-3).unwrap() + 1;
+            let facts = pm_media::facts::media_facts_as(&file, None, timing).unwrap();
+            assert!(
+                (facts.duration.unwrap() - 10.0).abs() < 0.05,
+                "{codec}: picture {:?}",
+                facts.duration
+            );
+            let length = facts.audio_duration.map(|d| d * f64::from(SR));
+            assert!(
+                length.is_some_and(|l| (l - last as f64).abs() <= slack),
+                "{codec}, {timing:?}: imported sound {length:?} samples, the mix plays {last}"
+            );
+        }
+    }
+}

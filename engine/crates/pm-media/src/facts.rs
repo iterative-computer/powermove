@@ -162,15 +162,10 @@ pub fn audio_duration(p: &MediaProbe, timing: ClipTiming) -> Option<f64> {
     stream.audio.as_ref()?;
     let unit = stream.timebase[0] as f64 / stream.timebase[1] as f64;
     let start = stream.start_pts.unwrap_or(0) as f64 * unit;
-    let length = match stream.duration_pts {
-        Some(d) => d as f64 * unit,
-        // Containers that keep only their own duration (Matroska): from the
-        // container's start to its end, less what precedes this stream.
-        None => {
-            let container_start = p.start_us.unwrap_or(0) as f64 / 1e6;
-            p.duration_us? as f64 / 1e6 - (start - container_start)
-        }
-    };
+    // Unknown when neither the container nor the stream's packets say
+    // (the probe measures Matroska's from its packets): never the file's
+    // length, which a longer picture sets.
+    let length = stream.duration_pts? as f64 * unit;
     Some(match timing {
         ClipTiming::Legacy => length.max(0.0),
         ClipTiming::Presentation => {
