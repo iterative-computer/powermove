@@ -561,6 +561,13 @@ impl SceneSource for DocumentSource {
         .map_err(|e| e.to_string())?;
         Ok(Some(
             pm_studio3d_engine::extract::FinalQuality {
+                sampling: pm_studio3d_engine::sampling::SamplingPolicy {
+                    perceptual_noise:q["perceptualNoise"].as_bool().unwrap_or(false),
+                    edge_multiplier:q["edgeSamplesMultiplier"].as_u64().unwrap_or(4) as u32,
+                    diffuse_bounces:q["diffuseBounces"].as_u64().unwrap_or(0) as u32,
+                    glossy_bounces:q["glossyBounces"].as_u64().unwrap_or(0) as u32,
+                    transmission_bounces:q["transmissionBounces"].as_u64().unwrap_or(0) as u32,
+                },
                 min_samples: q["minSamples"].as_u64().unwrap() as u32,
                 max_samples: q["maxSamples"].as_u64().unwrap() as u32,
                 noise_threshold: q["noiseThreshold"].as_f64().unwrap() as f32,

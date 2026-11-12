@@ -23,11 +23,12 @@ fn main()->Result<(),String>{
             let (samples,min_samples,noise,bounces,quality)=match preset {
                 "draft"=>(16,4,0.12,4,Quality::Balanced),
                 "preview"=>(64,16,0.06,6,Quality::Balanced),
-                "production"=>(256,32,0.03,8,Quality::Balanced),
+                "production"=>(128,8,0.12,8,Quality::Balanced),
                 "final"=>(1024,512,0.015,8,Quality::High),
                 "refine"=>(32,32,0.,6,Quality::Balanced),
                 _=>return Err("unknown preset".into()),
             };
+            renderer.sampling_policy=if preset=="production" {pm_studio::sampling::SamplingPolicy::PRODUCTION}else{Default::default()};
             renderer.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:noise>0.,min_samples,relative_error:noise,absolute_error:0.001},true);
             renderer.caustics_enabled = !matches!(preset,"draft"|"preview") && value("--caustics","on")!="off";
             renderer.set_precomputed_caustics(false);

@@ -116,8 +116,12 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
     let policies=std::env::var("PM_STUDIO_NOISE_POLICIES").unwrap_or_else(|_|"production,final".into());
     let policies:Vec<_>=policies.split(',').collect();
     assert!(policies.iter().all(|p|["production","final"].contains(p)));
+    let baseline=std::env::var_os("PM_STUDIO_NOISE_BASELINE").is_some();
     for &name in names {
-        let scene = if name == "chrome-set" {
+        let scene = if name == "bottle" {
+            let input=std::env::var("PM_STUDIO_BOTTLE_SCENE").expect("set PM_STUDIO_BOTTLE_SCENE to studio-fixtures product-shot/scene.json");
+            serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap()
+        } else if name == "chrome-set" {
             // The owner's product stress set includes glass, lacquer and the
             // shadow catcher; a chrome sphere alone misses those caustics.
             pm_studio::scene::preset("chrome", "starlight", 0.).unwrap()
@@ -132,8 +136,9 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
         let mut reference_scene = scene.clone();
         assert!(reference_scene.lights.len() > 1);
         reference_scene.lights.rotate_left(1);
+        renderer.sampling_policy=Default::default();
         renderer.set_scene(&reference_scene, &reference_scene.prepare());
-        let backdrop = (name == "chrome-set").then(|| scene.backdrop.to_array());
+        let backdrop = matches!(name,"chrome-set"|"bottle").then(|| scene.backdrop.to_array());
         renderer.set_void(backdrop);
         renderer.set_precomputed_caustics(true);
         renderer.set_adaptive_sampling(AdaptiveSampling {
@@ -146,15 +151,22 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
         renderer.set_scene(&scene, &scene.prepare());
         renderer.set_void(backdrop);
         for (quality, max_samples, min_samples, threshold) in
-            [("production", 256, 32, 0.03), ("final", 1024, 512, 0.015)]
+            [("production", if baseline {256}else{128}, if baseline {32}else{8}, if baseline{0.03}else{0.12}), ("final", 1024, 512, 0.015)]
         {
             if !policies.contains(&quality){continue;}
-            denoiser.set_quality(if quality == "final" {
-                Quality::High
-            } else {
-                Quality::Balanced
-            });
+            let denoise_quality=if quality=="final" {"high".to_owned()}else{std::env::var("PM_STUDIO_PRODUCTION_DENOISE").unwrap_or_else(|_|"balanced".into())};
+            denoiser.set_quality(match denoise_quality.as_str(){"high"=>Quality::High,"balanced"=>Quality::Balanced,"fast"=>Quality::Fast,_=>panic!("unknown denoising quality")});
             denoiser.set_half_resolution_guides(quality != "final");
+            renderer.sampling_policy=if quality=="production" && !baseline {pm_studio::sampling::SamplingPolicy::PRODUCTION}else{Default::default()};
+            if quality=="production" && !baseline {
+                for (name,value) in [("PM_STUDIO_PRODUCTION_GLOSSY",&mut renderer.sampling_policy.glossy_bounces),("PM_STUDIO_PRODUCTION_DIFFUSE",&mut renderer.sampling_policy.diffuse_bounces),("PM_STUDIO_PRODUCTION_TRANSMISSION",&mut renderer.sampling_policy.transmission_bounces)] {
+                    if let Ok(override_value)=std::env::var(name){*value=override_value.parse().unwrap();}
+                }
+                renderer.sampling_policy.validate().unwrap();
+            }
+            let min_samples=if quality=="production" {std::env::var("PM_STUDIO_PRODUCTION_MIN").ok().map(|v|v.parse::<u32>().unwrap()).unwrap_or(min_samples)}else{min_samples};
+            let threshold=if quality=="production" {std::env::var("PM_STUDIO_PRODUCTION_NOISE").ok().map(|v|v.parse::<f32>().unwrap()).unwrap_or(threshold)}else{threshold};
+            assert!(min_samples>0 && threshold.is_finite() && (0. ..=1.).contains(&threshold));
             renderer.set_time_seed(0);
             renderer.set_adaptive_sampling_with_floor(
                 AdaptiveSampling {
@@ -166,8 +178,8 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 true,
             );
             let start = Instant::now();
-            // A trial ceiling is reported explicitly; acceptance limits stay
-            // fixed. The normal production policy remains 256 until validated.
+            // Trial sampling parameters are explicit; acceptance limits and
+            // independent Monte Carlo references stay fixed.
             let max_samples=if quality=="production" {std::env::var("PM_STUDIO_PRODUCTION_SPP").ok().map(|v|v.parse::<u32>().unwrap()).unwrap_or(max_samples)}else{max_samples};
             assert!(max_samples>=min_samples && max_samples<=4096);
             renderer.trace(max_samples, 8, true, 0);
@@ -187,6 +199,7 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
             let counts = renderer.sample_counts();
             let ids=renderer.first_hit_ids();
             let frame_ms=start.elapsed().as_secs_f64()*1000.;
+            let pipeline=renderer.timings;
             renderer.set_time_seed(19);
             renderer.trace(max_samples,8,true,0);
             let second=renderer.finish_with_layers(&|color,shade,a,n|{
@@ -196,24 +209,39 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
             let flicker=flicker_difference(&actual,&second,&reference,w as usize,h as usize);
             let mut roi=reference.clone();
             for (p,id) in roi.chunks_exact_mut(4).zip(ids.iter().copied()) {
-                if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){p[3]=0;}
+                if id==0 || (!matches!(name,"chrome-set"|"bottle") && id>=scene.objects.len() as u32){p[3]=0;}
             }
             let flicker_roi=flicker_difference(&actual,&second,&roi,w as usize,h as usize);
             println!("FLICKER_GATE {}",serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"seeds":[0,19],"whole":flicker,"object":flicker_roi,"smooth_difference_rms_limit":0.006}));
+            if std::env::var_os("PM_STUDIO_NOISE_OUT").is_some() {
+                // Diagnose the source of boiling without changing the gate or
+                // its independent smooth-region mask. ID zero is the void / catcher.
+                let mut regions=vec![];
+                for id in ids.iter().copied().collect::<std::collections::BTreeSet<_>>() {
+                    let mut guide=reference.clone();let mut spp=0f64;let mut count=0usize;
+                    for ((pixel,&hit),&samples) in guide.chunks_exact_mut(4).zip(&ids).zip(&counts) {
+                        if hit!=id {pixel[3]=0;} else {spp+=samples as f64;count+=1;}
+                    }
+                    let (rms,smooth)=flicker_difference(&actual,&second,&guide,w as usize,h as usize);
+                    regions.push(serde_json::json!({"id":id,"difference_rms":rms,"smooth_pixels":smooth,"mean_spp":spp/count.max(1) as f64}));
+                }
+                println!("FLICKER_REGIONS {}",serde_json::json!({"scene":name,"policy":quality,"regions":regions}));
+                save(&format!("{name}-{quality}-seed19"),w,h,&second);
+            }
             if ![flicker,flicker_roi].iter().all(|&(r,n)|r<0.006&&n>100){
                 failures.push(format!("{name}/{quality} flicker whole={flicker:?} object={flicker_roi:?}"));
             }
             let object_metrics=if w>=1920 {
                 let mut masked=reference.clone();
                 for (pixel,id) in masked.chunks_exact_mut(4).zip(ids.iter().copied()) {
-                    if id==0 || (name!="chrome-set" && id>=scene.objects.len() as u32){pixel[3]=0;}
+                    if id==0 || (!matches!(name,"chrome-set"|"bottle") && id>=scene.objects.len() as u32){pixel[3]=0;}
                 }
                 Some(metrics(&actual,&masked,w as usize,h as usize))
             }else{None};
             let (rms, noise, bias, pixels) = metrics(&actual, &reference, w as usize, h as usize);
             println!(
                 "NOISE_GATE {}",
-                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":frame_ms})
+                serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"denoise_quality":denoise_quality,"sampling":renderer.sampling_policy,"requested_floor":min_samples,"relative_error":threshold,"mean_spp":counts.iter().map(|&n|n as f64).sum::<f64>()/counts.len() as f64,"pipeline":pipeline,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":frame_ms})
             );
             save(&format!("{name}-{quality}"), w, h, &actual);
             // Normalized sRGB code-value limits catch speckle and low-frequency
@@ -256,7 +284,7 @@ fn matte_enamel_uses_authored_perceptual_roughness_without_a_mirror_coat() {
 fn full_hd_product_noise_acceptance() {
     let selected=std::env::var("PM_STUDIO_NOISE_SCENES").unwrap_or_else(|_|"teapot,glass,chrome,chrome-set".into());
     let names:Vec<_>=selected.split(',').collect();
-    assert!(!names.is_empty() && names.iter().all(|n|["teapot","glass","chrome","chrome-set"].contains(n)),"unknown full-HD fixture");
+    assert!(!names.is_empty() && names.iter().all(|n|["teapot","glass","chrome","chrome-set","bottle"].contains(n)),"unknown full-HD fixture");
     check_noise_at(&names,1920,1080);
 }
 fn fingerprint(bytes:&[u8])->String {

@@ -41,6 +41,7 @@ pub struct AuxiliaryLayer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinalQuality {
+    pub sampling: pm_studio::sampling::SamplingPolicy,
     pub min_samples: u32,
     pub max_samples: u32,
     pub noise_threshold: f32,
@@ -62,6 +63,7 @@ impl FinalQuality {
         {
             return Err("Invalid Studio render quality".into());
         }
+        self.sampling.validate()?;
         Ok(self)
     }
 }

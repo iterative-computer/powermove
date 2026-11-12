@@ -308,6 +308,29 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64
+                  },
+                  "edgeSamplesMultiplier": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8
+                  },
+                  "diffuseBounces": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32
+                  },
+                  "glossyBounces": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32
+                  },
+                  "transmissionBounces": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 32
+                  },
+                  "perceptualNoise": {
+                    "type": "boolean"
                   }
                 }
               }

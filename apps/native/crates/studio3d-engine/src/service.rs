@@ -364,6 +364,7 @@ impl StudioService {
             self.prepare_scene(source, request.clone(), tier)?;
         let r = self.renderer.as_mut().unwrap();
         r.live = tier == Tier::QualityLive;
+        r.sampling_policy=quality.map_or(Default::default(),|q|q.sampling);
         let (mut samples, mut bounces, salt) = match tier {
             Tier::QualityLive => (if orthographic {4} else {1}, 3, 0),
             Tier::QualityRefine { samples } => (samples, 6, 0),

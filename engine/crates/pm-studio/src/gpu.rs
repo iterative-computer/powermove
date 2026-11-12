@@ -151,6 +151,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     pub adapter: String,
     pub timings: PipelineTimings,
+    pub sampling_policy: crate::sampling::SamplingPolicy,
     width: u32,
     height: u32,
     trace: wgpu::ComputePipeline,
@@ -441,7 +442,7 @@ impl Renderer {
         });
         let mut r = Renderer {
             adapter,
-            timings: Default::default(),
+            timings: Default::default(), sampling_policy: Default::default(),
             params: buf("params", std::mem::size_of::<Params>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             post_params: (0..9).map(|_| buf("post params", std::mem::size_of::<PostParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)).collect(),
             accum: buf("accum", pixels * 16, rw),
@@ -867,6 +868,7 @@ impl Renderer {
             self.frame = self.frame.wrapping_add(1);
             let mut p = self.base;
             p.dims = [w, h, self.frame, n];
+            p.ambient[3]=if self.live {0.}else{self.sampling_policy.packed() as f32};
             p.counts = [self.light_count, bounces, if reset && first { 1 } else { 0 }, clamp];
             p.opts = [u32::from(self.live), self.base.opts[1], self.instance_count, self.base.opts[3]];
             let group = self.trace_group().clone();

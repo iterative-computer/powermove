@@ -32,5 +32,5 @@ fn main(@builtin(global_invocation_id) p:vec3u){
     let contrast=0.15*max(max(length(c),length(q)),0.1);
     edge=edge || dot(c-q,c-q)>contrast*contrast+9.*dot(cv+qv,vec3f(1.));
   }}
-  if(edge){emission[count+i].w=1.;}
+  if(edge){emission[count+i].w=f32(u32(emission[count+i].w)|1u);}
 }

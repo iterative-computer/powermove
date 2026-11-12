@@ -2,7 +2,7 @@
 //! This crate contains no UI and does not own authored document state.
 #[cfg(feature = "oidn")]
 pub use pm_studio::oidn;
-pub use pm_studio::{bvh, environment, gpu, math, mesh, nature, scatter, scene, terrain};
+pub use pm_studio::{bvh, environment, gpu, sampling, math, mesh, nature, scatter, scene, terrain};
 pub mod compositor;
 pub mod extract;
 pub mod service;

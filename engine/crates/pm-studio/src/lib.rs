@@ -19,6 +19,7 @@ pub mod mesh;
 pub mod nature;
 pub mod scene;
 pub mod validation;
+pub mod sampling;
 #[cfg(feature = "oidn")]
 pub mod oidn;
 

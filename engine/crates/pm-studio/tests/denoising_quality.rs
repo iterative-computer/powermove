@@ -294,3 +294,46 @@ fn quiet_pixels_stop_at_the_requested_floor_and_end_the_frame_early() {
     r.trace_budgeted_interruptible(512,8,true,64,8,0,&||false);
     assert!(r.samples<512 && r.sample_counts().iter().all(|&n|n>=8. && n<=12.),"saved floors must override the legacy caustic minimum");
 }
+
+
+#[test]
+fn adaptive_glass_observations_keep_a_floor_for_rare_specular_paths() {
+    let scene=glass_detail();
+    let mut r=Renderer::new(64,48).unwrap();
+    for hardware in [false,true] {
+        r.hardware_rt=hardware;r.set_scene(&scene,&scene.prepare());r.caustics_enabled=false;
+        r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
+        r.sampling_policy=Default::default();r.trace(128,8,true,64);
+        let legacy=r.sample_counts();let ids=r.first_hit_ids();
+        assert!(legacy.iter().zip(&ids).any(|(&n,&id)|id==1 && n<128.),"the rare-path guard was not exercised");
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;r.trace(128,8,true,64);
+        let guarded=r.sample_counts();let ids=r.first_hit_ids();
+        let glass:Vec<_>=guarded.iter().zip(ids).filter_map(|(&n,id)|(id==1).then_some(n)).collect();
+        assert!(glass.len()>100 && glass.iter().all(|&n|n==128.),"glass stopped on an unreliable first variance estimate: {glass:?}");
+        r.trace(32,8,true,64);
+        assert!(r.sample_counts().iter().all(|&n|n<=32.),"the requested ceiling remains authoritative");
+    }
+}
+
+#[test]
+fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
+    let mut mirror=glass_detail();mirror.materials[0]=Material::metal(Vec3::splat(0.95),0.02);
+    let mut floor=mirror.clone();
+    floor.objects=vec![Object{mesh:mesh::sphere(v3(1000.,0.,0.),1.,12,24),material:0}];
+    floor.shadow_catcher=true;floor.backdrop=Vec3::splat(0.9);
+    floor.camera=Camera::lens(v3(0.,6.,8.),Vec3::ZERO,50.,0.);
+    let mut r=Renderer::new(64,48).unwrap();
+    for hardware in [false,true] {
+        r.hardware_rt=hardware;r.caustics_enabled=false;
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;
+        for (scene,object,minimum) in [(&mirror,1,32.),(&floor,0,16.)] {
+            r.set_scene(scene,&scene.prepare());
+            r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
+            r.trace(128,8,true,64);
+            let counts=r.sample_counts();let ids=r.first_hit_ids();
+            let visible:Vec<_>=counts.iter().zip(ids).filter_map(|(&n,id)|(id==object).then_some(n)).collect();
+            assert!(visible.len()>100 && visible.iter().all(|&n|n>=minimum),"undersampled reflection/catcher: {visible:?}");
+            assert!(visible.iter().any(|&n|n<128.),"quiet regions must still converge");
+        }
+    }
+}

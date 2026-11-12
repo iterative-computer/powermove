@@ -968,7 +968,7 @@ fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
     let after = project(&s);
     let q = &after["comps"]["C"]["studioQuality"];
     assert_eq!(q["maxSamples"], 12);
-    assert_eq!(q["minSamples"], 12);
+    assert_eq!(q["minSamples"], 8);
     assert_eq!(q["preset"], "custom");
     assert_eq!(layer(&s, "cam")["d"]["data"]["environment"]["samples"], 12);
     s.undo().unwrap();
@@ -985,6 +985,11 @@ fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
     );
     assert_eq!(s.revision(), revision);
     assert_eq!(project(&s), after);
+    apply(&mut s, json!({"operation":"set_environment","patch":{"samples":4}}));
+    let lowered=project(&s);
+    assert_eq!(lowered["comps"]["C"]["studioQuality"]["minSamples"],4);
+    assert_eq!(lowered["comps"]["C"]["studioQuality"]["maxSamples"],4);
+    s.undo().unwrap();assert_eq!(project(&s),after);
 }
 
 #[test]
@@ -1298,4 +1303,23 @@ fn world_density_migration_respects_an_explicit_shape_patch() {
         assert_eq!(p["fogDistance"]["v"], if explicit { 10000. } else { 400. });
         assert_eq!(p["fogHeightFalloff"]["v"], if explicit { 0. } else { 0.06 });
     }
+}
+
+#[test]
+fn offline_sampling_limits_are_undoable_saved_and_legacy_quality_still_opens() {
+    let mut s=store();let before=project(&s);
+    apply(&mut s,json!({"operation":"set_render_quality","preset":"production"}));
+    let q=project(&s)["comps"]["C"]["studioQuality"].clone();
+    assert_eq!(q["minSamples"],8);assert_eq!(q["maxSamples"],128);
+    assert_eq!(q["edgeSamplesMultiplier"],2);assert_eq!(q["transmissionBounces"],8);
+    let authored=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);s.redo().unwrap();
+    let mut dir=common::TempDir::new("sampling-policy");dir.0=std::fs::canonicalize(&dir.0).unwrap();
+    let path=dir.path("sampling.pmv");common::save_as(&mut s,&path).unwrap();
+    let mut reopened=common::open_store(&path);assert_eq!(project(&reopened),authored);
+    reopened.undo().unwrap();assert_eq!(project(&reopened),before);
+    let mut legacy=pm_scene3d::quality::preset("production").unwrap();
+    for key in ["perceptualNoise","edgeSamplesMultiplier","diffuseBounces","glossyBounces","transmissionBounces"]{legacy.as_object_mut().unwrap().remove(key);}
+    legacy["minSamples"]=json!(32);legacy["maxSamples"]=json!(256);legacy["noiseThreshold"]=json!(0.03);
+    assert_eq!(pm_scene3d::quality::validate(legacy.clone()).unwrap(),legacy);
+    legacy["diffuseBounces"]=json!(33);assert!(pm_scene3d::quality::validate(legacy).is_err());
 }

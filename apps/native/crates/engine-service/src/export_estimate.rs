@@ -322,6 +322,13 @@ impl Calibration {
         let policy = Policy(
             &self.source,
             FinalQuality {
+                sampling: pm_studio3d_engine::sampling::SamplingPolicy {
+                    perceptual_noise:q["perceptualNoise"].as_bool().unwrap_or(false),
+                    edge_multiplier:q["edgeSamplesMultiplier"].as_u64().unwrap_or(4) as u32,
+                    diffuse_bounces:q["diffuseBounces"].as_u64().unwrap_or(0) as u32,
+                    glossy_bounces:q["glossyBounces"].as_u64().unwrap_or(0) as u32,
+                    transmission_bounces:q["transmissionBounces"].as_u64().unwrap_or(0) as u32,
+                },
                 min_samples: spp,
                 max_samples: spp,
                 noise_threshold: 0.,

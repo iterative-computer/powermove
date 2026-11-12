@@ -67,9 +67,10 @@ impl SceneSource for Product {
     }
     fn final_quality(&self, _: &SceneRequest) -> Result<Option<FinalQuality>, String> {
         Ok(self.production.then_some(FinalQuality {
-            min_samples: 32,
-            max_samples: 256,
-            noise_threshold: 0.03,
+            sampling: pm_studio3d_engine::sampling::SamplingPolicy::PRODUCTION,
+            min_samples: 8,
+            max_samples: 128,
+            noise_threshold: 0.12,
             max_bounces: 8,
             caustics: true,
             denoise: true,
@@ -177,7 +178,7 @@ fn draft_spatial_denoise_keeps_targets_and_reuses_geometry() {
     struct Draft(Product);
     impl SceneSource for Draft {
         fn scene(&self,r:&SceneRequest)->Result<SceneInput,String>{self.0.scene(r)}
-        fn final_quality(&self,_:&SceneRequest)->Result<Option<FinalQuality>,String>{Ok(Some(FinalQuality{min_samples:4,max_samples:16,noise_threshold:0.12,max_bounces:4,caustics:false,denoise:true,fast_denoise:true,half_resolution_guides:true}))}
+        fn final_quality(&self,_:&SceneRequest)->Result<Option<FinalQuality>,String>{Ok(Some(FinalQuality{sampling:Default::default(),min_samples:4,max_samples:16,noise_threshold:0.12,max_bounces:4,caustics:false,denoise:true,fast_denoise:true,half_resolution_guides:true}))}
     }
     let source=Draft(Product::new("hero"));let mut service=StudioService::default();
     for ticks in [0,1] {

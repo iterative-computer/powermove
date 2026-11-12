@@ -133,6 +133,9 @@ fn safe_normalize(v: vec3f) -> vec3f {
 
 
 var<private> seed: u32;
+// Surviving BSDF families after the explicit per-kind offline limits.
+var<private> sampling_lobes:vec2f=vec2f(1.);
+var<private> specular_observation:f32=0.;
 // The shading tangent of the surface being lit (anisotropic highlights follow it).
 struct ShadingState { tangent:vec3f, coat_normal:vec3f, sampled_tangent:vec3f, sampled_coat_normal:vec3f, volume:vec4f, sampled_sheen:vec4f, sheen:vec4f }
 var<private> shading:ShadingState;
@@ -971,7 +974,7 @@ fn sheen_layer_weight(m:Material,nv:f32,nl:f32)->f32 {
 fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   // A two-sided thin Lambert sheet: reflection + diffuse transmission sum to
   // the leaf albedo. It has no fictitious solid-glass interior or random walk.
-  if(thin_leaf(m)){return m.base.xyz * abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
+  if(thin_leaf(m)){return sampling_lobes.x*m.base.xyz * abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return vec3f(0.0); }
@@ -996,7 +999,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let cnv=max(dot(shading.coat_normal,v),1e-4);let cnl=max(dot(shading.coat_normal,l),0.);let cnh=max(dot(shading.coat_normal,h),0.);
   let coat = fc * ggx_d(cnh, ca) * smith_g2(cnv, cnl, ca) / (4.0 * cnv);
   let atten = (1.0 - m.spec.y * fresnel_dielectric(cnv, 1.5)) * (1.0 - m.spec.y * fresnel_dielectric(cnl, 1.5));
-  return vec3f(coat) + (sheen(m, nh, nl, nv) + (spec + diff)*sheen_layer_weight(m,nv,nl)) * atten;
+  return sampling_lobes.y*vec3f(coat) + (sampling_lobes.x*sheen(m, nh, nl, nv) + (sampling_lobes.y*spec + sampling_lobes.x*diff)*sheen_layer_weight(m,nv,nl)) * atten;
 }
 
 // Thin-film interference integrates polarized Airy reflectance over the
@@ -1105,7 +1108,7 @@ fn sheen(m: Material, nh: f32, nl: f32, nv: f32) -> vec3f {
 }
 
 fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
-  if(thin_leaf(m)){return abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
+  if(thin_leaf(m)){return sampling_lobes.x*abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return 0.0; }
@@ -1121,7 +1124,7 @@ fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
     let hl = transpose(fr) * h;
     sp = aniso_g1(vl, ax) * aniso_d(hl, ax) / (4.0 * max(vl.z, 1e-4));
   }
-  return w.coat * spec_pdf(max(dot(shading.coat_normal,v),1e-4),max(dot(shading.coat_normal,h),0.),ca) + w.spec * sp + w.diff * nl / PI;
+  return sampling_lobes.y*(w.coat * spec_pdf(max(dot(shading.coat_normal,v),1e-4),max(dot(shading.coat_normal,h),0.),ca) + w.spec * sp) + sampling_lobes.x*w.diff * nl / PI;
 }
 
 // ── Subsurface random walk ──
@@ -1587,6 +1590,8 @@ fn limit_indirect(value:vec3f,bounce:u32)->vec3f {
 }
 
 fn path(px: vec2f)->Sample {
+  sampling_lobes=vec2f(1.);
+  specular_observation=0.;
   var s=Sample(vec3f(0.),vec3f(0.),vec3f(0.),-1.,0.,vec3f(0.),0u);
   let ray = camera_ray(px);
   var ro = ray[0];
@@ -1602,8 +1607,12 @@ fn path(px: vec2f)->Sample {
   var chain = 0;
   let photons_on = P.caustic.z > 0.5 && P.opts.x == 0u;
   let max_b = P.counts.y;
+  let policy=u32(P.ambient.w);
+  let limits=vec3u((policy>>4u)&63u,(policy>>10u)&63u,(policy>>16u)&63u);
+  var used=vec3u(0u);
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
+    sampling_lobes=vec2f(select(1.,0.,limits.x>0u && used.x>=limits.x),select(1.,0.,limits.y>0u && used.y>=limits.y));
     var h:Hit;
     if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=secondary_intersect(ro,rd,BIG);}
     let tf = floor_t(ro, rd);
@@ -1657,11 +1666,14 @@ fn path(px: vec2f)->Sample {
     if (tf < h.t) {
       let p = ro + rd * tf;
       if (primary) {
+        specular_observation=16.;
         let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);
         s.bg = P.backdrop.xyz * catcher_ratio(p)*transmission;
         s.void_hit = transmission;
         return s;
       }
+      if(limits.x>0u && used.x>=limits.x){return s;}
+      used.x++;
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
       let dummy = floor_material();
@@ -1692,6 +1704,10 @@ fn path(px: vec2f)->Sample {
     if (!front) { n = -n; ng = -ng; }
     if (primary) {
       s.object=hit_object(h)+1u;s.normal=n;
+      // A quiet first batch cannot rule out rare light paths through glass.
+      specular_observation=select(0.,16.,m.spec.y>.5 && m.spec.z<.05);
+      if(m.base.w>.5 && m.spec.x<.1){specular_observation=32.;}
+      if(m.spec.w*(1.-m.base.w)>.5 && m.spec.x<.2 && !thin_leaf(m)){specular_observation=128.;}
       s.depth=select(distance(sf.p,P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);
     }
     let v = -rd;
@@ -1717,7 +1733,7 @@ fn path(px: vec2f)->Sample {
     primary = false;
     shading.tangent=tangent;shading.coat_normal=select(-coat_normal,coat_normal,front);
     let w = lobe_probs(m, nv,max(dot(shading.coat_normal,v),1e-4));
-    s.radiance += tp*m.base.xyz*(1.-m.base.w)*(1.-m.spec.w)*P.ambient.xyz*m.policy.x;
+    s.radiance += sampling_lobes.x*tp*m.base.xyz*(1.-m.base.w)*(1.-m.spec.w)*P.ambient.xyz*m.policy.x;
     // Near-mirror conductors use their complete visible-normal BSDF estimator.
     // Emitter samples almost always miss its narrow lobe. Disable complementary
     // MIS on the next segment too; dropping NEE without that would lose energy.
@@ -1726,7 +1742,7 @@ fn path(px: vec2f)->Sample {
     // Direct light.
     if (!direct_bsdf_only && w.trans < 0.999) { s.radiance += limit_indirect(tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)),b); }
     // Caustics: light focused onto this surface by glass or mirrors.
-    if (photons_on && w.diff > 0.0) {
+    if (photons_on && w.diff > 0.0 && sampling_lobes.x>0.) {
       s.radiance += limit_indirect(tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p, n),max(b,1u));
     }
     // Russian roulette after the third bounce.
@@ -1736,6 +1752,8 @@ fn path(px: vec2f)->Sample {
       tp /= q;
     }
     if(thin_leaf(m)){
+      if(sampling_lobes.x<=0.){return s;}
+      used.x++;
       let through=rnd()<0.35;rd=cosine_dir(select(n,-n,through),rnd2());
       tp*=m.base.xyz;last_pdf=abs(dot(n,rd))/PI*select(0.65,0.35,through);
       ro=sf.p+select(ng,-ng,through)*ray_epsilon();chain=0;continue;
@@ -1767,12 +1785,16 @@ fn path(px: vec2f)->Sample {
       let eta = select(1.0 / ior, ior, front);
       let F = fresnel_dielectric(abs(dot(v, hm)), eta);
       if (rnd() < F) {
+        if(sampling_lobes.y<=0.){return s;}
+        used.y++;
         rd = reflect(-v, hm);
         ro = sf.p + ng * ray_epsilon();
       } else {
         let r = select(refract(-v, hm, 1.0 / eta),-v,(u32(m.policy.y)&64u)!=0u);
-        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon(); }
+        if (dot(r, r) < 0.5) { if(sampling_lobes.y<=0.){return s;} used.y++; rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon(); }
         else {
+          if(limits.z>0u && used.z>=limits.z){return s;}
+          used.z++;
           rd = r; ro = sf.p - ng * ray_epsilon(); tp *= m.base.xyz;
           if(volume.w>0.){
             volume_absorption=select(vec3f(0.),-log(clamp(volume.rgb,vec3f(1e-6),vec3f(1.)))/volume.w,front);
@@ -1787,9 +1809,13 @@ fn path(px: vec2f)->Sample {
     let r = (pick - w.trans) / max(1.0 - w.trans, 1e-6);
     let wr = 1.0 - w.trans;
     if (r < w.coat / wr) {
+      if(sampling_lobes.y<=0.){return s;}
+      used.y++;
       let tb = basis(shading.coat_normal);
       l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.z * m.spec.z, rnd2()));
     } else if (r < (w.coat + w.spec) / wr) {
+      if(sampling_lobes.y<=0.){return s;}
+      used.y++;
       if (m.extra.w != 0.0) {
         let fr = aniso_frame(n);
         l = reflect(-v, fr * sample_vndf2(transpose(fr) * v, aniso_alpha(m.spec.x * m.spec.x, m.extra.w), rnd2()));
@@ -1800,6 +1826,8 @@ fn path(px: vec2f)->Sample {
       // Polished metal continues a caustic chain; anything else ends it.
       if (chain > 0 && m.base.w > 0.5 && m.spec.x < 0.25) { chain = 2; } else { chain = 0; }
     } else if (m.emit.w > 0.0) {
+      if(sampling_lobes.x<=0.){return s;}
+      used.x++;
       // Subsurface: a random walk inside the object; the path leaves where it exits.
       let walk = random_walk(sf.p - ng * ray_epsilon(), cosine_dir(-n, rnd2()), m);
       if (walk.w <= 0.0) { return s; }
@@ -1811,6 +1839,8 @@ fn path(px: vec2f)->Sample {
       last_pdf = max(dot(exit_n, rd), 1e-4) / PI;
       continue;
     } else {
+      if(sampling_lobes.x<=0.){return s;}
+      used.x++;
       l = cosine_dir(n, rnd2());
       chain = select(0, 1, photons_on);
     }
@@ -1844,17 +1874,28 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // saved quality (enabled=2) also owns its floor with progressive caustics.
     var minimum=max(settings.y,select(0.,512.,settings.x<1.5 && P.caustic.z>.5 && P.caustic.z<1.5));
     let full_film=film_data();
-    if(full_film && ebuf[w*h+idx].w>0.5){minimum=max(minimum,settings.y*4.);}
+    var observations=0u;
+    if(full_film){observations=u32(ebuf[w*h+idx].w)>>1u;minimum=max(minimum,f32(observations));}
+    if(full_film && (u32(ebuf[w*h+idx].w)&1u)!=0u){let edge=u32(P.ambient.w)&15u;minimum=max(minimum,settings.y*f32(select(4u,edge,edge>0u)));}
     if(settings.x>0.5 && a.w>=minimum && a.w>1.){
       let mean_rgb=(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz)/a.w;
       let mean=dot(mean_rgb,vec3f(0.2126,0.7152,0.0722));
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
-      let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*settings.z);
+      // Mirror highlights need a tighter local error rule than broad matte
+      // areas. The 32-observation tag identifies that primary material class.
+      let relative=select(settings.z,min(settings.z,.06),observations==32u);
+      let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*relative);
       var quiet=error<limit;
       if(full_film){
         let rgb_variance=max(vec3f(0.),(ebuf[w*h+idx].xyz-a.w*mean_rgb*mean_rgb)/max(a.w-1.,1.));
         let rgb_error=sqrt(rgb_variance/a.w);
-        quiet=quiet && all(rgb_error<max(vec3f(settings.w),abs(mean_rgb)*settings.z));
+        if((u32(P.ambient.w)&(1u<<22u))!=0u){
+          // Guard chroma in proportion to its contribution to displayed luma.
+          // The independent post-denoise image/flicker gates remain unchanged.
+          quiet=quiet && all(rgb_error*vec3f(.2126,.7152,.0722)<vec3f(limit));
+        }else{
+          quiet=quiet && all(rgb_error<max(vec3f(settings.w),abs(mean_rgb)*settings.z));
+        }
       }
       if(quiet){return;}
     }
@@ -1866,7 +1907,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var em = vec3f(0.0);
   // Sampling luminance² includes backdrop shadow/coverage noise too.
   var l2 = 0.0;
-  var rgb2=vec3f(0.);var mixed=false;
+  var rgb2=vec3f(0.);var mixed=false;var specular_pixel=0.;
   var first_object=select(0u,u32(gbuf[idx].z+0.5),P.counts.z==0u);
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
@@ -1887,6 +1928,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       jitter=film_jitter(film_sample(idx,sample_index));
     }
     var smp=path(vec2f(f32(gid.x),f32(gid.y))+jitter);
+    specular_pixel=max(specular_pixel,specular_observation);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
     if(any(smp.emit!=smp.emit) || any(abs(smp.emit)>vec3f(1e20))){smp.emit=vec3f(0.);}
@@ -1911,7 +1953,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   }
   if(P.opts.x==0u && film_data()){
     let previous=select(ebuf[w*h+idx],vec4f(0.),P.counts.z!=0u);
-    ebuf[w*h+idx]=vec4f(previous.xyz+rgb2,max(previous.w,select(0.,1.,mixed)));
+    // Low bit: detail edge. Remaining bits: a rare-path safety floor.
+    // Keep flags separate so classifying an edge cannot erase a glass floor.
+    // Legacy convergence and independent MC references keep their old policy.
+    let observed=select(0u,u32(specular_pixel),(u32(P.ambient.w)&(1u<<22u))!=0u);
+    let old_flags=u32(previous.w);let floor=max(old_flags>>1u,observed);
+    let flags=(floor<<1u)|(old_flags&1u)|select(0u,1u,mixed);
+    ebuf[w*h+idx]=vec4f(previous.xyz+rgb2,f32(flags));
   }
   let n = f32(P.dims.w);
   if (P.counts.z == 1u) {

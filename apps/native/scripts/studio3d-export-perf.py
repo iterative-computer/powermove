@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--library-dir", type=Path, help="FFmpeg libraries for an unbundled benchmark snapshot")
     parser.add_argument("--sample-counts", action="store_true", help="record measured per-pixel counts and readback overhead")
     parser.add_argument("--fixed-spp", type=int, help="diagnostic fixed samples with the chosen preset's other settings")
+    parser.add_argument("--quality-patch", type=json.loads, help="explicit diagnostic preset overrides as a JSON object")
     parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--start", type=float, default=0)
     parser.add_argument("--bounces", type=int, help="diagnostic total bounce limit")
@@ -108,6 +109,8 @@ def main():
     args = parser.parse_args()
     if args.frames < 1 or not math.isfinite(args.fps) or args.fps <= 0 or not math.isfinite(args.start) or args.start < 0:
         parser.error("frames/fps must be positive; start must be nonnegative")
+    if args.quality_patch is not None and (not isinstance(args.quality_patch, dict) or "preset" in args.quality_patch):
+        parser.error("quality patch must be an object without a preset key; use --preset")
     if args.fixed_spp is not None and not 1 <= args.fixed_spp <= 4096:
         parser.error("fixed spp must be 1..4096")
     if args.bounces is not None and not 1 <= args.bounces <= 32:
@@ -164,8 +167,8 @@ def main():
             if free_bytes() < 5_000_000_000:
                 raise RuntimeError("Below 5 GB: no export started")
             export_quality=args.preset
-            if args.fixed_spp is not None or args.bounces is not None:
-                export_quality={"preset":args.preset}
+            if args.quality_patch is not None or args.fixed_spp is not None or args.bounces is not None:
+                export_quality={"preset":args.preset, **(args.quality_patch or {})}
                 if args.fixed_spp is not None:
                     export_quality.update(minSamples=args.fixed_spp,maxSamples=args.fixed_spp,noiseThreshold=0)
                 if args.bounces is not None:
@@ -192,7 +195,7 @@ def main():
                     if match:frame[field]=float(match[1])
                 frames.append(frame)
             report = {"frame_timings":frames,"executable_sha256": executable_hash, "input_sha256": source_hash, "preset": args.preset, "frames": args.frames,
-                      "fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
+                      "requested_quality":export_quality,"fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
                       "secondary_light_tree": args.secondary_tree,
                       "single_light_tree": args.single_tree,
                       "stratified_lights": args.stratified_lights,

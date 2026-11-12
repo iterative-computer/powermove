@@ -2346,8 +2346,8 @@ authoritative. A separate diagnostic of the faster candidate locates excessive
 flicker in the catcher/background (0.006508 at 9.35 mean spp) and polished
 metal (0.007722 at 25.72 mean spp). A candidate that allocates more observations
 to those paths is prepared but remains uncompiled and unverified. Production
-defaults and the round-1 decision are not shipped on the strength of these
-partial results.
+defaults were not shipped on the strength of these partial results; the
+selected policy and completed decision follow below.
 
 The command/state contract adds optional `perceptualNoise`,
 `edgeSamplesMultiplier`, `diffuseBounces`, `glossyBounces` and
@@ -2357,6 +2357,47 @@ retain the old total-bounce/convergence behavior. The UI can read the resolved
 quality object and call `set_render_quality`; no controls or layout are added
 by this lane. The perceptual candidate weights chroma errors by their luma
 contribution; it does not claim to evaluate variance after tone mapping.
+
+#### Round 1 accepted: protect glass, mirrors and catcher observations
+
+Production now uses 8–128 spp, 12% relative convergence, a 2× edge floor,
+and diffuse/glossy/transmission limits 4/8/8. The adaptive policy retains
+128 observations through near-delta glass, 32 for polished metal (with a
+relative-error limit no looser than 6%), 16 for narrow coats and 16 for the
+analytic catcher. This directs work to the regions identified by the flicker
+diagnostic. Legacy saved quality without the new fields and independent
+Monte Carlo references retain their existing behavior. Final is unchanged.
+
+The selected policy passes all four small-image tests, all three adaptive
+floor regressions (both traversal paths), and full-HD acceptance:
+
+| Selected policy, full-HD object region | RMS <0.02 | Noise <0.006 | Bias p95 <0.012 | Flicker <0.006 |
+|---|---:|---:|---:|---:|
+| Teapot | 0.002843 | 0.001306 | 0.003789 | 0.001678 |
+| Glass | 0.011945 | 0.003913 | 0.004507 | 0.004051 |
+| Chrome | 0.004779 | 0.002245 | 0.003481 | 0.001837 |
+
+The small combined chrome-set flicker is 0.005902; whole-image checks pass
+too. All thresholds and the retained 4096-spp MC references are unchanged.
+The native application builds with R1 isolated from the Metal-denoiser
+prototype, and all 36 kernel Studio tests pass, including quality save,
+reopen, undo/redo and legacy sample-ceiling behavior.
+
+Real native exports at 1920×1080, **30 animated-camera frames per scene**,
+with CPU OIDN throughout:
+
+| Scene | Round 0 CPU s/frame | R1 CPU s/frame | Reduction | Mean spp | Trace ms/frame | CPU OIDN ms/frame |
+|---|---:|---:|---:|---:|---:|---:|
+| Rebuilt bottle product shot | 10.361 | 3.450 | 66.7% | 19.81 | 2094 | 823 |
+| Hero | 4.587 | 2.182 | 52.4% | 16.59 | 1020 | 865 |
+| Chrome set, including glass | 27.779 | 11.043 | 60.2% | 40.01 | 9507 | 1016 |
+
+R1 clears the 15% real-export improvement rule and the required image gates.
+These are development-build results: Hero meets the 3 s target, while the
+bottle still exceeds 3 s and chrome still exceeds 8 s. Full-HD mixed-set
+noise certification and release-build/on-screen acceptance remain outstanding.
+The UI reads the resolved quality object and calls the existing quality
+command; no panel, control or layout is introduced here.
 
 #### Round 2 candidate: Metal OIDN binding and deployment blocker
 
