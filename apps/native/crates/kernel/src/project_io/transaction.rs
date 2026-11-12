@@ -730,12 +730,12 @@ pub(super) fn is_private_name(path: &Path) -> bool {
         })
 }
 
-/// Whether a save of `destination` left a record: something to settle
-/// before the file is opened or saved again.
+/// Whether a save of `destination` was cut short and left its record:
+/// something to settle before the file is opened or saved again. (A record
+/// that only keeps a replaced version, or a notice, is at rest.)
 pub(crate) fn pending(destination: &Path) -> bool {
-    private_files(destination)
-        .iter()
-        .any(|(_, extension)| extension == RECORD)
+    let (records, unreadable) = records_of(destination);
+    !unreadable.is_empty() || records.iter().any(|r| !r.only_retains())
 }
 
 /// What [`settle`] did with a file a cut-short save left.
@@ -1035,6 +1035,26 @@ fn settle_one(
         tx.finish();
     }
     unresolved
+}
+
+/// A save of the project stands: the file under its name went from `old`
+/// to `new`. Records beside it that still have something to tell and knew
+/// the old file learn the new one, so their notices stay this project's
+/// until they were seen.
+pub(super) fn carry_notices(destination: &Path, current: &Transaction, old: &str, new: &str) {
+    for record in records_of(destination).0 {
+        if record.path == current.record || record.notices().is_empty() || !record.knows(old) {
+            continue;
+        }
+        if let Ok(mut file) = OpenOptions::new().append(true).open(&record.path) {
+            let mut members = Map::new();
+            members.insert("step", Value::from("settled"));
+            members.insert("holds", Value::from(new));
+            let _ = file
+                .write_all(line(&Value::Object(members)).as_bytes())
+                .and_then(|()| sync_file(&file));
+        }
+    }
 }
 
 /// What the records beside `destination` have to tell the person and have

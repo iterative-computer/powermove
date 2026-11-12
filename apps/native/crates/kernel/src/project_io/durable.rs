@@ -1863,6 +1863,9 @@ fn publish_now(
             }
         }
     }
+    if let Some(expected) = expected {
+        transaction::carry_notices(destination, &tx, &expected.hash, new_hash);
+    }
     tx.settled(Some(new_hash));
     tx.finish();
     published.unproven = unproven;

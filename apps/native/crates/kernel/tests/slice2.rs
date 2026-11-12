@@ -989,7 +989,7 @@ fn retained(file: &Path) -> Vec<std::path::PathBuf> {
     for entry in fs::read_dir(dir).unwrap() {
         let record = entry.unwrap().path();
         let name = record.file_name().unwrap().to_string_lossy().into_owned();
-        if !(name.starts_with('.') && name.ends_with(".save")) {
+        if !(name.starts_with(&private_prefix(file)) && name.ends_with(".save")) {
             continue;
         }
         let text = fs::read_to_string(&record).unwrap();
@@ -1036,12 +1036,16 @@ fn private_leftovers(file: &Path) -> Vec<String> {
         .filter(|p| !retained.contains(p))
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .filter(|n| {
-            n.starts_with('.')
+            n.starts_with(&private_prefix(file))
                 && [".tmp", ".aside", ".partial", ".save"]
                     .iter()
                     .any(|e| n.ends_with(e))
         })
         .collect()
+}
+/// What the private names a save uses beside `file` begin with.
+fn private_prefix(file: &Path) -> String {
+    format!(".{}.", file.file_name().unwrap().to_string_lossy())
 }
 /// A kernel with a lock folder of its own, as a build that does not share
 /// the user's has.
@@ -2293,6 +2297,14 @@ fn a_kept_version_is_told_until_it_was_seen_whatever_happens_in_between() {
         told,
         "asking forgets nothing"
     );
+    // Nor does saving again before it was seen.
+    k.set_publish_hooks(Default::default());
+    rename_comp(&mut k, "P", "Two");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    assert_eq!(kept_beside(&mut k, &session), told, "still this project's");
     // Not seen yet, and the app goes away: the next open still says it.
     k.set_publish_hooks(Default::default());
     k.shell(ShellCall::Close(session)).unwrap();
@@ -3244,134 +3256,237 @@ fn a_new_file_is_created_on_a_disk_without_exclusive_rename_or_links() {
 }
 /// Saves on real volumes, by the app's save route: `PM_TEST_VOLUMES` names
 /// folders (one per volume, separated by `:`), for example the mount points
-/// of scratch disk images of each filesystem. On each, Save writes the file
-/// in place twice over, Save As creates a new file, a version that lands
-/// while the file is being replaced is kept, and nothing is left beside the
-/// project.
+/// of scratch disk images of each filesystem and of a network share. On
+/// each: Save writes the file in place twice over; Save As creates a new
+/// file; a version that lands before the file is taken, between the two
+/// renames, and at the instant of the install is kept; a save killed at
+/// each step its record has is settled by the next open; and so is a
+/// recovery that is itself killed. One line per volume says what each case
+/// did there (`n/a`: that volume's route has no such moment).
 #[test]
 #[ignore = "needs PM_TEST_VOLUMES"]
 fn saves_on_real_volumes_replace_the_file_in_place() {
     let volumes = std::env::var("PM_TEST_VOLUMES").expect("PM_TEST_VOLUMES");
     for volume in volumes.split(':').filter(|v| !v.is_empty()) {
+        let started = std::time::Instant::now();
         let dir = common::TempDir::new("volume");
         let folder = Path::new(volume).join(format!("pm-save-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).unwrap();
+        let mut cells: Vec<String> = Vec::new();
         let file = folder.join("cut.pmv");
         fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
         let mut k = kernel(&dir.path("native"));
         let (session, decision) = open_file(&mut k, &file);
         assert_eq!(decision, OpenDecision::Writable, "{volume}");
-        for name in ["One", "Two"] {
-            rename_comp(&mut k, "P", name);
+        // A volume other machines write keeps its lock beside the file, and
+        // a dead owner's lock is believed there for 30 seconds.
+        let shared = project_lock_path(&file).exists();
+        let save = |k: &mut Kernel, to: Option<&Path>| {
             let plan = k
-                .prepare_session_save(session.clone(), None, false)
+                .prepare_session_save(session.clone(), to.map(Into::into), false)
                 .unwrap();
             k.finish_session_save(plan.run())
-                .unwrap_or_else(|e| panic!("{volume}: Save in place: {e}"));
+        };
+        for name in ["One", "Two"] {
+            rename_comp(&mut k, "P", name);
+            save(&mut k, None).unwrap_or_else(|e| panic!("{volume}: Save in place: {e}"));
             assert_eq!(saved_name(&file).as_deref(), Some(name), "{volume}");
         }
+        cells.push("save in place x2: ok".into());
         let rescued = folder.join("cut 2.pmv");
-        let plan = k
-            .prepare_session_save(session.clone(), Some(rescued.clone()), false)
-            .unwrap();
-        k.finish_session_save(plan.run())
-            .unwrap_or_else(|e| panic!("{volume}: Save As: {e}"));
+        save(&mut k, Some(&rescued)).unwrap_or_else(|e| panic!("{volume}: Save As: {e}"));
         assert_eq!(saved_name(&rescued).as_deref(), Some("Two"), "{volume}");
-        // Back on the first file's name is not possible (Save As moved the
-        // session): the same checks on the file it now has.
+        cells.push("save as: ok".into());
+        // Save As moved the session: the landings are on the file it has now.
         rename_comp(&mut k, "P", "Three");
         k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
             before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
             ..Default::default()
         });
-        let plan = k
-            .prepare_session_save(session.clone(), None, false)
-            .unwrap();
         let ShellReply::Saved {
             displaced: Some(kept),
             ..
-        } = k
-            .finish_session_save(plan.run())
+        } = save(&mut k, None)
             .unwrap_or_else(|e| panic!("{volume}: a save with a version landing: {e}"))
         else {
             panic!("{volume}: the landed version is reported")
         };
         assert_eq!(saved_name(&rescued).as_deref(), Some("Three"), "{volume}");
         assert_eq!(fs::read(&kept).unwrap(), b"version B", "{volume}");
-        rename_comp(&mut k, "P", "Four");
-        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
-            between_renames: Some(std::sync::Arc::new(|path| land(path, b"version C"))),
-            ..Default::default()
-        });
-        let plan = k
-            .prepare_session_save(session.clone(), None, false)
-            .unwrap();
-        let between = match k.finish_session_save(plan.run()) {
-            // The exchange has no moment between two renames.
-            Ok(_) => {
-                assert_eq!(saved_name(&rescued).as_deref(), Some("Four"), "{volume}");
-                "exchange".to_owned()
-            }
-            Err(e) => {
-                assert_eq!(fs::read(&rescued).unwrap(), b"version C", "{volume}");
-                let ours = pm_kernel::project_io::kept_beside(&e.to_string())
-                    .unwrap_or_else(|| panic!("{volume}: {e}"));
-                assert_eq!(saved_name(&ours).as_deref(), Some("Four"), "{volume}");
-                "move aside: a version landing between the renames stays, ours kept beside it"
-                    .to_owned()
-            }
-        };
-        assert_eq!(private_leftovers(&rescued), [""; 0], "{volume}");
-        drop(k);
-        // Killed between the two renames, then opened again.
-        let crashed = folder.join("crash.pmv");
-        fs::copy(common::ts_fixture("fresh.pmv"), &crashed).unwrap();
-        let original = fs::read(&crashed).unwrap();
-        let native = dir.path("native-crash");
-        let killed = if killed_between_renames(&native, &crashed, true) {
-            assert!(!crashed.exists(), "{volume}: killed with the name empty");
-            let mut k = kernel(&native);
-            // A share's lock is believed for 30 seconds after its owner
-            // ended: until then the open is refused in plain words, and
-            // nothing is moved.
-            let early = k.shell(ShellCall::PrepareOpen {
-                id: "P".into(),
-                source: SessionSource::File(crashed.clone()),
-                electron_profile: None,
-            });
-            if let Err(refused) = &early {
-                assert!(
-                    refused.to_string().contains("Try opening it again"),
-                    "{volume}: {refused}"
+        cells.push("lands before the move: kept, save stands".into());
+        // Between the renames, and at the instant of the install: the
+        // version that landed stays, this save's file is kept beside it.
+        for (when, bytes) in [
+            ("between the renames", "version C"),
+            ("at the install", "version D"),
+        ] {
+            // The session carries on from whatever the name holds now.
+            drop(k);
+            let fresh = folder.join(format!("landing {when}.pmv"));
+            fs::copy(common::ts_fixture("fresh.pmv"), &fresh).unwrap();
+            k = kernel(&dir.path(&format!("native {when}")));
+            let (landing, _) = open_file(&mut k, &fresh);
+            rename_comp(&mut k, "P", "Four");
+            let project = fresh.clone();
+            let (hooks, landed) = if when == "between the renames" {
+                let landed = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = landed.clone();
+                (
+                    pm_kernel::project_io::PublishHooks {
+                        between_renames: Some(std::sync::Arc::new(move |path: &Path| {
+                            land(path, bytes.as_bytes());
+                            *seen.lock().unwrap() = Some(path.to_owned());
+                        })),
+                        ..Default::default()
+                    },
+                    landed,
+                )
+            } else {
+                lands_at_the_install(
+                    Default::default(),
+                    move |to| to == project,
+                    bytes.as_bytes().to_vec(),
+                )
+            };
+            k.set_publish_hooks(hooks);
+            let plan = k.prepare_session_save(landing, None, false).unwrap();
+            let outcome = k.finish_session_save(plan.run());
+            cells.push(if landed.lock().unwrap().is_none() {
+                outcome.unwrap_or_else(|e| panic!("{volume}: {when}: {e}"));
+                assert_eq!(saved_name(&fresh).as_deref(), Some("Four"), "{volume}");
+                format!("lands {when}: n/a")
+            } else {
+                let e = outcome.expect_err("the name was taken");
+                assert_eq!(
+                    fs::read(&fresh).unwrap(),
+                    bytes.as_bytes(),
+                    "{volume} {when}"
                 );
-                assert!(!crashed.exists(), "{volume}");
-                eprintln!("{volume}: reopen within 30 s refused in plain words; waiting");
+                let ours = pm_kernel::project_io::kept_beside(&e.to_string())
+                    .unwrap_or_else(|| panic!("{volume} {when}: {e}"));
+                assert_eq!(
+                    saved_name(&ours).as_deref(),
+                    Some("Four"),
+                    "{volume} {when}"
+                );
+                format!("lands {when}: it stays, ours kept beside")
+            });
+        }
+        drop(k);
+        // A save killed at each step of its record. All the kills first:
+        // on a share one wait then covers every dead owner's lock.
+        let wait = || {
+            if shared {
                 std::thread::sleep(Duration::from_secs(31));
             }
-            drop(early);
-            drop(k);
-            let mut k = kernel(&native);
-            let (ticket, recovery) = prepare(&mut k, "P", SessionSource::File(crashed.clone()));
-            assert!(
-                matches!(recovery, RecoveryResult::Recovered { truncated: false }),
-                "{volume}: {recovery:?}"
-            );
-            assert_eq!(fs::read(&crashed).unwrap(), original, "{volume}");
-            let session = decide(&mut k, ticket, RecoveryDecision::Recover);
-            let plan = k.prepare_session_save(session, None, false).unwrap();
-            k.finish_session_save(plan.run())
-                .unwrap_or_else(|e| panic!("{volume}: Save after the reopen: {e}"));
-            assert_eq!(saved_name(&crashed).as_deref(), Some("One"), "{volume}");
-            assert_eq!(private_leftovers(&crashed), [""; 0], "{volume}");
-            "killed between the renames: last saved version put back at the next open, work \
-             recovered and saved"
-        } else {
-            assert_eq!(saved_name(&crashed).as_deref(), Some("One"), "{volume}");
-            "no moment between renames to be killed in"
         };
+        let case = |name: String| {
+            let crashed = folder.join(format!("{name}.pmv"));
+            fs::copy(common::ts_fixture("fresh.pmv"), &crashed).unwrap();
+            let original = fs::read(&crashed).unwrap();
+            (crashed, dir.path(&format!("native-{name}")), original)
+        };
+        let mut killed_at = Vec::new();
+        for step in [
+            "begin",
+            "aside",
+            "install",
+            "mid-copy",
+            "exchanged",
+            "installed",
+            "closed",
+        ] {
+            let (crashed, native, original) = case(format!("killed {step}"));
+            if killed(&native, &crashed, "real", step, "save") {
+                killed_at.push((step, crashed, native, original));
+            } else {
+                cells.push(format!("killed at {step}: n/a"));
+            }
+        }
+        // And a recovery that is itself killed, after a save killed between
+        // its renames (or, where a volume exchanges, right after that).
+        let first = if killed_at.iter().any(|(step, ..)| *step == "aside") {
+            "between"
+        } else {
+            "exchanged"
+        };
+        let mut twice = Vec::new();
+        for second in ["restore", "restored", "keep", "mid-copy", "closed"] {
+            let (crashed, native, original) = case(format!("twice {second}"));
+            assert!(killed(&native, &crashed, "real", first, "save"), "{volume}");
+            twice.push((second, crashed, native, original));
+        }
+        wait();
+        // What the next open finds and does: a whole version under the name,
+        // the work there or offered, nothing under a private name, and Save.
+        let reopen = |crashed: &Path, native: &Path, original: &[u8], what: &str| {
+            let mut k = kernel(native);
+            let opened = k
+                .shell(ShellCall::PrepareOpen {
+                    id: "P".into(),
+                    source: SessionSource::File(crashed.to_owned()),
+                    electron_profile: None,
+                })
+                .unwrap_or_else(|e| panic!("{volume}: {what}: {e}"));
+            let session = match opened {
+                ShellReply::RecoveryRequired { ticket, .. } => {
+                    assert_eq!(fs::read(crashed).unwrap(), original, "{volume}: {what}");
+                    decide(&mut k, ticket, RecoveryDecision::Recover)
+                }
+                ShellReply::Opened { session, .. } => {
+                    assert_eq!(
+                        saved_name(crashed).as_deref(),
+                        Some("One"),
+                        "{volume}: {what}"
+                    );
+                    session
+                }
+                other => panic!("{volume}: {what}: {other:?}"),
+            };
+            let name = k.project("P").unwrap().store().root().unwrap().get("name");
+            assert_eq!(
+                name.map(|n| n.to_value()).as_ref().and_then(Value::as_str),
+                Some("One"),
+                "{volume}: {what}: the work being saved is there"
+            );
+            assert_eq!(private_leftovers(crashed), [""; 0], "{volume}: {what}");
+            let plan = k
+                .prepare_session_save(session.clone(), None, false)
+                .unwrap();
+            k.finish_session_save(plan.run())
+                .unwrap_or_else(|e| panic!("{volume}: {what}: the next save: {e}"));
+            assert_eq!(
+                saved_name(crashed).as_deref(),
+                Some("One"),
+                "{volume}: {what}"
+            );
+            assert_eq!(private_leftovers(crashed), [""; 0], "{volume}: {what}");
+            k.shell(ShellCall::Close(session)).unwrap();
+        };
+        for (step, crashed, native, original) in &killed_at {
+            reopen(crashed, native, original, &format!("killed at {step}"));
+            cells.push(format!("killed at {step}: reopened ok"));
+        }
+        let mut recovering = Vec::new();
+        for (second, crashed, native, original) in twice {
+            let reached = killed(&native, &crashed, "real", second, "open");
+            recovering.push((second, reached, crashed, native, original));
+        }
+        wait();
+        for (second, reached, crashed, native, original) in &recovering {
+            let what = format!("killed at {first}, recovery killed at {second}");
+            reopen(crashed, native, original, &what);
+            cells.push(if *reached {
+                format!("recovery killed at {second}: reopened ok")
+            } else {
+                format!("recovery killed at {second}: n/a")
+            });
+        }
         eprintln!(
-            "{volume}: Save in place ok x2; Save As ok; landed version kept; {between}; {killed}"
+            "VOLUME {volume} ({} s): {}",
+            started.elapsed().as_secs(),
+            cells.join("; ")
         );
         let _ = fs::remove_dir_all(&folder);
     }
