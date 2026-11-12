@@ -165,7 +165,8 @@ snaps anything that moves and turns fades into a 0.15 s cross-fade.
 Real controls first. Wherever AppKit has the control and the system draws it
 (liquid glass on macOS 26 and later), host the real one:
 `pm_shell::native_control::NativeControl` with a `ControlSpec` of kind `Push`
-(optionally tinted, the view's one accent action), `Popup`, `Segmented`,
+(optionally tinted, the view's one accent action; with `glass`, the system's
+glass button at the large size, a surface's one raised action), `Popup`, `Segmented`,
 `Switch`, `Checkbox`, `Radio`, `Slider` or `Search` (the system search
 field, with no focus ring: Return, Escape and Down hand the keyboard back to
 the window's content and reach the view as keys; ⌘F on Home calls `focus`).
@@ -243,9 +244,16 @@ controls are for forms: Settings, sheets, panel option rows).
 - First row, 48 high: the title in the Headline role (17, semibold); the
   search in the middle of the sheet, a soft pill 32 high with no edge (a
   magnifier, the bare native text field, the shortcut in the faint ink while
-  it is empty), at most 360 wide; at the trailing edge Open… and New Project
-  as icons alone, 32 square, no fill at rest, their names and shortcuts in
-  the tooltips. ⌘F puts the keyboard in the search; typing filters.
+  it is empty), at most 360 wide; at the trailing edge Open… as an icon
+  alone (32 square, no fill at rest, its name and shortcut in the tooltip)
+  and New Project, the header's one raised action: the system's glass
+  button (a plus and its name), the same glass as the toolbar's Export.
+  ⌘F puts the keyboard in the search; typing filters.
+- An open choice, kept in code until it is made (`PM_NATIVE_HOME_GLASS`):
+  `glyph` shows New Project as its plus alone; `all` also stands the search
+  field and the view switch in glass capsules (`ControlSpec.glass` on a
+  search field or a segmented control). The default is the label, with the
+  rest of the header drawn.
 - Second row, 28 high: the count in the muted ink; the sort as a text action
   (an icon and the current order) that opens our menu; then the grid/list
   switch, the header's one raised element (a small pill, two 30 × 24 cells,

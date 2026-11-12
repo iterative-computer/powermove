@@ -98,6 +98,13 @@ pub struct ProjectLibrary {
     /// v1's `projectsView`.
     pub layout: Layout,
     search: Option<Entity<pm_shell::text::TextField>>,
+    /// How much of the header is the system's glass (the owner is choosing).
+    glass: HeaderGlass,
+    /// New Project, a real glass button.
+    new_project: Option<Entity<NativeControl>>,
+    /// `HeaderGlass::All`: the search field and the view switch on glass.
+    glass_search: Option<Entity<NativeControl>>,
+    glass_view: Option<Entity<NativeControl>>,
     /// The project this window shows (its card reads Active).
     pub active: Option<String>,
     /// Cards per grid row at the last layout, for arrow keys.
@@ -175,6 +182,10 @@ impl ProjectLibrary {
             editor,
             layout,
             search: None,
+            glass: HeaderGlass::chosen(),
+            new_project: None,
+            glass_search: None,
+            glass_view: None,
             active: None,
             columns: 1,
             notice: None,
@@ -482,7 +493,9 @@ impl ProjectLibrary {
         }
         match event.keystroke.key.as_str() {
             "f" if event.keystroke.modifiers.platform => {
-                if let Some(field) = &self.search {
+                if let Some(field) = &self.glass_search {
+                    field.read(cx).focus();
+                } else if let Some(field) = &self.search {
                     field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
                 }
             }
@@ -559,6 +572,25 @@ impl ProjectLibrary {
             let _ = self.controller.select(&id);
             let _ = self.controller.menu(&id, action);
             self.pump(cx);
+        }
+    }
+}
+/// Home's header in the variants shown to the owner. New Project is the
+/// system's glass button in each; `PM_NATIVE_HOME_GLASS` picks the others
+/// (`glyph`: the button shows its plus alone; `all`: the search field and
+/// the view switch stand on glass too). The rest of the header is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum HeaderGlass {
+    Label,
+    Glyph,
+    All,
+}
+impl HeaderGlass {
+    fn chosen() -> Self {
+        match std::env::var("PM_NATIVE_HOME_GLASS").as_deref() {
+            Ok("glyph") => Self::Glyph,
+            Ok("all") => Self::All,
+            _ => Self::Label,
         }
     }
 }
@@ -1372,6 +1404,80 @@ impl Render for ProjectLibrary {
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
         let tr = t.translucency;
+        if self.new_project.is_none() && pm_shell::text::available(window) {
+            let glass = self.glass;
+            let mut make = |kind, label: &str, value: Value, options: Vec<Value>, symbol| {
+                let tokens = t.clone();
+                cx.new(|cx| {
+                    NativeControl::new(
+                        ControlSpec {
+                            kind,
+                            label,
+                            identifier: "home.header",
+                            value: &value,
+                            options,
+                            disabled: false,
+                            default: false,
+                            destructive: false,
+                            inline: false,
+                            quiet: false,
+                            tint: None,
+                            symbol,
+                            glass: true,
+                            symbol_only: glass == HeaderGlass::Glyph,
+                        },
+                        &tokens,
+                        window,
+                        cx,
+                    )
+                })
+            };
+            let new_project = make(Kind::Push, "New Project", Value::Null, vec![], Some("plus"));
+            if glass == HeaderGlass::All {
+                let search = make(
+                    Kind::Search,
+                    "Search projects",
+                    json!(self.controller.query.text),
+                    vec![],
+                    Some("⌘F"),
+                );
+                let view = make(
+                    Kind::Segmented,
+                    "Project layout",
+                    json!(usize::from(self.layout == Layout::List)),
+                    vec![
+                        json!({"symbol": "square.grid.2x2", "label": "Grid view"}),
+                        json!({"symbol": "list.bullet", "label": "List view"}),
+                    ],
+                    None,
+                );
+                cx.subscribe(&search, |v: &mut Self, _, event: &Value, cx| {
+                    match (event.as_str(), event.get("key").and_then(Value::as_str)) {
+                        (Some(text), _) => v.set_text(text.to_owned(), cx),
+                        (_, Some("Escape")) => v.clear_search(cx),
+                        _ => {}
+                    }
+                })
+                .detach();
+                cx.subscribe(&view, |v: &mut Self, _, event: &Value, cx| {
+                    v.set_layout(
+                        if event.as_u64() == Some(1) {
+                            Layout::List
+                        } else {
+                            Layout::Grid
+                        },
+                        cx,
+                    );
+                })
+                .detach();
+                (self.glass_search, self.glass_view) = (Some(search), Some(view));
+            }
+            cx.subscribe(&new_project, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("newProject"), cx)
+            })
+            .detach();
+            self.new_project = Some(new_project);
+        }
         let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
         let search_width = SEARCH_MAX.min(sheet - SEARCH_ROOM).max(CARD_LEAST);
         let search_key = kit::key("home-search");
@@ -1432,19 +1538,30 @@ impl Render for ProjectLibrary {
                             .child(section.title()),
                     ),
                 )
-                .child(search)
+                .child(match &self.glass_search {
+                    Some(field) => div()
+                        .flex_none()
+                        .w(px(search_width))
+                        .child(field.clone())
+                        .into_any_element(),
+                    None => search.into_any_element(),
+                })
                 .child(
                     side()
                         .justify_end()
-                        .gap(px(t.space.xs))
+                        .gap(px(t.space.sm))
                         .child(
                             Self::header_action(&kit, "home-open", "folder", "Open…", "Open… ⌘O")
                                 .on_click(cx.listener(|v, _, _, cx| {
                                     (v.sink)(Outbound::Command("open"), cx)
                                 })),
                         )
-                        .child(
-                            Self::header_action(
+                        // New Project is the header's one raised action:
+                        // the system's glass button. A window that cannot
+                        // host it (a test) keeps the quiet icon.
+                        .child(match &self.new_project {
+                            Some(button) => button.clone().into_any_element(),
+                            None => Self::header_action(
                                 &kit,
                                 "home-new",
                                 "plus",
@@ -1453,8 +1570,9 @@ impl Render for ProjectLibrary {
                             )
                             .on_click(cx.listener(|v, _, _, cx| {
                                 (v.sink)(Outbound::Command("newProject"), cx)
-                            })),
-                        ),
+                            }))
+                            .into_any_element(),
+                        }),
                 );
         let list = self.layout == Layout::List;
         let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
@@ -1572,7 +1690,10 @@ impl Render for ProjectLibrary {
                 ),
             )
             .child(div().flex_none().w(px(t.space.md)))
-            .child(view_switch);
+            .child(match &self.glass_view {
+                Some(switch) => switch.clone().into_any_element(),
+                None => view_switch.into_any_element(),
+            });
         let header = div()
             .flex()
             .flex_col()
@@ -1765,6 +1886,8 @@ impl Render for ProjectLibrary {
                                 quiet: false,
                                 tint,
                                 symbol: None,
+                                glass: false,
+                                symbol_only: false,
                             },
                             &tokens,
                             window,
