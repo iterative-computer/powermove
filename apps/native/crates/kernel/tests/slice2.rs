@@ -772,6 +772,71 @@ fn a_file_renamed_moved_or_deleted_while_open_can_still_be_saved() {
         "every embedded item was written from the held file"
     );
 }
+/// A disk without the atomic exchange (exFAT, HFS+, most network shares)
+/// cannot replace a file conditionally: checking it and then renaming over
+/// it would destroy a version a sync client or another machine installed in
+/// between. So Save never replaces a file there. By the app's save route the
+/// file keeps its bytes and the refusal says why (the sheet with Save As);
+/// Save As writes the open work to a new file; by the kernel's own route the
+/// work becomes a recovery copy.
+#[test]
+fn a_save_never_replaces_a_file_on_a_disk_without_an_atomic_exchange() {
+    let dir = common::TempDir::new("no-exchange");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks { no_exchange: true });
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::Writable);
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let refused = k
+        .finish_session_save(plan.run())
+        .expect_err("nothing may be replaced without the exchange");
+    assert!(
+        refused.to_string().contains("cannot replace a file safely"),
+        "{refused}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), original, "the file is untouched");
+    let staged: Vec<_> = fs::read_dir(dir.path("job"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(staged.is_empty(), "no staged file is left: {staged:?}");
+    // The work is still open: Save As writes it to a new file.
+    let rescued = dir.path("job/cut 2.pmv");
+    let plan = k
+        .prepare_session_save(session.clone(), Some(rescued.clone()), false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("Save As creates a new file on such a disk");
+    assert_eq!(saved_name(&rescued).as_deref(), Some("One"));
+    // The kernel's own route (a close that saves): a recovery copy.
+    rename_comp(&mut k, "P", "Two");
+    let ShellReply::Saved {
+        recovery_copy: Some(copy),
+        ..
+    } = k.shell(ShellCall::Save(session)).unwrap()
+    else {
+        panic!("the work goes to a recovery copy")
+    };
+    assert_eq!(saved_name(&rescued).as_deref(), Some("One"));
+    assert_eq!(fs::read(&file).unwrap(), original);
+    let kept = LibraryStore::open(&dir.path("native"))
+        .load(&copy)
+        .unwrap()
+        .expect("the recovery copy is in the library");
+    assert_eq!(
+        kept.project.get("name").and_then(Value::as_str),
+        Some("Two — Recovered"),
+        "the copy holds the newest work"
+    );
+}
 /// Unsaved work is found by the file, not by its path: the file is renamed
 /// while it has unsaved changes and the app ends without a save; opening the
 /// renamed file (a different session id, as its path gives) recovers them.

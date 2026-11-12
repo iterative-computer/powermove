@@ -126,6 +126,7 @@ pub struct Kernel {
     history_max_bytes: usize,
     history_max_entries: usize,
     pub(crate) trimmed_projects: Vec<String>,
+    publish_hooks: crate::project_io::PublishHooks,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,
@@ -147,6 +148,7 @@ impl Kernel {
             history_max_bytes: crate::history::DEFAULT_MAX_BYTES,
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
+            publish_hooks: Default::default(),
             durability,
             slots: BTreeMap::new(),
             library: None,
@@ -421,8 +423,14 @@ impl Kernel {
             .map(|root| crate::project_io::BackupPolicy::new(root.join(project)));
         crate::SaveOptions {
             backups,
+            hooks: self.publish_hooks.clone(),
             ..Default::default()
         }
+    }
+    /// Test hooks for every file save this kernel starts from now on.
+    #[doc(hidden)]
+    pub fn set_publish_hooks(&mut self, hooks: crate::project_io::PublishHooks) {
+        self.publish_hooks = hooks;
     }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()

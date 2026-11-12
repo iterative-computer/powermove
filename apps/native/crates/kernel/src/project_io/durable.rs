@@ -498,9 +498,20 @@ mod sys {
     }
 }
 
+/// Test hooks on publication.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct PublishHooks {
+    /// The volume has no atomic exchange (exFAT, HFS+, most network shares).
+    pub no_exchange: bool,
+}
+
 /// `swapFiles`: `Ok(true)` when exchanged, `Ok(false)` when the volume or
-/// platform does not support exchange (the caller falls back).
-fn swap_files(a: &Path, b: &Path) -> Result<bool, ProjectIoError> {
+/// platform has no atomic exchange (nothing was moved).
+fn swap_files(a: &Path, b: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoError> {
+    if hooks.no_exchange {
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
         match sys::renamex(a, b, sys::RENAME_SWAP) {
@@ -581,11 +592,18 @@ fn preserve_conflict(temp: TempFile, destination: &Path, message: &str) -> Proje
 /// destination holds what it held before, except for
 /// [`ProjectIoError::Finalize`] (our file is in place but the directory sync
 /// failed) and [`ProjectIoError::Conflict`] (both versions kept).
+///
+/// An existing file is replaced only by the atomic exchange, which takes
+/// whatever is at the path at that instant and hands it back to be judged.
+/// Where the volume has none, nothing is replaced
+/// ([`ProjectIoError::NoSafeReplace`]): checking the file and then renaming
+/// over it would destroy a version that arrived in between, unread.
 pub(crate) fn publish(
     temp: TempFile,
     destination: &Path,
     mode: &Publish,
     new_hash: &str,
+    hooks: &PublishHooks,
 ) -> Result<(), ProjectIoError> {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let expected = match mode {
@@ -596,7 +614,7 @@ pub(crate) fn publish(
     let incoming = lstat_file(&temp.path)?.ok_or(ProjectIoError::ChangedOnDisk)?;
     match expected {
         Some(expected) => {
-            if swap_files(&temp.path, destination)? {
+            if swap_files(&temp.path, destination, hooks)? {
                 // `temp.path` now names the displaced file. Verify it is the
                 // version we were allowed to replace.
                 let displaced = FileVersion::read(&temp.path).ok().flatten();
@@ -618,7 +636,7 @@ pub(crate) fn publish(
                     let ours = current
                         .as_ref()
                         .is_some_and(|c| c.hash == new_hash && c.stat.same_identity(&incoming));
-                    if ours && swap_files(&temp.path, destination).unwrap_or(false) {
+                    if ours && swap_files(&temp.path, destination, hooks).unwrap_or(false) {
                         let rolled = FileVersion::read(&temp.path).ok().flatten();
                         if rolled
                             .as_ref()
@@ -643,9 +661,7 @@ pub(crate) fn publish(
                 // drop.
                 drop(temp);
             } else {
-                check_version(destination, Some(expected), true)?;
-                fs::rename(&temp.path, destination).map_err(|e| io_err(destination, e))?;
-                let _ = temp.keep();
+                return Err(ProjectIoError::NoSafeReplace);
             }
         }
         None => {

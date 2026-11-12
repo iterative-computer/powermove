@@ -143,6 +143,8 @@ pub struct SaveOptions {
     pub compact_min_dead_bytes: Option<u64>,
     #[doc(hidden)]
     pub fault: Option<WriteFault>,
+    #[doc(hidden)]
+    pub hooks: durable::PublishHooks,
 }
 
 /// The `history` member a plan writes.
@@ -882,7 +884,7 @@ impl SavePlan {
             (Some(policy), Some(_)) => Some(durable::backup(policy, dest)?),
             _ => None,
         };
-        if let Err(e) = durable::publish(temp, dest, &publish, &file_hash) {
+        if let Err(e) = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks) {
             if let (Some(path), Some(prev)) = (&backup, previous) {
                 let still_old = FileVersion::read(dest)
                     .ok()
