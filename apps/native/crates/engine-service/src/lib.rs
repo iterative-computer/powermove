@@ -3079,6 +3079,20 @@ mod worker_tests {
         }
     }
 
+    /// A service whose engine keeps its translated shaders in a folder, as
+    /// the app's does. An engine rebuilt after a failure reads them back;
+    /// without the folder it translates every built-in shader again, which
+    /// takes longer than a test may wait for a restart (two rebuilds took
+    /// more than 20 s: a pending capture's failure was never seen).
+    fn rebuilding_service(label: &str) -> (tempfile::TempDir, EngineService) {
+        let shaders = tempfile::tempdir().unwrap();
+        let gpu = pm_gpu::Gpu::new(label).unwrap();
+        let device = metal_device(&gpu);
+        let engine =
+            render::Engine::with_shader_cache(gpu, Some(shaders.path().to_owned())).unwrap();
+        let service = EngineService::start_engine(device, engine).unwrap();
+        (shaders, service)
+    }
     fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
         service.viewer(shapes_config(layer)).unwrap()
     }
@@ -3291,7 +3305,7 @@ mod worker_tests {
     #[test]
     fn a_worker_panic_restarts_the_worker_and_the_viewer_draws_again() {
         let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let service = EngineService::start(pm_gpu::Gpu::new("panic-test").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("panic-test");
         let v = shapes_viewer(&service, None);
         v.capture_next().unwrap();
         let before = drawn(&v).frame.unwrap().pixels.unwrap();
@@ -3342,7 +3356,7 @@ mod worker_tests {
     fn a_worker_restart_keeps_time_play_state_and_loop() {
         use pm_protocol::clock::{SeekMode, TransportState};
         let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let service = EngineService::start(pm_gpu::Gpu::new("restart-transport").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("restart-transport");
         let paused = shapes_viewer(&service, None);
         let playing = shapes_viewer(&service, None);
         paused
@@ -3437,7 +3451,7 @@ mod worker_tests {
     #[test]
     fn a_capture_pending_when_the_viewer_stops_fails() {
         let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let service = EngineService::start(pm_gpu::Gpu::new("stop-capture").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("stop-capture");
         let v = shapes_viewer(&service, None);
         v.capture_next().unwrap();
         drawn(&v);
@@ -3463,7 +3477,7 @@ mod worker_tests {
     #[test]
     fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
         let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
+        let (_shaders, service) = rebuilding_service("lost-device-test");
         let layer = metal::MetalLayer::new();
         layer.set_device(&service.metal_device());
         layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
