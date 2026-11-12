@@ -1145,6 +1145,81 @@ fn a_version_that_lands_between_the_two_renames_is_never_replaced() {
         assert_eq!(fs::read(&file).unwrap(), b"version C", "{disk}");
     }
 }
+/// What the kernel has to tell about files kept beside the session's
+/// project file: (why, where).
+fn kept_beside(
+    k: &mut Kernel,
+    session: &SessionHandle,
+) -> Vec<(String, Option<std::path::PathBuf>)> {
+    let ShellReply::Kept(rows) = k.shell(ShellCall::KeptBeside(session.clone())).unwrap() else {
+        panic!()
+    };
+    rows.iter()
+        .map(|row| {
+            (
+                row.get("why").and_then(Value::as_str).unwrap().to_owned(),
+                row.get("path").and_then(Value::as_str).map(Into::into),
+            )
+        })
+        .collect()
+}
+/// A save nobody is shown the result of (the one a close does on its own
+/// when a window goes at quit, or a compaction of every open project) finds
+/// another version at the project's path. That version is
+/// kept beside the project, as in any save, but there is no window to say
+/// so in: the project's entry remembers it, and the next open of the
+/// project says it, once.
+#[test]
+fn a_version_kept_by_a_save_at_quit_or_close_is_told_at_the_next_open() {
+    for at_quit in [true, false] {
+        let dir = common::TempDir::new("kept-untold");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        let mut k = kernel(&native);
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+            ..Default::default()
+        });
+        if at_quit {
+            // Every open project written where it belongs, then the end.
+            k.shell(ShellCall::CompactAll).unwrap();
+            k.shell(ShellCall::ReleaseLibrary).unwrap();
+        } else {
+            k.shell(ShellCall::Close(session)).unwrap();
+        }
+        drop(k);
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "the save stands");
+        let kept = visible_siblings(&file);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(fs::read(&kept[0]).unwrap(), b"version B");
+        // The next launch: opened the way the app opens it.
+        let mut k = kernel(&native);
+        let ShellReply::Opened { session, .. } = k
+            .shell(ShellCall::PrepareOpen {
+                id: "P".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap()
+        else {
+            panic!("a saved project opens without a question")
+        };
+        assert_eq!(
+            kept_beside(&mut k, &session),
+            [("arrived".to_owned(), Some(kept[0].clone()))],
+            "at_quit {at_quit}"
+        );
+        assert_eq!(kept_beside(&mut k, &session), [], "told once");
+        // Told, and closed: the next open has nothing to say.
+        k.shell(ShellCall::Close(session)).unwrap();
+        let (session, _) = open_file(&mut k, &file);
+        assert_eq!(kept_beside(&mut k, &session), []);
+    }
+}
 #[test]
 fn save_child_process() {
     let (Some(profile), Some(file)) = (
@@ -1256,6 +1331,16 @@ fn a_save_killed_between_its_two_renames_leaves_the_last_saved_version_for_the_n
             "{unfinished:?}"
         );
         assert_eq!(saved_name(&unfinished[0]).as_deref(), Some("One"));
+        // The person is told once what was found and where it is.
+        let told = kept_beside(&mut k, &session);
+        assert_eq!(
+            told,
+            [
+                ("restored".to_owned(), None),
+                ("unfinished".to_owned(), Some(unfinished[0].clone()))
+            ]
+        );
+        assert_eq!(kept_beside(&mut k, &session), []);
         // And it saves: the session is an ordinary one again.
         k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
             no_exchange: true,

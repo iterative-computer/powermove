@@ -925,6 +925,7 @@ fn shell_scope(call: &crate::session::ShellCall) -> Scope {
         | DeferClose(session)
         | DiscardClose(session)
         | CopiesOf(session)
+        | KeptBeside(session)
         | SaveAs { session, .. } => Scope::Project(session.project.clone()),
         _ => Scope::Every,
     }

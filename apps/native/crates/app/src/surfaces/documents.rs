@@ -176,6 +176,71 @@ pub fn other_version_kept(name: &str, file: &str, kept: &str) -> Alert<Action> {
         ],
     )
 }
+/// A save that could not take its file's name: another version landed there
+/// while the file was being replaced, and was left in place. The save's own
+/// file is next to it, and the changes are still open.
+pub fn saved_beside(name: &str, file: &str, kept: &str) -> Alert<Action> {
+    Alert::new(
+        format!("“{name}” was saved next to its file, not over it."),
+        format!(
+            "While Powermove was saving, something else (a sync app or another computer) put a different version of “{file}” in its place. That version was left where it is. Your save is next to it as “{kept}”. Your changes are also still open: Save As writes them to a new file."
+        ),
+        vec![
+            Button::new("Save As…", Action::SaveAs).default(),
+            Button::new("Show in Finder", Action::ShowInFinder),
+            Button::new("OK", Action::Ok).cancel(),
+        ],
+    )
+}
+/// Files found beside a project's file that the person was never told
+/// about, said once when the project opens. `rows` are the kernel's
+/// (`ShellReply::Kept`): why each file is there and its name. `None` when
+/// there is nothing to say.
+pub fn kept_beside(file: &str, rows: &[(String, Option<String>)]) -> Option<Alert<Action>> {
+    let named = |why: &str| {
+        rows.iter()
+            .find(|(w, name)| w == why && name.is_some())
+            .and_then(|(_, name)| name.clone())
+    };
+    let restored = rows.iter().any(|(why, _)| why == "restored");
+    let (arrived, other, unfinished) = (named("arrived"), named("other"), named("unfinished"));
+    if !restored && arrived.is_none() && other.is_none() && unfinished.is_none() {
+        return None;
+    }
+    let mut said = Vec::new();
+    if restored {
+        said.push("The last saved version is back in place and is the one open now.".to_owned());
+    }
+    if let Some(kept) = &other {
+        said.push(format!(
+            "A save of this project was interrupted before it finished. The file it was replacing is next to “{file}” as “{kept}”."
+        ));
+    }
+    if let Some(kept) = &unfinished {
+        said.push(format!(
+            "The save that was interrupted is next to it as “{kept}”."
+        ));
+    }
+    if let Some(kept) = &arrived {
+        said.push(format!(
+            "The last time this project was saved, something else (a sync app or another computer) had put a different version of “{file}” in its place. Your save is in “{file}”. The other version is next to it as “{kept}”."
+        ));
+    }
+    said.push("Nothing was lost.".to_owned());
+    let message = if restored || (arrived.is_none() && unfinished.is_some()) {
+        format!("Powermove was interrupted while saving “{file}”.")
+    } else {
+        format!("Another version of “{file}” was kept.")
+    };
+    Some(Alert::new(
+        message,
+        said.join(" "),
+        vec![
+            Button::new("Show in Finder", Action::ShowInFinder).default(),
+            Button::new("OK", Action::Ok).cancel(),
+        ],
+    ))
+}
 /// An edit that is applied but could not be written to the recovery data:
 /// the one moment unsaved work is not protected.
 pub fn not_protected(name: &str, failure: WriteFailure) -> Alert<Action> {
@@ -238,6 +303,82 @@ mod write_failure_tests {
         assert_eq!(alert.labels(), ["Show in Finder", "OK"]);
         assert!(alert.buttons[0].default);
         assert!(!alert.informative.contains('/'), "names, never paths");
+    }
+
+    #[test]
+    fn a_save_kept_beside_another_version_says_where_it_is() {
+        let detail = pm_kernel::ProjectIoError::KeptBeside {
+            kept: "/Volumes/Job/cut (recovered 2026-11-12 14.03.22).pmv".into(),
+        }
+        .to_string();
+        let kept = pm_kernel::project_io::kept_beside(&detail).expect("the failure names it");
+        let kept = kept.file_name().unwrap().to_string_lossy();
+        let alert = saved_beside("cut", "cut.pmv", &kept);
+        assert_eq!(
+            alert.message,
+            "“cut” was saved next to its file, not over it."
+        );
+        assert!(
+            alert
+                .informative
+                .contains("next to it as “cut (recovered 2026-11-12 14.03.22).pmv”")
+        );
+        assert_eq!(alert.labels(), ["Save As…", "Show in Finder", "OK"]);
+        assert!(!alert.informative.contains('/'), "names, never paths");
+    }
+
+    #[test]
+    fn files_kept_beside_a_project_are_said_once_it_opens() {
+        let row = |why: &str, name: Option<&str>| (why.to_owned(), name.map(str::to_owned));
+        assert!(kept_beside("cut.pmv", &[]).is_none());
+        // A save at quit kept a version that had arrived.
+        let alert = kept_beside(
+            "cut.pmv",
+            &[row(
+                "arrived",
+                Some("cut (other version 2026-11-12 14.03.22).pmv"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(alert.message, "Another version of “cut.pmv” was kept.");
+        assert!(alert.informative.contains("Your save is in “cut.pmv”."));
+        assert!(alert.informative.ends_with("Nothing was lost."));
+        assert_eq!(alert.labels(), ["Show in Finder", "OK"]);
+        // A save was cut short between moving the file aside and installing.
+        let alert = kept_beside(
+            "cut.pmv",
+            &[
+                row("restored", None),
+                row(
+                    "unfinished",
+                    Some("cut (recovered 2026-11-12 14.03.22).pmv"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            alert.message,
+            "Powermove was interrupted while saving “cut.pmv”."
+        );
+        assert_eq!(
+            alert.informative,
+            "The last saved version is back in place and is the one open now. The save that was interrupted is next to it as “cut (recovered 2026-11-12 14.03.22).pmv”. Nothing was lost."
+        );
+        // Cut short after installing: the replaced file was still aside.
+        let alert = kept_beside(
+            "cut.pmv",
+            &[row(
+                "other",
+                Some("cut (other version 2026-11-12 14.03.22).pmv"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(alert.message, "Another version of “cut.pmv” was kept.");
+        assert!(
+            alert
+                .informative
+                .contains("The file it was replacing is next to “cut.pmv”")
+        );
     }
 
     #[test]

@@ -47,6 +47,11 @@ pub enum ShellCall {
     /// place that the person has not been told about yet (see
     /// `Kernel::unoffered_copies`). Replies `Copies`.
     CopiesOf(SessionHandle),
+    /// Files kept beside this session's project file that the person has
+    /// not been told about yet: a version that arrived during a save nobody
+    /// was shown (at quit, on close), and what a save that was cut short
+    /// left (see `Kernel::note_kept`). Replies `Kept` and forgets them.
+    KeptBeside(SessionHandle),
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
@@ -276,6 +281,13 @@ pub enum ShellReply {
     Recent(Vec<Value>),
     /// Library rows (`id`, `name`, `at`) of copies of a file.
     Copies(Vec<Value>),
+    /// Rows (`why`, and `path` unless `why` is `restored`) of files kept
+    /// beside a project file. `why`: `arrived` (another version, taken from
+    /// the path by a save that stands), `restored` (a save was cut short and
+    /// the last saved version is back under the project's name), `other`
+    /// (the file such a save had moved aside, where the path holds a file),
+    /// `unfinished` (the finished file of the save that was cut short).
+    Kept(Vec<Value>),
     Changed(bool),
 }
 pub(crate) enum Destination {
@@ -289,6 +301,37 @@ pub(crate) struct Session {
     pub meta: Value,
     pub rejected_history: Option<Value>,
     pub pending_save: Option<PendingSave>,
+}
+/// The session metadata member that lists files kept beside the project
+/// file which the person has not been told about.
+const KEPT_BESIDE: &str = "keptBeside";
+fn kept_row(why: &str, path: Option<&std::path::Path>) -> Value {
+    let mut m = Map::new();
+    m.insert("why", Value::from(why));
+    if let Some(path) = path {
+        m.insert("path", Value::from(path.to_string_lossy().into_owned()));
+    }
+    Value::Object(m)
+}
+fn left_row(left: &project_io::LeftAside) -> Value {
+    use project_io::LeftAside::*;
+    match left {
+        Restored => kept_row("restored", None),
+        Kept(path) => kept_row("other", Some(path)),
+        Unfinished(path) => kept_row("unfinished", Some(path)),
+    }
+}
+fn push_kept(meta: &mut Map, rows: impl IntoIterator<Item = Value>) {
+    let mut rows = rows.into_iter().peekable();
+    if rows.peek().is_none() {
+        return;
+    }
+    let mut kept = match meta.remove(KEPT_BESIDE) {
+        Some(Value::Array(kept)) => kept,
+        _ => Vec::new(),
+    };
+    kept.extend(rows);
+    meta.insert(KEPT_BESIDE, Value::Array(kept));
 }
 fn failure(e: impl std::fmt::Display) -> KernelFailure {
     KernelFailure::Storage(e.to_string())
@@ -425,6 +468,16 @@ impl Kernel {
                 self.check_session(&handle)?;
                 Ok(ShellReply::Copies(self.unoffered_copies(&handle.project)))
             }
+            ShellCall::KeptBeside(handle) => {
+                self.check_session(&handle)?;
+                let told = std::sync::Arc::make_mut(&mut self.state.ui)
+                    .get_mut(&handle.project)
+                    .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE));
+                Ok(ShellReply::Kept(match told {
+                    Some(Value::Array(rows)) => rows,
+                    _ => Vec::new(),
+                }))
+            }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
                     .pending_recovery
@@ -553,9 +606,19 @@ impl Kernel {
                     None
                 } else {
                     let saved = self.save_session(&handle, None)?;
-                    let ShellReply::Saved { recovery_copy, .. } = saved else {
+                    let ShellReply::Saved {
+                        recovery_copy,
+                        displaced,
+                        ..
+                    } = saved
+                    else {
                         unreachable!()
                     };
+                    // Nobody sees this save's reply: the next open says it.
+                    if let Some(kept) = displaced {
+                        self.note_kept(&handle.project, [kept_row("arrived", Some(&kept))]);
+                        self.save_session_meta(&handle.project)?;
+                    }
                     recovery_copy
                 };
                 self.flush_project(&handle.project)?;
@@ -923,9 +986,19 @@ impl Kernel {
         let mut projects = 0;
         let mut recovery_copies = Vec::new();
         for handle in handles {
-            if let ShellReply::Saved { recovery_copy, .. } = self.shell(ShellCall::Save(handle))? {
+            if let ShellReply::Saved {
+                recovery_copy,
+                displaced,
+                ..
+            } = self.shell(ShellCall::Save(handle.clone()))?
+            {
                 projects += 1;
                 recovery_copies.extend(recovery_copy);
+                // A quit has no window to say it in: the next open does.
+                if let Some(kept) = displaced {
+                    self.note_kept(&handle.project, [kept_row("arrived", Some(&kept))]);
+                    self.save_session_meta(&handle.project)?;
+                }
             }
         }
         let Some(root) = &self.config_journal_root() else {
@@ -1296,6 +1369,7 @@ impl Kernel {
                     }
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
+                let mut left_aside = Vec::new();
                 if decision == OpenDecision::Writable {
                     match self.lock_project(&path) {
                         Ok(l) => {
@@ -1304,7 +1378,7 @@ impl Kernel {
                             crate::project_io::remove_abandoned_temps(&path);
                             // The version a save moved aside and never got
                             // to replace is the file again.
-                            project_io::settle_asides(&path, &self.publish_hooks);
+                            left_aside = project_io::settle_asides(&path, &self.publish_hooks);
                         }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
@@ -1350,6 +1424,11 @@ impl Kernel {
                         Some(Left::Maybe { entry, name }) => maybe_left = Some((entry, name)),
                         None => {}
                     }
+                }
+                // What a save that was cut short left is said once the
+                // project is open (`ShellCall::KeptBeside`).
+                if let Value::Object(m) = &mut meta {
+                    push_kept(m, left_aside.iter().map(left_row));
                 }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
@@ -2312,6 +2391,16 @@ impl Kernel {
         }
         maybe
     }
+    /// Remembers files kept beside session `id`'s project file until the
+    /// person is told (`ShellCall::KeptBeside`); the file's entry keeps them
+    /// across a quit.
+    fn note_kept(&mut self, id: &str, rows: impl IntoIterator<Item = Value>) {
+        if let Some(ui) = std::sync::Arc::make_mut(&mut self.state.ui).get_mut(id)
+            && let Value::Object(m) = &mut ui.session
+        {
+            push_kept(m, rows);
+        }
+    }
     /// The file session `id` saves to was renamed or moved while open: carry
     /// on at the place the system says it is now (the same inode, its bytes
     /// proven unchanged, never a Trash), under a lock taken there. A file
@@ -2323,7 +2412,8 @@ impl Kernel {
         };
         // A save that could not put the file back under its name left it
         // aside: it is put back now, not followed to its private name.
-        project_io::settle_asides(path, &self.publish_hooks);
+        let left = project_io::settle_asides(path, &self.publish_hooks);
+        self.note_kept(id, left.iter().map(left_row));
         let Some(version) = self
             .project(id)
             .and_then(|p| p.store().file().version.clone())

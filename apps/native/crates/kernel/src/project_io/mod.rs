@@ -50,12 +50,12 @@ use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
 pub use crate::error::kept_beside;
-pub use durable::PublishHooks;
 pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     temporary_sibling,
 };
+pub use durable::{LeftAside, PublishHooks};
 pub(crate) use durable::{left_aside, remove_abandoned_temps, settle_asides};
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 

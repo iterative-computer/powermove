@@ -274,6 +274,11 @@ fn unprotects(project: &str, shown: Option<&str>) -> bool {
 /// made under its name: that copy was made of another file (this one
 /// replaced it, or changed somewhere else since), so it was not opened in
 /// its place. `true` opens the earlier copy.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
 fn earlier_copy_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button};
     let which = match copies {
@@ -1498,6 +1503,7 @@ impl Controller {
                         v.report_first_frame(cx);
                         v.load_recent(cx);
                         v.offer_stranded_copies(cx);
+                        v.tell_kept_beside(cx);
                         // No lock reaches another computer through a sync
                         // client: say what does guard the file.
                         if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {
@@ -1591,6 +1597,54 @@ impl Controller {
                     let leader = v.shell_window_id(cx);
                     crate::entry::open_in_new_tab(crate::entry::Pending::Library(newest), leader, cx);
                 });
+            }
+        })
+        .detach();
+    }
+    /// Files kept beside this project's file that nobody was told about: a
+    /// version that arrived during a save no window showed the end of (at
+    /// quit), or what a save that was cut short left. Said once, in a sheet
+    /// with a way to them, and in the Error Log.
+    fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Kept(rows))) = asked.await else {
+                return;
+            };
+            let rows: Vec<(String, Option<PathBuf>)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
+                })
+                .collect();
+            let Ok(Some((answer, reveal))) = this.update(cx, |v, _| {
+                let file = v.path.as_deref().map(file_name).unwrap_or_default();
+                let named: Vec<_> = rows
+                    .iter()
+                    .map(|(why, path)| (why.clone(), path.as_deref().map(file_name)))
+                    .collect();
+                let alert = crate::surfaces::documents::kept_beside(&file, &named)?;
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                let reveal = rows
+                    .iter()
+                    .find_map(|(_, path)| path.clone())
+                    .or(v.path.clone());
+                Some((alert.sheet(&v.host.borrow().window), reveal))
+            }) else {
+                return;
+            };
+            if answer.recv().await.ok().flatten()
+                == Some(crate::surfaces::documents::Action::ShowInFinder)
+                && let Some(path) = reveal
+            {
+                platform::reveal(&path);
             }
         })
         .detach();
@@ -2012,11 +2066,6 @@ impl Controller {
     fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, other_version_kept};
         let name = self.project_name();
-        let file_name = |path: &std::path::Path| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        };
         let file = self.path.as_deref().map(file_name).unwrap_or_default();
         self.message = format!("“{name}” was saved. Another version of its file was kept.");
         self.errors.borrow_mut().push(
@@ -2039,15 +2088,26 @@ impl Controller {
     /// and Show in Finder are one press away, and the kernel's own account
     /// is an Error Log row, never copy.
     fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
-        use crate::surfaces::documents::{Action, WriteFailure, save_failed};
+        use crate::surfaces::documents::{Action, WriteFailure, save_failed, saved_beside};
         let name = self.project_name();
         self.message = format!("“{name}” couldn’t be saved.");
         self.errors
             .borrow_mut()
             .push("Save", &format!("“{name}” couldn’t be saved: {detail}"));
         let path = self.path.clone().filter(|p| p.exists());
-        let answer = save_failed(&name, WriteFailure::of(detail), path.is_some())
-            .sheet(&self.host.borrow().window);
+        // The save's own file, kept next to a version that took the name.
+        let (alert, path) = match pm_kernel::project_io::kept_beside(detail) {
+            Some(kept) => {
+                let file = self.path.as_deref().map(file_name).unwrap_or_default();
+                self.message = format!("“{name}” was saved next to its file.");
+                (saved_beside(&name, &file, &file_name(&kept)), Some(kept))
+            }
+            None => (
+                save_failed(&name, WriteFailure::of(detail), path.is_some()),
+                path,
+            ),
+        };
+        let answer = alert.sheet(&self.host.borrow().window);
         cx.spawn(
             async move |this, cx| match answer.recv().await.ok().flatten() {
                 Some(Action::SaveAs) => {
