@@ -507,6 +507,8 @@ pub struct PublishHooks {
     /// The volume answers the exchange with success but only renames the
     /// first name over the second (a FAT32 volume on macOS 27).
     pub exchange_renames: bool,
+    /// The volume has neither an exclusive rename nor hard links (exFAT).
+    pub no_exclusive: bool,
 }
 
 /// `swapFiles`: `Ok(true)` when exchanged, `Ok(false)` when the volume or
@@ -615,7 +617,14 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
 }
 
 /// `installFile`: exclusive rename where supported. `Ok(false)` to fall back.
-fn install_exclusive(temp: &Path, destination: &Path) -> Result<bool, ProjectIoError> {
+fn install_exclusive(
+    temp: &Path,
+    destination: &Path,
+    hooks: &PublishHooks,
+) -> Result<bool, ProjectIoError> {
+    if hooks.no_exclusive {
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
         match sys::renamex(temp, destination, sys::RENAME_EXCL) {
@@ -632,6 +641,78 @@ fn install_exclusive(temp: &Path, destination: &Path) -> Result<bool, ProjectIoE
         let _ = (temp, destination);
         Ok(false)
     }
+}
+
+/// The last way to create a new file, for a volume with neither an exclusive
+/// rename nor hard links (exFAT), which has no atomic way to give a finished
+/// file a name nothing holds yet: the name is created exclusively (never
+/// over a file that is there), the staged bytes are copied into it and
+/// synced, and what the name then holds is read back and must be that
+/// content. A crash mid-copy leaves an incomplete file under a name that
+/// held nothing before; the work is still open or in its journal.
+fn create_exclusive(
+    staged: &Path,
+    destination: &Path,
+    new_hash: &str,
+) -> Result<(), ProjectIoError> {
+    let mut source = File::open(staged).map_err(|e| io_err(staged, e))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = source
+            .metadata()
+            .map_err(|e| io_err(staged, e))?
+            .permissions()
+            .mode();
+        options.mode(mode & 0o777);
+    }
+    let mut out = match options.open(destination) {
+        Ok(out) => out,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ProjectIoError::DestinationExists(
+                destination.display().to_string(),
+            ));
+        }
+        Err(e) => return Err(io_err(destination, e)),
+    };
+    // Its identity is read once it has bytes: on FAT-family volumes an empty
+    // file has no stable inode number yet.
+    let written = io::copy(&mut source, &mut out)
+        .and_then(|_| sync_file(&out))
+        .and_then(|()| out.metadata())
+        .map(|m| stat_of(&m))
+        .map_err(|e| io_err(destination, e));
+    let verified = written.as_ref().map_err(|_| ()).and_then(|ours| {
+        let file = File::open(destination).map_err(|_| ())?;
+        let same = file
+            .metadata()
+            .is_ok_and(|now| stat_of(&now).same_identity(ours));
+        let hash = hash_reader(&file, destination).map_err(|_| ())?;
+        (same && hex(&hash.finalize()) == new_hash)
+            .then_some(())
+            .ok_or(())
+    });
+    if verified.is_ok() {
+        return Ok(());
+    }
+    // Our own incomplete file, under a name that held nothing before: gone
+    // again unless the name already holds something else.
+    let ours = out.metadata().map(|m| stat_of(&m));
+    if let Ok(ours) = ours
+        && lstat_file(destination)
+            .ok()
+            .flatten()
+            .is_some_and(|now| now.same_identity(&ours))
+    {
+        let _ = fs::remove_file(destination);
+    }
+    Err(written.err().unwrap_or_else(|| {
+        ProjectIoError::Invalid(
+            "The new project file could not be verified after writing it.".into(),
+        )
+    }))
 }
 
 /// How the destination may be written.
@@ -745,19 +826,28 @@ pub(crate) fn publish(
             }
         }
         None => {
-            if install_exclusive(&temp.path, destination)? {
+            if install_exclusive(&temp.path, destination, hooks)? {
                 let _ = temp.keep();
             } else {
-                match fs::hard_link(&temp.path, destination) {
+                let linked = if hooks.no_exclusive {
+                    Err(io::Error::from_raw_os_error(45))
+                } else {
+                    fs::hard_link(&temp.path, destination)
+                };
+                match linked {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Err(ProjectIoError::DestinationExists(
                             destination.display().to_string(),
                         ));
                     }
-                    Err(e) => return Err(io_err(destination, e)),
+                    // No links either (or none allowed): exclusive creation
+                    // replaces nothing whatever the reason was, and reports
+                    // its own error if the folder cannot be written at all.
+                    Err(_) => create_exclusive(&temp.path, destination, new_hash)?,
                 }
-                // The link keeps the data; `temp` unlinks its name on drop.
+                // The link or the copy keeps the data; `temp` unlinks its
+                // name on drop.
                 drop(temp);
             }
         }

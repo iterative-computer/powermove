@@ -877,6 +877,118 @@ fn a_save_never_trusts_an_exchange_that_only_renames() {
         .collect();
     assert!(left.is_empty(), "no staging file is left: {left:?}");
 }
+/// A disk with neither an exclusive rename nor hard links (exFAT) had no way
+/// at all to create a project file: the first Save and every Save As failed
+/// with "Operation not supported", and with Save refused there too the work
+/// could not be written to that disk by any route. A new file is created
+/// there by exclusive creation of its name; a name that is taken is never
+/// written over.
+#[test]
+fn a_new_file_is_created_on_a_disk_without_exclusive_rename_or_links() {
+    let dir = common::TempDir::new("no-exclusive");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        no_exchange: true,
+        no_exclusive: true,
+        ..Default::default()
+    });
+    let (session, _) = open_file(&mut k, &file);
+    let media = k.project("P").unwrap().store().media().len();
+    assert!(media > 0);
+    rename_comp(&mut k, "P", "One");
+    // A name that is taken is refused, whether or not replacing was allowed.
+    let taken = dir.path("job/other.pmv");
+    fs::write(&taken, &original).unwrap();
+    for replace in [false, true] {
+        let plan = k
+            .prepare_session_save(session.clone(), Some(taken.clone()), replace)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .expect_err("a file that is there is never written over");
+        assert_eq!(fs::read(&taken).unwrap(), original);
+    }
+    let created = dir.path("job/cut 2.pmv");
+    let plan = k
+        .prepare_session_save(session.clone(), Some(created.clone()), false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("Save As creates a new file");
+    assert_eq!(saved_name(&created).as_deref(), Some("One"));
+    assert_eq!(
+        open_project(&created, OpenOptions::default())
+            .unwrap()
+            .file
+            .media
+            .len(),
+        media,
+        "with all its media"
+    );
+    let left: Vec<_> = fs::read_dir(dir.path("job"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "no staging file is left: {left:?}");
+}
+/// Saves on real volumes, by the app's save route: `PM_TEST_VOLUMES` names
+/// folders (one per volume, separated by `:`), for example the mount points
+/// of scratch disk images of each filesystem. On each, Save either replaces
+/// the file or refuses and leaves its bytes alone, and Save As always
+/// creates a new file there.
+#[test]
+#[ignore = "needs PM_TEST_VOLUMES"]
+fn saves_on_real_volumes_replace_safely_or_not_at_all() {
+    let volumes = std::env::var("PM_TEST_VOLUMES").expect("PM_TEST_VOLUMES");
+    for volume in volumes.split(':').filter(|v| !v.is_empty()) {
+        let dir = common::TempDir::new("volume");
+        let folder = Path::new(volume).join("pm-save-test");
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, decision) = open_file(&mut k, &file);
+        assert_eq!(decision, OpenDecision::Writable, "{volume}");
+        rename_comp(&mut k, "P", "One");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let in_place = match k.finish_session_save(plan.run()) {
+            Ok(_) => {
+                assert_eq!(saved_name(&file).as_deref(), Some("One"), "{volume}");
+                "replaced by exchange"
+            }
+            Err(e) => {
+                assert!(
+                    e.to_string().contains("cannot replace a file safely"),
+                    "{volume}: {e}"
+                );
+                assert_eq!(fs::read(&file).unwrap(), original, "{volume}");
+                "refused, file untouched"
+            }
+        };
+        let rescued = folder.join("cut 2.pmv");
+        let plan = k
+            .prepare_session_save(session.clone(), Some(rescued.clone()), false)
+            .unwrap();
+        let save_as = match k.finish_session_save(plan.run()) {
+            Ok(_) => {
+                assert_eq!(saved_name(&rescued).as_deref(), Some("One"), "{volume}");
+                "created".to_owned()
+            }
+            Err(e) => format!("FAILED: {e}"),
+        };
+        eprintln!("{volume}: Save {in_place}; Save As {save_as}");
+        drop(k);
+        let _ = fs::remove_dir_all(&folder);
+        assert_eq!(save_as, "created", "{volume}");
+    }
+}
 /// Unsaved work is found by the file, not by its path: the file is renamed
 /// while it has unsaved changes and the app ends without a save; opening the
 /// renamed file (a different session id, as its path gives) recovers them.
