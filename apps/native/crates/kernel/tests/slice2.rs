@@ -896,13 +896,48 @@ fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     drop(FileLock::acquire(&path).unwrap());
     assert!(FileLock::acquire(&path).is_ok());
 }
+/// A lock record that was never written or was torn (a crash, a full disk
+/// between create and write) does not refuse the project or the library for
+/// good: on a local volume the flock proves no owner lives, so the open is
+/// writable and the record is rewritten.
 #[test]
-fn malformed_lock_is_never_stolen() {
-    let dir = common::TempDir::new("bad-lock");
-    let path = dir.path("lock");
-    fs::write(&path, b"broken").unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    assert_eq!(fs::read(path).unwrap(), b"broken");
+fn an_empty_or_torn_lock_record_on_a_local_volume_does_not_refuse_the_open() {
+    for torn in [&b""[..], b"{\"pid\":4"] {
+        let dir = common::TempDir::new("torn-lock");
+        let file = dir.path("cut.pmv");
+        fs::write(&file, PROJECT).unwrap();
+        fs::write(project_lock_path(&file), torn).unwrap();
+        let native = dir.path("native");
+        fs::create_dir_all(&native).unwrap();
+        // The library's own lock, torn the same way.
+        let mut k = kernel(&native);
+        let h = open(&mut k, "seed", SessionSource::New(value()));
+        k.shell(ShellCall::Close(h)).unwrap();
+        drop(k);
+        let library_lock = {
+            fn find(dir: &Path) -> Option<std::path::PathBuf> {
+                fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+                    let path = e.path();
+                    if path.is_dir() {
+                        find(&path)
+                    } else {
+                        (e.file_name() == "library.lock").then_some(path)
+                    }
+                })
+            }
+            find(&native).expect("the library lock")
+        };
+        fs::write(&library_lock, torn).unwrap();
+        let mut k = kernel(&native);
+        let (session, decision) = open_file(&mut k, &file);
+        assert_eq!(decision, OpenDecision::Writable, "{torn:?}");
+        edit(&mut k, "P", 30.0);
+        k.shell(ShellCall::Save(session)).unwrap();
+        assert_eq!(
+            common::opacity_of(&common::open_store(&file), "layer0"),
+            Some(30.0)
+        );
+    }
 }
 #[test]
 fn lock_child_process() {

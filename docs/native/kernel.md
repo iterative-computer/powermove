@@ -410,8 +410,11 @@ cannot affect a later reopen. An already-owned source cannot open twice.
 * `store/library.lock` and `Movie.pmvlock` (for `Movie.pmv`) carry PID and
   millisecond heartbeat, refreshed every five seconds. Local `flock` gives
   exclusion during acquisition/reclaim. A dead PID **and** age ≥30 s are both
-  required; malformed locks are refused. Stable inodes avoid unlink/recreate
-  races; orderly release writes PID 0 before releasing the descriptor.
+  required. An empty, torn or malformed record is stale on a volume only this
+  Mac writes (the held `flock` proves no owner lives) and is rewritten; on a
+  shared volume it is refused. Stable inodes avoid unlink/recreate races, so
+  the file stays after close (hidden in Finder); orderly release writes PID 0
+  before releasing the descriptor.
 * Cloud path components (including symlink targets), ancestor
   `com.apple.file-provider*` xattrs, volume read-only flags/permission bits,
   and the source profile's Chromium `SingletonLock` produce copy decisions.

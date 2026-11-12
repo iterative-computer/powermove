@@ -90,6 +90,11 @@ pub struct FileLock {
 }
 impl FileLock {
     pub fn acquire(path: &Path) -> io::Result<Self> {
+        Self::acquire_on(path, is_local_volume(path))
+    }
+    /// [`Self::acquire`] on a volume that is (`local`) or is not one only
+    /// this Mac writes.
+    fn acquire_on(path: &Path, local: bool) -> io::Result<Self> {
         let (file, created) = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -116,33 +121,38 @@ impl FileLock {
             file,
             owns_record: false,
         };
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
-        if !created && text.is_empty() {
-            return Err(io::Error::other("empty lock has unknown ownership"));
+        if created {
+            // Bookkeeping beside the person's project: kept (the inode must
+            // stay), not shown in Finder.
+            hide(path);
         }
-        if !text.is_empty() {
-            let v = parse(&text).map_err(|_| io::Error::other("unreadable lock record"))?;
-            let pid = v
-                .get("pid")
-                .and_then(Value::as_f64)
-                .filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n <= i32::MAX as f64)
-                .ok_or_else(|| io::Error::other("invalid lock pid"))? as u32;
-            let heartbeat = v
-                .get("heartbeat")
-                .and_then(Value::as_f64)
-                .filter(|n| n.is_finite() && *n >= 0.0)
-                .ok_or_else(|| io::Error::other("invalid lock heartbeat"))?
-                as u64;
+        let mut text = Vec::new();
+        file.read_to_end(&mut text)?;
+        match record(&text) {
             // We hold the flock, so no process on this Mac holds it (the
             // native app and the transition release both flock). A record
             // younger than 30 s still names a live owner when its pid runs,
             // or when the volume is shared and another Mac may hold it.
-            let young = now_ms().saturating_sub(heartbeat) < 30_000;
-            if pid != 0 && young && (pid_alive(pid) || !is_local_volume(path)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "lock is live or younger than 30 seconds",
+            Some((pid, heartbeat)) => {
+                let young = now_ms().saturating_sub(heartbeat) < 30_000;
+                if pid != 0 && young && (pid_alive(pid) || !local) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "lock is live or younger than 30 seconds",
+                    ));
+                }
+            }
+            // No readable record: a lock created but never written, or torn
+            // by a crash or a full disk mid-write. On a volume only this Mac
+            // writes, the flock we hold already proves no owner lives, so the
+            // record is stale and is written afresh below; refusing it
+            // refused the project (or the whole library) until someone
+            // deleted the file by hand. On a shared volume flock proves
+            // nothing about another Mac: unknown ownership is refused.
+            None if created || local => {}
+            None => {
+                return Err(io::Error::other(
+                    "lock record is unreadable on a shared volume",
                 ));
             }
         }
@@ -168,6 +178,29 @@ impl FileLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+/// A lock record's owner pid and heartbeat, if it is whole and valid.
+fn record(text: &[u8]) -> Option<(u32, u64)> {
+    let v = parse(std::str::from_utf8(text).ok()?).ok()?;
+    let pid = v
+        .get("pid")
+        .and_then(Value::as_f64)
+        .filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n <= i32::MAX as f64)? as u32;
+    let heartbeat = v
+        .get("heartbeat")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n >= 0.0)? as u64;
+    Some((pid, heartbeat))
+}
+/// Marks the lock file hidden (Finder shows projects, not their locks).
+fn hide(path: &Path) {
+    #[cfg(target_os = "macos")]
+    if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        // SAFETY: a valid C path; a failure only leaves the file visible.
+        unsafe { libc::chflags(c.as_ptr(), libc::UF_HIDDEN) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
 }
 fn write_record(file: &mut File, pid: u32) -> io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
@@ -296,6 +329,48 @@ pub fn open_decision(path: &Path, electron_profile: Option<&Path>) -> OpenDecisi
         OpenDecision::AsCopy(CopyReason::OlderElectron)
     } else {
         OpenDecision::Writable
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    /// With the flock held, an empty, torn or malformed record is stale on a
+    /// volume only this Mac writes (it is rewritten and the lock taken), and
+    /// refused on a shared one, where another Mac may own it.
+    #[test]
+    fn an_unreadable_record_is_stale_only_where_flock_is_authoritative() {
+        let dir = std::env::temp_dir().join(format!("pm-lock-record-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (n, torn) in [
+            &b""[..],
+            b"{\"pid\":41",
+            b"broken",
+            b"{\"pid\":-1,\"heartbeat\":1}",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.join(format!("shared-{n}.pmvlock"));
+            fs::write(&path, torn).unwrap();
+            assert!(FileLock::acquire_on(&path, false).is_err(), "{torn:?}");
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                torn,
+                "a refused record is not rewritten"
+            );
+            let path = dir.join(format!("local-{n}.pmvlock"));
+            fs::write(&path, torn).unwrap();
+            let lock =
+                FileLock::acquire_on(&path, true).unwrap_or_else(|e| panic!("{torn:?}: {e}"));
+            let (pid, _) = record(&fs::read(&path).unwrap()).expect("a whole record");
+            assert_eq!(pid, std::process::id());
+            drop(lock);
+            assert_eq!(record(&fs::read(&path).unwrap()).unwrap().0, 0);
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 
