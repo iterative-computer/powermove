@@ -65,6 +65,9 @@ const WARM: i64 = 3;
 /// frame is on disk because drawing it takes longer than its interval, so
 /// a short wait for the reader always beats drawing it again.
 pub(crate) const PATIENCE: Duration = Duration::from_millis(40);
+/// How long a paused frame waits for its frame on disk: longer than a
+/// playing one, and still far less than drawing and refining it.
+pub(crate) const PAUSED_PATIENCE: Duration = Duration::from_millis(250);
 /// Playing frames in a row that give way to the reader before one is drawn
 /// after all (a disk too slow to play from must not freeze the viewer).
 pub(crate) const LATE_AT_MOST: u32 = 6;

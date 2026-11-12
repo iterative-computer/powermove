@@ -861,20 +861,24 @@ impl Engine {
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
-        // A frame Render Selection put on disk: shown while playing or
-        // scrubbing an uncropped viewer instead of drawn again (the present
-        // pass scales it to the drawable).
+        // A frame rendered on disk: shown in an uncropped viewer instead of
+        // drawn again (the present pass scales it to the drawable), playing,
+        // scrubbing and paused alike: it is the composition-size frame an
+        // export draws, so a paused playhead in a rendered range shows its
+        // picture at once, whatever else the GPU is doing. A capture always
+        // draws its own exact frame.
         // Never upscaled: a canvas larger than the composition renders.
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && !spec.exact && spec.moment != Moment::Paused;
-        // A playing frame waits a moment for its frame on disk rather than
-        // drawing what was rendered because it can't be drawn in time.
-        let patience = if spec.moment == Moment::Playing {
-            crate::render_cache::PATIENCE
-        } else {
-            std::time::Duration::ZERO
+        let looked = hit.is_none() && !spec.exact;
+        // A playing or paused frame waits a moment for its frame on disk
+        // rather than drawing what was rendered because it can't be drawn
+        // in time (a dragged one never waits).
+        let patience = match spec.moment {
+            Moment::Playing => crate::render_cache::PATIENCE,
+            Moment::Paused => crate::render_cache::PAUSED_PATIENCE,
+            Moment::Scrub => std::time::Duration::ZERO,
         };
         let fits = |size: &Size| canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();

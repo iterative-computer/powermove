@@ -1815,11 +1815,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // new picture of the same time, is drawn next. (Asked for
                 // at submission, the new stamp made this report stale and
                 // the fast picture was never reported.)
+                // A picture read from disk is the composition-size frame
+                // already: nothing to refine.
                 if let Some(r) = runtime.get_mut(&f.id)
                     && r.full_owed == Some(f.stamp)
                 {
                     r.full_owed = None;
-                    r.full_due = true;
+                    r.full_due = t.disk != 2;
                 }
             }
             state.notify();

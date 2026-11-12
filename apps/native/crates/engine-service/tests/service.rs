@@ -278,6 +278,62 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
     }
 }
 
+/// A paused playhead in a rendered range shows the rendered frame: its
+/// picture is the composition-size frame on disk, so it is not drawn again
+/// and has no refinement to wait for (whatever a background fill is doing
+/// to the GPU). Outside the range a paused picture is drawn and refined.
+#[test]
+fn a_paused_frame_in_a_rendered_range_shows_the_rendered_frame() {
+    let service = EngineService::start(pm_gpu::Gpu::new("paused-disk-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&viewer, viewer.stamp().unwrap());
+    // Frames 30 to 32 rendered (the fill child), once the scene is read.
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let start = Instant::now();
+    while disk
+        .start_fill(1., 1.1, exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(20), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            disk.bars()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let settled = |ticks: i64| {
+        viewer
+            .command(C::Seek {
+                time: Ticks::new(ticks).unwrap(),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        // Any refinement has landed after this long.
+        std::thread::sleep(Duration::from_secs(3));
+        let stamp = viewer.stamp().unwrap();
+        wait_frame(&viewer, stamp)
+    };
+    // The composition is twice the drawable: a drawn paused picture is
+    // refined at scale 2; the rendered frame is shown as it is.
+    let drawn = settled(2 * TICKS_PER_SECOND);
+    assert_eq!(drawn.scale, 2., "outside the range: drawn and refined");
+    // Frame 30 starts the reader on the range (a slow test build may still
+    // draw it); frame 31 is then read when the playhead gets to it.
+    settled(TICKS_PER_SECOND);
+    let rendered = settled(TICKS_PER_SECOND + TICKS_PER_SECOND / 30);
+    assert_eq!(rendered.scale, 1., "in the range: the frame on disk");
+    viewer.retire();
+}
+
 /// A stop releases what is idle (targets, read-ahead) and keeps the engine:
 /// its device, compiled programs and pipelines stay, so the next play
 /// starts warm. (Renewing the device two seconds after every stop gave the
