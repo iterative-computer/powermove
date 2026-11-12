@@ -545,7 +545,15 @@ impl Engine {
             }));
         let metal = metal_device(&gpu);
         let library = metal
-            .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
+            .new_library_with_source(
+                &format!(
+                    "#define SDR_MIN {:?}\n#define SDR_MAX {:?}\n{}",
+                    pm_color::delivery::SDR_MIN,
+                    pm_color::delivery::SDR_MAX,
+                    include_str!("viewer.metal")
+                ),
+                &metal::CompileOptions::new(),
+            )
             .map_err(|s| anyhow!(s))?;
         let desc = metal::RenderPipelineDescriptor::new();
         let vertex = library
@@ -2306,6 +2314,70 @@ mod viewer_output_tests {
         assert!(
             captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
             "a capture is the engine's frame: {captured:?} vs {edr:?}"
+        );
+    }
+    /// The SDR view shows a colour past white as every SDR file delivers it
+    /// (`pm_color::delivery`, channel by channel in Rec.709): two (0.8, 0.25,
+    /// 0.1) solids added make (1.6, 0.5, 0.2), shown as (1, 0.5, 0.2).
+    #[test]
+    fn an_sdr_view_shows_out_of_range_colour_by_the_delivery_rule() {
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let solid = |id: &str, blend: &str| {
+            format!(
+                r##"{{"id":"{id}","type":"solid","name":"{id}","from":0,"dur":1,"on":true,"solo":false,"mblur":false,"blend":"{blend}",
+                "p":{{{transform}}},"fx":[],"masks":[],"d":{{"color":"#CC401A","w":64,"h":36}}}}"##
+            )
+        };
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{},{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##,
+            solid("a", "add"),
+            solid("b", "normal")
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("sdr-colour-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        let encoded = [0xCC, 0x40, 0x1A].map(|v: u8| f64::from(v) / 255.0 * 2.0);
+        let dec = |v: f64| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let l = pm_color::delivery::sdr(encoded).map(dec);
+        let want = [
+            0.8224621 * l[0] + 0.1775380 * l[1],
+            0.0331941 * l[0] + 0.9668058 * l[1],
+            0.0170827 * l[0] + 0.0723974 * l[1] + 0.9105199 * l[2],
+        ];
+        assert!(
+            shown.iter().zip(want).all(|(s, w)| (s - w).abs() < 0.004),
+            "{shown:?} vs the delivered {want:?}"
         );
     }
     /// The SDR view clips each engine sample before it reduces the frame to

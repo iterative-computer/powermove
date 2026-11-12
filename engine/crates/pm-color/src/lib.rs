@@ -30,6 +30,7 @@ pub mod alpha;
 pub mod camera_log;
 pub mod chroma;
 pub mod cicp;
+pub mod delivery;
 pub mod dither;
 pub mod effect_transforms;
 pub mod gamut;
