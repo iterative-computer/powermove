@@ -59,6 +59,7 @@ mod providers;
 mod publish;
 mod raster_overrides;
 mod render_frames;
+mod thumbnails;
 mod rows;
 mod session;
 mod shader_panel;
@@ -193,6 +194,7 @@ fn main() -> Result<()> {
         profile.is_absolute(),
         "Use an absolute isolated native profile"
     );
+    thumbnails::install(&profile);
     let exports = export_folder(&profile, std::env::var_os("HOME"));
     if mcp_mode {
         if profile.join("mcp/connection.json").exists() {

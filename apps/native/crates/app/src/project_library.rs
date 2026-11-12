@@ -721,8 +721,15 @@ impl ProjectLibrary {
         let k = key(&format!("card-{}", row.id));
         let wash = self.motion.hovers.amount(k);
         let alpha = (t.translucency.hover * wash * 255.).round() as u32;
-        let dims = row.dimensions().map(|(w, h)| format!("{w}×{h}"));
-        // No image: the frame shows the canvas size instead of a blank slab.
+        // The project's poster frame; without one the frame shows the
+        // canvas size instead of a blank slab.
+        let poster = (!row.trashed)
+            .then(|| crate::thumbnails::poster(&row.id))
+            .flatten();
+        let dims = poster
+            .is_none()
+            .then(|| row.dimensions().map(|(w, h)| format!("{w}×{h}")))
+            .flatten();
         let thumb = div()
             .relative()
             .flex()
@@ -736,6 +743,15 @@ impl ProjectLibrary {
             .border_color(rgb(if selected { c.secondary } else { c.hairline }))
             .text_size(px(ty.label))
             .text_color(rgb(c.muted))
+            .overflow_hidden()
+            .children(poster.map(|path| {
+                img(path)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(px(m.control_radius))
+            }))
             .children(dims)
             .when(alpha > 0, |d| {
                 d.child(

@@ -1027,6 +1027,7 @@ impl Backend {
                 "dynamicRange",
                 "useProxies",
                 "studioQuality",
+                "studioReducedSize",
                 "preset",
                 "presetName"
             ]))?;
@@ -1113,6 +1114,16 @@ impl Backend {
             // Asked just now: say so until the viewer's state catches up,
             // rather than flash the static guess before the measured range.
             let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
+            let from_viewer = asked.is_some()
+                || crate::delivery::measured_estimate(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                )
+                .is_some();
             if let Some(note) = asked.or_else(|| {
                 crate::delivery::measured_estimate(
                     &self.native.facts["studioExportEstimate"],
@@ -1125,6 +1136,21 @@ impl Backend {
             }) {
                 let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();
                 self.native.export["project"]["summary"] = json!(format!("{base} · {note}"));
+            }
+            // The estimate on its own, for the sheet's Render Time row: the
+            // measured range, "measuring…", or the static guess.
+            let summary = self.native.export["project"]["summary"].as_str().unwrap_or("");
+            if let Some((_, time)) = summary
+                .split(" · 3D ")
+                .nth(1)
+                .and_then(|tail| tail.split_once(", "))
+            {
+                let measuring = time.ends_with("measuring…");
+                let measured = !measuring && from_viewer;
+                self.native.export["project"]["studio"]["estimate"] = json!(time);
+                self.native.export["project"]["studio"]["state"] =
+                    json!(if measuring { "measuring" } else if measured { "measured" } else { "guess" });
+                self.native.export["project"]["studio"]["preset"] = json!(preset);
             }
         }
         self.native.export["presets"] = json!(

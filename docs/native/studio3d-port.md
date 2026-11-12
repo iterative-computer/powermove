@@ -1645,17 +1645,24 @@ outside Git in `/tmp/pm-shots/na-studio3d-ui/` with `captions.md`.
 
 ### Still open for the designer
 
-- Status capsule (§3): needs refine progress (samples done / target) in
-  `ViewerStatus`.
-- Light panel: log sliders (the kit has no `NSSlider`), the Aim segment, and
-  motion. Views: navigation and selection in the extra panes.
-- 3D handles for extruded text and shapes.
-- Export: adopt the export time-estimate state when it lands.
-- Engine notes from round 3: one cube face shows a live map mirrored (box
-  UVs); Fast shows speckle on extruded faces in an orthographic Front view.
-- See `design/reviews/na-studio3d-ui.md` § Round 3 for the keyboard fix
-  (v4 tab stops, focus-visible) and what's left there.
+- Light panel motion (enter/exit).
+- See `design/reviews/na-studio3d-ui.md` § Round 5 for the export promises,
+  the kit `Slider`, native controls in the Tab order, Home posters and the
+  extruded-surface rows; rounds 3 and 4 there for earlier work.
 
+### Requests for the engine lane (round 5)
+
+- **Render at 75% Size.** The Export sheet stores `studioReducedSize: true`
+  with its options (off by default, never automatic). The export request has
+  no 3D render-size field, so `export_coordinator` sends nothing and the
+  export renders at full size. Wanted: a request field (for example
+  `studio_render_scale: Option<f32>`, 0.75) that traces 3D at that fraction
+  of the output size and upsamples to it, and an export estimate that takes
+  it into account.
+- **Studio-scene fog.** The legacy-fog migration applies when a terrain is
+  present. In a studio scene (no terrain) raising World ▸ Atmosphere
+  Density with the schema's uniform 10,000-unit shape still goes dark in
+  both Fast and Quality.
 
 ### Quiet-window engine findings (2026-11-11)
 

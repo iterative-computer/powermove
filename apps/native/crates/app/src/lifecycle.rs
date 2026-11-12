@@ -611,6 +611,10 @@ impl Controller {
         .detach();
     }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        // The card on Home shows how the project was left.
+        if intent != Intent::Quit {
+            self.refresh_poster();
+        }
         let kernel = self.kernel.clone();
         let session = self.session.clone();
         // A discarded close has already released its session; its project

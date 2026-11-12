@@ -498,6 +498,60 @@ fn frame(
     stop: &(dyn Fn() -> bool + Sync),
     capture: Capture,
 ) -> AnyResult<Vec<u8>> {
+    frame_with(jobs, published, fps, time, size, look, stop, capture, None)
+}
+/// Home's poster for `published`: a small still of its open composition at
+/// `time`, with 3D at Draft (a card needs the picture, not a clean render).
+pub(crate) fn poster_png(
+    kernel: KernelHandle,
+    published: &Arc<Published>,
+    profile: PathBuf,
+    time: f64,
+) -> AnyResult<Vec<u8>> {
+    let jobs = EngineJobs::new(
+        kernel,
+        std::env::current_exe()?,
+        Default::default(),
+        profile,
+        Default::default(),
+    );
+    let root = published.snapshot.root().context("No open project")?;
+    let open = published.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+    let n = |key: &str, default: f64| {
+        comp.get(key)
+            .and_then(|n| n.to_value().as_f64())
+            .filter(|v| v.is_finite() && *v > 0.)
+            .unwrap_or(default)
+    };
+    let (w, h, fps) = (n("w", 1920.), n("h", 1080.), n("fps", 30.));
+    let width = 480u32;
+    let height = ((width as f64 * h / w).round() as u32).clamp(16, 960) & !1;
+    std::fs::create_dir_all(&jobs.cache)?;
+    frame_with(
+        &jobs,
+        published,
+        fps,
+        time.max(0.),
+        Size::new(width, height),
+        MCP_LOOK,
+        &never,
+        Capture::AgentStill,
+        Some(serde_json::json!("draft")),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn frame_with(
+    jobs: &EngineJobs,
+    published: &Arc<Published>,
+    fps: f64,
+    time: f64,
+    size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
+    studio_quality: Option<serde_json::Value>,
+) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
     let span = rate.den() as f64 / rate.num() as f64;
@@ -531,7 +585,7 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
-        None,
+        studio_quality,
     )?;
     while matches!(
         handle.status().state,

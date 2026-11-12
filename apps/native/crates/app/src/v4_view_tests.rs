@@ -367,17 +367,21 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 29);
+    assert_eq!(names.len(), 30);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
-            "number-field" | "text-field" => "input",
+            "number-field" | "text-field" | "slider" => "input",
             _ => "div",
         };
         let mut props = json!({"id":name,"data-pm-component":name,"label":name,"style":{"height":16,"width":20}});
         match name.as_str() {
             "number-field" => props["control"] = json!("number"),
             "text-field" => props["control"] = json!("text"),
+            "slider" => {
+                props["control"] = json!("slider");
+                props["value"] = json!(0.5);
+            }
             "progress-row" => props["aria-valuenow"] = json!(0.5),
             "colour-well" => props["value"] = json!("#ff0000"),
             "viewer-gizmo" => {

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
 import {
   EmptyState,
-  NumberField,
   PopUpButton,
+  Slider,
   SegmentedControl,
   ToolbarItem,
   token,
@@ -41,6 +41,12 @@ const target = {
  * neutral placeholders; metadata is inspection data, never a rendering recipe.
  * All output is provisional until Opus review. See README for exact section gates.
  */
+/** A light value as the panel reads it: three significant digits. */
+function reading(v: number): string {
+  if (!Number.isFinite(v)) return "";
+  const digits = Math.min(6, Math.max(0, 2 - Math.floor(Math.log10(Math.max(Math.abs(v), 1e-9)))));
+  return String(Number(v.toFixed(digits)));
+}
 export function ViewerPanel({
   state,
   actions,
@@ -306,21 +312,29 @@ export function ViewerPanel({
               >
                 {row.label}
               </text>
-              <NumberField
-                id={`viewer.studio.light.${row.id}`}
-                label={row.label}
-                title={`${row.label}\n${row.tooltip}`}
-                binding={`viewer.studio.light.${row.id}`}
-                value={Math.round(row.value * 100) / 100}
-                min={row.min}
-                max={row.max}
-                step={row.max > 100 ? 0.5 : 0.05}
-                precision={row.value < 10 ? 2 : row.value < 100 ? 1 : 0}
-                unit={row.id === "spread" ? "°" : ""}
-                disabled={light.locked}
-                style={{ width: token("metrics.value_column") }}
-                onChange={(e) => actions.drive(`viewer.studio.light.${row.id}`, Number(e.value))}
-              />
+              {/* 3d-studio.md §6: a slider per value (logarithmic where the
+                  value spans orders of magnitude), with its reading beside. */}
+              <div style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: token("metrics.gap") }}>
+                <Slider
+                  id={`viewer.studio.light.${row.id}`}
+                  label={row.label}
+                  title={`${row.label}\n${row.tooltip}`}
+                  binding={`viewer.studio.light.${row.id}`}
+                  value={row.value}
+                  min={row.min}
+                  max={row.max}
+                  log={row.log}
+                  unit={row.id === "spread" ? "°" : ""}
+                  disabled={light.locked}
+                  onChange={(e) => actions.drive(`viewer.studio.light.${row.id}`, Number(e.value))}
+                />
+                <text
+                  style={{ color: token("colors.text"), fontSize: token("typography.body"), fontVariantNumeric: "tabular-nums", textAlign: "right", width: token("metrics.toolbar") }}
+                >
+                  {reading(row.value)}
+                  {row.id === "spread" ? "°" : ""}
+                </text>
+              </div>
             </div>
           ))}
         </>

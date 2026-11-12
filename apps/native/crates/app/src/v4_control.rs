@@ -15,6 +15,68 @@ pub enum Kind {
     Checkbox,
     Switch,
     Push,
+    Slider,
+}
+/// A slider's value range. A logarithmic one moves its track in ln(value),
+/// so each equal pull multiplies the value (brightness, size).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Range {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub log: bool,
+}
+impl Range {
+    /// From the slider's single option (`{"min","max","step","log"}`).
+    pub fn of(options: &[Value]) -> Self {
+        let o = options.first().cloned().unwrap_or(Value::Null);
+        let n = |k: &str, d: f64| o[k].as_f64().filter(|v| v.is_finite()).unwrap_or(d);
+        let (min, max) = (n("min", 0.), n("max", 1.));
+        let log = o["log"] == true && min > 0. && max > min;
+        Self {
+            min,
+            max: max.max(min),
+            step: n("step", 0.).max(0.),
+            log,
+        }
+    }
+    fn position(self, value: f64) -> f64 {
+        let v = value.clamp(self.min, self.max);
+        if self.log { v.ln() } else { v }
+    }
+    fn value(self, position: f64) -> f64 {
+        let v = if self.log { position.exp() } else { position };
+        let v = if self.step > 0. {
+            (v / self.step).round() * self.step
+        } else {
+            // Three significant digits: a pull lands on a value one can read.
+            let digits = 2 - v.abs().max(1e-9).log10().floor() as i32;
+            let scale = 10f64.powi(digits.max(0));
+            (v * scale).round() / scale
+        };
+        v.clamp(self.min, self.max)
+    }
+    /// One arrow-key step: the declared step, else 1/20 of the track.
+    fn nudge(self, value: f64, up: bool) -> f64 {
+        let sign = if up { 1. } else { -1. };
+        if self.log {
+            let span = (self.max.ln() - self.min.ln()) / 20.;
+            return self.value((self.position(value) + sign * span).clamp(self.min.ln(), self.max.ln()));
+        }
+        let step = if self.step > 0. { self.step } else { (self.max - self.min) / 20. };
+        self.value((value + sign * step).clamp(self.min, self.max))
+    }
+}
+/// The value VoiceOver reads and the field shows: up to three significant
+/// digits, trailing zeros trimmed.
+fn readable(v: f64) -> String {
+    let digits = (2 - v.abs().max(1e-9).log10().floor() as i32).clamp(0, 6) as usize;
+    let text = format!("{v:.digits$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
+    }
 }
 struct TargetState {
     sender: async_channel::Sender<Value>,
@@ -35,6 +97,7 @@ define_class!(
                 Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|o.get("v").unwrap_or(o).clone()).unwrap_or(Value::Null)},
                 Kind::Checkbox|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Push=>Value::Null,
+                Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
             };
             let _=self.ivars().sender.try_send(value);
         }
@@ -44,6 +107,7 @@ enum Control {
     Popup(Retained<NSPopUpButton>),
     Button(Retained<NSButton>),
     Switch(Retained<NSSwitch>),
+    Slider(Retained<NSSlider>),
 }
 impl Control {
     fn view(&self) -> &NSView {
@@ -51,6 +115,7 @@ impl Control {
             Self::Popup(v) => v.as_ref(),
             Self::Button(v) => v.as_ref(),
             Self::Switch(v) => v.as_ref(),
+            Self::Slider(v) => v.as_ref(),
         }
     }
     fn enabled(&self, enabled: bool) {
@@ -58,10 +123,21 @@ impl Control {
             Self::Popup(v) => v.setEnabled(enabled),
             Self::Button(v) => v.setEnabled(enabled),
             Self::Switch(v) => v.setEnabled(enabled),
+            Self::Slider(v) => v.setEnabled(enabled),
         }
     }
     fn value(&self, value: &Value, options: &[Value]) {
         match self {
+            Self::Slider(v) => {
+                let range = Range::of(options);
+                v.setMinValue(range.position(range.min));
+                v.setMaxValue(range.position(range.max));
+                if let Some(n) = value.as_f64() {
+                    v.setDoubleValue(range.position(n));
+                    // VoiceOver reads the value, not a logarithmic position.
+                    v.setAccessibilityValueDescription(Some(&NSString::from_str(&readable(n))));
+                }
+            }
             Self::Popup(v) => {
                 if let Some(index) = options
                     .iter()
@@ -205,6 +281,17 @@ impl NativeControl {
                 v.sizeToFit();
                 Control::Button(v)
             }
+            Kind::Slider => {
+                let v = NSSlider::initWithFrame(NSSlider::alloc(mtm), NSRect::ZERO);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                }
+                // One change per pull, so a drag is one Undo.
+                v.setContinuous(false);
+                v.setControlSize(NSControlSize::Small);
+                Control::Slider(v)
+            }
             Kind::Switch => {
                 let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
                 unsafe {
@@ -224,7 +311,9 @@ impl NativeControl {
         control.enabled(!disabled);
         control.value(value, &options);
         let intrinsic = control.view().fittingSize();
-        let width = if matches!(kind, Kind::Popup) && !inline {
+        let width = if matches!(kind, Kind::Slider) {
+            t.metrics.value_column
+        } else if matches!(kind, Kind::Popup) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else {
             (intrinsic.width as f32).max(t.metrics.hit)
@@ -254,6 +343,41 @@ impl NativeControl {
     }
     pub fn keep(&self) {
         self.slot.keep();
+    }
+    /// Full Keyboard Access: the panel's focus ring sits on this control and
+    /// forwards its keys. Space, Return and the vertical arrows open a
+    /// pop-up's menu (AppKit then runs the menu's own keys); Space toggles a
+    /// checkbox or switch and presses a button; the arrows step a slider.
+    /// Returns whether the key was the control's.
+    pub fn key(&self, key: &str) -> bool {
+        let press = |view: &NSView| unsafe {
+            let _: () = msg_send![view, performClick: std::ptr::null::<AnyObject>()];
+        };
+        match &self.control {
+            Control::Popup(v) if matches!(key, "space" | "enter" | "down" | "up") => {
+                press(v.as_ref());
+                true
+            }
+            Control::Button(v) if matches!(key, "space" | "enter") => {
+                press(v.as_ref());
+                true
+            }
+            Control::Switch(v) if key == "space" => {
+                press(v.as_ref());
+                true
+            }
+            Control::Slider(v) if matches!(key, "left" | "right" | "up" | "down") => {
+                let range = Range::of(&self.options);
+                let now = range.value(v.doubleValue());
+                let next = range.nudge(now, matches!(key, "right" | "up"));
+                if next != now {
+                    v.setDoubleValue(range.position(next));
+                    let _ = self._target.ivars().sender.try_send(json!(next));
+                }
+                true
+            }
+            _ => false,
+        }
     }
     /// A push button's title follows the panel (Export's action names the
     /// chosen format); its width follows the new title.
@@ -308,6 +432,12 @@ impl NativeControl {
             options.clone_into(&mut self.options);
             options.clone_into(&mut self._target.ivars().options.borrow_mut());
         }
+        if let Control::Slider(_) = &self.control
+            && options != self.options.as_slice()
+        {
+            options.clone_into(&mut self.options);
+            options.clone_into(&mut self._target.ivars().options.borrow_mut());
+        }
         self.control.value(value, &self.options);
         self.control.enabled(!disabled);
         if self.inline {
@@ -350,7 +480,7 @@ impl Render for NativeControl {
     }
 }
 fn add_items(popup: &NSPopUpButton, options: &[Value]) {
-    for option in options {
+    for (i, option) in options.iter().enumerate() {
         popup.addItemWithTitle(&NSString::from_str(
             option
                 .get("label")
@@ -358,6 +488,16 @@ fn add_items(popup: &NSPopUpButton, options: &[Value]) {
                 .or_else(|| option.as_str())
                 .unwrap_or(""),
         ));
+        // A row's second line (a quality's promise, a sky's look): the menu
+        // item's own subtitle, under its title, as in System Settings.
+        if let Some(detail) = option.get("detail").and_then(Value::as_str)
+            && let Some(item) = popup.itemAtIndex(i as isize)
+        {
+            let responds: bool = unsafe { msg_send![&*item, respondsToSelector: sel!(setSubtitle:)] };
+            if responds {
+                let _: () = unsafe { msg_send![&*item, setSubtitle: &*NSString::from_str(detail)] };
+            }
+        }
     }
     checks(popup, options);
 }
