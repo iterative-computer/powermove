@@ -1352,20 +1352,26 @@ pub(crate) struct Installed {
 }
 
 /// The file `destination` names now, opened, if it is the file a save just
-/// installed: the same file (whose bytes were synced and read back before
-/// anything was moved), or, where a rename gives a file a new number (a
-/// network share), a file with exactly the new bytes, read through the very
-/// descriptor that is then held. A file that is neither is never taken for
-/// the save.
-fn installed_at(destination: &Path, incoming: &FileStat, new_hash: &str) -> Option<Installed> {
+/// installed: `ours` says it is that file by its stat (where file numbers
+/// are the file's own); otherwise it must hold exactly the new bytes, read
+/// through the very descriptor that is then held. On a volume whose numbers
+/// follow names (a network share) another file put under the name has the
+/// same number, so a number alone never says it: `ours` asks for the size
+/// and times too. A file that is neither is never taken for the save.
+fn installed_at(
+    destination: &Path,
+    ours: impl Fn(&FileStat) -> bool,
+    size: u64,
+    new_hash: &str,
+) -> Option<Installed> {
     let named = lstat_file(destination).ok().flatten()?;
     let file = File::open(destination).ok()?;
     let stat = stat_of(&file.metadata().ok()?);
     if !stat.same_identity(&named) {
         return None;
     }
-    let ours = stat.same_identity(incoming)
-        || (stat.size == incoming.size
+    let ours = ours(&stat)
+        || (stat.size == size
             && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash));
     ours.then_some(Installed { file, stat })
 }
@@ -1381,8 +1387,15 @@ fn confirm_installed(
     new_hash: &str,
     hooks: &PublishHooks,
 ) -> Result<Installed, ProjectIoError> {
-    let installed =
-        installed_at(destination, incoming, new_hash).ok_or(ProjectIoError::ChangedOnDisk)?;
+    // The staged file itself, renamed into place: the same number, size and
+    // modification time (a rename keeps them; a copy does not, and is read).
+    let moved = |now: &FileStat| {
+        now.same_identity(incoming)
+            && now.size == incoming.size
+            && now.mtime_ns == incoming.mtime_ns
+    };
+    let installed = installed_at(destination, moved, incoming.size, new_hash)
+        .ok_or(ProjectIoError::ChangedOnDisk)?;
     let dir = destination.parent().unwrap_or(Path::new("."));
     match folder_sync_as(dir, tx.folder(), hooks) {
         Ok(()) => tx.step("installed")?,
@@ -1413,7 +1426,8 @@ fn still_installed(
         .metadata()
         .map(|m| stat_of(&m))
         .unwrap_or(installed.stat);
-    if let Some(again) = installed_at(destination, &now, new_hash) {
+    // Untouched since the install: the very same stat as the held file.
+    if let Some(again) = installed_at(destination, |at| at.same_file(&now), now.size, new_hash) {
         return Ok(again);
     }
     let kept = (|| {
