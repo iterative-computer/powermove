@@ -2489,6 +2489,30 @@ mod frame_cache_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+    /// A playing frame draws a reduced still with the final resampler, as the
+    /// paused frame of the same time and density does: footage and
+    /// precomps don't sharpen when playback stops.
+    #[test]
+    fn playing_and_paused_frames_resample_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let output = Output {
+            width: 128,
+            height: 72,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = |moment| FrameSpec {
+            moment,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
+        let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
+        let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
+        assert_eq!(playing, paused);
+    }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take
     /// different resamplers: the second is drawn for itself, as a cold
