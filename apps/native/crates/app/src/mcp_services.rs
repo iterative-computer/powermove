@@ -1188,8 +1188,17 @@ impl EngineJobs {
         .remove(asset)
         .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
     }
+    /// Source times read as the asset's layers read them (its `timing`).
     fn reader(&self, request: &MediaRequest) -> Result<PreviewReader> {
-        PreviewReader::open(&self.original(request)?).map_err(failed)
+        let timing = pm_media::clip::ClipTiming::of_asset(
+            request
+                .asset
+                .as_ref()
+                .and_then(|asset| asset["timing"].as_f64()),
+        );
+        Ok(PreviewReader::open(&self.original(request)?)
+            .map_err(failed)?
+            .with_timing(timing))
     }
 }
 fn seconds(micros: Option<i64>) -> Option<f64> {

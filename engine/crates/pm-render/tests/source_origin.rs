@@ -618,3 +618,123 @@ fn a_clip_is_as_long_as_its_presentation() {
 fn ticks_of_frame(n: usize) -> pm_protocol::common::Ticks {
     ticks(n as f64 / f64::from(FPS))
 }
+
+/// The frame a composition at time `t` shows from the clip (`None`:
+/// nothing drawn), read from the center pixel's level.
+fn timeline_frame(
+    renderer: &mut Renderer,
+    document: &pm_model::Document,
+    path: &std::path::Path,
+    t: f64,
+) -> Option<usize> {
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path.to_path_buf());
+    let request = RenderRequest {
+        output_kind: OutputKind::Preview,
+        ..RenderRequest::at_scale(Size::new(SIDE, SIDE), 1.0, Precision::Float16)
+    };
+    let frame = renderer
+        .render(document, "Ptest-root", ticks(t), &request, &resolver)
+        .expect("render");
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let rgba = renderer.read_rgba(&frame).unwrap();
+    renderer.recycle(frame);
+    let center = ((SIDE / 2) * SIDE + SIDE / 2) as usize * 4;
+    (rgba[center + 3] >= 0.5).then(|| nearest_frame(f64::from(rgba[center]) * 255.0))
+}
+
+/// The source frame whose grey level `code` (0..255) is.
+fn nearest_frame(code: f64) -> usize {
+    let (i, error) = (0..FRAMES)
+        .map(|i| (i, (code - level(i)).abs()))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap();
+    assert!(error < 6.0, "code {code:.1}");
+    i
+}
+
+/// The source monitor, contact sheets and posters show, for a source time,
+/// the frame the asset's own layers show at it: an older asset reads its
+/// file as the earlier app did (the first frame held before its time), a
+/// new one by its presentation, on the monitor's coded planes and on the
+/// preview reader alike.
+#[test]
+fn source_views_show_the_frame_the_timeline_shows() {
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-source-views-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let plain: &[&str] = &["-c:v", "mpeg4", "-q:v", "2", "-g", "6", "-bf", "0"];
+    let base = dir.0.join("zero.mp4");
+    steps_clip(&base, plain, &[]);
+    // A picture that starts 0.4 s into the file, with no sound.
+    retime_track(
+        &base,
+        &dir.0.join("empty-edit.mp4"),
+        &[(-1, 400, 1), (0, 800, 1)],
+        0,
+    );
+    // Sound from zero, the picture 0.2 s later.
+    let with_sound: Vec<&str> = [
+        "-f",
+        "lavfi",
+        "-t",
+        "1.2",
+        "-i",
+        "anullsrc=r=48000:cl=mono",
+        "-c:a",
+        "aac",
+    ]
+    .into_iter()
+    .chain(plain.iter().copied())
+    .collect();
+    let together = dir.0.join("together.mp4");
+    steps_clip(&together, &with_sound, &[]);
+    retime_track(
+        &together,
+        &dir.0.join("late-picture.mp4"),
+        &[(-1, 200, 1), (0, 800, 1)],
+        0,
+    );
+    let mut timeline = Renderer::headless().unwrap();
+    let mut monitor = Renderer::headless().unwrap();
+    for name in ["empty-edit.mp4", "late-picture.mp4"] {
+        let path = dir.0.join(name);
+        for timing in [None, VERSIONED] {
+            let clip = pm_media::clip::ClipTiming::of_asset(timing.map(|t| t as f64));
+            let doc = load(&document(0.0, 1.0, timing));
+            let mut reader = pm_media::preview::PreviewReader::open(&path)
+                .unwrap()
+                .with_timing(clip);
+            for t in [0.0, 0.1, 0.2, 0.3, 0.44, 0.6, 0.76, 1.1] {
+                let shown = timeline_frame(&mut timeline, &doc, &path, t);
+                let planes = monitor
+                    .source_video_planes(&path, ticks(t), clip, false)
+                    .map(|planes| {
+                        let (size, bytes, _) = planes.expect("presentable planes");
+                        let luma = f64::from(
+                            bytes[(size.height / 2 * size.width + size.width / 2) as usize],
+                        );
+                        nearest_frame((luma - 16.0) * 255.0 / 219.0)
+                    })
+                    .ok();
+                let previewed = reader.frame_at(t).ok().map(|frame| {
+                    let decoded = frame.decoded();
+                    let (width, height) = (decoded.format.width, decoded.format.height);
+                    assert_eq!(decoded.format.bits, 8);
+                    // SAFETY: the luma plane holds `height` rows of `stride` bytes.
+                    let luma = decoded
+                        .with_planes(|planes| unsafe {
+                            *planes[0].ptr.add(height / 2 * planes[0].stride + width / 2)
+                        })
+                        .unwrap();
+                    nearest_frame((f64::from(luma) - 16.0) * 255.0 / 219.0)
+                });
+                assert_eq!(
+                    (planes, previewed),
+                    (shown, shown),
+                    "{name}, timing {timing:?}, source time {t}"
+                );
+            }
+        }
+    }
+}

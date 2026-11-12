@@ -3,6 +3,7 @@
 //! Frames retain native depth, alpha, orientation and color facts; the
 //! renderer applies the source reading before thumbnail encoding.
 
+use crate::clip::ClipTiming;
 use crate::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use crate::frame::DecodedFrame;
 use crate::image::{self, StillImage, animation::AnimationTiming};
@@ -56,6 +57,9 @@ pub struct PreviewReader {
     source: Source,
     pool: FramePool,
     service: Arc<DecodeService>,
+    /// How source times address the file: the asset's reading, or the
+    /// file's presentation for a file read without an asset.
+    timing: ClipTiming,
 }
 
 fn stamp(path: &Path) -> Result<(u64, SystemTime)> {
@@ -116,7 +120,15 @@ impl PreviewReader {
             source,
             pool: FramePool::new(0),
             service,
+            timing: ClipTiming::Presentation,
         })
+    }
+
+    /// Reads source times as an asset with this `timing` does, so a source
+    /// time shows the frame that asset's layers show at it.
+    pub fn with_timing(mut self, timing: ClipTiming) -> Self {
+        self.timing = timing;
+        self
     }
 
     /// Open exactly the host's selected files. Available frames play
@@ -138,6 +150,7 @@ impl PreviewReader {
             source: Source::Sequence { sequence, fps },
             pool: FramePool::new(0),
             service: Self::preview_service(),
+            timing: ClipTiming::Presentation,
         })
     }
 
@@ -151,6 +164,7 @@ impl PreviewReader {
             let mut next = Self::open_with_service(&self.path, self.service.clone())?;
             // Outstanding still frames remain counted across replacements.
             next.pool = self.pool.clone();
+            next.timing = self.timing;
             *self = next;
         }
         Ok(())
@@ -214,7 +228,7 @@ impl PreviewReader {
                     return Err(MediaError::invalid("preview time exceeds the engine clock"));
                 }
                 let n = source
-                    .select(ticks.round() as i64)
+                    .select_as(self.timing, ticks.round() as i64)
                     .ok_or_else(|| MediaError::invalid("no video frame at preview time"))?;
                 let frame = self
                     .service
