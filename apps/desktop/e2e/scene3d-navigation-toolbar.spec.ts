@@ -31,16 +31,21 @@ test('AE navigation toolbar variants, shortcuts, cancellation and render isolati
   await page.keyboard.press('c');await expect(toolbar.locator('[data-navigation="orbit"]')).toHaveAttribute('aria-pressed','true');
   await page.keyboard.press('v');await expect(toolbar.locator('[data-tool="select"]')).toHaveAttribute('aria-pressed','true');
   await expect(toolbar.locator('[data-navigation="orbit"]')).toHaveAttribute('aria-pressed','false');
-  await page.getByRole('combobox',{name:'3D navigation',exact:true}).click();
-  await page.getByRole('option',{name:'Reset Free View',exact:true}).click();
+  const freeView=page.getByRole('tab',{name:'Free View',exact:true});
+  await expect(freeView).toHaveAttribute('title',/⌘-click to reset/);
+  await freeView.click();expect(await hash()).toBe(orbited);
+  await freeView.click({modifiers:['Meta']});
   expect(await hash()).toBe(original);
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('camera-toolbar-test').scene3d.getView())).toBe('editor');
+  await page.getByRole('tab',{name:'Active Camera',exact:true}).click();
+  await freeView.click({modifiers:['Meta']});expect(await hash()).toBe(original);
   const after=await page.evaluate(()=>{
     const PM=(window as any).PM;return {layers:JSON.stringify(PM.proj.layers),history:PM.hist.list().length,pixels:[...PM.GL.renderToPixels(0,80,45,{transparent:true,mblur:false})]};
   });expect(after).toEqual(before);
   for(const theme of ['light','dark']){
     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
     await toolbar.screenshot({path:`/tmp/powermove-navigation-toolbar-${theme}.png`});
+    await freeView.locator('..').screenshot({path:`/tmp/powermove-free-view-${theme}.png`});
     for(const id of ['orbit','pan','dolly'])expect(await toolbar.locator(`[data-navigation="${id}"] svg`).count()).toBe(1);
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
