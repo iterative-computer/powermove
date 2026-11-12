@@ -115,11 +115,34 @@ impl FrameSpec {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
     }
+    /// The composition's own size, when this frame is the whole composition
+    /// at its own size: a frame at the paused Full scale above 1
+    /// ([`Self::paused_full_scale`]: paused or captured, not zoomed, within
+    /// its bounds). It is drawn on the composition's pixel grid exactly, as
+    /// an export and a rendered frame on disk are, and presented as they
+    /// are (the drawable's window of the canvas, one footprint filter):
+    /// `output × scale` rounds to another size whenever the drawable's
+    /// aspect is a pixel off the composition's (1081 rows for 1080).
+    pub(crate) fn whole_composition(&self, scene: &Scene) -> Option<Size> {
+        if self.scale <= 1. || self.scale != Self::paused_full_scale(scene, &self.output) {
+            return None;
+        }
+        composition_size(scene)
+    }
+    /// The size the frame is rendered at.
+    pub(crate) fn size_in(&self, scene: &Scene) -> Size {
+        self.whole_composition(scene)
+            .unwrap_or_else(|| self.render_size())
+    }
     pub(crate) fn request(&self, scene: &Scene) -> Result<pm_render::RenderRequest> {
         use pm_protocol::frame::MotionBlurKind;
         let playing = self.moment == Moment::Playing;
-        let mut request = pm_render::RenderRequest::sized(self.render_size(), Precision::Float16);
-        if let Some(crop) = self.output.crop {
+        let whole = self.whole_composition(scene);
+        let mut request = pm_render::RenderRequest::sized(
+            whole.unwrap_or_else(|| self.render_size()),
+            Precision::Float16,
+        );
+        if let Some(crop) = self.output.crop.filter(|_| whole.is_none()) {
             let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp)
                 .map_err(|_| RenderError::Composition(scene.comp.clone()))?;
             let side = |key: &str| {
@@ -173,6 +196,15 @@ impl FrameSpec {
             pm_render::sampling::Sampling::Final
         }
     }
+}
+/// The composition's size in whole pixels.
+fn composition_size(scene: &Scene) -> Option<Size> {
+    let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp).ok()?;
+    let side = |key: &str| {
+        let v = pm_eval::node::to_number(comp.member(key)).round();
+        (v.is_finite() && v >= 1. && v <= f64::from(u32::MAX)).then_some(v as u32)
+    };
+    Some(Size::new(side("w")?, side("h")?))
 }
 /// A frame that could not be drawn yet: the picture stays and it is drawn again.
 #[derive(Debug)]
@@ -942,7 +974,8 @@ impl Engine {
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
-        let size = spec.render_size();
+        let size = spec.size_in(scene);
+        let drawn_whole = spec.whole_composition(scene).is_some();
         let hdr = self.sync_hdr(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
@@ -983,7 +1016,25 @@ impl Engine {
             Moment::Paused => crate::render_cache::PAUSED_PATIENCE,
             Moment::Scrub => std::time::Duration::ZERO,
         };
-        let fits = |size: &Size| canvas.0 <= size.width && canvas.1 <= size.height;
+        // A paused frame shows the frame on disk only where it would draw
+        // that very picture itself: the whole composition at its own size
+        // (its refinement at the paused Full scale, or a drawable that is
+        // the composition's size). Where a paused frame is drawn otherwise
+        // (zoomed in, or so far out that Full is bounded to the drawable),
+        // it is drawn as ever: whether a frame is rendered on disk never
+        // changes a paused picture.
+        let paused_whole = || {
+            let full = FrameSpec::paused_full_scale(scene, &output);
+            let refined = FrameSpec {
+                scale: full,
+                ..spec
+            };
+            refined.whole_composition(scene).is_some()
+                || (output.crop.is_none()
+                    && composition_size(scene) == Some(Size::new(output.width, output.height)))
+        };
+        let as_drawn = spec.moment != Moment::Paused || paused_whole();
+        let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
         // Shown only while it still is this frame's picture.
@@ -1028,9 +1079,12 @@ impl Engine {
         if uploaded.is_some() {
             self.disk_late = 0;
         }
-        let whole = disk.is_some() || uploaded.is_some();
+        let from_disk = disk.is_some() || uploaded.is_some();
+        // The source is the whole composition: presented as the drawable's
+        // window of the canvas, a rendered frame and a drawn one alike.
+        let whole = from_disk || drawn_whole;
         trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
-        trace.lock().unwrap().disk = match (looked, whole) {
+        trace.lock().unwrap().disk = match (looked, from_disk) {
             (false, _) => 0,
             (true, false) => 1,
             (true, true) => 2,
@@ -1362,7 +1416,7 @@ impl Engine {
         }
         self.sync_studio(scene)?;
         self.sync_fonts();
-        let size = spec.render_size();
+        let size = spec.size_in(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
             revision: scene.doc.revision(),

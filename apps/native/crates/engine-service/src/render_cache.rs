@@ -2675,25 +2675,104 @@ mod tests {
 
     /// One frame filled through the real child at 1 s.
     fn filled_frame(scene: &Scene) -> Arc<Vec<u8>> {
-        let exe = std::env::current_exe().unwrap();
-        let exe = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("pm-engine-service");
+        let (_dir, disk) = filled(scene);
+        read_eventually(&disk, scene, second()).expect("rendered frame")
+    }
+    /// Frame 30's time (1 s).
+    fn second() -> Ticks {
+        Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap()
+    }
+    /// A cache with `scene`'s frame 30 rendered by a fill child.
+    fn filled(scene: &Scene) -> (tempfile::TempDir, DiskFrames) {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
             .unwrap();
         disk.observe(scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
-            .unwrap();
+        disk.start_fill(
+            1.,
+            1.03,
+            &job_binary(),
+            crate::jobs::Activity::default(),
+            |_| {},
+        )
+        .unwrap();
         let bars = settle(&disk, |b| !b.running);
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
-        let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
-        read_eventually(&disk, scene, time).expect("rendered frame")
+        (dir, disk)
+    }
+    /// What a paused viewer (not a capture) settles on for `scene` at 1 s
+    /// on a `width` × `height` drawable: whether it was the frame on disk,
+    /// and the presented picture.
+    fn paused_picture(
+        disk: Option<&DiskFrames>,
+        scene: &Scene,
+        (width, height): (u32, u32),
+    ) -> (bool, Vec<[f64; 3]>) {
+        use crate::render::{Engine, FrameSpec};
+        let mut engine = Engine::new(pm_gpu::Gpu::new("paused-picture").unwrap()).unwrap();
+        engine.disk = disk.cloned();
+        let output = crate::Output {
+            width,
+            height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        // The settled paused picture: the refinement at the Full scale.
+        let spec = FrameSpec {
+            exact: false,
+            scale: FrameSpec::paused_full_scale(scene, &output),
+            ..FrameSpec::exact(second(), output)
+        };
+        let start = Instant::now();
+        loop {
+            let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
+            let sub = engine
+                .frame(scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let from_disk = trace.lock().unwrap().disk == 2;
+            // A frame on disk is shown once its read lands.
+            if !sub.stand_ins && (from_disk || disk.is_none()) {
+                return (from_disk, sub.pixels());
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "never settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// The largest difference between two pictures' samples.
+    fn apart(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+            .fold(0., f64::max)
+    }
+
+    /// A paused picture is the same whether its frame is rendered on disk
+    /// or drawn: the composition's frame reduced to the drawable through
+    /// one footprint filter, at a quarter of its size and at a third (not a
+    /// whole reduction). Thin strokes and a 1-px grid would alias through a
+    /// single bilinear tap; motion blur is off.
+    #[test]
+    fn a_rendered_paused_frame_is_presented_as_a_drawn_one() {
+        let scene = scene();
+        let (_dir, disk) = filled(&scene);
+        for drawable in [(160, 90), (213, 120)] {
+            let (from_disk, drawn) = paused_picture(None, &scene, drawable);
+            assert!(!from_disk);
+            let (from_disk, rendered) = paused_picture(Some(&disk), &scene, drawable);
+            assert!(from_disk, "{drawable:?}: the frame on disk is shown");
+            assert_eq!(
+                apart(&rendered, &drawn),
+                0.,
+                "{drawable:?}: the rendered frame is presented differently from the drawn one"
+            );
+        }
     }
 
     /// A stored frame is a delivery: an effect whose extension isn't
