@@ -1,6 +1,6 @@
 import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { expect, it, vi } from 'vitest';
-import { prepareVideoPreview, previewVideoElement } from './video-preview';
+import { prepareVideoPreview, previewVideoElement, setMaterialVideoDemands } from './video-preview';
 
 it('uses editing media for Auto and reduced previews, and the original for Full and export', () => {
   const original = {}, preview = {}, asset = { el: original, preview: { el: preview } };
@@ -24,6 +24,19 @@ it('keeps a running decoder until pause when editing media arrives during playba
   expect(previewVideoElement(PM, asset)).toBe(preview);
   PM.playing = true;
   expect(previewVideoElement(PM, asset)).toBe(preview);
+});
+
+it('uses editing media only when it supplies every visible material texel, and keeps full originals for capture',()=>{
+  const original={},preview={videoWidth:1280,videoHeight:832},asset={el:original,preview:{el:preview}};
+  const PM:any={quality:1,perf:{auto:false},GL:{materialVideoSize:()=>({width:1024,height:665})}};
+  const clip={asset,id:'material-layer:video/video',materialSize:{width:512,height:333}};
+  setMaterialVideoDemands(PM,[clip]);expect(previewVideoElement(PM,asset)).toBe(preview);
+  PM.GL.materialVideoSize=()=>({width:2048,height:1330});
+  setMaterialVideoDemands(PM,[clip]);expect(previewVideoElement(PM,asset)).toBe(original);
+  PM.GL.materialVideoSize=()=>({width:512,height:333});
+  setMaterialVideoDemands(PM,[clip]);PM.Export={busy:true};expect(previewVideoElement(PM,asset)).toBe(original);
+  PM.Export.busy=false;
+  setMaterialVideoDemands(PM,[clip,{asset,id:'ordinary'}]);expect(previewVideoElement(PM,asset)).toBe(original);
 });
 
 

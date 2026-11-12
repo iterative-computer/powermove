@@ -608,23 +608,29 @@ describe('bridge recovery and bundle CSS ownership', () => {
   it('keeps runtime failures quarantined across a health echo until an explicit retry', async () => {
     const bridge = fakeBridge([rec('flaky')]);
     let activations = 0;
+    const { deps } = fakeDeps();
+    const dismissToast = vi.fn();
+    deps.pm = { dismissToast };
     bridge.bridge.reportHealth = (report) => {
       bridge.state.records[0]!.health = report.health;
       bridge.emit({ ids: [report.id], reason: 'health' });
     };
-    const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps,
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps,
       builtins: { flaky: async () => ({ default: () => { activations++; } }) } });
     await loader.boot();
     await loader.whenIdle();
+    dismissToast.mockClear();
     loader.reportRuntimeError('flaky', new Error('boom'));
     loader.reportRuntimeError('flaky', new Error('boom'));
     await loader.whenIdle();
     await loader.whenIdle();
     expect(activations).toBe(1);
     expect(loader.activeIds()).toEqual([]);
+    expect(dismissToast).not.toHaveBeenCalled();
     bridge.emit({ ids: ['flaky'], reason: 'enable' });
     await loader.whenIdle();
     expect(activations).toBe(2);
+    expect(dismissToast).toHaveBeenCalledExactlyOnceWith('extension-health:flaky');
     await loader.dispose();
   });
 

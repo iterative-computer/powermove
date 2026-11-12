@@ -380,6 +380,7 @@ describe('legacy compositor install', () => {
 
   it('gives transparent null objects a compact canvas hit target', () => {
     const PM = compositorRegistry();
+    PM.ev=(_layer:any,key:string)=>key.startsWith('anchor.')?50:0;
     expect(PM.GL.bounds({ type: 'null', d: { w: 100, h: 100 } }, 0)).toEqual({
       x0: -0, y0: -0, x1: 100, y1: 100, w: 100, h: 100, ax: 0, ay: 0
     });

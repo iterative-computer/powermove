@@ -18,6 +18,26 @@ function editor() {
 }
 
 describe('individual 3D layers and guarded edits',()=>{
+  it('edits trimmed model rotation while retaining keys before its in point',()=>{
+    const PM=editor();
+    expect(editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}}).ok).toBe(true);
+    const layer=PM.L('model');layer.from=2;
+    for(const path of ['rotation.x','rotation.y','rotation'])layer.p[path].kf=[PM.KF(-1,0)];
+    PM.touch();PM.hist.clear();
+    for(const path of ['rotation.x','rotation.y','rotation']){
+      const result=PM.Edit.apply({type:'set_property',target:'model',path,value:35,time:2.5});
+      expect(result.ok,result.message).toBe(true);
+      expect(PM.ev(PM.L('model'),path,2.5)).toBe(35);
+      expect(PM.L('model').p[path].kf[0].t).toBe(-1);
+    }
+    PM.hist.undo();expect(PM.ev(PM.L('model'),'rotation',2.5)).toBe(0);
+    PM.hist.redo();expect(PM.ev(PM.L('model'),'rotation',2.5)).toBe(35);
+    PM.proj=PM.deserialize(PM.serialize());PM.touch();
+    expect(PM.ev(PM.L('model'),'rotation.y',2.5)).toBe(35);
+    const before=PM.serialize();
+    expect(PM.Edit.apply({type:'set_property',target:'model',path:'rotation.y',value:360001,time:2.5}).ok).toBe(false);
+    expect(PM.serialize()).toBe(before);
+  });
   it.each(['model','camera'])('keeps switched-off artwork affine when parented to a %s',parent=>{
     const PM=editor();
     editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});

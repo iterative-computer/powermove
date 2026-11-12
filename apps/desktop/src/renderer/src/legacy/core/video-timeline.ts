@@ -6,14 +6,15 @@ import { sequenceStreamTime } from '../../../../shared/image-sequence';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { sourceTime } from './retiming';
 import { resolveContent } from './content-properties';
+import { setMaterialVideoDemands } from './video-preview';
 
-export type VideoClip = { layer: any; asset: any; id: string; time: number; at: number; streamAt: number | null; rate: number | null };
+export type VideoClip = { layer: any; asset: any; id: string; time: number; at: number; streamAt: number | null; rate: number | null;materialSize?:{width:number;height:number} };
 
 /** Resolve each visible decoder once, at the composition frame's central time.
  * A repeated precomp owns separate decoders, just as repeated media clips do. */
 export function videoClipsAt(PM: any, time: number): VideoClip[] {
   const clips: VideoClip[] = [];
-  const visit = (comp: any, at: number, prefix: string, rate: number | null, depth: number, sourceLayerId?:string) => {
+  const visit = (comp: any, at: number, prefix: string, rate: number | null, depth: number, sourceLayerId?:string,materialSize?:{width:number;height:number}) => {
     if (depth > 8) return;
     PM.scope?.push(comp);
     try {
@@ -26,11 +27,22 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
         const sourceMember=!!sourceIds?.has(layer.id);
         if(sourceLayerId && !sourceMember && !required.has(layer.id))continue;
         if (!(sourceMember?materialSourceActive(PM,comp,sourceLayerId!,layer,at):PM.active(layer, at)) && !((required.has(layer.id) || layer.id===sourceLayerId) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
-        const materialMaps=layerMaterialMaps(layer).filter(map=>typeof map==='object');
+        const materialMaps=[...new Map(layerMaterialMaps(layer).filter(map=>typeof map==='object').map(map=>[JSON.stringify(map),map])).values()];
         if(materialMaps.length){
           for(const map of materialMaps){
             const sample=materialCompositionSample(PM,layer,map,at);
-            if(sample)visit(sample.comp,sample.time,prefix+(sample.sourceLayerId?`material-layer:${sample.sourceLayerId}/`:`material:${'compositionId' in map?map.compositionId:''}/`),null,depth+1,sample.sourceLayerId);
+            if(sample){
+              let materialRate=rate;
+              // A layer source shares the receiver composition's clock. A comp
+              // source follows the receiver's trim/speed/remap, just as a precomp
+              // does. Continuous clocks can stream instead of seeking each tick.
+              if('compositionId' in map){
+                const d=resolveContent(PM,layer,at),source=sourceTime(PM,layer,at),speed=Number(d.speed ?? 1);
+                const variable=d.timeRemap || layer.d.speed?.kf?.length || layer.d.speed?.expr || layer.d.trim?.kf?.length || layer.d.trim?.expr;
+                materialRate=rate==null || variable || speed<=0 || source<0 || source>=sample.comp.dur ? null : rate*speed;
+              }
+              visit(sample.comp,sample.time,prefix+(sample.sourceLayerId?`material-layer:${sample.sourceLayerId}/`:`material:${'compositionId' in map?map.compositionId:''}/`),materialRate,depth+1,sample.sourceLayerId,{width:sample.width,height:sample.height});
+            }
           }
           continue;
         }
@@ -44,15 +56,17 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
         if (layer.type === 'video') {
           const asset = PM.assets.get(d.asset);
           if (asset?.el) clips.push({ layer, asset, id, time: at,
+            ...(materialSize?{materialSize}:{}),
             streamAt: sequenceStreamTime(asset, source) ?? null,
             at: videoPlaybackTime(asset, source), rate: nextRate });
         } else {
           const sub = comp.comps?.[d.comp] || PM.proj.comps?.[d.comp];
-          if (sub) visit(sub, source, id + '/', nextRate, depth + 1);
+          if (sub) visit(sub, source, id + '/', nextRate, depth + 1,undefined,materialSize);
         }
       }
     } finally { PM.scope?.pop(); }
   };
   visit(PM.proj, time, '', 1, 0);
+  setMaterialVideoDemands(PM,clips);
   return clips;
 }

@@ -1,6 +1,6 @@
 import {expect,it,vi} from 'vitest';
 import * as THREE from 'three';
-import {materialTextureSize,projectedMaterialSize} from './material-resolution';
+import {materialTextureSize,materialVideoTextureSize,projectedMaterialSize} from './material-resolution';
 import {materialCompositionSample,compositionTextureFrame,clearCompositionTextures} from './composition-textures';
 import {SceneRuntime} from './runtime';
 import {parseScene} from './schema';
@@ -19,6 +19,14 @@ it('preserves an image layer bitmap even when its layout dimensions are smaller'
     assets:{get:()=>({kind:'image',el:{width:4096,height:2048}})},GL:{bounds:()=>({w:320,h:160}),maxTextureSize:8192}};
   expect(materialCompositionSample(PM,receiver,{layerId:'image'},0)).toMatchObject({width:4096,height:2048});
   expect(materialCompositionSample(PM,receiver,{layerId:'image'},0,{width:4096,height:2048})).toMatchObject({width:4096,height:2048});
+});
+
+it('captures video at visible demand and scales back up for camera/output detail',()=>{
+  expect(materialVideoTextureSize(6048,3928)).toEqual({width:512,height:333});
+  expect(materialVideoTextureSize(6048,3928,{width:1024,height:512})).toEqual({width:1024,height:665});
+  expect(materialVideoTextureSize(6048,3928,{width:2048,height:1024})).toEqual({width:2048,height:1330});
+  expect(materialVideoTextureSize(6048,3928,{width:8192,height:8192})).toEqual({width:4096,height:2660});
+  expect(materialVideoTextureSize(64,64)).toEqual({width:64,height:64});
 });
 
 function screen() {

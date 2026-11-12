@@ -219,3 +219,18 @@ it('builds a reused nested composition only once per static check',()=>{
   const key=first.key(1);expect(first.key(1)).toBe(key);
   shape.d.color='#FF0000';PM.touch();expect(materialStaticPlan(PM,comp).plan!.content).not.toBe(first.content);
 });
+
+it('shares GPU video surfaces across slots and replaces their storage when exact capture is needed',()=>{
+  const runtime=new SceneRuntime(),raw=parseScene({objects:[{id:'screen',source:{primitive:'plane'},material:{maps:{color:{layerId:'video'},emissive:{layerId:'video'}}}}]});
+  const surface={width:64,height:64} as HTMLCanvasElement;
+  let frame:any={surface,pixels:new Uint8Array(0),width:64,height:64,key:'live',hasAlpha:true};
+  const sync=()=>runtime.sync(raw,()=>null,p=>p.v,0,true,undefined,()=>frame);
+  const material=()=>((runtime.objects.get('screen') as THREE.Mesh).material as THREE.MeshStandardMaterial);
+  sync();const live=material().map as THREE.CanvasTexture;
+  expect(live.isCanvasTexture).toBe(true);expect(live.image).toBe(surface);expect(material().emissiveMap).toBe(live);
+  const disposed=vi.spyOn(live,'dispose');
+  frame={pixels:new Uint8Array(64*64*4),width:64,height:64,key:'exact',hasAlpha:false};sync();
+  expect((material().map as THREE.DataTexture).isDataTexture).toBe(true);expect(disposed).toHaveBeenCalledOnce();
+  expect(material().map!.image.data).toBe(frame.pixels);expect(material().emissiveMap).toBe(material().map);
+  runtime.dispose();
+});
