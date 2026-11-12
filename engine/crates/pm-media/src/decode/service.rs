@@ -327,6 +327,8 @@ pub struct DecodeService {
     config: ServiceConfig,
     idle: Mutex<HashMap<SessionKey, Vec<Session>>>,
     open_sessions: AtomicU64,
+    /// Decoders a failed session's recovery tried to open, in all.
+    recovery_opens: AtomicU64,
     /// The lease's decoder share ([`MediaLease::decoders`]).
     decoder_budget: AtomicUsize,
 }
@@ -413,21 +415,25 @@ impl SessionGuard<'_> {
 
     /// A VideoToolbox session that failed is not asked again: once the
     /// system invalidates it (a GPU reset, sleep and wake), every later
-    /// sample fails. The session is dropped and a new one opened, once; if
-    /// the sample still fails and the stream has a software backend, that
-    /// decodes it. A sample that fails everywhere is damaged: its error
-    /// stands, and the session that tried last stays, marked, so a damaged
-    /// sample does not reopen decoders on every request.
+    /// sample fails. The session gives back its hardware and a new one
+    /// opens, once; if the sample still fails and the stream has a software
+    /// backend, that decodes it. A sample that fails everywhere is damaged,
+    /// and a file no decoder opens any more is gone: the error stands, and
+    /// the session that tried last stays, marked, so neither reopens
+    /// decoders on every request.
     fn recover(
         &mut self,
         sample: usize,
         stop: &mut dyn FnMut(super::session::Progress) -> bool,
         failed: Result<Option<DecodedFrame>>,
     ) -> Result<Option<DecodedFrame>> {
-        let old = self.session.as_ref().unwrap();
+        let old = self.session.as_mut().unwrap();
         if old.replacement || old.decoder_info().backend != Backend::VideoToolbox {
             return failed;
         }
+        // Its hardware session is the replacement's to take.
+        old.release_hardware();
+        old.replacement = true;
         let software = super::backends(&self.source.info, &self.source.index)
             .into_iter()
             .find(|b| *b != Backend::VideoToolbox);
@@ -436,6 +442,7 @@ impl SessionGuard<'_> {
             if prefer.is_none() && last.is_ok() {
                 break;
             }
+            self.service.recovery_opens.fetch_add(1, Ordering::Relaxed);
             let Ok(mut fresh) = self
                 .service
                 .open_session(&self.source, self.key.purpose, prefer)
@@ -571,8 +578,15 @@ impl DecodeService {
             config,
             idle: Mutex::new(HashMap::new()),
             open_sessions: AtomicU64::new(0),
+            recovery_opens: AtomicU64::new(0),
             decoder_budget: AtomicUsize::new(usize::MAX),
         }
+    }
+
+    /// How many decoders failed sessions' recoveries tried to open. For tests.
+    #[doc(hidden)]
+    pub fn recovery_opens(&self) -> u64 {
+        self.recovery_opens.load(Ordering::Relaxed)
     }
 
     pub fn pool(&self) -> &FramePool {

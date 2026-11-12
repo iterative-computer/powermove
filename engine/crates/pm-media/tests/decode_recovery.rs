@@ -52,3 +52,54 @@ fn an_invalidated_hardware_session_is_replaced() {
         }
     }
 }
+
+/// The failed session gives back its hardware before the replacement asks
+/// for it: with one H.264 session allowed, the replacement is hardware
+/// again, not a software decoder the failed session forced.
+#[test]
+fn a_replacement_takes_the_failed_sessions_hardware() {
+    let source = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let frames = source.index.frames.len();
+    let service = DecodeService::with_arbiter(
+        ServiceConfig {
+            cache_bytes: 0,
+            session_window: 1,
+            ..ServiceConfig::default()
+        },
+        std::sync::Arc::new(pm_media::decode::arbiter::LocalArbiter::new(1, &[])),
+    );
+    let mut session = service.session(&source, 1, DecodePurpose::Display).unwrap();
+    assert_eq!(session.info().backend, Backend::VideoToolbox);
+    session.frame(0).unwrap();
+    assert!(session.invalidate_hardware());
+    session.frame(frames / 2).unwrap();
+    assert_eq!(session.info().backend, Backend::VideoToolbox);
+}
+
+/// A recovery that cannot open any decoder is not tried again on every
+/// later request: the failed session stays, marked, and its errors stand.
+#[test]
+fn a_failed_recovery_is_not_repeated() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clip.mp4");
+    std::fs::copy(fixtures_dir().join("h264-aac.mp4"), &path).unwrap();
+    let source = MediaSource::open(&path).unwrap();
+    let frames = source.index.frames.len();
+    let service = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        session_window: 1,
+        ..ServiceConfig::default()
+    });
+    let mut session = service.session(&source, 1, DecodePurpose::Display).unwrap();
+    session.frame(0).unwrap();
+    // No decoder can open the file any more.
+    std::fs::remove_file(&path).unwrap();
+    assert!(session.invalidate_hardware());
+    assert!(session.frame(frames / 2).is_err());
+    let tried = service.recovery_opens();
+    assert!(tried > 0);
+    for n in [frames / 2 + 1, frames - 1, 1] {
+        assert!(session.frame(n).is_err());
+    }
+    assert_eq!(service.recovery_opens(), tried);
+}

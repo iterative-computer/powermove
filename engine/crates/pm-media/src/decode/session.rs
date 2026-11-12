@@ -173,6 +173,11 @@ impl Session {
         self.decoder.invalidate_hardware()
     }
 
+    /// See [`super::Decoder::release_hardware`].
+    pub(super) fn release_hardware(&mut self) {
+        self.decoder.release_hardware();
+    }
+
     pub fn index(&self) -> &Arc<FrameIndex> {
         &self.index
     }
