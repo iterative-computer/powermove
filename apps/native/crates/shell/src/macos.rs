@@ -327,11 +327,11 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                     .timer(std::time::Duration::from_secs(wait))
                     .await;
                 wait = 3;
-                // `pointer:x:y` and `click:x:y` (window points) go into the
+                // `pointer:x:y`, `click:x:y` and `dblclick:x:y` (window points) go into the
                 // window as GPUI input, so a review can hover and click
                 // without the real pointer.
                 if let Some((kind, at)) = name.split_once(':')
-                    && matches!(kind, "pointer" | "click")
+                    && matches!(kind, "pointer" | "click" | "dblclick")
                     && let Some((x, y)) = at.split_once(':')
                     && let (Ok(x), Ok(y)) = (x.parse::<f32>(), y.parse::<f32>())
                 {
@@ -347,13 +347,18 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                             }),
                             cx,
                         );
-                        if kind == "click" {
+                        let clicks = match kind {
+                            "click" => 1,
+                            "dblclick" => 2,
+                            _ => 0,
+                        };
+                        for click_count in 1..=clicks {
                             window.dispatch_event(
                                 gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
                                     button: gpui::MouseButton::Left,
                                     position,
                                     modifiers,
-                                    click_count: 1,
+                                    click_count,
                                     first_mouse: false,
                                 }),
                                 cx,
@@ -363,7 +368,7 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                                     button: gpui::MouseButton::Left,
                                     position,
                                     modifiers,
-                                    click_count: 1,
+                                    click_count,
                                 }),
                                 cx,
                             );

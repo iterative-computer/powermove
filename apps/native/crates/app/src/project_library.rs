@@ -781,12 +781,13 @@ impl ProjectLibrary {
         {
             let (w, h) = row.dimensions().unwrap_or((1920, 1080));
             let height = (POSTER_WIDTH as f64 * h as f64 / w.max(1) as f64).round() as u32;
-            // A third of the way in: past a fade-up, before the end card.
+            // Early, but past a fade-up: a twelfth of the way in, between
+            // 0.4 s and 4 s.
             let time = row
                 .summary
                 .as_ref()
                 .and_then(|s| s.duration_seconds)
-                .map_or(1., |d| d / 3.);
+                .map_or(1., |d| (d / 12.).clamp(0.4, 4.));
             let dir = source.dir.clone();
             cx.spawn(async move |this, cx| {
                 let png = cx
