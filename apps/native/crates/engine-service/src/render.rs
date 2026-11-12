@@ -253,6 +253,8 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
+    budgeted_extra: u64,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -303,6 +305,7 @@ impl Engine {
                 + self.renderer.scene3d_resident().map_bytes,
             binding_bytes: self.renderer.binding_cache_bytes(),
             gpu_allocated_bytes: self.metal.current_allocated_size() as u64,
+            scrub_extra_bytes: self.budgeted_extra,
         }
     }
 
@@ -364,6 +367,22 @@ impl Engine {
         self.gpu.wait_idle();
     }
 
+    /// PM_SCRUB_EXTRA_MIB: bytes borrowed while a drag or skim asked for
+    /// video in the last two seconds, scaled with installed memory as the
+    /// base budget is (×1 at 16 GB), none under memory pressure. Only decoded
+    /// (60 %) and converted (40 %) frames receive it; it is returned at once
+    /// on playback or export and two seconds after the drag otherwise.
+    fn scrub_extra(&self) -> u64 {
+        let mib = pm_media::decode::diag::knob("PM_SCRUB_EXTRA_MIB").unwrap_or(0);
+        if mib == 0
+            || crate::memory::pressure() != crate::memory::Pressure::Normal
+            || !self.renderer.scrubbed_within(Duration::from_secs(2))
+        {
+            return 0;
+        }
+        (mib << 20) * crate::memory::budget() / (160 << 20)
+    }
+
     pub fn govern_memory(&mut self) {
         objc2::rc::autoreleasepool(|_| self.govern_memory_inner());
     }
@@ -373,7 +392,9 @@ impl Engine {
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
-        if request != u64::MAX || surfaces != self.budgeted_surfaces {
+        let extra = self.scrub_extra();
+        if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra {
+            self.budgeted_extra = extra;
             // A traced viewer logs why its caches are trimmed (diagnostics).
             if crate::trace::enabled() {
                 eprintln!(
@@ -404,13 +425,14 @@ impl Engine {
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
                     frame_cache: knob("PM_ABL_FRAME_CACHE_MIB")
-                        .map_or((cache * frame_part / 100) as usize, |m| (m << 20) as usize),
+                        .map_or((cache * frame_part / 100) as usize, |m| (m << 20) as usize)
+                        + (extra * 6 / 10) as usize,
                     decoders: knob("PM_ABL_DECODERS_MIB")
                         .map_or((cache / 4) as usize, |m| (m << 20) as usize),
                 });
             self.renderer.set_image_cache_budget(cache * image_part / 100);
             self.renderer.set_converted_frame_budget(
-                knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20),
+                knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20) + extra * 4 / 10,
             );
             self.renderer.set_target_pool_budget(cache / 10);
             self.renderer.set_vector_cache_budget(cache / 20, 512);
@@ -626,6 +648,7 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            budgeted_extra: 0,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -780,6 +803,7 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.renderer.clear_scrub_mark();
         self.renderer.set_preview_media(false);
         self.last_frame = Instant::now();
         self.idle_released = false;
@@ -919,6 +943,10 @@ impl Engine {
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
+                if spec.moment == Moment::Playing {
+                    // Playback returns a scrub allowance at once.
+                    self.renderer.clear_scrub_mark();
+                }
                 self.renderer.set_playback(if spec.exact {
                     None
                 } else {
@@ -1117,6 +1145,8 @@ impl Engine {
         // PM_FIX_OUT_HALF: the output frame cache keeps within half the
         // engine's grant, leaving the rest to decode and conversion.
         let limit = if pm_media::decode::diag::knob("PM_FIX_OUT_HALF") == Some(1)
+            || pm_media::decode::diag::knob("PM_FIX_VIDEO2") == Some(1)
+            || pm_media::decode::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0)
             || pm_media::decode::diag::knob("PM_FIX_SHARES") == Some(1)
         {
             FRAME_CACHE_BYTES.min(self.memory_client.grant() / 2)

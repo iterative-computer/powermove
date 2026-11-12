@@ -239,6 +239,9 @@ pub struct DecodeService {
     arbiter: Arc<dyn HardwareArbiter>,
     config: ServiceConfig,
     idle: Mutex<HashMap<SessionKey, Vec<Session>>>,
+    /// When a drag frame last asked for video (ms since process start), for
+    /// PM_FIX_VIDEO2's scrub-only decoder retention.
+    scrubbed_ms: AtomicU64,
     open_sessions: AtomicU64,
     /// The lease's decoder share ([`MediaLease::decoders`]).
     decoder_budget: AtomicUsize,
@@ -399,8 +402,9 @@ impl Drop for SessionGuard<'_> {
             // PM_FIX_KEEP_SESSION: over the share, a session gives back its
             // window but stays open as its key's one idle session; cold
             // sources and idle release close it.
-            let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
+            let keep = (super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
                 || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
+                || svc.scrubbing())
                 && svc
                     .idle
                     .lock()
@@ -432,6 +436,30 @@ impl Drop for SessionGuard<'_> {
 }
 
 impl DecodeService {
+    /// A drag frame is asking for video now (PM_FIX_VIDEO2).
+    pub fn note_scrub(&self) {
+        self.scrubbed_ms.store(scrub_clock_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Whether a drag asked for video in the last half second, with
+    /// PM_FIX_VIDEO2 on: decoders and reorder windows are then kept.
+    pub fn scrubbing(&self) -> bool {
+        (super::diag::knob("PM_FIX_VIDEO2") == Some(1)
+            || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
+            && self.scrubbed_within(std::time::Duration::from_millis(500))
+    }
+
+    /// Whether a drag asked for video within `within`.
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        let at = self.scrubbed_ms.load(Ordering::Relaxed);
+        at != 0 && scrub_clock_ms().saturating_sub(at) < within.as_millis() as u64
+    }
+
+    /// Playback or export began: retention and the allowance end now.
+    pub fn clear_scrub_mark(&self) {
+        self.scrubbed_ms.store(0, Ordering::Relaxed);
+    }
+
     pub fn new(config: ServiceConfig) -> DecodeService {
         Self::with_arbiter(config, Arc::new(LocalArbiter::unlimited()))
     }
@@ -443,6 +471,7 @@ impl DecodeService {
             arbiter,
             config,
             idle: Mutex::new(HashMap::new()),
+            scrubbed_ms: AtomicU64::new(0),
             open_sessions: AtomicU64::new(0),
             decoder_budget: AtomicUsize::new(usize::MAX),
         }
@@ -520,6 +549,8 @@ impl DecodeService {
                 s
             }
         };
+        let mut session = session;
+        session.set_reorder(self.scrubbing());
         Ok(SessionGuard {
             service: self,
             key,
@@ -582,7 +613,7 @@ impl DecodeService {
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.
-        let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2);
+        let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2) || self.scrubbing();
         while zero || (!keep && self.decoders_over()) {
             let Some(s) = idle.values_mut().find_map(|l| l.pop()) else {
                 break;
@@ -672,4 +703,10 @@ pub fn read_ahead_order(source: &MediaSource, from: usize, plan: ReadAhead) -> V
                 .collect()
         }
     }
+}
+
+/// Milliseconds since this process first asked (PM_FIX_VIDEO2's clock).
+fn scrub_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }

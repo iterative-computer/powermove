@@ -63,6 +63,8 @@ pub struct Session {
     window_bytes: usize,
     /// The sample of the newest request (PM_FIX_REORDER).
     last_target: Option<usize>,
+    /// Keep reorder frames while a drag scrubs (PM_FIX_VIDEO2).
+    reorder: bool,
     color: Option<ColorDescription>,
     /// Classifies unreferenced pictures a seek may leave out.
     skip: Option<Disposable>,
@@ -127,6 +129,7 @@ impl Session {
             window_limit: DEFAULT_WINDOW,
             window_bytes: 32 << 20,
             last_target: None,
+            reorder: false,
             color,
             stats: SessionStats::default(),
         }
@@ -366,7 +369,7 @@ impl Session {
     /// Keeps the window within its limit, dropping frames farthest from the
     /// last request.
     fn trim(&mut self, around: Option<usize>) {
-        let reorder = super::diag::knob("PM_FIX_REORDER") == Some(1);
+        let reorder = self.reorder || super::diag::knob("PM_FIX_REORDER") == Some(1);
         while self.window.len() > 1
             && (self.window.len() > self.window_limit.max(1)
                 || self.window.values().map(DecodedFrame::bytes).sum::<usize>() > self.window_bytes)
@@ -403,7 +406,7 @@ impl Session {
     /// Drops every frame the window holds (a lease shrink). Decoding state
     /// is kept: the next request continues the current run when it can.
     pub fn clear_window(&mut self) {
-        if super::diag::knob("PM_FIX_REORDER") == Some(1) {
+        if self.reorder || super::diag::knob("PM_FIX_REORDER") == Some(1) {
             let keep: Vec<usize> = self
                 .window
                 .keys()
@@ -414,6 +417,11 @@ impl Session {
             return;
         }
         self.window.clear();
+    }
+
+    /// Keep decoded reorder frames (a drag is scrubbing; PM_FIX_VIDEO2).
+    pub fn set_reorder(&mut self, on: bool) {
+        self.reorder = on;
     }
 
     /// A decoded frame shown after the newest request whose sample the run

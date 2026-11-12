@@ -1720,8 +1720,9 @@ impl MediaCache {
                     // the drag's run (one or two frames on); a jump stands in.
                     let step = self.scrub_last.insert(path.to_path_buf(), n);
                     let continues = step.is_some_and(|last| n > last && n - last <= 2);
-                    let gated = pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
-                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS") {
+                    let video2 = pm_media::decode::diag::knob("PM_FIX_VIDEO2") == Some(1);
+                    let gated = video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
+                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS").or(video2.then_some(8)) {
                         Some(ms) if ms > 0 && (!gated || continues) => {
                             Want::Playback(std::time::Duration::from_millis(ms))
                         }
@@ -1982,6 +1983,17 @@ impl MediaCache {
                 .chain(&self.free_frames)
                 .map(Target::bytes)
                 .sum::<u64>()
+    }
+
+    /// A drag frame is drawing (PM_FIX_VIDEO2's scrub-only retention).
+    pub(crate) fn note_scrub(&self) {
+        self.service.note_scrub();
+    }
+    pub(crate) fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        self.service.scrubbed_within(within)
+    }
+    pub(crate) fn clear_scrub_mark(&self) {
+        self.service.clear_scrub_mark();
     }
 
     /// Bytes of converted textures held.

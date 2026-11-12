@@ -1447,8 +1447,19 @@ impl Renderer {
     /// decoded frame of its source while the exact one decodes, and
     /// [`Rendered::stand_ins`] counts such layers. Off by default; never
     /// applies to export requests.
+    /// Whether a drag frame asked for video within `within` (scrub allowance).
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        self.media.scrubbed_within(within)
+    }
+    /// Playback or export: no scrub is in progress any more.
+    pub fn clear_scrub_mark(&self) {
+        self.media.clear_scrub_mark();
+    }
     pub fn set_scrub(&mut self, on: bool) {
         self.media.scrub = on;
+        if on {
+            self.media.note_scrub();
+        }
     }
 
     /// Frames while playing: a video layer waits for its exact frame until
