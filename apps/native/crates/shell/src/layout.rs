@@ -230,7 +230,7 @@ impl Layout {
 
     pub fn geometry(&self, bounds: Rect, t: &Tokens) -> Geometry {
         let mut out = Geometry::default();
-        let gap = t.metrics.gap;
+        let gap = t.metrics.dock_gap;
         let shown = |d: &&Dock| !d.collapsed && !d.groups.is_empty();
         let right = self
             .docks
@@ -502,7 +502,7 @@ impl Layout {
             return None;
         }
         let zone = t.metrics.drag_threshold.max(4.) * 4.;
-        let gap = t.metrics.gap;
+        let gap = t.metrics.dock_gap;
         let edge = if x < bounds.x + zone {
             Some(Edge::Left)
         } else if x > bounds.x + bounds.w - zone {
@@ -603,7 +603,7 @@ impl Layout {
                 .iter()
                 .find(|p| p.rect.contains(at.0, at.1))?;
             let lower = at.1 >= p.rect.y + p.rect.h / 2.;
-            let half = ((p.rect.h - t.metrics.gap) / 2.).max(0.);
+            let half = ((p.rect.h - t.metrics.dock_gap) / 2.).max(0.);
             preview = DropPreview {
                 target: DropTarget::Split {
                     dock: p.dock,
@@ -1032,6 +1032,7 @@ fn builtin_title(id: &str) -> &str {
         "timeline" => "Timeline",
         "inspector" => "Properties",
         "fxbrowser" => "Effects",
+        "agent" => "Agent",
         "gradient-controls" => "Gradient",
         "takes" => "Takes",
         "shader" => "Shader",

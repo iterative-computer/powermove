@@ -30,8 +30,7 @@ fn shell_window_appearance_matrix() {
             let tokens = Tokens::new(scheme, a11y);
             let expected = tokens.colors.clone();
             let translucent = tokens.translucent();
-            let (ground, edge_ink, panel_alpha) =
-                (tokens.ground(), tokens.edge(), tokens.translucency.panel);
+            let (ground, panel_alpha) = (tokens.ground(), tokens.translucency.panel);
             let metrics = tokens.metrics;
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(
@@ -85,13 +84,27 @@ fn shell_window_appearance_matrix() {
             // Probe a gap, a panel interior, a panel edge and the viewer, away
             // from glyphs/AA. Headless has an opaque black backdrop where the
             // app has the desktop blur, so every layer's composite is exact:
-            // ground over black, panel material over ground, hairline over panel.
+            // ground over black, panel material over ground. A panel has no
+            // border: its edge is the elevation's hairline in its first half
+            // point, with the plain material straight after it and the plain
+            // ground straight before.
+            let first = metrics.dock_gap as u32 * scale;
             let gap = image.get_pixel(2 * scale, 200 * scale).0;
             let panel = image.get_pixel(40 * scale, 150 * scale).0;
-            let edge = image.get_pixel(6 * scale, 200 * scale).0;
+            let edge = image.get_pixel(first, 200 * scale).0;
             near(gap, over(ground, [0, 0, 0, 255]), "ground");
             near(panel, over((expected.panel, panel_alpha), gap), "panel");
-            near(edge, over(edge_ink, panel), "edge");
+            assert_eq!(
+                image.get_pixel(first - 1, 200 * scale).0,
+                gap,
+                "{name}: gap"
+            );
+            assert_eq!(
+                image.get_pixel(first + 2 * scale, 200 * scale).0,
+                panel,
+                "{name}: no border inside the hairline"
+            );
+            assert_ne!(edge, panel, "{name}: a hairline edges the panel");
             if translucent {
                 // In dark the panel steps lighter than the ground it sits on.
                 if scheme == Scheme::Dark {

@@ -497,6 +497,8 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the bezel.
                     inline: crate::v4_compile::variant(node) == Some("inline")
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    tint: None,
+                    symbol: None,
                 },
                 &tokens,
                 window,
@@ -1924,7 +1926,7 @@ impl SurfaceView {
             if let Some(unit) = &node.unit {
                 element = element.child(
                     div()
-                        .ml(px(t.metrics.inner_radius))
+                        .ml(px(t.space.hair))
                         .text_color(rgb(t.colors.muted))
                         .child(unit.clone()),
                 );

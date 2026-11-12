@@ -34,3 +34,6 @@ harness = false
 [[test]]
 name = "child_windows_gpui"
 harness = false
+[[test]]
+name = "tab_close_gpui"
+harness = false

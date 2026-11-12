@@ -16,9 +16,54 @@ use crate::{
     sheets::OpenSheet,
 };
 use gpui::{prelude::*, *};
-use pm_design::Tokens;
+use pm_design::{Elevation, Text, Tokens, motion::Preset};
 use pm_kernel::{KernelHandle, session::ShellReply};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+use pm_shell::{
+    kit::{self, Button, Item, Kit, Recipes, ink},
+    native_control::{ControlSpec, Kind, NativeControl},
+    symbol::Weight,
+};
+use serde_json::{Value, json};
+
+/// The header's real AppKit controls: the layout segmented control, the sort
+/// pop-up, Open… and the tinted New Project button. They exist in an AppKit
+/// window; a headless window draws the kit's equivalents.
+struct HeaderControls {
+    layout: Entity<NativeControl>,
+    sort: Entity<NativeControl>,
+    open: Entity<NativeControl>,
+    new: Entity<NativeControl>,
+    /// What the layout and sort controls last showed.
+    shown: (Layout, Sort),
+}
+/// Home's own thumbnails: a cache under the profile, and the renderer of the
+/// project this window has open. The kernel's library carries a thumbnail
+/// only for projects v1 saved; everything else gets its poster frame here.
+pub struct ThumbnailSource {
+    /// `<profile>/caches/thumbnails`: `<project>.png` and its `.stamp`.
+    pub dir: PathBuf,
+    /// One frame of the open project as PNG, through the engine's frame path.
+    pub renderer: Option<pm_compat_runner::FrameRenderer>,
+}
+fn sort_options() -> Vec<Value> {
+    [Sort::Recent, Sort::Name]
+        .map(|sort| json!({"label": sort.label(), "v": sort.key()}))
+        .to_vec()
+}
+fn layout_options() -> Vec<Value> {
+    vec![
+        json!({"symbol": "square.grid.2x2", "label": "Grid view"}),
+        json!({"symbol": "list.bullet", "label": "List view"}),
+    ]
+}
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
+
+/// A menu opened from one of Home's buttons (ours, never NSMenu).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Menu {
+    Sort,
+    Account,
+}
 
 /// What Home needs from the editor window it is drawn in.
 #[derive(Debug)]
@@ -43,8 +88,27 @@ pub struct ProjectLibrary {
     tokens: Tokens,
     focus: FocusHandle,
     sheet: Rc<RefCell<Option<OpenSheet>>>,
-    /// Hover washes on sidebar rows, cards and buttons.
+    /// Hover washes, the gliding layout toggle, cards sliding to new places.
     motion: pm_shell::motion::Motion<u64>,
+    /// Decoded thumbnails by project id, with the length of the source they
+    /// were read from (a new save replaces it).
+    thumbs: HashMap<String, (usize, Option<Arc<Image>>)>,
+    native: Option<HeaderControls>,
+    /// Home's thumbnail cache and renderer (set by the window that shows it).
+    pub thumbnails: Option<ThumbnailSource>,
+    /// Projects whose cached poster has been read, and renders started
+    /// (project, the modification it was started for).
+    posters_read: std::collections::HashSet<String>,
+    posters_started: std::collections::HashSet<(String, i64)>,
+    /// Development builds: the gallery's real controls.
+    #[cfg(debug_assertions)]
+    gallery_native: Vec<Entity<NativeControl>>,
+    /// The open button menu, and where its button was last painted.
+    menu: Option<Menu>,
+    anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
+    /// Columns and card width at the last layout: when they change (a resize)
+    /// cards are placed at once; otherwise (a sort, a search) they slide.
+    grid: (usize, u32),
     /// The editor window Home is drawn in: its sheets and alerts attach here.
     editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     /// v1's `projectsView`.
@@ -114,6 +178,16 @@ impl ProjectLibrary {
             focus: cx.focus_handle(),
             sheet: Rc::default(),
             motion: Default::default(),
+            thumbs: HashMap::new(),
+            native: None,
+            thumbnails: None,
+            posters_read: Default::default(),
+            posters_started: Default::default(),
+            #[cfg(debug_assertions)]
+            gallery_native: Vec::new(),
+            menu: None,
+            anchors: Rc::default(),
+            grid: (0, 0),
             editor,
             layout,
             search: None,
@@ -399,6 +473,12 @@ impl ProjectLibrary {
             Layout::List => 1,
         };
         match event.keystroke.key.as_str() {
+            "escape" if self.menu.is_some() => self.menu = None,
+            "f" if event.keystroke.modifiers.platform => {
+                if let Some(field) = &self.search {
+                    field.update(cx, |f, cx| f.begin_editing(cx));
+                }
+            }
             "up" => self.controller.move_selection(-columns),
             "down" => self.controller.move_selection(columns),
             "left" if columns > 1 => self.controller.move_selection(-1),
@@ -454,38 +534,6 @@ impl ProjectLibrary {
             }
         });
     }
-    fn sort_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.controller.query.sort;
-        let sorts = [Sort::Recent, Sort::Name];
-        let options: Vec<_> = sorts
-            .iter()
-            .map(|s| serde_json::json!({"label": s.label(), "checked": *s == current}))
-            .collect();
-        let this = cx.entity();
-        crate::v4_native::menu(window, &options, cx, move |index, cx| {
-            if let Some(sort) = index.and_then(|i| sorts.get(i).copied()) {
-                this.update(cx, |v, cx| v.set_sort(sort, cx));
-            }
-        });
-    }
-    /// v1's account row: Sign in, or your account's menu.
-    fn account_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let items: [(&str, &'static str); 3] = [
-            ("Your Library", "store"),
-            ("Account Settings…", "settings"),
-            ("Sign Out", "cloudSignOut"),
-        ];
-        let options: Vec<_> = items
-            .iter()
-            .map(|(label, _)| serde_json::json!({ "label": label }))
-            .collect();
-        let sink = self.sink.clone();
-        crate::v4_native::menu(window, &options, cx, move |index, cx| {
-            if let Some((_, command)) = index.and_then(|i| items.get(i)) {
-                sink(Outbound::Command(command), cx);
-            }
-        });
-    }
 }
 /// Development builds: an on-screen review runs a row's context-menu choice
 /// (the NSMenu callback's body) without pressing a menu item.
@@ -508,172 +556,258 @@ impl ProjectLibrary {
     }
 }
 const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
-/// Hover key for a sidebar section, row or button.
-fn key(name: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut h);
-    h.finish()
-}
+/// Space either side of Home's sheet content: the title, the controls and
+/// the thumbnails share this one left edge.
+const MARGIN: f32 = 32.;
+/// Padding inside a card (its hover and selection surface) around the
+/// thumbnail; the thumbnail's corner is the card's minus this.
+const CARD_PAD: f32 = 6.;
 impl ProjectLibrary {
-    /// A hover wash (spring) over any control; `selected` is the neutral on state.
-    fn wash(
-        &self,
-        d: Stateful<Div>,
-        name: &str,
-        selected: bool,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let t = &self.tokens;
-        let k = key(name);
-        let amount = self.motion.hovers.amount(k);
-        let alpha = (t.translucency.hover * amount * 255.).round() as u32;
-        let radius = t.metrics.control_radius;
-        d.relative()
-            .when(selected, |d| d.bg(rgb(t.colors.fill_strong)))
-            .when(!selected && alpha > 0, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(radius))
-                        .bg(rgba(t.colors.text << 8 | alpha)),
-                )
-            })
-            .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                let tokens = v.tokens.clone();
-                v.motion.hovers.hover(k, *hovered, &tokens);
-                cx.notify();
-            }))
+    fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
+        &mut self.motion
     }
-    /// A sidebar row: (symbol, label), trailing count.
+    /// A sidebar row: symbol, label, trailing count.
     fn nav_row(
         &self,
+        kit: &Kit,
         id: &'static str,
         (symbol, label): (&str, String),
         count: Option<usize>,
         selected: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let t = &self.tokens;
+        let t = &kit.t;
         let (c, m) = (&t.colors, &t.metrics);
-        let row = div()
-            .id(id)
+        kit.row(id, selected)
             .debug_selector(|| id.into())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(m.gap))
-            .h(px(m.row))
-            .px(px(m.gap))
-            .rounded(px(m.control_radius))
-            .text_color(rgb(if selected { c.text } else { c.secondary }))
+            .text_size(px(t.typography.reading))
             .role(Role::Button)
-            .aria_selected(selected)
             .aria_label(match count {
                 Some(n) => format!("{label}, {n}"),
                 None => label.clone(),
             })
-            .child(pm_shell::symbol::symbol(
+            .child(kit.symbol(
                 symbol,
-                m.symbol_inline,
-                pm_shell::symbol::Weight::Regular,
+                m.symbol_panel,
+                Weight::Regular,
                 if selected { c.text } else { c.muted },
-                window,
             ))
             .child(div().flex_1().min_w(px(0.)).truncate().child(label))
             .children(count.map(|n| {
                 div()
                     .flex_none()
-                    .text_size(px(t.typography.label))
+                    .text_role(t, Text::Caption)
+                    .font_features(kit::tabular())
+                    // On system glass: a step that reads over any desktop.
                     .text_color(rgb(c.muted))
-                    .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
                     .child(n.to_string())
-            }));
-        self.wash(row, id, selected, cx)
+            }))
     }
-    /// A quiet push button (`field` ground); `primary` is the window's one
-    /// accent action.
-    fn button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        symbol: Option<&str>,
-        primary: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let t = &self.tokens;
-        let (c, m) = (&t.colors, &t.metrics);
-        let ink = if primary { c.selected_text } else { c.text };
-        // A pop-up's chevron trails its title; an action's symbol leads.
-        let trailing = symbol.is_some_and(|s| s.starts_with("chevron"));
-        let glyph = symbol.map(|s| {
-            pm_shell::symbol::symbol(
-                s,
-                m.symbol_inline,
-                pm_shell::symbol::Weight::Medium,
-                if trailing { c.muted } else { ink },
-                window,
-            )
+    /// Opens or closes a button menu; it enters on the `Enter` spring.
+    fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.menu = (self.menu != Some(menu)).then_some(menu);
+        self.motion
+            .values
+            .borrow_mut()
+            .insert(kit::key("home-menu"), pm_design::motion::Animated::unit(0.));
+        cx.notify();
+    }
+    /// The open button menu: our popover (rows light only under the pointer),
+    /// hanging from its button, closed by a click elsewhere or Escape.
+    fn menu_overlay(&self, kit: &Kit, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu?;
+        let anchor = self.anchors.borrow().get(&menu).copied()?;
+        let t = &kit.t;
+        let shown = kit
+            .animate(kit::key("home-menu"), 1., Some(Preset::Enter))
+            .clamp(0., 1.);
+        let close = cx.listener(|v, _: &MouseDownEvent, _, cx| {
+            v.menu = None;
+            cx.notify();
         });
-        let (lead, trail) = if trailing {
-            (None, glyph)
-        } else {
-            (glyph, None)
+        let rows: Vec<Stateful<Div>> = match menu {
+            Menu::Sort => [Sort::Recent, Sort::Name]
+                .into_iter()
+                .map(|sort| {
+                    kit.menu_row(
+                        format!("home-sort-{}", sort.key()),
+                        sort.label(),
+                        Some(sort == self.controller.query.sort),
+                        None,
+                    )
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.menu = None;
+                        v.set_sort(sort, cx);
+                    }))
+                })
+                .collect(),
+            Menu::Account => [
+                ("Your Library", "store"),
+                ("Account Settings…", "settings"),
+                ("Sign Out", "cloudSignOut"),
+            ]
+            .into_iter()
+            .map(|(label, command)| {
+                kit.menu_row(format!("home-account-{command}"), label, None, None)
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.menu = None;
+                        (v.sink)(Outbound::Command(command), cx);
+                        cx.notify();
+                    }))
+            })
+            .collect(),
         };
-        let d = div()
-            .id(id)
-            .debug_selector(|| id.into())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(m.border * 4.))
-            .h(px(m.control))
-            .px(px(m.inset))
-            .rounded(px(m.control_radius))
-            .bg(rgb(if primary { c.accent } else { c.field }))
-            .text_color(rgb(ink))
-            .font_weight(FontWeight(t.typography.medium_weight))
-            .role(Role::Button)
-            .aria_label(label)
-            .children(lead)
-            .child(label)
-            .children(trail);
-        self.wash(d, id, false, cx)
+        // It grows out of its button: a few points of travel with the fade.
+        let travel = (1. - shown) * t.space.sm;
+        let (corner, at) = match menu {
+            Menu::Sort => (
+                Anchor::TopRight,
+                point(anchor.right(), anchor.bottom() + px(t.space.xs - travel)),
+            ),
+            Menu::Account => (
+                Anchor::BottomLeft,
+                point(anchor.left(), anchor.top() - px(t.space.xs - travel)),
+            ),
+        };
+        Some(
+            deferred(
+                anchored().anchor(corner).position(at).child(
+                    kit.menu()
+                        .id("home-menu")
+                        .min_w(px(t.metrics.sidebar - 2. * t.space.md))
+                        .opacity(shown)
+                        .font_family(pm_design::TEXT_FONT)
+                        .role(Role::Menu)
+                        .on_mouse_down_out(close)
+                        .children(rows),
+                ),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
     }
-    /// One icon segment of the grid/list toggle.
-    fn segment(
-        &self,
-        layout: Layout,
-        symbol: &str,
-        label: &'static str,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let t = &self.tokens;
-        let (c, m) = (&t.colors, &t.metrics);
-        let on = self.layout == layout;
-        let d = div()
-            .id(label)
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(m.control))
-            .rounded(px(m.control_radius))
-            .role(Role::Button)
-            .aria_label(label)
-            .aria_selected(on)
-            .child(pm_shell::symbol::symbol(
-                symbol,
-                m.symbol_inline,
-                pm_shell::symbol::Weight::Regular,
-                if on { c.text } else { c.muted },
-                window,
-            ))
-            .on_click(cx.listener(move |v, _, _, cx| v.set_layout(layout, cx)));
-        self.wash(d, label, on, cx)
+    /// A poster was written for `id`: its card reads it from the cache again.
+    pub fn poster_written(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.posters_read.remove(id);
+        self.posters_started
+            .retain(|(started, stamp)| started != id || *stamp != i64::MIN);
+        cx.notify();
+    }
+    /// Home shows again: posters written since (a project saved or closed in
+    /// any window) are read from the cache once more.
+    pub fn show_posters(&mut self, source: ThumbnailSource) {
+        self.thumbnails = Some(source);
+        self.posters_read.clear();
+        self.posters_started.retain(|(_, stamp)| *stamp != i64::MIN);
+    }
+    /// A project's thumbnail: the one v1 stored with it (a data URL, decoded
+    /// once per source), else Home's own poster frame (`crate::poster`). A
+    /// poster is read from the cache off the main thread on first sight, and
+    /// rendered (also off the main thread) when this window has the project
+    /// open and the cache has none or an older one. Until it arrives the
+    /// card shows its empty canvas, then the image fades in.
+    fn thumbnail(&mut self, row: &Row, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+        if let Some(source) = row.summary.as_ref().and_then(|s| s.thumbnail.as_deref()) {
+            if let Some((length, image)) = self.thumbs.get(&row.id)
+                && *length == source.len()
+            {
+                return image.clone();
+            }
+            let image = source
+                .strip_prefix("data:image/")
+                .and_then(|rest| rest.split_once(";base64,"))
+                .and_then(|(kind, data)| {
+                    let format = match kind {
+                        "jpeg" | "jpg" => ImageFormat::Jpeg,
+                        "png" => ImageFormat::Png,
+                        "webp" => ImageFormat::Webp,
+                        _ => return None,
+                    };
+                    use base64::Engine as _;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .ok()?;
+                    Some(Arc::new(Image::from_bytes(format, bytes)))
+                });
+            self.thumbs
+                .insert(row.id.clone(), (source.len(), image.clone()));
+            return image;
+        }
+        let cached = self.thumbs.get(&row.id).cloned();
+        let image = cached.as_ref().and_then(|(_, image)| image.clone());
+        let Some(source) = &self.thumbnails else {
+            return image;
+        };
+        let (id, stamp) = (row.id.clone(), row.modified_ms.unwrap_or(0));
+        let (file, stamp_file) = crate::poster::files(&source.dir, &id);
+        let fade = kit::key(&format!("poster-{id}"));
+        let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
+            v.thumbs.insert(
+                id,
+                (
+                    stamp as usize,
+                    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
+                ),
+            );
+            v.motion
+                .values
+                .borrow_mut()
+                .insert(fade, pm_design::motion::Animated::unit(0.));
+        };
+        if !self.posters_read.contains(&id) {
+            if self.posters_started.insert((id.clone(), i64::MIN)) {
+                cx.spawn(async move |this, cx| {
+                    let read = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let (stamp, _) = crate::poster::stamp(&stamp_file)?;
+                            Some((stamp, std::fs::read(file).ok()?))
+                        })
+                        .await;
+                    let _ = this.update(cx, |v, cx| {
+                        v.posters_read.insert(id.clone());
+                        // The one already shown stays as it is.
+                        let shown = v.thumbs.get(&id).map(|(at, _)| *at as i64);
+                        if let Some((stamp, png)) = read
+                            && shown != Some(stamp)
+                        {
+                            store(v, id, stamp, png);
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            return image;
+        }
+        // Taken at or after the project last changed on disk.
+        let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 >= stamp);
+        if !fresh
+            && self.active.as_deref() == Some(id.as_str())
+            && let Some(renderer) = source.renderer.clone()
+            && self.posters_started.insert((id.clone(), stamp))
+        {
+            let size = row.dimensions().unwrap_or((1920, 1080));
+            let duration = row.summary.as_ref().and_then(|s| s.duration_seconds);
+            let dir = source.dir.clone();
+            let taken = crate::poster::now_ms().max(stamp);
+            cx.spawn(async move |this, cx| {
+                let poster = id.clone();
+                let png = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::poster::write(&renderer, None, &dir, &poster, taken, size, duration)
+                    })
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    if let Some(png) = png {
+                        store(v, id, taken, png);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        image
     }
     /// Click selects; double-click (or Return) opens, ⌥ in a new window;
     /// right-click selects and shows the row's menu.
@@ -709,142 +843,231 @@ impl ProjectLibrary {
             None
         }
     }
-    fn card(&self, row: &Row, width: f32, now: i64, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = &self.tokens;
-        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
-        let selected = self.controller.selected.as_ref() == Some(&row.id);
-        let facts = row.facts(now);
-        let tag = self.tag(row);
-        let k = key(&format!("card-{}", row.id));
-        let wash = self.motion.hovers.amount(k);
-        let alpha = (t.translucency.hover * wash * 255.).round() as u32;
-        let dims = row.dimensions().map(|(w, h)| format!("{w}×{h}"));
-        // No image: the frame shows the canvas size instead of a blank slab.
-        let thumb = div()
+    /// The frame a project shows in: its thumbnail, or, when the library has
+    /// none, an empty canvas in the composition's own shape (wide, square or
+    /// tall reads at a glance). A hairline of pure ink keeps a bright or dark
+    /// frame apart from the sheet.
+    fn frame(
+        &self,
+        kit: &Kit,
+        thumbnail: Option<Arc<Image>>,
+        dimensions: Option<(u32, u32)>,
+        radius: f32,
+        fade: f32,
+    ) -> Div {
+        let t = &kit.t;
+        let dark = t.scheme == pm_design::Scheme::Dark;
+        let outline = |radius: f32| {
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(radius))
+                .shadow(vec![BoxShadow {
+                    color: ink(if dark { 0xffffff } else { 0x000000 }, 0.1).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(0.5),
+                    inset: true,
+                }])
+        };
+        let frame = div()
             .relative()
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
-            .w(px(width))
-            .h(px(width * 9. / 16.))
-            .rounded(px(m.control_radius))
-            .bg(rgb(c.field))
-            .border(px(if selected { m.border * 2. } else { m.border }))
-            .border_color(rgb(if selected { c.secondary } else { c.hairline }))
-            .text_size(px(ty.label))
-            .text_color(rgb(c.muted))
-            .children(dims)
-            .when(alpha > 0, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(m.control_radius))
-                        .bg(rgba(c.text << 8 | alpha)),
+            .rounded(px(radius))
+            .overflow_hidden();
+        match thumbnail {
+            // The whole picture in the composition's own shape, on the
+            // viewer's ground where its shape leaves room.
+            Some(image) => frame
+                .bg(rgb(t.colors.viewer))
+                .child(
+                    img(ImageSource::Image(image))
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .opacity(fade.clamp(0., 1.)),
                 )
-            });
-        let card = div()
-            .id(SharedString::from(format!("project-{}", row.id)))
-            .debug_selector(|| format!("project-{}", row.id))
+                .child(outline(radius)),
+            None => {
+                let (w, h) = dimensions.unwrap_or((16, 9));
+                let aspect = (w.max(1) as f32 / h.max(1) as f32).clamp(0.25, 4.);
+                // The canvas takes 56 % of the frame's height, or of its
+                // width when it is wider than the frame itself.
+                let canvas = div()
+                    .relative()
+                    .rounded(px(t.radius.xs))
+                    .bg(rgb(t.colors.viewer))
+                    .child(outline(t.radius.xs));
+                frame
+                    .bg(ink(t.colors.text, t.translucency.hover))
+                    .child(if aspect > 16. / 9. {
+                        canvas.w(relative(0.56)).map(|mut d| {
+                            d.style().aspect_ratio = Some(aspect);
+                            d
+                        })
+                    } else {
+                        canvas.h(relative(0.56)).map(|mut d| {
+                            d.style().aspect_ratio = Some(aspect);
+                            d
+                        })
+                    })
+            }
+        }
+    }
+    /// Name with v1's tag, over the facts line.
+    fn caption(&self, kit: &Kit, row: &Row, facts: &str) -> Div {
+        let t = &kit.t;
+        let c = &t.colors;
+        div()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(width))
-            .gap(px(m.gap))
-            .role(Role::ListItem)
-            .aria_selected(selected)
-            .aria_label(match tag {
-                Some(tag) => format!("{}, {tag}, {facts}", row.name),
-                None => format!("{}, {facts}", row.name),
-            })
-            .child(thumb)
+            .min_w(px(0.))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .px(px(m.border * 2.))
+                    .items_baseline()
+                    .gap(px(t.space.sm))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(m.gap))
-                            .child(
-                                div()
-                                    .min_w(px(0.))
-                                    .truncate()
-                                    .font_weight(FontWeight(ty.medium_weight))
-                                    .child(row.name.clone()),
-                            )
-                            .children(tag.map(|tag| {
-                                div()
-                                    .flex_none()
-                                    .text_size(px(ty.label))
-                                    .text_color(rgb(c.muted))
-                                    .child(tag)
-                            })),
-                    )
-                    .child(
-                        div()
+                            .min_w(px(0.))
                             .truncate()
-                            .text_size(px(ty.label))
-                            .text_color(rgb(c.muted))
-                            .child(facts),
-                    ),
-            )
-            .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                let tokens = v.tokens.clone();
-                v.motion.hovers.hover(k, *hovered, &tokens);
-                cx.notify();
-            }));
-        self.interactive(card, &row.id, cx)
-    }
-    fn list_row(&self, row: &Row, now: i64, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = &self.tokens;
-        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
-        let selected = self.controller.selected.as_ref() == Some(&row.id);
-        let facts = row.facts(now);
-        let tag = self.tag(row);
-        let d = div()
-            .id(SharedString::from(format!("project-{}", row.id)))
-            .debug_selector(|| format!("project-{}", row.id))
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(m.inset))
-            .h(px(m.row))
-            .px(px(m.gap))
-            .rounded(px(m.control_radius))
-            .role(Role::ListItem)
-            .aria_selected(selected)
-            .aria_label(match tag {
-                Some(tag) => format!("{}, {tag}, {facts}", row.name),
-                None => format!("{}, {facts}", row.name),
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .items_center()
-                    .gap(px(m.gap))
-                    .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
-                    .children(tag.map(|tag| {
+                            .text_role(t, Text::Title)
+                            .text_color(rgb(c.text))
+                            .child(row.name.clone()),
+                    )
+                    .children(self.tag(row).map(|tag| {
                         div()
                             .flex_none()
-                            .text_size(px(ty.label))
+                            .text_role(t, Text::Caption)
                             .text_color(rgb(c.muted))
                             .child(tag)
                     })),
             )
             .child(
                 div()
-                    .flex_none()
-                    .text_size(px(ty.label))
+                    .truncate()
+                    .text_role(t, Text::Caption)
+                    .font_features(kit::tabular())
                     .text_color(rgb(c.muted))
-                    .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                    .child(facts.to_string()),
+            )
+    }
+    fn card(
+        &mut self,
+        kit: &Kit,
+        row: &Row,
+        (width, height): (f32, f32),
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = &kit.t;
+        let selected = self.controller.selected.as_ref() == Some(&row.id);
+        let facts = row.facts(now);
+        let thumbnail = self.thumbnail(row, cx);
+        let fade = kit.animate(
+            kit::key(&format!("poster-{}", row.id)),
+            1.,
+            Some(Preset::Show),
+        );
+        let radius = t.radius.xl;
+        let frame = self
+            .frame(
+                kit,
+                thumbnail,
+                row.dimensions(),
+                t.radius.nested(radius, CARD_PAD),
+                fade,
+            )
+            .w_full()
+            .h(px(((width - 2. * CARD_PAD) * 9. / 16.).round()));
+        let card = div()
+            .id(SharedString::from(format!("project-{}", row.id)))
+            .debug_selector(|| format!("project-{}", row.id))
+            .flex()
+            .flex_col()
+            .w(px(width))
+            .h(px(height))
+            .p(px(CARD_PAD))
+            .gap(px(t.space.md))
+            .rounded(px(radius))
+            .when(selected, |d| {
+                d.bg(ink(t.colors.text, t.translucency.selected))
+            })
+            .role(Role::ListItem)
+            .aria_selected(selected)
+            .aria_label(match self.tag(row) {
+                Some(tag) => format!("{}, {tag}, {facts}", row.name),
+                None => format!("{}, {facts}", row.name),
+            })
+            .child(frame)
+            .child(self.caption(kit, row, &facts).px(px(t.space.hair)));
+        let card = if selected {
+            card
+        } else {
+            kit.wash(card, kit::key(&format!("card-{}", row.id)), radius)
+        };
+        self.interactive(card, &row.id, cx)
+    }
+    fn list_row(
+        &mut self,
+        kit: &Kit,
+        row: &Row,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = &kit.t;
+        let selected = self.controller.selected.as_ref() == Some(&row.id);
+        let facts = row.facts(now);
+        let thumbnail = self.thumbnail(row, cx);
+        let height = t.metrics.row + t.space.lg;
+        let d = kit
+            .row(format!("project-{}", row.id), selected)
+            .debug_selector(|| format!("project-{}", row.id))
+            .h(px(height))
+            .gap(px(t.space.lg))
+            .role(Role::ListItem)
+            .aria_label(match self.tag(row) {
+                Some(tag) => format!("{}, {tag}, {facts}", row.name),
+                None => format!("{}, {facts}", row.name),
+            })
+            .child(
+                self.frame(kit, thumbnail, row.dimensions(), t.radius.xs, 1.)
+                    .h(px(height - t.space.md))
+                    .w(px(((height - t.space.md) * 16. / 9.).round())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .items_baseline()
+                    .gap(px(t.space.sm))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_role(t, Text::Title)
+                            .text_color(rgb(t.colors.text))
+                            .child(row.name.clone()),
+                    )
+                    .children(self.tag(row).map(|tag| {
+                        div()
+                            .flex_none()
+                            .text_role(t, Text::Caption)
+                            .text_color(rgb(t.colors.muted))
+                            .child(tag)
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_role(t, Text::Caption)
+                    .font_features(kit::tabular())
+                    .text_color(rgb(t.colors.muted))
                     .child(facts),
             );
-        let d = self.wash(d, &format!("row-{}", row.id), selected, cx);
         self.interactive(d, &row.id, cx)
     }
 }
@@ -852,7 +1075,8 @@ impl Render for ProjectLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
         let t = self.tokens.clone();
-        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+        let (c, m) = (&t.colors, &t.metrics);
+        let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         if self.search.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
             let search = cx.new(|cx| {
@@ -865,6 +1089,7 @@ impl Render for ProjectLibrary {
                     cx,
                 );
                 field.set_placeholder("Search projects");
+                field.set_bare(true);
                 field
             });
             cx.subscribe(&search, |v: &mut Self, _, event, cx| {
@@ -879,6 +1104,89 @@ impl Render for ProjectLibrary {
             .detach();
             self.search = Some(search);
         }
+        let (layout, sort) = (self.layout, self.controller.query.sort);
+        if self.native.is_none() && pm_shell::text::available(window) {
+            let mut make = |kind, label: &str, value: Value, options: Vec<Value>, primary: bool| {
+                let tokens = t.clone();
+                cx.new(|cx| {
+                    NativeControl::new(
+                        ControlSpec {
+                            kind,
+                            label,
+                            identifier: &format!("home.{}", label.to_lowercase().replace(' ', "-")),
+                            value: &value,
+                            options,
+                            disabled: false,
+                            default: false,
+                            destructive: false,
+                            inline: false,
+                            tint: primary.then_some(tokens.colors.accent),
+                            symbol: primary.then_some("plus"),
+                        },
+                        &tokens,
+                        window,
+                        cx,
+                    )
+                })
+            };
+            let controls = HeaderControls {
+                layout: make(
+                    Kind::Segmented,
+                    "Project layout",
+                    json!(usize::from(layout == Layout::List)),
+                    layout_options(),
+                    false,
+                ),
+                sort: make(
+                    Kind::Popup,
+                    "Sort projects",
+                    json!(sort.key()),
+                    sort_options(),
+                    false,
+                ),
+                open: make(Kind::Push, "Open…", Value::Null, vec![], false),
+                new: make(Kind::Push, "New Project", Value::Null, vec![], true),
+                shown: (layout, sort),
+            };
+            cx.subscribe(&controls.layout, |v: &mut Self, _, value: &Value, cx| {
+                let layout = if value.as_i64() == Some(1) {
+                    Layout::List
+                } else {
+                    Layout::Grid
+                };
+                v.set_layout(layout, cx);
+            })
+            .detach();
+            cx.subscribe(&controls.sort, |v: &mut Self, _, value: &Value, cx| {
+                v.set_sort(Sort::from_key(value.as_str().unwrap_or_default()), cx);
+            })
+            .detach();
+            cx.subscribe(&controls.open, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("open"), cx)
+            })
+            .detach();
+            cx.subscribe(&controls.new, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("newProject"), cx)
+            })
+            .detach();
+            self.native = Some(controls);
+        }
+        // A change made elsewhere (the keyboard, a restored setting) shows in
+        // the real controls.
+        if let Some(native) = self.native.as_mut().filter(|n| n.shown != (layout, sort)) {
+            native.shown = (layout, sort);
+            native.layout.update(cx, |c, cx| {
+                c.update(
+                    &json!(usize::from(layout == Layout::List)),
+                    &layout_options(),
+                    false,
+                    cx,
+                )
+            });
+            native.sort.update(cx, |c, cx| {
+                c.update(&json!(sort.key()), &sort_options(), false, cx)
+            });
+        }
         let section = self.controller.query.section;
         let live = self
             .controller
@@ -891,88 +1199,92 @@ impl Render for ProjectLibrary {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        let (ground, ground_alpha) = t.ground();
-        // Sidebar (v1): search, Recents and Trash with counts, Store, then
-        // the account at the foot.
+        // Sidebar (v1): search, Recents and Trash with counts, Store, then the
+        // account at the foot. It sits on the window's own material.
         let account = crate::cloud::fact(cx);
         let identity = account
             .get("identity")
             .and_then(serde_json::Value::as_str)
             .filter(|_| account.get("signedIn") == Some(&serde_json::Value::Bool(true)))
             .map(str::to_owned);
+        let anchor = |menu: Menu| {
+            let anchors = self.anchors.clone();
+            canvas(
+                move |bounds, _, _| {
+                    anchors.borrow_mut().insert(menu, bounds);
+                },
+                |_, _, _, _| (),
+            )
+            .absolute()
+            .size_full()
+        };
         let sidebar = div()
             .id("home-sidebar")
             .flex()
             .flex_col()
             .flex_none()
-            .gap(px(m.border))
-            .w(px(m.settings_sidebar))
+            .gap(px(t.space.hair))
+            .w(px(m.sidebar))
             .h_full()
-            .p(px(m.gap))
-            .bg(pm_shell::view::tint(ground, ground_alpha))
+            .px(px(m.dock_gap))
+            .pb(px(m.dock_gap))
             .role(Role::Group)
             .aria_label("Home")
-            .children(self.search.clone().map(|f| div().mb(px(m.gap)).child(f)))
+            .child(
+                kit.search(self.search.clone(), Some("⌘F"))
+                    .mb(px(t.space.md)),
+            )
             .child(
                 self.nav_row(
+                    &kit,
                     "home-recents",
                     ("clock", "Recents".into()),
                     Some(live.min(12)),
                     section != Section::Deleted,
-                    window,
-                    cx,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Recents, cx))),
             )
             .child(
                 self.nav_row(
+                    &kit,
                     "home-trash",
                     ("trash", "Trash".into()),
                     Some(trash),
                     section == Section::Deleted,
-                    window,
-                    cx,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Deleted, cx))),
             )
-            .child(div().h(px(m.gap)))
+            .child(div().h(px(t.space.lg)))
             .child(
-                self.nav_row(
-                    "home-store",
-                    ("basket", "Store".into()),
-                    None,
-                    false,
-                    window,
-                    cx,
-                )
-                .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
+                self.nav_row(&kit, "home-store", ("basket", "Store".into()), None, false)
+                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
             .child(match identity {
                 Some(name) => self
                     .nav_row(
+                        &kit,
                         "home-account",
                         ("person.crop.circle", name),
                         None,
                         false,
-                        window,
-                        cx,
                     )
-                    .on_click(cx.listener(|v, _, window, cx| v.account_menu(window, cx))),
+                    .child(anchor(Menu::Account))
+                    .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Account, cx))),
                 None => self
                     .nav_row(
+                        &kit,
                         "home-account",
                         ("person.crop.circle", "Sign in".into()),
                         None,
                         false,
-                        window,
-                        cx,
                     )
                     .on_click(
                         cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("cloudSignIn"), cx)),
                     ),
             });
-        // Header (v1): section and count, grid/list, sort, Open…, New Project.
+        // Title row (v1's header): the section and its count, then grid/list,
+        // sort, Open… and the one accent action.
         let shown = self.controller.rows.len();
         let count = format!(
             "{shown} {}",
@@ -984,141 +1296,188 @@ impl Render for ProjectLibrary {
             .opening()
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(m.gap))
-            .h(px(m.toolbar))
-            .px(px(m.inset + m.gap))
-            .child(
-                div()
-                    .id("home-heading")
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .items_baseline()
-                    .gap(px(m.gap))
-                    .role(Role::Heading)
-                    .aria_label(format!("{}, {count}", section.title()))
-                    .child(
-                        div()
-                            .text_size(px(ty.heading))
-                            .font_weight(FontWeight(ty.semibold_weight))
-                            .child(section.title()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(ty.label))
-                            .text_color(rgb(c.muted))
-                            .child(count),
-                    )
-                    // A real project can take seconds to read: say so here
-                    // until it shows in the window.
-                    .children(opening.map(|name| {
-                        div()
-                            .id("home-status")
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_size(px(ty.label))
-                            .text_color(rgb(c.secondary))
-                            .role(Role::Status)
-                            .aria_label(name.clone())
-                            .child(name)
-                    })),
-            )
-            .child(
-                div()
-                    .id("home-layout")
-                    .flex()
-                    .flex_none()
-                    .gap(px(m.border * 2.))
-                    .role(Role::Group)
-                    .aria_label("Project layout")
-                    .child(self.segment(Layout::Grid, "square.grid.2x2", "Grid view", window, cx))
-                    .child(self.segment(Layout::List, "list.bullet", "List view", window, cx)),
-            )
-            .child(
-                self.button(
-                    "home-sort",
-                    sort.label(),
-                    Some("chevron.down"),
-                    false,
-                    window,
-                    cx,
+        let this = cx.entity().downgrade();
+        let header =
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(t.space.md))
+                .px(px(MARGIN))
+                .pt(px(t.space.xxl + t.space.xs))
+                .pb(px(t.space.xl + t.space.xs))
+                .child(
+                    div()
+                        .id("home-heading")
+                        .flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .items_baseline()
+                        .gap(px(t.space.lg))
+                        .role(Role::Heading)
+                        .aria_label(format!("{}, {count}", section.title()))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_role(&t, Text::Display)
+                                .child(section.title()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_role(&t, Text::Caption)
+                                .font_features(kit::tabular())
+                                .text_color(rgb(c.muted))
+                                .child(count),
+                        )
+                        // A real project can take seconds to read: say so here
+                        // until it shows in the window.
+                        .children(opening.map(|name| {
+                            div()
+                                .id("home-status")
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_role(&t, Text::Caption)
+                                .text_color(rgb(c.secondary))
+                                .role(Role::Status)
+                                .aria_label(name.clone())
+                                .child(name)
+                        })),
                 )
-                .aria_label(format!("Sort projects: {}", sort.label()))
-                .on_click(cx.listener(|v, _, window, cx| v.sort_menu(window, cx))),
-            )
-            .child(
-                self.button("home-open", "Open…", None, false, window, cx)
-                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("open"), cx))),
-            )
-            .child(
-                self.button("home-new", "New Project", Some("plus"), true, window, cx)
-                    .on_click(
-                        cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("newProject"), cx)),
-                    ),
-            );
+                .map(|header| match &self.native {
+                    // Real AppKit controls: the system draws, tracks and focuses them.
+                    Some(native) => header
+                        .child(native.layout.clone())
+                        .child(native.sort.clone())
+                        .child(native.open.clone())
+                        .child(native.new.clone()),
+                    None => header
+                        .child(
+                            kit.segmented(
+                                "home-layout",
+                                &[
+                                    Item::Symbol("square.grid.2x2", "Grid view"),
+                                    Item::Symbol("list.bullet", "List view"),
+                                ],
+                                usize::from(self.layout == Layout::List),
+                                false,
+                                move |index, _, cx| {
+                                    let layout = if index == 0 {
+                                        Layout::Grid
+                                    } else {
+                                        Layout::List
+                                    };
+                                    let _ = this.update(cx, |v, cx| v.set_layout(layout, cx));
+                                },
+                            )
+                            .aria_label("Project layout"),
+                        )
+                        .child(
+                            kit.button(
+                                "home-sort",
+                                sort.label(),
+                                Button::Quiet,
+                                None,
+                                Some("chevron.down"),
+                            )
+                            .debug_selector(|| "home-sort".into())
+                            .aria_label(format!("Sort projects: {}", sort.label()))
+                            .child(anchor(Menu::Sort))
+                            .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
+                        )
+                        .child(
+                            kit.button("home-open", "Open…", Button::Neutral, None, None)
+                                .debug_selector(|| "home-open".into())
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    (v.sink)(Outbound::Command("open"), cx)
+                                })),
+                        )
+                        .child(
+                            kit.button(
+                                "home-new",
+                                "New Project",
+                                Button::Primary,
+                                Some("plus"),
+                                None,
+                            )
+                            .debug_selector(|| "home-new".into())
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                (v.sink)(Outbound::Command("newProject"), cx)
+                            })),
+                        ),
+                });
         // Body: cards or rows; an empty section says so with v1's copy.
-        let width = f32::from(window.viewport_size().width)
-            - m.settings_sidebar
-            - m.gap * 2.
-            - (m.inset + m.gap) * 2.;
-        let card = m.thumbnail_min * 2.;
-        self.columns = (((width + m.inset) / (card + m.inset)).floor() as usize).max(1);
-        let body: AnyElement = match self.controller.content() {
-            Content::Loading => div().flex_1().into_any_element(),
-            Content::Unavailable { message, action } => div()
+        let width = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap
+            + 2. * (CARD_PAD - MARGIN))
+            .max(0.);
+        // Large previews with room between them: three across at the
+        // default window size.
+        let column_gap = t.space.xl;
+        let least = m.thumbnail_min * 2.5 + 2. * CARD_PAD;
+        self.columns = (((width + column_gap) / (least + column_gap)).floor() as usize).max(1);
+        let card_width =
+            ((width - column_gap * (self.columns - 1) as f32) / self.columns as f32).floor();
+        let text = t.text(Text::Title).size * t.text(Text::Title).leading
+            + t.text(Text::Caption).size * t.text(Text::Caption).leading;
+        let card_height = (2. * CARD_PAD
+            + ((card_width - 2. * CARD_PAD) * 9. / 16.).round()
+            + t.space.md
+            + text.ceil()
+            + t.space.xs)
+            .round();
+        let centred = || {
+            div()
                 .flex_1()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(m.gap))
-                .text_color(rgb(c.secondary))
-                .child(message)
+                .gap(px(t.space.xl))
+                .pb(px(m.toolbar * 2.))
+        };
+        let body: AnyElement = match self.controller.content() {
+            // Loading: the grid's own shape, breathing, so nothing jumps when
+            // the projects arrive.
+            Content::Loading => div()
+                .flex_1()
+                .px(px(MARGIN - CARD_PAD))
+                .flex()
+                .gap(px(column_gap))
+                .children((0..self.columns.min(4)).map(|_| {
+                    div().w(px(card_width)).p(px(CARD_PAD)).child(
+                        div()
+                            .w_full()
+                            .h(px(((card_width - 2. * CARD_PAD) * 9. / 16.).round()))
+                            .rounded(px(t.radius.nested(t.radius.xl, CARD_PAD)))
+                            .bg(ink(c.text, t.translucency.hover)),
+                    )
+                }))
+                .with_animation(
+                    "home-loading",
+                    Animation::new(std::time::Duration::from_millis(1400))
+                        .repeat()
+                        .with_easing(pulsating_between(0.45, 1.)),
+                    |this, delta| this.opacity(delta),
+                )
+                .into_any_element(),
+            Content::Unavailable { message, action } => centred()
+                .child(kit.empty_state("exclamationmark.triangle", message, ""))
                 .child(
-                    self.button("home-retry", action, None, false, window, cx)
+                    kit.button("home-retry", action, Button::Neutral, None, None)
                         .on_click(cx.listener(|v, _, _, cx| {
                             let _ = v.controller.refresh();
                             v.pump(cx);
                         })),
                 )
                 .into_any_element(),
-            Content::Empty(state) => div()
+            Content::Empty(state) => centred()
                 .id("home-empty")
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .pt(px(m.toolbar * 1.5))
-                .gap(px(m.gap))
                 .role(Role::Group)
                 .aria_label(state.title)
-                .child(pm_shell::symbol::symbol(
-                    state.symbol,
-                    m.symbol_toolbar,
-                    pm_shell::symbol::Weight::Regular,
-                    c.muted,
-                    window,
-                ))
-                .child(
-                    div()
-                        .font_weight(FontWeight(ty.semibold_weight))
-                        .child(state.title),
-                )
-                .child(
-                    div()
-                        .max_w(px(m.sheet_width))
-                        .text_center()
-                        .text_size(px(ty.reading))
-                        .text_color(rgb(c.muted))
-                        .child(state.detail.clone()),
-                )
+                .child(kit.empty_state(state.symbol, state.title, &state.detail))
                 .when_some(state.action, |d, action| {
                     d.child(
-                        self.button("home-create", action, Some("plus"), false, window, cx)
+                        kit.button("home-create", action, Button::Primary, Some("plus"), None)
                             .on_click(cx.listener(|v, _, _, cx| {
                                 (v.sink)(Outbound::Command("newProject"), cx)
                             })),
@@ -1131,59 +1490,441 @@ impl Render for ProjectLibrary {
                     .id("home-projects")
                     .flex_1()
                     .overflow_y_scroll()
-                    .px(px(m.inset + m.gap))
-                    .pb(px(m.inset))
+                    .px(px(MARGIN - CARD_PAD))
+                    .pb(px(t.space.xxl))
                     .role(Role::List)
                     .aria_label(section.title());
                 match self.layout {
-                    Layout::Grid => list
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(m.inset))
-                                .children(rows.iter().map(|row| self.card(row, card, now, cx))),
+                    Layout::Grid => {
+                        // Cards are placed by hand so a sort or a search slides
+                        // them to their new places; a resize places them at once.
+                        let layout = (self.columns, card_width as u32);
+                        let slide = (self.grid == layout).then_some(Preset::Layout);
+                        self.grid = layout;
+                        let row_gap = t.space.lg;
+                        let lines = rows.len().div_ceil(self.columns);
+                        let mut grid = div()
+                            .relative()
+                            .w_full()
+                            .h(px(lines as f32 * (card_height + row_gap)));
+                        for (i, row) in rows.iter().enumerate() {
+                            let (column, line) = (i % self.columns, i / self.columns);
+                            let x = kit.animate(
+                                kit::key(&format!("card-x-{}", row.id)),
+                                column as f32 * (card_width + column_gap),
+                                slide,
+                            );
+                            let y = kit.animate(
+                                kit::key(&format!("card-y-{}", row.id)),
+                                line as f32 * (card_height + row_gap),
+                                slide,
+                            );
+                            grid =
+                                grid.child(div().absolute().left(px(x)).top(px(y)).child(
+                                    self.card(&kit, row, (card_width, card_height), now, cx),
+                                ));
+                        }
+                        list.child(grid).into_any_element()
+                    }
+                    Layout::List => {
+                        self.grid = (0, 0);
+                        list.child(
+                            div().flex().flex_col().gap(px(t.space.hair)).children(
+                                rows.iter()
+                                    .map(|row| self.list_row(&kit, row, now, cx))
+                                    .collect::<Vec<_>>(),
+                            ),
                         )
-                        .into_any_element(),
-                    Layout::List => list
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(m.border))
-                                .children(rows.iter().map(|row| self.list_row(row, now, cx))),
-                        )
-                        .into_any_element(),
+                        .into_any_element()
+                    }
                 }
             }
         };
-        let (edge, edge_alpha) = t.edge();
+        #[cfg(debug_assertions)]
+        let body = if kit::GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.gallery_native.is_empty() && pm_shell::text::available(window) {
+                type Sample = (Kind, &'static str, Value, Vec<Value>, Option<u32>);
+                let specs: [Sample; 9] = [
+                    (Kind::Switch, "Switch off", json!(false), vec![], None),
+                    (Kind::Switch, "Switch on", json!(true), vec![], None),
+                    (Kind::Checkbox, "Checkbox", json!(true), vec![], None),
+                    (Kind::Radio, "Radio", json!(true), vec![], None),
+                    (Kind::Slider, "Slider", json!(0.35), vec![], None),
+                    (
+                        Kind::Segmented,
+                        "Timeline mode",
+                        json!(0),
+                        vec![json!("Layers"), json!("Tracks")],
+                        None,
+                    ),
+                    (
+                        Kind::Popup,
+                        "Appearance",
+                        json!("Dark"),
+                        vec![json!("System"), json!("Light"), json!("Dark")],
+                        None,
+                    ),
+                    (Kind::Push, "Open…", Value::Null, vec![], None),
+                    (
+                        Kind::Push,
+                        "New Project",
+                        Value::Null,
+                        vec![],
+                        Some(t.colors.accent),
+                    ),
+                ];
+                for (kind, label, value, options, tint) in specs {
+                    let tokens = t.clone();
+                    self.gallery_native.push(cx.new(|cx| {
+                        NativeControl::new(
+                            ControlSpec {
+                                kind,
+                                label,
+                                identifier: "home.gallery",
+                                value: &value,
+                                options,
+                                disabled: false,
+                                default: false,
+                                destructive: false,
+                                inline: false,
+                                tint,
+                                symbol: None,
+                            },
+                            &tokens,
+                            window,
+                            cx,
+                        )
+                    }));
+                }
+            }
+            self.gallery(&kit, cx)
+        } else {
+            body
+        };
+        // One inset sheet on the window ground, as Settings.
         let content = div()
             .flex_1()
             .min_w(px(0.))
-            .m(px(m.gap))
-            .ml(px(0.))
+            .mr(px(m.dock_gap))
+            .mb(px(m.dock_gap))
             .flex()
             .flex_col()
-            .rounded(px(m.panel_radius))
+            .corner(&t, m.panel_radius)
             .bg(rgb(c.panel))
-            .border(px(m.border))
-            .border_color(pm_shell::view::tint(edge, edge_alpha))
+            .elevated(&t, Elevation::Panel)
             .overflow_hidden()
             .child(header)
             .child(body);
+        let menu = self.menu_overlay(&kit, cx);
         div()
             .id("home")
             .debug_selector(|| "home".into())
             .size_full()
             .flex()
             .text_color(rgb(c.text))
-            .text_size(px(ty.body))
+            .text_role(&t, Text::Body)
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .child(sidebar)
             .child(content)
+            .children(menu)
+            .child(kit.settle())
+    }
+}
+/// Development builds: every kit control and strip state in place of the
+/// projects (`--open reviewKit`), so a design review sees the whole system on
+/// screen in either appearance without a pointer.
+#[cfg(debug_assertions)]
+impl ProjectLibrary {
+    fn gallery(&self, kit: &Kit, cx: &App) -> AnyElement {
+        use pm_design::StripState;
+        let t = &kit.t;
+        let c = &t.colors;
+        let section = |title: &str| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap(px(t.space.md))
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_role(t, Text::Caption)
+                        .text_color(rgb(c.muted))
+                        .child(title.to_string()),
+                )
+        };
+        let line = || div().flex().flex_wrap().items_center().gap(px(t.space.md));
+        let none = |_: usize, _: &mut Window, _: &mut App| {};
+        let buttons = |disabled: bool| {
+            let row = line()
+                .child(kit.button(
+                    format!("g-primary-{disabled}"),
+                    "New Project",
+                    Button::Primary,
+                    Some("plus"),
+                    None,
+                ))
+                .child(kit.button(
+                    format!("g-neutral-{disabled}"),
+                    "Open…",
+                    Button::Neutral,
+                    None,
+                    None,
+                ))
+                .child(kit.button(
+                    format!("g-popup-{disabled}"),
+                    "Dark",
+                    Button::Neutral,
+                    None,
+                    Some("chevron.down"),
+                ))
+                .child(kit.button(
+                    format!("g-quiet-{disabled}"),
+                    "Recently edited",
+                    Button::Quiet,
+                    None,
+                    Some("chevron.down"),
+                ))
+                .child(kit.button(
+                    format!("g-danger-{disabled}"),
+                    "Delete",
+                    Button::Destructive,
+                    None,
+                    None,
+                ));
+            if disabled { kit.disabled(row) } else { row }
+        };
+        let strip = |fill: u32, state: StripState, name: &str| {
+            let s = t.strip(fill, state);
+            let height = t.metrics.track_row - 2. * t.strip_gap();
+            div()
+                .relative()
+                .flex()
+                .flex_none()
+                .items_center()
+                .w(px(96.))
+                .h(px(height))
+                .px(px(t.space.md))
+                .rounded(px(t.strip_radius(height)))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(ink(s.top, s.opacity), 0.),
+                    linear_color_stop(ink(s.bottom, s.opacity), 1.),
+                ))
+                .shadow(vec![
+                    BoxShadow {
+                        color: ink(s.rim_top.0, (s.rim_top.1 - s.rim.1).max(0.)).into(),
+                        offset: point(px(0.), px(1.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(0.),
+                        inset: true,
+                    },
+                    BoxShadow {
+                        color: ink(s.rim.0, s.rim.1).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(1.),
+                        inset: true,
+                    },
+                ])
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(t.strip_radius(height)))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(ink(s.glow.0, 0.), 0.42),
+                            linear_color_stop(ink(s.glow.0, s.glow.1), 1.),
+                        )),
+                )
+                .text_role(t, Text::Caption)
+                .text_color(rgb(s.foreground))
+                .child(name.to_string())
+                .when(state == StripState::Hover, |d| {
+                    let grip = t.trim_grip();
+                    d.child(
+                        div()
+                            .absolute()
+                            .right(px(grip.inset))
+                            .top(relative((1. - grip.height) / 2.))
+                            .w(px(grip.width))
+                            .h(relative(grip.height))
+                            .rounded_full()
+                            .bg(rgb(grip.color)),
+                    )
+                })
+        };
+        let states = [
+            (StripState::Rest, "Rest"),
+            (StripState::Hover, "Hover"),
+            (StripState::Selected, "Selected"),
+            (StripState::Dragging, "Dragging"),
+            (StripState::Disabled, "Disabled"),
+        ];
+        let roles = [
+            (Text::Display, "Display 24"),
+            (Text::Heading, "Heading 15"),
+            (Text::Title, "Title 13"),
+            (Text::Reading, "Reading 13"),
+            (Text::Label, "Label 12"),
+            (Text::Body, "Body 12"),
+            (Text::Caption, "Caption 11"),
+            (Text::Timecode, "00:01:23:12"),
+        ];
+        div()
+            .id("kit-gallery")
+            .flex_1()
+            .overflow_y_scroll()
+            .px(px(MARGIN))
+            .pb(px(t.space.xxl))
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .gap(px(t.space.section))
+            .child(
+                section("Real AppKit controls (hosted; the system draws them)")
+                    .w(px(560.))
+                    .child(line().gap(px(t.space.lg)).children(self.gallery_native.iter().cloned()))
+                    .children(self.gallery_native.first().map(|switch| {
+                        let (w, h) = (switch.read(cx).width(), switch.read(cx).height());
+                        div()
+                            .text_role(t, Text::Caption)
+                            .text_color(rgb(c.faint))
+                            .child(format!("NSSwitch at regular size is {w}×{h} pt"))
+                    })),
+            )
+            .child(
+                section("Buttons: rest, then disabled")
+                    .child(buttons(false))
+                    .child(buttons(true)),
+            )
+            .child(
+                section("Icon buttons, segmented control, tabs")
+                    .child(
+                        line()
+                            .child(kit.icon_button("g-icon-a", "magnifyingglass", "Search", false))
+                            .child(kit.icon_button("g-icon-b", "plus", "Add", false))
+                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true))
+                            .child(kit.segmented(
+                                "g-seg-symbols",
+                                &[
+                                    Item::Symbol("square.grid.2x2", "Grid view"),
+                                    Item::Symbol("list.bullet", "List view"),
+                                ],
+                                0,
+                                false,
+                                none,
+                            ))
+                            .child(kit.segmented(
+                                "g-seg-titles",
+                                &[Item::Title("Layers"), Item::Title("Tracks")],
+                                0,
+                                false,
+                                none,
+                            )),
+                    )
+                    .child(kit.segmented(
+                        "g-tabs",
+                        &[
+                            Item::Title("Project"),
+                            Item::Title("Effect Controls"),
+                            Item::Title("Notes"),
+                        ],
+                        0,
+                        true,
+                        none,
+                    )),
+            )
+            .child(
+                section("Search, switch, checkbox, radio, slider, progress")
+                    .child(kit.search(None, Some("⌘F")))
+                    .child(
+                        line()
+                            .child(kit.switch("g-switch-off", false))
+                            .child(kit.switch("g-switch-on", true))
+                            .child(kit.check("g-check-off", false, false))
+                            .child(kit.check("g-check-on", true, false))
+                            .child(kit.check("g-radio-off", false, true))
+                            .child(kit.check("g-radio-on", true, true))
+                            .child(kit.disclosure(false))
+                            .child(kit.disclosure(true)),
+                    )
+                    .child(kit.slider("g-slider", 0.35))
+                    .child(kit.progress(Some(0.6)))
+                    .child(kit.progress(None)),
+            )
+            .child(
+                section("Rows and a menu")
+                    .child(kit.row("g-row-a", false).child("Gaussian Blur"))
+                    .child(kit.row("g-row-b", true).child("Directional Blur"))
+                    .child(kit.row("g-row-c", false).child("Sharpen"))
+                    .child(
+                        kit.menu()
+                            .w(px(220.))
+                            .child(kit.menu_row("g-menu-a", "Recently edited", Some(true), None))
+                            .child(kit.menu_row("g-menu-b", "Name", Some(false), None))
+                            .child(kit.menu_row(
+                                "g-menu-c",
+                                "Open in New Window",
+                                Some(false),
+                                Some("⌘O"),
+                            )),
+                    ),
+            )
+            .child(
+                section("Card and form rows, banner, empty state")
+                    .child(
+                        kit.card()
+                            .child(kit.form_row(
+                                "Reopen last project on launch",
+                                Some("Open only the project you were last working on."),
+                                kit.switch("g-form-switch", true).into_any_element(),
+                            ))
+                            .child(kit.form_row(
+                                "Appearance",
+                                Some("Follow your system setting, or pick a light or dark theme."),
+                                kit.button(
+                                    "g-form-popup",
+                                    "Dark",
+                                    Button::Neutral,
+                                    None,
+                                    Some("chevron.down"),
+                                )
+                                .into_any_element(),
+                            )),
+                    )
+                    .child(kit.banner("checkmark.circle.fill", c.success, "Exported to Desktop"))
+                    .child(kit.empty_state(
+                        "magnifyingglass",
+                        "No Results",
+                        "No project matches this search.",
+                    )),
+            )
+            .child(
+                section("Timeline strips by layer colour and state")
+                    .w(px(560.))
+                    .children(
+                        [c.labels.teal, c.labels.violet, c.labels.orange, c.labels.gray].map(
+                            |fill| {
+                                line()
+                                    .gap(px(t.strip_gap()))
+                                    .children(states.map(|(state, name)| strip(fill, state, name)))
+                            },
+                        ),
+                    ),
+            )
+            .child(
+                section("Type scale").children(roles.map(|(role, sample)| {
+                    div()
+                        .text_role(t, role)
+                        .text_color(rgb(c.text))
+                        .child(sample)
+                })),
+            )
+            .into_any_element()
     }
 }
 /// The defaults of `createNewProjectForm`, for a window with no project.

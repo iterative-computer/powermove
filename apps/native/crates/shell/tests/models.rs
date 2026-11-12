@@ -16,12 +16,15 @@ fn default_matches_approved_workspace() {
     assert_eq!(l.docks[0].size, Some(300.));
     assert_eq!(l.docks[2].size, Some(344.));
     assert_eq!(l.docks[3].groups[1].size, Some(268.));
+    // The editor's dock area: the dock gap at the sides and bottom, the
+    // toolbar above, the status line below.
+    let m = tokens().metrics;
     let g = l.geometry(
         Rect {
-            x: 6.,
-            y: 58.,
-            w: 1428.,
-            h: 810.,
+            x: m.dock_gap,
+            y: m.toolbar,
+            w: m.window_width - 2. * m.dock_gap,
+            h: m.window_height - m.toolbar - m.status - m.dock_gap,
         },
         &tokens(),
     );
@@ -31,7 +34,7 @@ fn default_matches_approved_workspace() {
     let inspector = &g.panels[3].rect;
     let effects = &g.panels[4].rect;
     assert_eq!(timeline.x, left.x);
-    assert_eq!(timeline.w, left.w + 6. + viewer.w);
+    assert_eq!(timeline.w, left.w + m.dock_gap + viewer.w);
     assert_eq!(timeline.h, 344.);
     assert_eq!(inspector.y, left.y);
     assert_eq!(effects.y + effects.h, timeline.y + timeline.h);
