@@ -259,6 +259,12 @@ fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<b
         ],
     )
 }
+/// Whether a background recovery-data failure for `project` leaves the work
+/// in the window showing `shown` unprotected.
+fn unprotects(project: &str, shown: Option<&str>) -> bool {
+    shown == Some(project)
+}
+
 /// Said when a file opened as a new copy although the library holds a copy
 /// made under its name: that copy was made of another file (this one
 /// replaced it, or changed somewhere else since), so it was not opened in
@@ -523,9 +529,16 @@ impl Controller {
                     .update(cx, |v, cx| {
                         for e in events {
                             match e {
-                                KernelEvent::Durability { message } => {
-                                    v.message = "Powermove couldn’t write recovery data for recent changes. Save your projects now.".into();
-                                    v.errors.borrow_mut().push("Recovery", &message);
+                                // A change acknowledged earlier could not be made
+                                // durable afterwards: the window showing that
+                                // project says so exactly as for a change
+                                // refused at the time (sheet, subtitle until a
+                                // save succeeds, Error Log row).
+                                KernelEvent::Durability { project, message } => {
+                                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                                    if unprotects(&project, shown) {
+                                        v.notice(pm_kernel::Notice::NotDurable { message }, cx);
+                                    }
                                 }
                                 KernelEvent::Fault { message, .. } => {
                                     v.message = "Something went wrong; see the Error Log.".into();
@@ -2655,6 +2668,12 @@ mod save_note_tests {
         assert!(alert.message.contains("“cut.pmv” isn’t the file"));
         assert!(alert.informative.contains("“cut — Native”"));
         assert!(alert.informative.contains("stays in your projects"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_background_recovery_failure_concerns_the_window_of_its_project() {
+        assert!(unprotects("file-1", Some("file-1")));
+        assert!(!unprotects("file-1", Some("file-2")));
+        assert!(!unprotects("file-1", None));
     }
     #[::core::prelude::v1::test]
     fn a_composition_is_laid_out_at_a_positive_size_whatever_is_stored() {

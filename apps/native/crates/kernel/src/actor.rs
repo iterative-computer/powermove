@@ -299,8 +299,10 @@ pub enum KernelEvent {
     Closed {
         project: String,
     },
-    /// A background journal error (disk full, ...).
+    /// A background journal error (disk full, ...) after `project`'s edits
+    /// were acknowledged: they are applied but not durable.
     Durability {
+        project: String,
         message: String,
     },
     /// A request failed with an internal error (a contained panic); the
@@ -332,6 +334,8 @@ struct Shared {
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
 
 enum Msg {
+    /// The journal queued a background error: collect and publish it.
+    DurabilityErrors,
     ProEditing {
         project: String,
         request: crate::pro_editing::ProRequest,
@@ -427,11 +431,21 @@ impl KernelActor {
         *shared.state.lock().expect("state") = Arc::new(crate::state::StateSnapshot::seeded());
         let thread = {
             let shared = shared.clone();
+            let wake = tx.clone();
             thread::Builder::new()
                 .name("pm-kernel".into())
                 .spawn(move || {
                     let idle_memory_relief = config.idle_memory_relief;
                     let kernel = Kernel::new(config);
+                    // A background journal failure is reported when it
+                    // happens, not at the next request (which may never
+                    // come before the person walks away).
+                    if let Some(durability) = kernel.durability() {
+                        let wake = std::sync::Mutex::new(wake);
+                        durability.on_error(move || {
+                            let _ = wake.lock().expect("wake").send(Msg::DurabilityErrors);
+                        });
+                    }
                     *shared.journal_sync.lock().expect("journal sync") = kernel.journal_sync();
                     run(kernel, rx, shared, idle_memory_relief)
                 })
@@ -931,6 +945,7 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::PrepareExport { .. }
         | Msg::Recover { .. }
         | Msg::Sync { .. }
+        | Msg::DurabilityErrors
         | Msg::Shutdown => Scope::Nothing,
         #[cfg(any(test, feature = "fault-injection"))]
         Msg::ArmFault { .. } => Scope::Nothing,
@@ -1452,8 +1467,8 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 );
             }
             if let Some(d) = kernel.durability() {
-                for message in d.take_errors() {
-                    emit(shared, KernelEvent::Durability { message });
+                for (project, message) in d.take_errors() {
+                    emit(shared, KernelEvent::Durability { project, message });
                 }
             }
         }
@@ -1495,6 +1510,13 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
         }
         #[cfg(any(test, feature = "fault-injection"))]
         Msg::ArmFault { stage, project } => crate::fault_injection::arm(stage, project),
+        Msg::DurabilityErrors => {
+            if let Some(d) = kernel.durability() {
+                for (project, message) in d.take_errors() {
+                    emit(shared, KernelEvent::Durability { project, message });
+                }
+            }
+        }
         Msg::Shutdown => {}
     }
 }

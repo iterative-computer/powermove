@@ -2111,6 +2111,77 @@ fn registry_stacks_support_buried_disposal_top_reveal_and_owner_generation() {
         .unwrap();
     assert!(k.state().provider("commands", "select").is_none());
 }
+/// An edit is acknowledged (it is in the journal's open segment), and the
+/// journal then fails in the background: its checkpoint cannot be written.
+/// The kernel says so at once, without waiting for another request, and
+/// says which project is not protected, so its window can raise the same
+/// state as for an edit refused at the time. Another open project hears
+/// nothing.
+#[test]
+fn a_background_journal_failure_names_its_project_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Condvar, Mutex};
+    let dir = common::TempDir::new("background-durability");
+    let journals = dir.path("journals");
+    let hold = Arc::new((Mutex::new(false), Condvar::new()));
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(journals.clone()),
+        journal: pm_kernel::journal::JournalConfig {
+            checkpoint_revisions: 1,
+            hold_checkpoints: Some(hold.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let h = actor.handle();
+    for id in ["P", "Q"] {
+        h.open(id, OpenSource::Untitled(value()))
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    h.sync().wait();
+    let events = h.subscribe();
+    *hold.0.lock().unwrap() = true;
+    let ack = h
+        .call(
+            "P",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("Opacity".into()),
+                    body: WriteBody::Commands(vec![Command::SetStaticOpacity {
+                        layer_id: "layer0".into(),
+                        value: 40.0,
+                    }]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Applied { changed: true, .. }));
+    assert!(ack.notice.is_none(), "the edit itself was accepted");
+    // Its session folder stops taking new files, then the checkpoint runs.
+    let session = pm_kernel::journal::sessions(&journals.join("P"))
+        .pop()
+        .unwrap();
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o555)).unwrap();
+    *hold.0.lock().unwrap() = false;
+    hold.1.notify_all();
+    let mut named = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while named.is_empty() && std::time::Instant::now() < deadline {
+        if let Ok(KernelEvent::Durability { project, .. }) =
+            events.recv_timeout(Duration::from_millis(100))
+        {
+            named.push(project);
+        }
+    }
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(named, ["P"], "reported without another request, by project");
+}
 #[test]
 fn actor_publishes_per_key_events_and_ui_facts_before_ack() {
     let actor = KernelActor::spawn(Default::default());
