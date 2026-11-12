@@ -209,6 +209,9 @@ impl TextField {
         }
     }
 }
+/// Where a multi-line native editor draws its first glyph, from its own
+/// corner: the text container inset plus the line fragment padding.
+const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
 impl Render for TextField {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
@@ -231,14 +234,14 @@ impl Render for TextField {
             .w_full()
             .when(self.fill, |d| d.h_full())
             .when(!self.fill, |d| {
-                d.h(px(if bare {
-                    // One line, so the control around it can centre the text.
-                    (self.tokens.typography.body * 1.35).ceil()
-                } else if self.kind == TextKind::Composer {
+                d.h(px(if self.kind == TextKind::Composer {
                     // Grows with its lines, up to the composer's limit.
                     let lines = (self.value.lines().count().max(1) as f32)
                         .min(self.tokens.metrics.composer_max_lines);
                     (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
+                } else if bare {
+                    // One line, so the control around it can centre the text.
+                    (self.tokens.typography.body * 1.35).ceil()
                 } else if self.kind == TextKind::Multiline {
                     self.tokens.metrics.row * 4.
                 } else {
@@ -278,6 +281,23 @@ impl Render for TextField {
                 d.text_color(rgb(self.tokens.colors.muted))
                     .child(self.placeholder.clone())
             })
+            // A text view has no placeholder of its own: draw it where its
+            // first line starts (the view's container inset and line padding).
+            .when(
+                matches!(self.kind, TextKind::Composer | TextKind::Multiline)
+                    && !self.placeholder.is_empty()
+                    && self.slot.value().is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(MULTILINE_TEXT_ORIGIN.0))
+                            .top(px(MULTILINE_TEXT_ORIGIN.1))
+                            .text_color(rgb(self.tokens.colors.muted))
+                            .child(self.placeholder.clone()),
+                    )
+                },
+            )
             .when(dense && !editing && !self.value.is_empty(), |d| {
                 d.overflow_hidden()
                     .child(div().min_w(px(0.)).truncate().child(self.value.clone()))

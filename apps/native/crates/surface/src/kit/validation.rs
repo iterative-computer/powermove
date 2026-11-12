@@ -186,6 +186,7 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
         "position" => &["relative", "absolute"][..],
         "inset" => &["fill"][..],
         "flexDirection" => &["row", "column"][..],
+        "flexWrap" => &["wrap", "nowrap"][..],
         "alignItems" | "justifyContent" => {
             &["start", "end", "center", "stretch", "space-between"][..]
         }

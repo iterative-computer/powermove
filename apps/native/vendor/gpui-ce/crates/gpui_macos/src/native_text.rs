@@ -399,6 +399,17 @@ impl NativeTextSlot {
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(4., 3.));
+            if kind == TextKind::Composer {
+                // A prompt is not prose to rewrite: no Writing Tools badge
+                // beside the empty field (NSWritingToolsBehaviorNone).
+                unsafe {
+                    let supported: bool =
+                        msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)];
+                    if supported {
+                        let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                    }
+                }
+            }
             Editor::Multiline(v)
         } else {
             let v = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);

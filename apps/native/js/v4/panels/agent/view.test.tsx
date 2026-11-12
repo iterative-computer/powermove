@@ -71,10 +71,10 @@ test("native supported focus order follows header, conversation and composer bar
     "agent-conversation",
     "agent-composer-text",
     "agent-attach",
-    "agent-access",
+    "agent-send",
     "agent-provider",
     "agent-model",
-    "agent-send",
+    "agent-access",
   ]);
   expect(
     root.inspect().nodes.find((n) => n.props.id === "agent-conversation")?.props
@@ -82,7 +82,7 @@ test("native supported focus order follows header, conversation and composer bar
   ).toBe("Agent conversation");
   root.dispose();
 });
-test("pin, close, new thread, send and stop use the same model commands as headless clients", async () => {
+test("pin, new thread, send and stop use the same model commands as headless clients; a docked panel has no button of its own to close it", async () => {
   const { root, commits } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -100,7 +100,10 @@ test("pin, close, new thread, send and stop use the same model commands as headl
   p.native.presentation = "docked";
   p.snapshot.runId = "run";
   await render();
-  await click("agent-presentation");
+  // Docked panels are closed as every other dock is, not from their header.
+  expect(
+    root.inspect().nodes.some((n) => n.props.id === "agent-presentation"),
+  ).toBe(false);
   await click("agent-stop");
   p.snapshot.stopping = true;
   await render();
@@ -109,7 +112,6 @@ test("pin, close, new thread, send and stop use the same model commands as headl
     { type: "shell", action: "pin" },
     { type: "newThread" },
     { type: "submit" },
-    { type: "shell", action: "close" },
     { type: "stop" },
   ]);
   assertWire(commits);

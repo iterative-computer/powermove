@@ -588,12 +588,21 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
-          justifyContent: "end",
+          justifyContent: "space-between",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           paddingRight: token("metrics.inset"),
         }}
       >
+        <text
+          style={{
+            color: token("colors.text"),
+            fontSize: token("typography.title"),
+            fontWeight: token("typography.semibold_weight"),
+          }}
+        >
+          Project
+        </text>
         <div
           style={{
             display: "flex",

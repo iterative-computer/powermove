@@ -854,6 +854,7 @@ impl ProjectLibrary {
         dimensions: Option<(u32, u32)>,
         radius: f32,
         fade: f32,
+        (width, height): (f32, f32),
     ) -> Div {
         let t = &kit.t;
         let dark = t.scheme == pm_design::Scheme::Dark;
@@ -877,18 +878,32 @@ impl ProjectLibrary {
             .items_center()
             .justify_center()
             .rounded(px(radius))
-            .overflow_hidden();
+            .overflow_hidden()
+            .w(px(width))
+            .h(px(height));
         match thumbnail {
             // The whole picture in the composition's own shape, on the
             // viewer's ground where its shape leaves room.
             Some(image) => frame
                 .bg(rgb(t.colors.viewer))
-                .child(
-                    img(ImageSource::Image(image))
+                .child({
+                    // A clip is a rectangle, so a picture that reaches the
+                    // frame's corners carries the frame's radius itself; one
+                    // that stands clear of them keeps its square corners.
+                    let (w, h) = dimensions.unwrap_or((16, 9));
+                    let aspect = w.max(1) as f32 / h.max(1) as f32;
+                    let clear_x = (width - height * aspect).max(0.) / 2.;
+                    let clear_y = (height - width / aspect).max(0.) / 2.;
+                    let picture = img(ImageSource::Image(image))
                         .size_full()
                         .object_fit(ObjectFit::Contain)
-                        .opacity(fade.clamp(0., 1.)),
-                )
+                        .opacity(fade.clamp(0., 1.));
+                    if clear_x < radius && clear_y < radius {
+                        picture.rounded(px(radius))
+                    } else {
+                        picture
+                    }
+                })
                 .child(outline(radius)),
             None => {
                 let (w, h) = dimensions.unwrap_or((16, 9));
@@ -972,16 +987,17 @@ impl ProjectLibrary {
             Some(Preset::Show),
         );
         let radius = t.radius.xl;
-        let frame = self
-            .frame(
-                kit,
-                thumbnail,
-                row.dimensions(),
-                t.radius.nested(radius, CARD_PAD),
-                fade,
-            )
-            .w_full()
-            .h(px(((width - 2. * CARD_PAD) * 9. / 16.).round()));
+        let frame = self.frame(
+            kit,
+            thumbnail,
+            row.dimensions(),
+            t.radius.nested(radius, CARD_PAD),
+            fade,
+            (
+                width - 2. * CARD_PAD,
+                ((width - 2. * CARD_PAD) * 9. / 16.).round(),
+            ),
+        );
         let card = div()
             .id(SharedString::from(format!("project-{}", row.id)))
             .debug_selector(|| format!("project-{}", row.id))
@@ -1032,11 +1048,17 @@ impl ProjectLibrary {
                 Some(tag) => format!("{}, {tag}, {facts}", row.name),
                 None => format!("{}, {facts}", row.name),
             })
-            .child(
-                self.frame(kit, thumbnail, row.dimensions(), t.radius.xs, 1.)
-                    .h(px(height - t.space.md))
-                    .w(px(((height - t.space.md) * 16. / 9.).round())),
-            )
+            .child(self.frame(
+                kit,
+                thumbnail,
+                row.dimensions(),
+                t.radius.xs,
+                1.,
+                (
+                    ((height - t.space.md) * 16. / 9.).round(),
+                    height - t.space.md,
+                ),
+            ))
             .child(
                 div()
                     .flex()
