@@ -2802,6 +2802,60 @@ fn private_file(file: &Path, extension: &str) -> std::path::PathBuf {
     assert_eq!(found.len(), 1, "{extension}: {found:?}");
     file.parent().unwrap().join(&found[0])
 }
+/// A record is read only if every name in it is a name of its own save
+/// beside the project: a single file name, never a path. A record whose
+/// step names a file elsewhere (a crafted or damaged line that still carries
+/// a valid checksum) is not acted on at all, so recovery cannot withdraw or
+/// remove a file outside the project's folder, here one whose bytes begin
+/// the staged file's.
+#[test]
+fn a_record_that_names_a_file_outside_the_project_folder_is_never_acted_on() {
+    let dir = common::TempDir::new("crafted-record");
+    fs::create_dir_all(dir.path("outside")).unwrap();
+    let victim = dir.path("outside/victim.pmv");
+    for to in [
+        "../outside/victim.pmv".to_owned(),
+        victim.display().to_string(),
+    ] {
+        let job = dir.path("job");
+        let _ = fs::remove_dir_all(&job);
+        fs::create_dir_all(&job).unwrap();
+        let file = job.join("cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        let _ = fs::remove_dir_all(&native);
+        assert!(killed(&native, &file, "no-exchange", "install", "save"));
+        let staged = private_file(&file, ".tmp");
+        let bytes = fs::read(&staged).unwrap();
+        fs::write(&victim, &bytes[..bytes.len() / 2]).unwrap();
+        let mut step = pm_model::json::Map::new();
+        step.insert("step", Value::from("keep"));
+        step.insert(
+            "from",
+            Value::from(staged.file_name().unwrap().to_string_lossy().into_owned()),
+        );
+        step.insert("to", Value::from(to.as_str()));
+        step.insert("why", Value::from("other"));
+        let text = to_canonical_string(&Value::Object(step));
+        let sum = &pm_model::hash::sha256_hex(text.as_bytes())[..16];
+        let record = private_file(&file, ".save");
+        let mut log = fs::OpenOptions::new().append(true).open(&record).unwrap();
+        std::io::Write::write_all(&mut log, format!("{sum} {text}\n").as_bytes()).unwrap();
+        drop(log);
+        let outside = tree(&dir.path("outside"));
+        let mut k = kernel(&native);
+        let _ = k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        });
+        assert!(
+            tree(&dir.path("outside")) == outside,
+            "{to}: the file outside and its folder are untouched"
+        );
+        assert!(staged.exists(), "{to}: the record's own files stay too");
+    }
+}
 /// Recovery goes by a save's record, never by a file's name or date. A file
 /// that merely has the name a save gives the file it moves aside (left by
 /// something else, or corrupt) is not named by any record: it is never made

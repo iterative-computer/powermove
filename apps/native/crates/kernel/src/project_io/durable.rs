@@ -1362,7 +1362,21 @@ fn still_installed(
         return Ok(again);
     }
     let kept = (|| {
-        let (temp, mut out) = TempFile::create(destination).ok()?;
+        // Under one of the record's own private names that is free now (the
+        // staged file was installed or exchanged away, and what was moved
+        // aside went to the backups or was kept), so the record names it.
+        let private = [tx.staged(), tx.aside()]
+            .into_iter()
+            .find(|p| matches!(lstat_file(p), Ok(None)))?;
+        let mut out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&private)
+            .ok()?;
+        let temp = TempFile {
+            path: private,
+            keep: false,
+        };
         let mut copied = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         let mut offset = 0u64;

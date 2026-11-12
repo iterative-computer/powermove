@@ -253,6 +253,58 @@ fn private_parts<'a>(entry: &'a str, destination: &Path) -> Option<(&'a str, &'a
     is_uuid_v4(uuid).then_some((uuid, extension))
 }
 
+/// Whether `step`, a line after a record's first, is one a save or a
+/// recovery writes, and every name in it is one that record may name: its
+/// own staged or moved-aside file (`staged`, `aside`), or a name a file is
+/// kept under beside the project (`<stem> (<label> <time>).<extension>`, a
+/// single file name in the project's folder). A record with any other line
+/// (a crafted or damaged one that still carries a valid checksum) is not
+/// read at all, so recovery never acts on a name outside its own folder.
+fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> bool {
+    let text = |key: &str| step.get(key).and_then(Value::as_str);
+    let own = |key: &str| {
+        text(key).is_some_and(|n| {
+            [staged, aside]
+                .iter()
+                .any(|p| p.file_name() == Some(OsStr::new(n)))
+        })
+    };
+    let kept = |key: &str| text(key).is_some_and(|n| is_kept_name(n, destination));
+    match text("step") {
+        Some(
+            "aside" | "install" | "exchanged" | "installed" | "restore" | "restored" | "chosen",
+        ) => true,
+        Some("keep") => own("from") && kept("to"),
+        Some("kept") => kept("to"),
+        Some("retained") => own("name"),
+        Some("settled") => step.get("holds").is_none() || text("holds").is_some(),
+        Some("seen") => step.get("to").is_none() || kept("to"),
+        _ => false,
+    }
+}
+
+/// Whether `name` is a name [`keep_beside`] gives a file beside
+/// `destination`: one plain file name (no folder, no `..`), the project's
+/// name with a label in brackets, and the project's extension.
+fn is_kept_name(name: &str, destination: &Path) -> bool {
+    let (Some(stem), extension) = (
+        destination.file_stem().and_then(OsStr::to_str),
+        destination.extension().and_then(OsStr::to_str),
+    ) else {
+        return false;
+    };
+    let tail = match extension {
+        Some(extension) => format!(").{extension}"),
+        None => ")".to_owned(),
+    };
+    !name.contains(['/', '\\', '\0'])
+        && Path::new(name).file_name() == Some(OsStr::new(name))
+        && name
+            .strip_prefix(stem)
+            .and_then(|rest| rest.strip_prefix(" ("))
+            .is_some_and(|rest| rest.ends_with(&tail) && rest.len() > tail.len())
+}
+
 impl Record {
     fn read(path: &Path, destination: &Path) -> Option<Record> {
         let (uuid, _) = private_parts(path.file_name()?.to_str()?, destination)?;
@@ -270,6 +322,9 @@ impl Record {
             || !named("file", destination)
             || !named("staged", &staged)
             || !named("aside", &aside)
+            || !steps[1..]
+                .iter()
+                .all(|step| known_step(step, destination, &staged, &aside))
         {
             return None;
         }
@@ -554,6 +609,11 @@ impl Transaction {
     /// The name this save moves the replaced file aside to.
     pub fn aside(&self) -> PathBuf {
         self.record.with_extension(ASIDE)
+    }
+
+    /// The name this save staged its new file under.
+    pub fn staged(&self) -> PathBuf {
+        self.record.with_extension(STAGED)
     }
 
     /// Records that the file under the private name `path` stays there,
@@ -1210,7 +1270,11 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
             (Ok(part), Ok(whole)) => part.is_file() && part.len() < whole.len(),
             _ => false,
         };
-        if shorter && begins(whole, &to) {
+        // The whole file is first proven to be what the record says it is
+        // (the staged file, or the version the save replaced): only then is
+        // a beginning of it a copy this save was making.
+        if shorter && matches!(holds(whole, record), Holds::New | Holds::Old) && begins(whole, &to)
+        {
             withdraw(&to, whole, hooks);
         }
     }
