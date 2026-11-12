@@ -2161,3 +2161,29 @@ old behavior was reproduced at the falloff assertion (0 versus 0.06). All
 **35 kernel Studio tests and six panel tests pass**, including density
 activation, explicit-shape preservation and save/reopen/undo coverage. Existing World fields and commands
 supply the UI; no controls or layout were added.
+
+#### Walkthrough round storage handoff
+
+The multidimensional sampling prototype is excluded from this branch. Its
+accumulation/reset/resize GPU regression passed, but the larger runtime-switched
+shader slowed the unchanged MC path (warm worker image-ready Hero 4.669 s,
+chrome 29.527 s). The candidate timing phase did not start because free storage
+was below 5 GB. A future experiment must specialize the additional sampling
+code out of the default pipeline before considering acceptance. No export
+speed improvement or noise certification is claimed for that prototype.
+
+The final verified native increment passes 35 kernel Studio tests and six
+panel tests. Earlier in this round the native app built and the repaired
+close/reopen flow passed in the running app. A final application rebuild after
+fog migration, full engine/native regression, the 11-scene Cycles yardstick,
+full-HD chrome acceptance and final on-screen gates remain pending. The real
+walkthrough export still misses the 3 s budget at 10.635 s/frame; actual-export
+Hero/chrome before/after comparisons remain pending as well.
+
+Heavy work stopped with storage below the 5 GB start floor after repeated
+cleanup cycles. Only this lane's superseded bundles, disposable copied profiles
+and generated intermediates were removed; the shared target was untouched.
+The original walkthrough profile and the verified recovered portable project
+are preserved. All application windows and workers launched by this lane are
+closed. Unshipped engine source and a detailed resumption handoff are saved
+outside Git; the worktree is left clean on the compiling native branch.
