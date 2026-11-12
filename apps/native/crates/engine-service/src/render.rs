@@ -2304,4 +2304,24 @@ mod viewer_output_tests {
             "a capture is the engine's frame: {captured:?} vs {edr:?}"
         );
     }
+    /// The SDR view clips each engine sample before it reduces the frame to
+    /// the drawable: 1-px columns of twice white and black, drawn at the
+    /// composition's size and shown at half size, average to the delivered
+    /// grey (encoded 0.5), not to clipped white.
+    #[test]
+    fn an_sdr_view_clips_before_it_reduces() {
+        let mut engine = Engine::new(Gpu::new("sdr-reduce-test").unwrap()).unwrap();
+        let scene = columns(32, 1.);
+        let spec = FrameSpec {
+            scale: 2.,
+            ..FrameSpec::exact(Ticks::ZERO, output(32, 18))
+        };
+        let (_, shown) = draw(&mut engine, &scene, spec, Mastering::LinearP3);
+        let shown = shown.expect("the presented picture");
+        // Encoded 0.5 is 0.214 linear (sRGB); white would be 1.0.
+        assert!(
+            shown.iter().all(|c| (*c - 0.214).abs() < 0.03),
+            "half white, half black: {shown:?}"
+        );
+    }
 }
