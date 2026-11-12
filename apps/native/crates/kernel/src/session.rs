@@ -1231,6 +1231,21 @@ impl Kernel {
                         }
                     }
                 }
+                if decision != OpenDecision::Writable {
+                    // The copy made the last time this file could not open in
+                    // place holds the person's work since: the same file
+                    // opens that copy again, never a second one.
+                    if let Some(copy) = self.copy_of(&path) {
+                        return self.reopen_copy(id, copy, decision, electron_profile, mode);
+                    }
+                    // The copy's entry names the file it stands in for and
+                    // why, so the file finds it again and its window can say
+                    // what it is.
+                    if let (OpenDecision::AsCopy(reason), Value::Object(m)) = (&decision, &mut meta)
+                    {
+                        m.insert("copyOf", copy_record(&path, reason));
+                    }
+                }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
                 // The workspace the person left this file with (its entry keeps
@@ -1879,7 +1894,80 @@ impl Kernel {
     }
 }
 
+/// What a copy's entry records about the file it stands in for (`copyOf`).
+fn copy_record(path: &std::path::Path, reason: &CopyReason) -> Value {
+    let mut m = Map::new();
+    m.insert("path", Value::from(path.to_string_lossy().into_owned()));
+    m.insert("reason", Value::from(format!("{reason:?}")));
+    Value::Object(m)
+}
+
 impl Kernel {
+    /// The library copy made when `path` could not be opened in place, if
+    /// the library still has it (the newest, were there several).
+    fn copy_of(&self, path: &std::path::Path) -> Option<String> {
+        let store = self.library.as_ref()?.store();
+        let same = |recorded: &str| {
+            let recorded = std::path::Path::new(recorded);
+            recorded == path
+                || recorded
+                    .canonicalize()
+                    .is_ok_and(|r| path.canonicalize().is_ok_and(|p| p == r))
+        };
+        let mut rows = store.projects().ok()?;
+        rows.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
+        rows.into_iter().map(|row| row.id).find(|id| {
+            store
+                .read(&format!("projectMeta.{id}"))
+                .ok()
+                .flatten()
+                .and_then(|meta| {
+                    meta.get("copyOf")?
+                        .get("path")?
+                        .as_str()
+                        .map(|recorded| same(recorded))
+                })
+                .unwrap_or(false)
+        })
+    }
+    /// Opens the copy `copy` in place of the file it stands in for; the
+    /// reply still says the file opened as a copy, and why.
+    fn reopen_copy(
+        &mut self,
+        id: String,
+        copy: String,
+        decision: OpenDecision,
+        electron_profile: Option<PathBuf>,
+        mode: RecoveryMode,
+    ) -> Result<ShellReply, KernelFailure> {
+        let profile = self
+            .library
+            .as_ref()
+            .ok_or_else(|| failure("Attach a native library first"))?
+            .store()
+            .dir()
+            .to_path_buf();
+        let source = SessionSource::Library {
+            profile,
+            project: copy,
+        };
+        Ok(
+            match self.open_session_mode(id, source, electron_profile, mode)? {
+                ShellReply::Opened {
+                    session,
+                    recovery,
+                    info,
+                    ..
+                } => ShellReply::Opened {
+                    session,
+                    recovery,
+                    decision,
+                    info,
+                },
+                other => other,
+            },
+        )
+    }
     fn owns_library(&self, profile: &std::path::Path) -> bool {
         self.library.as_ref().is_some_and(|w| {
             w.store().dir().canonicalize().ok()

@@ -535,6 +535,56 @@ fn a_project_in_a_syncing_folder_opens_and_saves_in_place() {
         .expect("the work is kept as a recovery copy");
     assert!(to_canonical_string(&kept.project).contains("55"));
 }
+/// A file that cannot be opened in place (read-only here) opens as a copy,
+/// and opens that same copy every time: the work done in it is there, and
+/// the library holds one copy however often the file is opened.
+#[test]
+fn a_file_that_must_open_as_a_copy_reopens_the_same_copy() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("same-copy");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let bytes = fs::read(&file).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let copies = |dir: &common::TempDir| {
+        LibraryStore::open(&dir.path("native"))
+            .projects()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.name.ends_with("— Native"))
+            .count()
+    };
+    let (session, decision) = open_file(&mut k, &file);
+    assert_eq!(decision, OpenDecision::AsCopy(CopyReason::ReadOnly));
+    edit(&mut k, "P", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(copies(&dir), 1);
+    for opened in 2..=3 {
+        let (session, decision) = open_file(&mut k, &file);
+        assert_eq!(
+            decision,
+            OpenDecision::AsCopy(CopyReason::ReadOnly),
+            "open {opened} still says it is a copy, and why"
+        );
+        assert_eq!(
+            common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+            Some(20.0),
+            "open {opened} is the copy with the work in it"
+        );
+        let meta = k.session_metadata("P").unwrap().metadata;
+        assert_eq!(
+            meta.get("copyOf")
+                .and_then(|c| c.get("path"))
+                .and_then(Value::as_str),
+            file.to_str()
+        );
+        k.shell(ShellCall::Close(session)).unwrap();
+        assert_eq!(copies(&dir), 1, "open {opened} made another copy");
+    }
+    assert_eq!(fs::read(&file).unwrap(), bytes, "the file is untouched");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+}
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");
