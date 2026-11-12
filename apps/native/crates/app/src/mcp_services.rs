@@ -703,11 +703,28 @@ impl MediaImporter for EngineJobs {
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
         // Every audio stream of a multi-track file is listed and heard, as
-        // when a person imports it.
-        if let Some(streams) = probe
+        // when a person imports it; a relink keeps what was heard.
+        let streams = probe
             .as_ref()
-            .and_then(|p| pm_media::facts::asset_audio_streams(&pm_media::facts::audio_streams(p)))
-        {
+            .map(pm_media::facts::audio_streams)
+            .unwrap_or_default();
+        if let Some(asset) = &request.replace {
+            let old = published
+                .snapshot
+                .root()
+                .and_then(|root| root.get("assets")?.get(asset)?.get("audioStreams"))
+                .and_then(|streams| {
+                    serde_json::from_str(&pm_model::json::to_canonical_string(&streams.to_value()))
+                        .ok()
+                });
+            pm_builtins::media_import::relink_streams(
+                &mut metadata,
+                old.as_ref(),
+                &streams,
+                previous.as_ref(),
+                &original,
+            );
+        } else if let Some(streams) = pm_media::facts::asset_audio_streams(&streams) {
             metadata["audioStreams"] = streams;
         }
         // As a person's import: a new clip's times address the file's
@@ -1180,4 +1197,164 @@ fn seconds(micros: Option<i64>) -> Option<f64> {
 }
 fn decibels(level: f64) -> f64 {
     (20. * level.max(1e-9).log10() * 10.).round() / 10.
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+    use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::*};
+
+    const RATE: usize = 48_000;
+    const CLICKS: [usize; 3] = [4_800, 24_000, 14_400];
+
+    /// A one-second clip with a picture and one mono PCM stream per click.
+    fn clip(root: &Path, name: &str, clicks: &[usize]) -> PathBuf {
+        let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg");
+        let path = root.join(name);
+        let mut command = std::process::Command::new(ffmpeg);
+        command.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"]);
+        command.args(["-i", "testsrc2=size=64x64:rate=25:duration=1"]);
+        for at in clicks {
+            command
+                .args(["-f", "lavfi", "-i"])
+                .arg(format!("aevalsrc='0.9*eq(n\\,{at})':s={RATE}:d=1"));
+        }
+        command.args(["-map", "0:v"]);
+        for k in 0..clicks.len() {
+            command.args(["-map", &format!("{}:a", k + 1)]);
+        }
+        command.args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        assert!(command.arg(&path).status().unwrap().success());
+        path
+    }
+
+    fn root_of(kernel: &KernelHandle) -> (Arc<Published>, Value) {
+        let published = kernel.published("p").unwrap();
+        let root = serde_json::from_str(&to_canonical_string(
+            &published.snapshot.root().unwrap().to_value(),
+        ))
+        .unwrap();
+        (published, root)
+    }
+
+    /// The clicks heard from `asset` as the only clip, through the mix graph.
+    fn heard(kernel: &KernelHandle, asset: &str) -> Vec<usize> {
+        let (_, mut root) = root_of(kernel);
+        root["layers"] = json!([{"id":"V","type":"video","name":"V","from":0,"dur":1,"on":true,
+            "solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],
+            "d":{"asset":asset,"trim":0,"speed":1,"embeddedAudio":true}}]);
+        let source = PathBuf::from(root["assets"][asset]["sourcePath"].as_str().unwrap());
+        let doc =
+            pm_model::Document::new(Some(pm_model::json::parse(&root.to_string()).unwrap()), 1);
+        let cache = pm_audio::SourceCache::new(64 << 20, 0);
+        let resolver = move |_: &str| Some(source.clone());
+        let graph =
+            pm_audio::MixGraph::build(&doc, "c", &mut pm_eval::Evaluator::new(), &cache, &resolver)
+                .unwrap();
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(RATE as u32),
+            Arc::new(doc),
+            Arc::new(graph),
+            pm_eval::Evaluator::new(),
+            cache.clone(),
+        );
+        let mut left = vec![];
+        let summary = pm_audio::offline::render(&mut mixer, 0, RATE as i64, 4096, |_, inter| {
+            left.extend(inter.iter().step_by(2).copied());
+            Ok(())
+        })
+        .unwrap();
+        cache.shutdown();
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        CLICKS
+            .iter()
+            .enumerate()
+            .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// An agent's relink keeps which audio streams are heard, exactly as a
+    /// person's does (`pm_builtins` tests the full table).
+    #[test]
+    fn an_agent_relink_keeps_which_audio_streams_are_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entry =
+            |index: u32, on: bool| json!({"index":index,"channels":1,"sampleRate":48000,"on":on});
+        let project = json!({"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{
+                "older":{"id":"older","name":"Older.mov","kind":"video","dur":1},
+                "muted":{"id":"muted","name":"Muted.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, true), entry(2, false)]},
+                "first_off":{"id":"first_off","name":"First off.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, false), entry(2, true)]}}});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let recorder = clip(&root, "recorder.mov", &CLICKS[..2]);
+        let mono = clip(&root, "mono.mov", &CLICKS[2..]);
+        let relink = |asset: &str, path: &Path| {
+            let (published, project) = root_of(&kernel);
+            let replaced = jobs
+                .import(&MediaImport {
+                    frozen: FrozenProject {
+                        project_id: "p".into(),
+                        document_id: published.snapshot.doc_id,
+                        revision: published.revision(),
+                        project,
+                    },
+                    path: path.to_owned(),
+                    folder: None,
+                    replace: Some(asset.into()),
+                    expected_fingerprint: None,
+                    writer: 1,
+                })
+                .unwrap();
+            assert_eq!(replaced.status, "replaced");
+        };
+        relink("older", &recorder);
+        assert_eq!(heard(&kernel, "older"), [0]);
+        relink("muted", &recorder);
+        assert_eq!(heard(&kernel, "muted"), [0]);
+        relink("first_off", &mono);
+        assert_eq!(heard(&kernel, "first_off"), Vec::<usize>::new());
+        assert_eq!(
+            root_of(&kernel).1["assets"]["first_off"]["audioStreams"],
+            json!([entry(1, false)])
+        );
+    }
 }

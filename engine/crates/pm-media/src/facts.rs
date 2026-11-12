@@ -198,6 +198,61 @@ pub fn asset_audio_streams(streams: &[AudioStreamFacts]) -> Option<serde_json::V
     })
 }
 
+/// The `audioStreams` member an asset keeps when its file is replaced, from
+/// the member it had (`old`), the new file's streams and whether the new
+/// bytes are the old ones (`same`; `None` when that cannot be told).
+///
+/// Relinking to the same file changes nothing audible: the member, or its
+/// absence, stays exactly as it was. An older asset without a list keeps
+/// playing its one stream unless the new footage is known to differ, which
+/// then plays as a fresh import of it would. A list is reconciled to the new
+/// file: a stream with the same index and channel count keeps its on/off,
+/// any other stream takes the new file's default (on), and nothing listed
+/// names a stream the new file lacks. A file with one stream needs a list
+/// only to keep that stream switched off.
+pub fn relinked_audio_streams(
+    old: Option<&serde_json::Value>,
+    streams: &[AudioStreamFacts],
+    same: Option<bool>,
+) -> Option<serde_json::Value> {
+    if same == Some(true) {
+        return old.cloned();
+    }
+    let Some(old) = old else {
+        return match same {
+            Some(false) => asset_audio_streams(streams),
+            _ => None,
+        };
+    };
+    let kept = |s: &AudioStreamFacts| -> Option<bool> {
+        old.as_array()?
+            .iter()
+            .find(|e| {
+                e["index"].as_u64() == Some(u64::from(s.index))
+                    && e["channels"].as_u64() == Some(u64::from(s.channels))
+            })
+            .map(|e| e["on"] != serde_json::Value::Bool(false))
+    };
+    let entry = |s: &AudioStreamFacts, on: bool| {
+        serde_json::json!({
+            "index": s.index,
+            "channels": s.channels,
+            "sampleRate": s.sample_rate,
+            "on": on,
+        })
+    };
+    match streams {
+        [] => None,
+        [one] => (kept(one) == Some(false)).then(|| serde_json::json!([entry(one, false)])),
+        _ => Some(
+            streams
+                .iter()
+                .map(|s| entry(s, kept(s).unwrap_or(true)))
+                .collect(),
+        ),
+    }
+}
+
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
     let Some(a) = p
         .audio_stream
