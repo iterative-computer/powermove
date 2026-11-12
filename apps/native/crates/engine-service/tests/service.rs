@@ -269,6 +269,24 @@ fn closing_a_project_returns_every_reported_cache_to_empty() {
     );
 }
 
+/// The service's cache counters once it has released a closed project
+/// (the release is counted when it is complete, device renewal included;
+/// the bound is only for a worker that never gets there).
+fn released(service: &EngineService) -> memory::CacheUsage {
+    let start = Instant::now();
+    loop {
+        let usage = service.memory_usage();
+        if usage.project_releases > 0 {
+            return usage;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the closed project was never released: {usage:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn retiring_the_last_view_releases_its_document_and_shared_caches() {
     let service =
@@ -281,21 +299,13 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
         .unwrap();
     wait_frame(&v, v.stamp().unwrap());
     v.retire();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let u = service.memory_usage();
-        if u.resident_bytes() == 0 && document.upgrade().is_none() {
-            assert!(results.is_closed(), "closed viewer retained its scope tap");
-            assert_eq!(u.decoder_sessions, 0);
-            assert_eq!(u.decoder_pool_free_bytes, 0);
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "closed document/caches retained: {u:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // The release is counted once it is done: by then everything is gone.
+    let u = released(&service);
+    assert_eq!(u.resident_bytes(), 0, "closed caches retained: {u:?}");
+    assert!(document.upgrade().is_none(), "closed document retained");
+    assert!(results.is_closed(), "closed viewer retained its scope tap");
+    assert_eq!(u.decoder_sessions, 0);
+    assert_eq!(u.decoder_pool_free_bytes, 0);
 }
 
 /// A paused playhead in a rendered range shows the rendered frame: its
@@ -421,11 +431,11 @@ fn closing_the_last_view_retires_device_pools_and_reopens_with_identical_exact_p
     let pixels = wait_frame(&first, first.stamp().unwrap()).pixels.unwrap();
     assert!(service.memory_usage().targets_created > 0);
     first.retire();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while service.memory_usage().targets_created != 0 {
-        assert!(Instant::now() < deadline, "old device pools stayed live");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert_eq!(
+        released(&service).targets_created,
+        0,
+        "old device pools stayed live"
+    );
     let reopened = service.viewer(config(input)).unwrap();
     reopened.capture_next().unwrap();
     assert_eq!(

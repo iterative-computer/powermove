@@ -971,10 +971,11 @@ impl EngineService {
     /// The renderer's latest cache counters (not OS or allocator footprint).
     pub fn memory_usage(&self) -> memory::CacheUsage {
         memory::CacheUsage {
+            // Read first: a release counted here is in the usage read next.
             project_releases: self
                 .shared
                 .project_releases
-                .load(std::sync::atomic::Ordering::Relaxed),
+                .load(std::sync::atomic::Ordering::Acquire),
             ..self.shared.memory.lock().unwrap().clone()
         }
     }
@@ -1900,9 +1901,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     shared.disk.forget_document(doc);
                 }
                 engine.release_project_memory();
-                shared
-                    .project_releases
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if last_view_closed {
                     // Metal command queues and wgpu encoder pools retain
                     // their playback high-water storage after caches empty.
@@ -1921,6 +1919,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     crate::memory::pressure_relief();
                 }
                 *shared.memory.lock().unwrap() = engine.memory_usage();
+                // Counted once it is all done and published (renewing the
+                // device takes seconds on a loaded machine): whoever sees
+                // the count sees the released state.
+                shared
+                    .project_releases
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
             }
             continue;
         }
