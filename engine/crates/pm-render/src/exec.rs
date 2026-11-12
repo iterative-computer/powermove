@@ -184,6 +184,9 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
+    /// Final output (an export, a cached frame, an agent capture): its
+    /// regions equal the whole frame bit for bit.
+    pub final_frame: bool,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
