@@ -1266,7 +1266,7 @@ impl Kernel {
                     // place holds the person's work since: the same file
                     // opens that copy again, never a second one.
                     if let Some(copy) = self.copy_of(&path) {
-                        return self.reopen_copy(id, copy, decision, electron_profile, mode);
+                        return self.reopen_copy(id, copy, decision, mode);
                     }
                     // The copy's entry names the file it stands in for and
                     // why, so the file finds it again and its window can say
@@ -2136,13 +2136,15 @@ impl Kernel {
         session.lock = Some(lock);
     }
     /// Opens the copy `copy` in place of the file it stands in for; the
-    /// reply still says the file opened as a copy, and why.
+    /// reply still says the file opened as a copy, and why. The copy is this
+    /// library's own project: what kept the file from opening in place (the
+    /// original app running, a read-only folder) does not apply to it, or
+    /// every open would make a copy of the copy.
     fn reopen_copy(
         &mut self,
         id: String,
         copy: String,
         decision: OpenDecision,
-        electron_profile: Option<PathBuf>,
         mode: RecoveryMode,
     ) -> Result<ShellReply, KernelFailure> {
         let profile = self
@@ -2156,22 +2158,20 @@ impl Kernel {
             profile,
             project: copy,
         };
-        Ok(
-            match self.open_session_mode(id, source, electron_profile, mode)? {
-                ShellReply::Opened {
-                    session,
-                    recovery,
-                    info,
-                    ..
-                } => ShellReply::Opened {
-                    session,
-                    recovery,
-                    decision,
-                    info,
-                },
-                other => other,
+        Ok(match self.open_session_mode(id, source, None, mode)? {
+            ShellReply::Opened {
+                session,
+                recovery,
+                info,
+                ..
+            } => ShellReply::Opened {
+                session,
+                recovery,
+                decision,
+                info,
             },
-        )
+            other => other,
+        })
     }
     fn owns_library(&self, profile: &std::path::Path) -> bool {
         self.library.as_ref().is_some_and(|w| {

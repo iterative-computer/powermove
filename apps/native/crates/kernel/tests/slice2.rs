@@ -585,6 +585,64 @@ fn a_file_that_must_open_as_a_copy_reopens_the_same_copy() {
     assert_eq!(fs::read(&file).unwrap(), bytes, "the file is untouched");
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
 }
+fn copy_slot(k: &Kernel) -> String {
+    match k.session_metadata("P").unwrap().destination {
+        SessionDestination::Library(slot) => slot,
+        other => panic!("{other:?}"),
+    }
+}
+/// A file that opens as a copy because the original app is running opens
+/// that same copy every time, like any other copy: the copy is this
+/// library's own project, and what kept the file from opening in place is
+/// not applied to it again (which made a copy of the copy on every open).
+#[test]
+fn a_copy_made_while_the_original_app_runs_is_reopened_not_copied_again() {
+    use std::os::unix::fs::symlink;
+    let dir = common::TempDir::new("copy-electron");
+    let electron = dir.path("electron");
+    fs::create_dir_all(&electron).unwrap();
+    let mut hostname = [0i8; 256];
+    unsafe {
+        libc::gethostname(hostname.as_mut_ptr(), 255);
+    };
+    let hostname = unsafe { std::ffi::CStr::from_ptr(hostname.as_ptr()) }.to_string_lossy();
+    symlink(
+        format!("{hostname}-{}", std::process::id()),
+        electron.join("SingletonLock"),
+    )
+    .unwrap();
+    let file = dir.path("cut.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let mut open = |k: &mut Kernel| match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: Some(electron.clone()),
+        })
+        .unwrap()
+    {
+        ShellReply::Opened {
+            session, decision, ..
+        } => (session, decision),
+        _ => panic!(),
+    };
+    let (session, decision) = open(&mut k);
+    assert_eq!(decision, OpenDecision::AsCopy(CopyReason::OlderElectron));
+    let first = copy_slot(&k);
+    edit(&mut k, "P", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    for _ in 0..2 {
+        let (session, decision) = open(&mut k);
+        assert_eq!(decision, OpenDecision::AsCopy(CopyReason::OlderElectron));
+        assert_eq!(copy_slot(&k), first, "the same copy, not a copy of it");
+        assert_eq!(
+            common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+            Some(20.0)
+        );
+        k.shell(ShellCall::Close(session)).unwrap();
+    }
+}
 /// A file that opens in place again is told about the copies that hold work
 /// for it: the copy an earlier build made of a file in a syncing folder
 /// (named "<project> — Native", nothing recorded) and a copy recorded for
