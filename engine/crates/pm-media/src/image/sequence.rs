@@ -185,6 +185,13 @@ impl Manifest {
         (self.last - self.first + 1).max(0) as u64
     }
 
+    /// Whether any file of the range is where the manifest says: a folder
+    /// moved or renamed leaves none, and the sequence is offline until it is
+    /// relinked (a single missing number is that frame's Media Offline).
+    pub fn present(&self) -> bool {
+        self.dir.is_dir() && (self.first..=self.last).any(|n| self.file(n).is_file())
+    }
+
     /// Numbers in the range with no file now, as inclusive ranges.
     pub fn missing(&self) -> Vec<(i64, i64)> {
         let mut out: Vec<(i64, i64)> = Vec::new();

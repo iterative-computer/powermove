@@ -367,6 +367,56 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
         missing,
     })
 }
+/// A sequence asset relinked by choosing one of its files in their new
+/// folder: every file numbered as that one is the sequence again, at the
+/// rate it was imported at.
+struct RelinkedSequence {
+    frames: Vec<PathBuf>,
+    sequence: SequenceImport,
+    /// The first and last number the asset had, when it says.
+    was: Option<(i64, i64)>,
+}
+impl RelinkedSequence {
+    /// The status line's word on a range that changed.
+    fn range_note(&self, asset: &serde_json::Value) -> Option<String> {
+        let number = |key: &str| asset["imageSequence"][key].as_i64();
+        let now = (number("first")?, number("last")?);
+        let was = self.was.filter(|was| *was != now)?;
+        Some(format!(
+            "frames {}–{}, were {}–{}",
+            now.0, now.1, was.0, was.1
+        ))
+    }
+}
+/// `paths` (one numbered still) as the new place of the sequence `record`
+/// is, or None when the asset is not a sequence or the file is not one of a
+/// numbered set (it then replaces the asset as any file does).
+fn relinked_sequence(
+    record: Option<&serde_json::Value>,
+    paths: &[PathBuf],
+) -> Option<RelinkedSequence> {
+    let numbers = record?.get("imageSequence")?;
+    let [frame] = paths else {
+        return None;
+    };
+    if kind(frame) != Some("image") {
+        return None;
+    }
+    let found = pm_media::image::sequence::detect(frame).ok()??;
+    let fps = numbers["fps"]
+        .as_f64()
+        .or_else(|| record?["fps"].as_f64())
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(30.0);
+    Some(RelinkedSequence {
+        frames: found.frames.into_iter().map(|(_, path)| path).collect(),
+        sequence: SequenceImport {
+            fps,
+            progress: Default::default(),
+        },
+        was: numbers["first"].as_i64().zip(numbers["last"].as_i64()),
+    })
+}
 /// A 3D model's type, for imports that take models.
 fn model_mime(path: &Path) -> Option<&'static str> {
     match extension(path).as_str() {
@@ -431,18 +481,10 @@ impl Builtins {
         let archive = Archive::open(profile).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
         let mut items = vec![];
-        let sequence = request
-            .sequence
-            .as_ref()
-            .map(|sequence| choose_sequence(&request.paths, sequence))
-            .transpose()?;
-        let paths = match &sequence {
-            Some(sequence) => vec![sequence.path.clone()],
-            None => expand(request.paths),
-        };
         // A relink retains the old bytes and reads which of the old file's
         // audio streams were heard and how the asset reads its file's times.
         let mut timing = pm_media::clip::ClipTiming::Presentation;
+        let mut relinked = None;
         let (previous, old_streams) = match &request.replace {
             Some(id) => {
                 let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
@@ -457,10 +499,22 @@ impl Builtins {
                     .and_then(|root| root.get("assets")?.get(id))
                     .map(|record| crate::data::wire(&record.to_value()));
                 timing = asset_timing(record.as_ref());
+                if request.sequence.is_none() {
+                    relinked = relinked_sequence(record.as_ref(), &request.paths);
+                }
                 let streams = record.and_then(|record| record.get("audioStreams").cloned());
                 (previous, streams)
             }
             None => (None, None),
+        };
+        let sequence = match (&request.sequence, &relinked) {
+            (Some(sequence), _) => Some(choose_sequence(&request.paths, sequence)?),
+            (None, Some(relinked)) => Some(choose_sequence(&relinked.frames, &relinked.sequence)?),
+            (None, None) => None,
+        };
+        let paths = match &sequence {
+            Some(sequence) => vec![sequence.path.clone()],
+            None => expand(request.paths),
         };
         for path in paths {
             if cancel.load(Ordering::Acquire) {
@@ -624,6 +678,11 @@ impl Builtins {
         }
         outcome.imported = names;
         outcome.assets = assets;
+        if let (Some(relinked), Some(sequence)) = (&relinked, &sequence)
+            && let Some(note) = relinked.range_note(&sequence.asset)
+        {
+            outcome.notes.push(note);
+        }
         outcome.notes.extend(sequence.and_then(|s| s.missing));
         Ok(outcome)
     }
@@ -1082,6 +1141,127 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A sequence whose folder was renamed is relinked by choosing one of its
+    /// files there (Replace): the numbering and range are read again from
+    /// the new folder, a changed range and missing numbers are reported, and
+    /// its layers show the new folder's files.
+    #[test]
+    fn a_sequence_relinked_by_one_of_its_files_reads_its_numbering_again() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":24,"dur":10,"bg":"#000000","colorDepth":16,"assets":{},"comps":{},"layers":[]}"##,
+        );
+        let renders = f.root.join("renders");
+        std::fs::create_dir(&renders).unwrap();
+        let frames: Vec<_> = (1..=6)
+            .map(|n| {
+                write(
+                    &renders,
+                    &format!("shot.{n:04}.png"),
+                    &png16(64, 4, |x, y| coded(n, x, y)),
+                )
+            })
+            .collect();
+        let import = |request: ImportRequest| {
+            f.runtime
+                .import_media(document(&f), &f.root, request, &AtomicBool::new(false))
+                .unwrap()
+        };
+        let imported = import(ImportRequest {
+            paths: frames,
+            place_at: Some(0.),
+            sequence: Some(SequenceImport {
+                fps: 24.,
+                progress: Default::default(),
+            }),
+            ..Default::default()
+        });
+        let id = imported.assets[0].clone();
+        // The folder is renamed; a frame is rendered past the end, one is lost.
+        let moved = f.root.join("renders v2");
+        std::fs::rename(&renders, &moved).unwrap();
+        write(
+            &moved,
+            "shot.0007.png",
+            &png16(64, 4, |x, y| coded(7, x, y)),
+        );
+        std::fs::remove_file(moved.join("shot.0003.png")).unwrap();
+        let relinked = import(ImportRequest {
+            paths: vec![moved.join("shot.0005.png")],
+            replace: Some(id.clone()),
+            ..Default::default()
+        });
+        assert_eq!(
+            relinked.summary(),
+            "Imported shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
+        );
+        assert_eq!(relinked.assets, [id.clone()]);
+        let published = f.actor.handle().published("p").unwrap();
+        let root = published.snapshot.root().unwrap().to_value();
+        let asset = root.get("assets").unwrap().get(&id).unwrap();
+        let sequence = asset.get("imageSequence").unwrap();
+        let number = |key: &str| sequence.get(key).and_then(Value::as_f64);
+        assert_eq!(
+            (
+                number("first"),
+                number("last"),
+                number("frames"),
+                number("fps")
+            ),
+            (Some(1.), Some(7.), Some(7.), Some(24.))
+        );
+        let manifest = f.root.join("retained.json");
+        published
+            .media
+            .get(&id)
+            .unwrap()
+            .copy_to(&manifest)
+            .unwrap();
+        let read = pm_media::image::sequence::Manifest::read(&manifest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.dir, moved);
+        let mut resolver = MapResolver::default();
+        resolver.paths.insert(id.clone(), manifest);
+        let comp = published.snapshot.open_comp().unwrap();
+        let mut renderer = Renderer::headless().unwrap();
+        let mut request = RenderRequest::sized(Size::new(64, 4), Precision::Float16);
+        request.background = false;
+        let at = |frame: i64| Ticks::new(frame * Ticks::from_whole_seconds(1).get() / 24).unwrap();
+        // The placed layer keeps its length (six frames): its fifth shows
+        // file 5, read from the new folder (the old one is gone).
+        let fifth = renderer
+            .render(
+                &published.snapshot.document,
+                &comp,
+                at(4),
+                &request,
+                &resolver,
+            )
+            .unwrap();
+        assert!(fifth.failures.is_empty(), "{:?}", fifth.failures);
+        let green = renderer.read_rgba(&fifth).unwrap()[1];
+        assert!((green - f32::from(coded(5, 0, 0)[1]) / 65535.).abs() < 3e-4);
+        let lost = renderer
+            .render(
+                &published.snapshot.document,
+                &comp,
+                at(2),
+                &request,
+                &resolver,
+            )
+            .unwrap();
+        assert!(
+            lost.failures[0]
+                .message
+                .contains("frame 3 of the image sequence is missing: shot.0003.png"),
+            "{:?}",
+            lost.failures
+        );
     }
 
     #[test]
