@@ -2672,7 +2672,12 @@ impl Host {
         let t = &self.tokens;
         let frame = NSRect::new(
             NSPoint::ZERO,
-            NSSize::new(t.metrics.sidebar as f64, self.content.bounds().size.height),
+            // The glass runs on under the sheet's leading corners, so its
+            // own rim is hidden and the two meet in one step.
+            NSSize::new(
+                (t.metrics.sidebar + t.metrics.panel_radius + t.space.xs) as f64,
+                self.content.bounds().size.height,
+            ),
         );
         let view = material(self.window.mtm(), frame, t, Surface::Sidebar);
         if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {

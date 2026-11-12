@@ -108,8 +108,12 @@ Real system material through AppKit, for what the system itself makes glass:
   either. The pull-down and New Project are round targets after the last
   rule. A tab is carried along the strip to reorder it.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
-  light tint of the window colour) in a column under the GPUI view, which
-  leaves that column unpainted.
+  heavy tint of the window colour) in a column under the GPUI view, which
+  leaves that column unpainted. The glass runs on under the content sheet's
+  leading corners, so its rim is hidden. In both appearances the sidebar
+  recedes into the window (a shade under the window ground) and the content
+  sheet stands out from it: the change of value is the only line between
+  them.
 - Popovers with their own window: `popover_frame`. The palette and field menu
   are pooled child windows (`native::Popup`).
 - The window ground is a tint over a behind-window blur.
@@ -179,6 +183,21 @@ Send). A value in a well starts on the same inset with or without a unit, in
 the text font, so it sits on its row label's baseline. A section heading in a
 panel is the Label role, a step under the panel's Title.
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
+
+## Home
+
+A sidebar for navigation only (Recents, Trash, Store, the account) on the
+window's glass, and one inset sheet. The sheet's header is two rows on the
+sheet's margins: the section title, the one wide search field in the middle
+(the large system field, its shortcut at the trailing end while it is empty)
+and Open… with the one accent action; then the count and the quiet sort and
+layout controls. A project is its poster: the frame in the composition's own
+shape with a continuous corner, a hairline and a soft shadow, the name and
+one line of facts under it, and a small dot when it is open (the accent for
+this window's project). A project with no poster yet is a quiet ground of the
+same shape that says its size. Under the pointer a card rises on the hover
+springs; pressed, it sits back down; a sort or a search slides cards to their
+new places. The list is the dense alternative under the same header.
 
 ## Timeline strips
 
