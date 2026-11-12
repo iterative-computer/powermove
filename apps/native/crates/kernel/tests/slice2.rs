@@ -1159,6 +1159,87 @@ fn saves_on_real_volumes_replace_safely_or_not_at_all() {
         assert_eq!(save_as, "created", "{volume}");
     }
 }
+/// The open file (with embedded media) is renamed, a save is prepared, and
+/// the file is renamed again before the save's worker runs. That save fails
+/// (the name it was prepared for is gone). The proof that the held file
+/// still has its bytes must read it from the start each time: read from
+/// wherever the last proof left the descriptor, it hashed nothing, the
+/// unchanged file counted as changed, and neither Save nor Save As could
+/// write its media again.
+#[test]
+fn a_file_renamed_again_before_its_save_runs_can_still_be_saved() {
+    let dir = common::TempDir::new("renamed-twice");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let first = dir.path("job/a.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &first).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &first);
+    let media = k.project("P").unwrap().store().media().len();
+    assert!(media > 0);
+    let second = dir.path("job/b.pmv");
+    fs::rename(&first, &second).unwrap();
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let third = dir.path("job/c.pmv");
+    fs::rename(&second, &third).unwrap();
+    k.finish_session_save(plan.run())
+        .expect_err("the name the save was prepared for is gone");
+    // Save As writes every embedded item from the held file.
+    let rescued = dir.path("job/rescued.pmv");
+    let plan = k
+        .prepare_session_save(session.clone(), Some(rescued.clone()), false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("Save As works from the held file");
+    assert_eq!(saved_name(&rescued).as_deref(), Some("One"));
+    assert_eq!(
+        open_project(&rescued, OpenOptions::default())
+            .unwrap()
+            .file
+            .media
+            .len(),
+        media
+    );
+}
+/// The same two renames, then Save again: it follows the file to the name
+/// it has now.
+#[test]
+fn a_save_follows_a_file_renamed_again_before_the_save_ran() {
+    let dir = common::TempDir::new("renamed-twice-follow");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let first = dir.path("job/a.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &first).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &first);
+    let media = k.project("P").unwrap().store().media().len();
+    let second = dir.path("job/b.pmv");
+    fs::rename(&first, &second).unwrap();
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let third = dir.path("job/c.pmv");
+    fs::rename(&second, &third).unwrap();
+    k.finish_session_save(plan.run())
+        .expect_err("the name the save was prepared for is gone");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("the next save follows the file to its new name");
+    assert_eq!(saved_name(&third).as_deref(), Some("One"));
+    assert_eq!(
+        open_project(&third, OpenOptions::default())
+            .unwrap()
+            .file
+            .media
+            .len(),
+        media
+    );
+    assert!(!first.exists() && !second.exists());
+}
 /// Unsaved work is found by the file, not by its path: the file is renamed
 /// while it has unsaved changes and the app ends without a save; opening the
 /// renamed file (a different session id, as its path gives) recovers them.

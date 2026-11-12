@@ -220,7 +220,11 @@ impl FileVersion {
         if now.same_file(&self.stat) || proven.as_ref() == Some(&now) {
             return Ok(Some(held.file()));
         }
-        if hex(&hash_reader(held.file(), &self.path)?.finalize()) != self.hash {
+        // Proven for the state it was read in: the descriptor's stat must be
+        // the same after the read as before it.
+        if hex(&hash_reader(held.file(), &self.path)?.finalize()) != self.hash
+            || held.stat().ok().as_ref() != Some(&now)
+        {
             return Ok(None);
         }
         *proven = Some(now);
@@ -316,16 +320,34 @@ pub fn check_version(
     Ok(())
 }
 
+/// SHA-256 of everything behind `file`, read by position from its start. A
+/// descriptor's cursor belongs to whatever read through it last (a held
+/// descriptor is hashed more than once, and its duplicates share the
+/// cursor), so it says nothing about where the file begins.
 pub(crate) fn hash_reader(file: &File, path: &Path) -> Result<Sha256, ProjectIoError> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
-    let mut reader = file;
+    let mut offset = 0u64;
     loop {
-        let n = read_retry(|| reader.read(&mut buf)).map_err(|e| io_err(path, e))?;
+        #[cfg(unix)]
+        let n = {
+            use std::os::unix::fs::FileExt;
+            read_retry(|| file.read_at(&mut buf, offset))
+        };
+        #[cfg(not(unix))]
+        let n = {
+            use std::io::{Seek, SeekFrom};
+            let mut reader = file;
+            reader
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| read_retry(|| reader.read(&mut buf)))
+        };
+        let n = n.map_err(|e| io_err(path, e))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        offset += n as u64;
     }
     Ok(hasher)
 }
