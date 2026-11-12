@@ -2090,3 +2090,12 @@ close refusal keeps its window alive. Running-app verification opened the
 walkthrough project from Home, opened a second project in a separate window,
 closed the second with its close button, retained the first project, and quit
 normally. No new performance acceptance is claimed yet.
+
+#### Retained imported-model bounds
+
+The viewer used a unit cube while imported geometry was loading, even when the
+asset retained its measured bounds. The viewer and import-placement commands
+now share the retained normalized geometry box; legacy unmeasured assets keep
+their existing unit envelope. The reproduced bottle outline now matches its
+retained aspect before mesh IO. Six panel tests and the kernel import/undo/
+reopen/archive regression pass.

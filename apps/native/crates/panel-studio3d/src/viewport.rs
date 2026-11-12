@@ -4,17 +4,16 @@
 //! from one immutable publication; the host draws handles from it at once.
 //!
 //! Picking here is a box test, an interim until the engine's surface query
-//! reaches the viewer. Imported models whose geometry isn't loaded use their
-//! normalized unit box.
+//! reaches the viewer. Imported models use their retained import bounds before
+//! geometry loads, with a unit envelope only for older unmeasured imports.
 use crate::{Result, invalid};
 use pm_kernel::Published;
 use pm_scene3d::{
     from_model,
-    geometry::{AssetGeometry, NoAssets},
+    geometry::{AssetGeometry, NoAssets, RetainedAssets},
     navigation::{Bounds, Lens, Pose, Vec3, add, cross, dot, length, mul, normalize, sub},
     schema::{self, Role},
 };
-use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
@@ -237,16 +236,6 @@ fn translation(m: &[f64; 16]) -> Vec3 {
     )
     .map_or([0.; 3], |b| b.min)
 }
-/// Imported models without loaded geometry: their normalized unit box.
-struct UnitAssets;
-impl AssetGeometry for UnitAssets {
-    fn bounds(&self, _: &str, _: &Value, _: f64) -> pm_scene3d::Result<Bounds> {
-        Ok(Bounds {
-            min: [-1.; 3],
-            max: [1.; 3],
-        })
-    }
-}
 /// Read on a worker from one publication at `time`.
 pub fn scene(p: &Published, time: f64) -> Result<Scene> {
     let comp_id = p.snapshot.open_comp();
@@ -326,7 +315,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                 let local = pm_scene3d::geometry::local_bounds(
                     source,
                     if source.get("assetId").is_some() {
-                        &UnitAssets as &dyn AssetGeometry
+                        &RetainedAssets as &dyn AssetGeometry
                     } else {
                         &NoAssets
                     },
@@ -405,6 +394,15 @@ pub fn framed(scene: &Scene, from: Pose, selection: &[String]) -> Option<Pose> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn imported_outline_uses_retained_geometry_before_loading_the_mesh() {
+        let record = serde_json::json!({"kind":"model", "native3dBounds":{
+            "version":1, "bounds":[-0.2,-1.0,-0.2,0.2,1.0,0.2]
+        }});
+        let b = RetainedAssets.bounds("bottle", &record, 0.).unwrap();
+        assert_eq!(b.min, [-0.2, -1., -0.2]);
+        assert_eq!(b.max, [0.2, 1., 0.2]);
+    }
     fn eye() -> Eye {
         Eye {
             pose: Pose {

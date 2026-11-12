@@ -4,7 +4,7 @@ use pm_scene3d::{
     geometry,
     navigation::{self as nav, Bounds, Vec3},
 };
-use serde_json::{Value as Json, json};
+use serde_json::json;
 
 fn snapshot(cx: &Cx<'_>) -> crate::Snapshot {
     crate::Snapshot {
@@ -13,39 +13,7 @@ fn snapshot(cx: &Cx<'_>) -> crate::Snapshot {
         document: std::sync::Arc::new(pm_model::Document::from_root(Some(cx.root().clone()), 0)),
     }
 }
-pub(super) struct AssetBounds;
-impl geometry::AssetGeometry for AssetBounds {
-    fn bounds(&self, _id: &str, record: &Json, _time: f64) -> pm_scene3d::Result<Bounds> {
-        if record["kind"] != "model" {
-            return Err(pm_scene3d::Error("Model geometry is not retained".into()));
-        }
-        if record["native3dBounds"]["version"] == 1 {
-            if let Some(array) = record["native3dBounds"]["bounds"]
-                .as_array()
-                .filter(|a| a.len() == 6)
-            {
-                let mut v = [0.; 6];
-                for (n, item) in array.iter().enumerate() {
-                    v[n] = item
-                        .as_f64()
-                        .ok_or_else(|| pm_scene3d::Error("Invalid retained model bounds".into()))?;
-                }
-                let b = Bounds {
-                    min: [v[0], v[1], v[2]],
-                    max: [v[3], v[4], v[5]],
-                };
-                b.validate()?;
-                return Ok(b);
-            }
-        }
-        // Older native/Electron imports fit their initial geometry inside a
-        // unit-radius envelope. Keep their files offline and use that envelope.
-        Ok(Bounds {
-            min: [-1.; 3],
-            max: [1.; 3],
-        })
-    }
-}
+pub(super) use pm_scene3d::geometry::RetainedAssets as AssetBounds;
 fn interval(b: Bounds, axis: Vec3) -> (f64, f64) {
     let c = nav::dot(b.center(), axis);
     let r = (0..3)
