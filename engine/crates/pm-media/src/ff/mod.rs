@@ -208,6 +208,13 @@ impl Input {
         (s >= 0).then_some(s as usize)
     }
 
+    /// The best video stream that is a picture to play, not cover art.
+    pub fn picture(&self) -> Option<usize> {
+        self.best_video().filter(|&v| unsafe {
+            (*self.st(v)).disposition & ff::AV_DISPOSITION_ATTACHED_PIC as i32 == 0
+        })
+    }
+
     pub fn best_audio(&self) -> Option<usize> {
         let s = unsafe {
             ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0)

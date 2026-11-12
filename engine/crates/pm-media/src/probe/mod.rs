@@ -141,6 +141,12 @@ pub struct VideoProbe {
     pub min_frame_duration: i64,
     pub max_frame_duration: i64,
     pub frames: usize,
+    /// The clip's timeline, in `timebase` units (seconds per unit as
+    /// [num, den]): the first presented frame starts at `start_pts`, which
+    /// is clip time 0, and the last one ends at `end_pts`.
+    pub timebase: [i64; 2],
+    pub start_pts: i64,
+    pub end_pts: i64,
     pub index: IndexSummary,
     pub decode: DecodeCost,
     /// Presented frame for the poster: the first sync frame at or after 10%.
@@ -207,6 +213,47 @@ pub struct MediaProbe {
     pub content_identifier: Option<String>,
     pub creation_time: Option<String>,
     pub sampled_fingerprint: String,
+}
+
+impl VideoProbe {
+    /// Seconds from the first presented frame's start to the last one's end.
+    pub fn duration(&self) -> f64 {
+        (self.end_pts - self.start_pts) as f64 * self.timebase[0] as f64 / self.timebase[1] as f64
+    }
+}
+
+impl MediaProbe {
+    /// How long the file plays, in seconds: its picture's length when it
+    /// has one (first frame start to last frame end), otherwise the
+    /// container's duration.
+    pub fn duration(&self) -> Option<f64> {
+        match &self.video {
+            Some(v) => Some(v.duration()),
+            None => self.duration_us.map(|d| d as f64 / 1e6),
+        }
+    }
+}
+
+/// The clip origin of a file's picture: the timestamp of its first
+/// presented frame and that timestamp's unit in seconds. `None` when the
+/// file has no picture. This is the frame index the picture is decoded by
+/// (prepared once and shared with the first [`MediaSource`] where the
+/// container allows), so sound placed against it stays with the picture.
+///
+/// [`MediaSource`]: crate::decode::service::MediaSource
+pub fn clip_origin(path: &Path) -> Result<Option<(i64, pm_time::Rational)>> {
+    let of = |index: &FrameIndex| (index.origin_pts(), index.timebase);
+    if let Some(prepared) = cache::lookup(path)? {
+        return Ok(Some(of(&prepared.index)));
+    }
+    if Input::open(path)?.picture().is_none() {
+        return Ok(None);
+    }
+    cache::prewarm(path)?;
+    if let Some(prepared) = cache::lookup(path)? {
+        return Ok(Some(of(&prepared.index)));
+    }
+    Ok(probe(path)?.index.as_ref().map(of))
 }
 
 /// Everything probe learns, plus the video index (kept for decoding).
@@ -531,6 +578,9 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
             min_frame_duration: min_d,
             max_frame_duration: max_d,
             frames: presented,
+            timebase: [idx.timebase.num(), idx.timebase.den()],
+            start_pts: idx.origin_pts(),
+            end_pts: idx.end_pts(),
             index: summary,
             decode,
             poster_frame,

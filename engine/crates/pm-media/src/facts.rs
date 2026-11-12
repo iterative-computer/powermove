@@ -237,9 +237,7 @@ fn video_facts(
         ));
     }
     facts.push(line("Frames", v.frames.to_string()));
-    if let Some(d) = p.duration_us {
-        facts.push(line("Duration", clock(d as f64 / 1e6)));
-    }
+    facts.push(line("Duration", clock(v.duration())));
     identity_lines(p, &mut facts);
     if let Some(h) = &c.hdr {
         facts.push(line(
@@ -317,7 +315,7 @@ fn video_facts(
     let (w, h) = r.display_size((v.width, v.height));
     let duration = match r.conformed() {
         Some(rate) => Some(v.frames as f64 * rate.den() as f64 / rate.num() as f64),
-        None => p.duration_us.map(|d| d as f64 / 1e6),
+        None => Some(v.duration()),
     };
     MediaFacts {
         kind: MediaKind::Video,

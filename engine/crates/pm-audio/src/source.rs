@@ -29,10 +29,17 @@ pub const BLOCK: usize = 1 << 16;
 /// `trimDecodedCache` likewise never evicts the assets of active voices.
 const PLAYBACK_PRESSURE_HOT: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// One decodable stream of one file.
+/// One decodable stream of one file, on its file's clip timeline: sample 0
+/// is clip time 0. For a file with a picture that is its first presented
+/// frame, and the stream's first program sample sits [`Source::lead`]
+/// samples after it; for a file without one it is the first program sample.
 pub struct Source {
     id: u64,
     pub info: AudioStreamInfo,
+    /// Clip sample of program sample 0 ([`pm_media::audio::clip_lead`]):
+    /// silence before it when positive, program samples before the first
+    /// frame dropped when negative.
+    lead: i64,
     decoder: Mutex<Decoder>,
 }
 
@@ -96,9 +103,16 @@ impl Source {
     pub fn sample_rate(&self) -> u32 {
         self.info.sample_rate
     }
-    /// Program length in samples (metadata; see `AudioStreamInfo::length`).
+    /// Clip sample of the stream's first program sample.
+    pub fn lead(&self) -> i64 {
+        self.lead
+    }
+    /// Where the stream ends on the clip timeline, in samples: the program
+    /// length (metadata; see `AudioStreamInfo::length`) placed at its lead.
     pub fn length(&self) -> Option<u64> {
-        self.info.length
+        self.info
+            .length
+            .map(|n| (n as i64).saturating_add(self.lead).max(0) as u64)
     }
     /// Packets its decoder has sent to the codec (diagnostics: what the
     /// blocks decoded so far cost).
@@ -107,7 +121,7 @@ impl Source {
     }
 }
 
-/// Decoded samples `[index × BLOCK, index × BLOCK + len)`, per channel.
+/// Decoded clip samples `[index × BLOCK, index × BLOCK + len)`, per channel.
 #[derive(Debug)]
 pub struct Block {
     pub channels: Vec<Vec<f32>>,
@@ -534,6 +548,7 @@ impl SourceCache {
         };
         let source = Arc::new(Source {
             id,
+            lead: pm_media::audio::clip_lead(&info),
             info,
             decoder: Mutex::new(decoder),
         });
@@ -640,13 +655,23 @@ impl SourceCache {
         if self.profile {
             trace.decoder_lock_us = crate::clock::host_now_us();
         }
-        let start = index * BLOCK as u64;
-        decoder.seek_anchored(start)?;
+        // The block's first clip sample as a program sample: silence up to
+        // the stream's first sample, then the program.
+        let start = (index * BLOCK as u64) as i64 - source.lead;
+        let silence = (-start).clamp(0, BLOCK as i64) as usize;
+        let mut channels = vec![Vec::with_capacity(BLOCK); source.channels()];
+        for channel in &mut channels {
+            channel.resize(silence, 0.0);
+        }
+        if silence < BLOCK {
+            decoder.seek_anchored(start.max(0) as u64)?;
+        }
         if self.profile {
             trace.seek_done_us = crate::clock::host_now_us();
         }
-        let mut channels = vec![Vec::with_capacity(BLOCK); source.channels()];
-        decoder.read(&mut channels, BLOCK)?;
+        if silence < BLOCK {
+            decoder.read(&mut channels, BLOCK - silence)?;
+        }
         if self.profile {
             trace.read_done_us = crate::clock::host_now_us();
         }

@@ -38,8 +38,12 @@ pub struct MediaSource {
     startup_input: Arc<Mutex<Option<Input>>>,
     pub nominal: NominalRate,
     pub color: ColorDescription,
-    /// Presented PTS in presentation order.
+    /// Presented timestamps in presentation order on the clip's timeline:
+    /// the first presented frame is 0 ([`FrameIndex::origin_pts`] is what
+    /// the container stamps it with). Index timebase units.
     pub pts: Vec<i64>,
+    /// The container timestamp of clip time 0 (the first presented frame).
+    pub origin_pts: i64,
 }
 
 impl MediaSource {
@@ -82,7 +86,8 @@ impl MediaSource {
         let nominal = video.nominal_rate.clone().ok_or_else(|| {
             MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
         })?;
-        let pts = index.presented_pts();
+        let origin_pts = index.origin_pts();
+        let pts = index.frames.iter().map(|f| f.pts - origin_pts).collect();
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
@@ -92,6 +97,7 @@ impl MediaSource {
             nominal,
             color: video.color.interpreted,
             pts,
+            origin_pts,
             index,
             probe,
         }))
@@ -101,15 +107,21 @@ impl MediaSource {
         self.nominal.rate
     }
 
-    /// Section 5 rule 7: the presented frame showing at source time `t`
-    /// (ticks, on the presentation timeline: PTS 0 is tick 0).
+    /// Section 5 rule 7: the presented frame showing at clip time `t`
+    /// (ticks; tick 0 is the first presented frame). `None` before it.
     pub fn select(&self, t: Tick) -> Option<usize> {
         select_frame(&self.pts, self.index.timebase, self.nominal.rate, t)
     }
 
-    /// Source time of presented frame `n`, in ticks.
+    /// Clip time of presented frame `n`, in ticks.
     pub fn time_of(&self, n: usize) -> Tick {
         crate::time::ticks_of(self.pts[n], self.index.timebase)
+    }
+
+    /// The clip's length in ticks: the end of the last presented frame
+    /// minus the start of the first.
+    pub fn duration(&self) -> Tick {
+        crate::time::ticks_of(self.index.end_pts() - self.origin_pts, self.index.timebase)
     }
 
     pub fn path(&self) -> &Path {

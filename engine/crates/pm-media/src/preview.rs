@@ -162,7 +162,9 @@ impl PreviewReader {
             Source::Still => 0.0,
             Source::Animation(t) => t.duration(),
             Source::Sequence { sequence, fps } => sequence.frames.len() as f64 / fps,
-            Source::Video { source, .. } => source.probe.duration_us.unwrap_or(0) as f64 / 1e6,
+            Source::Video { source, .. } => {
+                source.duration() as f64 / pm_time::TICKS_PER_SECOND as f64
+            }
         })
     }
 

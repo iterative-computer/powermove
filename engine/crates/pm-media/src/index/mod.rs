@@ -268,6 +268,33 @@ impl FrameIndex {
         self.frames.iter().map(|f| f.pts).collect()
     }
 
+    /// The clip's time origin: the timestamp of the first presented frame.
+    /// Containers start their timestamps anywhere (transport streams around
+    /// 1.4 s, program streams and fragmented MP4 at smaller offsets); a
+    /// clip's time 0 is this frame, never timestamp 0.
+    pub fn origin_pts(&self) -> i64 {
+        self.frames.first().map_or(0, |f| f.pts)
+    }
+
+    /// Where the last presented frame ends: its timestamp plus its own
+    /// duration, or the spacing of the two last frames when the container
+    /// gives it none. The clip's length is this minus [`Self::origin_pts`].
+    pub fn end_pts(&self) -> i64 {
+        let Some(last) = self.frames.last() else {
+            return 0;
+        };
+        let own = self.samples[last.sample].duration;
+        let duration = if own > 0 {
+            own
+        } else {
+            match self.frames.len().checked_sub(2) {
+                Some(k) => last.pts - self.frames[k].pts,
+                None => 0,
+            }
+        };
+        last.pts.saturating_add(duration.max(0))
+    }
+
     /// Samples decoded but never presented (edit lists).
     pub fn hidden_samples(&self) -> usize {
         let mut shown = vec![false; self.samples.len()];
