@@ -305,6 +305,22 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions"),
     ]
 }
+/// How long an open waits for the effects its extensions are loading before
+/// the project opens without them (their frames keep waiting).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The status note when an open stops waiting for extensions still loading.
+fn still_loading_note(names: &[&str]) -> Option<String> {
+    let (who, its) = match names {
+        [] => return None,
+        [one] => (format!("{one} is"), "its effects wait for it"),
+        [one, other] => (format!("{one} and {other} are"), "their effects wait for them"),
+        [one, rest @ ..] => (
+            format!("{one} and {} more are", rest.len()),
+            "their effects wait for them",
+        ),
+    };
+    Some(format!("{who} still loading. Frames that use {its}."))
+}
 /// Effect types the engine draws without any extension.
 fn builtin_effects() -> &'static BTreeSet<String> {
     static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
@@ -1197,13 +1213,17 @@ impl Controller {
     /// window draws with, and whether a load pass is still running (an effect
     /// the project uses may yet arrive: `ResourceSnapshot::pending`).
     fn pin_definitions(&mut self, definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>) {
-        let pending = self
-            .extensions
-            .host
-            .as_ref()
-            .is_some_and(|host| !host.definitions_settled());
+        let host = self.extensions.host.as_ref();
+        let pending = host.is_some_and(|host| !host.definitions_settled());
+        let loading = match host {
+            Some(host) if pending => host.loading(),
+            _ => vec![],
+        };
         let current = &self.extensions.resources;
-        if definitions == current.definitions && pending == current.pending {
+        if definitions == current.definitions
+            && pending == current.pending
+            && loading == current.loading
+        {
             return;
         }
         if current.pending && !pending {
@@ -1213,6 +1233,7 @@ impl Controller {
             generation: current.generation + 1,
             definitions,
             pending,
+            loading,
             ..Default::default()
         });
         if let Some(doc_id) = self.extensions.doc_id {
@@ -1222,6 +1243,39 @@ impl Controller {
         if let Some(project) = self.extensions.settle_after.take() {
             self.settled(&project);
         }
+    }
+    /// An open waiting for effects its extensions load waits [`OPEN_WAIT`] at
+    /// most: then the project opens, frames that need an effect still loading
+    /// stay held (the viewer's status line names who they wait for), and the
+    /// person is told which extensions are still loading.
+    pub(crate) fn bound_open_wait(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.extensions.settle_after.as_deref() != Some(project) {
+            return;
+        }
+        let project = project.to_owned();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPEN_WAIT).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.extensions.settle_after.as_deref() != Some(project.as_str()) {
+                    return;
+                }
+                v.extensions.settle_after = None;
+                v.finish_open(&project);
+                crate::diag::line(json!({"extensions": "open-released"}));
+                let names: Vec<&str> = v
+                    .extensions
+                    .resources
+                    .loading
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                if let Some(text) = still_loading_note(&names) {
+                    v.note(text, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     /// The open composition uses an effect no definition provides yet while
     /// this window's extensions load: the viewer shows the open as still
@@ -1999,6 +2053,23 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_open_that_stops_waiting_says_who_is_still_loading() {
+        use super::still_loading_note as note;
+        assert_eq!(note(&[]), None);
+        assert_eq!(
+            note(&["Deep Glow"]).as_deref(),
+            Some("Deep Glow is still loading. Frames that use its effects wait for it.")
+        );
+        assert_eq!(
+            note(&["Deep Glow", "Grain"]).as_deref(),
+            Some("Deep Glow and Grain are still loading. Frames that use their effects wait for them.")
+        );
+        assert_eq!(
+            note(&["A", "B", "C"]).as_deref(),
+            Some("A and 2 more are still loading. Frames that use their effects wait for them.")
+        );
+    }
     use super::{external_link, menu_entries};
     use serde_json::json;
 

@@ -15,6 +15,10 @@ pub struct ResourceSnapshot {
     /// exported until a settled snapshot arrives.
     #[serde(default)]
     pub pending: bool,
+    /// While `pending`: the extensions still loading, as (id, name), so a
+    /// frame that waits for one says which.
+    #[serde(default)]
+    pub loading: Vec<(String, String)>,
 }
 impl ResourceSnapshot {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -36,8 +40,13 @@ impl ResourceSnapshot {
     }
     /// The same pins, whichever viewer holds them: switching between viewers
     /// on one engine must not reinstall definitions or drop cached frames.
+    /// Which extensions are still loading names a wait; it pins nothing.
     pub fn same_pins(a: &std::sync::Arc<Self>, b: &std::sync::Arc<Self>) -> bool {
-        std::sync::Arc::ptr_eq(a, b) || (a.generation == b.generation && a == b)
+        std::sync::Arc::ptr_eq(a, b)
+            || (a.pending == b.pending
+                && a.definitions == b.definitions
+                && a.extension_generations == b.extension_generations
+                && a.project_fonts == b.project_fonts)
     }
 }
 #[cfg(test)]

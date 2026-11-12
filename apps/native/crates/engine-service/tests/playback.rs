@@ -556,6 +556,11 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
             generation,
             definitions,
             pending,
+            loading: if pending {
+                vec![("ext".into(), "Acme Effects".into())]
+            } else {
+                vec![]
+            },
             ..Default::default()
         })
     };
@@ -574,6 +579,13 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Past a few seconds the viewer says which extension it waits for.
+    let named = wait(&v, "the wait named", |s| s.error.is_some());
+    assert_eq!(
+        named.error.as_deref(),
+        Some("Still waiting: Acme Effects is loading (ext.invert)")
+    );
+    assert!(named.frame.is_none() && named.missing_effects.is_empty());
     let mut invert = pm_render::all_builtin_definitions()
         .definitions
         .into_iter()

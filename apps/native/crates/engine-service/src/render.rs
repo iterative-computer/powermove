@@ -225,13 +225,45 @@ impl std::error::Error for FontsPending {}
 /// still loading: it waits for them instead of drawing them bypassed.
 #[derive(Debug)]
 pub(crate) struct DefinitionsPending(String);
+impl DefinitionsPending {
+    /// Names who is loading: the extensions whose id prefixes the waiting
+    /// effects' ids (an effect is registered as `<extension>.<name>`), or
+    /// every extension still loading when one isn't so named.
+    pub(crate) fn new(effects: &[&str], loading: &[(String, String)]) -> Self {
+        let owner = |effect: &str| {
+            loading.iter().find(|(id, _)| {
+                effect
+                    .strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+        };
+        let mut names: Vec<&str> = vec![];
+        let all_owned = effects.iter().all(|effect| owner(effect).is_some());
+        let named: Vec<&(String, String)> = if all_owned {
+            effects.iter().filter_map(|effect| owner(effect)).collect()
+        } else {
+            loading.iter().collect()
+        };
+        for (_, name) in named {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        let effects = effects.join(", ");
+        Self(match names.as_slice() {
+            [] => format!("the extensions this project uses are loading ({effects})"),
+            [one] => format!("{one} is loading ({effects})"),
+            [a, b] => format!("{a} and {b} are loading ({effects})"),
+            [a, b, rest @ ..] => format!(
+                "{a}, {b} and {} more are loading ({effects})",
+                rest.len()
+            ),
+        })
+    }
+}
 impl std::fmt::Display for DefinitionsPending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the extensions this project uses are loading ({})",
-            self.0
-        )
+        f.write_str(&self.0)
     }
 }
 impl std::error::Error for DefinitionsPending {}
@@ -860,10 +892,10 @@ impl Engine {
     }
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
-            self.resources = resources;
             self.studio_content = None;
             self.cache.clear();
         }
+        self.resources = resources;
     }
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
@@ -895,9 +927,9 @@ impl Engine {
                     .map(|missing| missing.effect.as_str())
                     .collect();
                 if !loading.is_empty() {
-                    let loading = loading.join(", ");
+                    let waiting = DefinitionsPending::new(&loading, &self.resources.loading);
                     self.missing_effects.clear();
-                    return Err(DefinitionsPending(loading).into());
+                    return Err(waiting.into());
                 }
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
@@ -2856,5 +2888,46 @@ mod frame_cache_tests {
         let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
         drawn(&mut engine, &scene, reduced);
         assert_eq!(drawn(&mut engine, &scene, full), want);
+    }
+}
+#[cfg(test)]
+mod definitions_pending_tests {
+    use super::DefinitionsPending;
+    #[test]
+    fn a_wait_names_the_extension_that_is_loading() {
+        let loading = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(id, name)| ((*id).into(), (*name).into()))
+                .collect()
+        };
+        let line = |effects: &[&str], list: &[(&str, &str)]| {
+            DefinitionsPending::new(effects, &loading(list)).to_string()
+        };
+        let both = [("deep-glow", "Deep Glow"), ("blur-kit", "Blur Kit")];
+        assert_eq!(
+            line(&["deep-glow.effect"], &both),
+            "Deep Glow is loading (deep-glow.effect)"
+        );
+        assert_eq!(
+            line(&["deep-glow.effect", "blur-kit.radial"], &both),
+            "Deep Glow and Blur Kit are loading (deep-glow.effect, blur-kit.radial)"
+        );
+        // An id that names no loading extension: everyone still loading.
+        assert_eq!(
+            line(&["glow"], &[("a", "A"), ("b", "B"), ("c", "C")]),
+            "A, B and 1 more are loading (glow)"
+        );
+        // A prefix is a whole id, not part of one.
+        assert_eq!(
+            line(
+                &["deep-glow-pop.effect"],
+                &[("deep-glow", "Deep Glow"), ("deep-glow-pop", "Deep Glow Pop")]
+            ),
+            "Deep Glow Pop is loading (deep-glow-pop.effect)"
+        );
+        assert_eq!(
+            line(&["x.y"], &[]),
+            "the extensions this project uses are loading (x.y)"
+        );
     }
 }
