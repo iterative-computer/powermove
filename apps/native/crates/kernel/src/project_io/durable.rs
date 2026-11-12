@@ -234,7 +234,10 @@ impl FileVersion {
     /// This version at the path the file has now (it was renamed or moved
     /// while open): the same inode and bytes, found through the descriptor
     /// held since it was read. `None` if the path still names it, it has no
-    /// name any more, it sits in a Trash, or its bytes changed.
+    /// name any more, its bytes changed, or it now sits somewhere nobody
+    /// keeps documents ([`is_document_place`]: a Trash, a bundle, a hidden or
+    /// system folder), where a save must be the person's choice (Save As),
+    /// never something that follows the file there on its own.
     pub fn moved(&self) -> Result<Option<FileVersion>, ProjectIoError> {
         if lstat_file(&self.path)
             .ok()
@@ -246,13 +249,13 @@ impl FileVersion {
         let Some(path) = self.held.as_ref().and_then(|held| held.current_path()) else {
             return Ok(None);
         };
-        let trashed = path
-            .components()
-            .any(|c| matches!(c.as_os_str().to_str(), Some(".Trash" | ".Trashes")));
         let Some(at) = lstat_file(&path).ok().flatten() else {
             return Ok(None);
         };
-        if trashed || !at.same_identity(&self.stat) || self.held_unchanged()?.is_none() {
+        if !is_document_place(&path)
+            || !at.same_identity(&self.stat)
+            || self.held_unchanged()?.is_none()
+        {
             return Ok(None);
         }
         Ok(Some(FileVersion {
@@ -279,6 +282,84 @@ impl FileVersion {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Whether `path` is somewhere a person keeps documents: not inside a
+/// hidden folder (a Trash is one), not inside a bundle or another package
+/// (known by the folder's extension), not in a system folder, and not in the
+/// user's Library other than the folders sync clients keep documents in.
+pub(crate) fn is_document_place(path: &Path) -> bool {
+    const PACKAGES: &[&str] = &[
+        "app",
+        "appex",
+        "bundle",
+        "framework",
+        "plugin",
+        "kext",
+        "xpc",
+        "pkg",
+        "mpkg",
+        "prefpane",
+        "saver",
+        "qlgenerator",
+        "mdimporter",
+        "component",
+        "wdgt",
+        "dsym",
+        "lproj",
+        "xcodeproj",
+        "xcworkspace",
+        "xcassets",
+        "playground",
+        "photoslibrary",
+        "aplibrary",
+        "imovielibrary",
+        "tvlibrary",
+        "musiclibrary",
+        "fcpbundle",
+        "logicx",
+        "band",
+        "rtfd",
+        "key",
+        "pages",
+        "numbers",
+        "sparsebundle",
+    ];
+    const SYSTEM: &[&str] = &[
+        "/System",
+        "/Library",
+        "/Applications",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/opt",
+        "/etc",
+        "/private/etc",
+    ];
+    if SYSTEM.iter().any(|folder| path.starts_with(folder)) {
+        return false;
+    }
+    if let Some(library) = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library"))
+        && path.starts_with(&library)
+        && !path.starts_with(library.join("Mobile Documents"))
+        && !path.starts_with(library.join("CloudStorage"))
+    {
+        return false;
+    }
+    let Some(folder) = path.parent() else {
+        return true;
+    };
+    !folder.components().any(|c| {
+        let std::path::Component::Normal(name) = c else {
+            return false;
+        };
+        let name = name.to_string_lossy();
+        name.starts_with('.')
+            || Path::new(&*name)
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|e| PACKAGES.iter().any(|p| p.eq_ignore_ascii_case(e)))
+    })
 }
 
 /// `checkVersion(destination, expected, verifyContent)`. With no expected
@@ -1686,6 +1767,39 @@ mod tests {
         assert_eq!(key("notes.pmv"), None);
         // Collisions sort numerically: `-10` is newer than `-9`.
         assert!(key(&format!("{stamp}.pmv-10")) > key(&format!("{stamp}.pmv-9")));
+    }
+
+    #[test]
+    fn a_document_place_is_not_a_bundle_a_hidden_folder_or_a_system_folder() {
+        for place in [
+            "/Volumes/Work/job/cut.pmv",
+            "/Users/someone/Movies/2026.11 final v1.2/cut.pmv",
+            "/Users/someone/Dropbox/job/cut.pmv",
+            "/private/tmp/job/cut.pmv",
+        ] {
+            assert!(is_document_place(Path::new(place)), "{place}");
+        }
+        for place in [
+            "/Users/someone/.Trash/cut.pmv",
+            "/Volumes/Work/.Trashes/501/cut.pmv",
+            "/Users/someone/Tools/Thing.app/Contents/Resources/cut.pmv",
+            "/Users/someone/Pictures/Photos Library.photoslibrary/originals/cut.pmv",
+            "/Users/someone/work/.git/cut.pmv",
+            "/Applications/cut.pmv",
+            "/System/Library/cut.pmv",
+        ] {
+            assert!(!is_document_place(Path::new(place)), "{place}");
+        }
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let library = home.join("Library");
+            assert!(!is_document_place(&library.join("Caches/x/cut.pmv")));
+            assert!(is_document_place(
+                &library.join("Mobile Documents/com~apple~CloudDocs/job/cut.pmv")
+            ));
+            assert!(is_document_place(
+                &library.join("CloudStorage/Provider-Name/job/cut.pmv")
+            ));
+        }
     }
 
     #[test]

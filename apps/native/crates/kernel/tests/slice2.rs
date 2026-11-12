@@ -1328,6 +1328,66 @@ fn saves_on_real_volumes_replace_safely_or_not_at_all() {
         assert_eq!(save_as, "created", "{volume}");
     }
 }
+/// Save follows a file the person renamed or moved, but only to a place
+/// people keep documents. Moved into an application bundle, or into a
+/// hidden folder, the file is not written there on the quiet: Save does not
+/// happen (the sheet with Save As), the moved file keeps its bytes, and
+/// Save As writes the work where the person chooses. An ordinary folder is
+/// still followed, dots in its name or not.
+#[test]
+fn a_file_moved_into_a_bundle_or_hidden_folder_is_not_saved_into_silently() {
+    for place in ["Tool.app/Contents/Resources", ".cache/items"] {
+        let dir = common::TempDir::new("follow-boundary");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        fs::create_dir_all(dir.path(place)).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        let media = k.project("P").unwrap().store().media().len();
+        let moved = dir.path(place).join("cut.pmv");
+        fs::rename(&file, &moved).unwrap();
+        let bytes = fs::read(&moved).unwrap();
+        rename_comp(&mut k, "P", "One");
+        let saved = k
+            .prepare_session_save(session.clone(), None, false)
+            .and_then(|plan| k.finish_session_save(plan.run()));
+        assert!(saved.is_err(), "{place}: not followed there");
+        assert_eq!(fs::read(&moved).unwrap(), bytes, "{place}: left as it was");
+        let chosen = dir.path("job/cut 2.pmv");
+        let plan = k
+            .prepare_session_save(session.clone(), Some(chosen.clone()), false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .expect("Save As writes where the person chooses");
+        assert_eq!(saved_name(&chosen).as_deref(), Some("One"));
+        assert_eq!(
+            open_project(&chosen, OpenOptions::default())
+                .unwrap()
+                .file
+                .media
+                .len(),
+            media
+        );
+    }
+    // An ordinary folder with a dot in its name is a place like any other.
+    let dir = common::TempDir::new("follow-dotted");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    fs::create_dir_all(dir.path("2026.11 final v1.2")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    let moved = dir.path("2026.11 final v1.2/cut.pmv");
+    fs::rename(&file, &moved).unwrap();
+    rename_comp(&mut k, "P", "One");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run())
+        .expect("an ordinary move is followed");
+    assert_eq!(saved_name(&moved).as_deref(), Some("One"));
+}
 /// The open file (with embedded media) is renamed, a save is prepared, and
 /// the file is renamed again before the save's worker runs. That save fails
 /// (the name it was prepared for is gone). The proof that the held file
