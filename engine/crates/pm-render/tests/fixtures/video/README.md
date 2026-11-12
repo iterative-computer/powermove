@@ -41,3 +41,14 @@ done
 
 Each is two identical lossless frames (a video needs two); decoding frame 0
 returns the raw planes exactly.
+
+`stripes-709-limited.mp4` (480×480, two identical lossless frames, Rec.709
+limited range) is vertical 3-px stripes, two columns of Y′ 235 and one of
+Y′ 16, neutral chroma: detail finer than a reduced preview's pixels, for the
+preview downscale test in `src/media/source_storage_tests.rs`. Regenerate:
+
+```sh
+python3 -c "y=bytes((16 if x%3==2 else 235) for x in range(480))*480; c=bytes([128])*(240*240); open('s.yuv','wb').write((y+c+c)*2)"
+ffmpeg -f rawvideo -pix_fmt yuv420p -s 480x480 -r 30 -i s.yuv -c:v libx264 -qp 0 \
+  -pix_fmt yuv420p -bsf:v $TAG stripes-709-limited.mp4
+```

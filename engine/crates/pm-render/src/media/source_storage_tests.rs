@@ -95,6 +95,63 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
     assert_eq!(pixels, after);
 }
 
+/// A preview-sized video frame averages detail finer than its pixels: 480
+/// px of 3-px stripes (two white, one black) reduced 16× show a flat grey
+/// (each pixel 10 or 11 sixteenths white), not moire from four source taps.
+#[test]
+fn preview_video_downscale_averages_detail_finer_than_its_pixels() {
+    let gpu = pm_gpu::Gpu::new("preview downscale filter").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/stripes-709-limited.mp4");
+    let mut media = MediaCache::new(&gpu.device);
+    let convert = |media: &mut MediaCache, preview: bool| {
+        media.preview_media = preview;
+        media.draw_edge = Some(30);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .video(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                1,
+                0.0,
+                false,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                pm_time::Rate::FPS_30,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+        media.flush();
+        (target.width(), target.height(), pixels)
+    };
+    let (w, _, exact) = convert(&mut media, false);
+    assert_eq!(w, 480);
+    let reds = |p: &[f32]| p.chunks(4).map(|c| c[0]).collect::<Vec<_>>();
+    let exact = reds(&exact);
+    let (black, white) = exact
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    assert!(white - black > 0.9, "stripes {black}..{white}");
+    let (pw, ph, preview) = convert(&mut media, true);
+    assert_eq!((pw, ph), (30, 30));
+    let preview = reds(&preview);
+    let (lo, hi) = preview
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    // 10/16 to 11/16 white through the transfer: well inside 0.1 of each other.
+    assert!(
+        hi - lo < 0.1 && lo > black + 0.3 && hi < white - 0.1,
+        "preview {lo}..{hi} of stripes {black}..{white}"
+    );
+}
+
 /// Exercise the production source compute pass with normalized f32 RGB.
 /// Keeping the input at f32 makes an accidental half-float conversion
 /// before RGBA8 storage observable independently of a video decoder.
