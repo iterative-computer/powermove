@@ -3908,6 +3908,71 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
             });
         }
         drop(k);
+        // Installed and confirmed; while the version it replaced is judged
+        // and retained, another valid version lands at the name: it is
+        // never taken for this save, ours is kept beside it.
+        {
+            let late = folder.join("late arrival.pmv");
+            fs::copy(common::ts_fixture("fresh.pmv"), &late).unwrap();
+            let mut k = kernel(&dir.path("native late"));
+            let (session, _) = open_file(&mut k, &late);
+            rename_comp(&mut k, "P", "Five");
+            let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+            let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (landing, project) = (other.clone(), late.clone());
+            k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+                after_judged: Some(std::sync::Arc::new(move |_| {
+                    if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        land(&project, &landing);
+                    }
+                })),
+                ..Default::default()
+            });
+            let plan = k.prepare_session_save(session, None, false).unwrap();
+            let e = k
+                .finish_session_save(plan.run())
+                .expect_err("another version holds the name");
+            assert_eq!(fs::read(&late).unwrap(), other, "{volume}");
+            let ours = pm_kernel::project_io::kept_beside(&e.to_string())
+                .unwrap_or_else(|| panic!("{volume}: {e}"));
+            assert_eq!(saved_name(&ours).as_deref(), Some("Five"), "{volume}");
+            cells.push(
+                "lands while the replaced one is retained: it stays, ours kept beside".into(),
+            );
+        }
+        // The folder fails to sync once right after the install: the next
+        // Save in place goes through.
+        {
+            let once = folder.join("sync once.pmv");
+            fs::copy(common::ts_fixture("fresh.pmv"), &once).unwrap();
+            let mut k = kernel(&dir.path("native sync once"));
+            let (session, _) = open_file(&mut k, &once);
+            rename_comp(&mut k, "P", "Six");
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+                folder_sync: Some(std::sync::Arc::new(move || {
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        1 => (Some(5), None),
+                        _ => (None, None),
+                    }
+                })),
+                ..Default::default()
+            });
+            let plan = k
+                .prepare_session_save(session.clone(), None, false)
+                .unwrap();
+            k.finish_session_save(plan.run())
+                .expect_err("the folder did not sync");
+            k.set_publish_hooks(Default::default());
+            rename_comp(&mut k, "P", "Seven");
+            let plan = k
+                .prepare_session_save(session, None, false)
+                .unwrap_or_else(|e| panic!("{volume}: {e}"));
+            k.finish_session_save(plan.run())
+                .unwrap_or_else(|e| panic!("{volume}: the next save: {e}"));
+            assert_eq!(saved_name(&once).as_deref(), Some("Seven"), "{volume}");
+            cells.push("folder sync fails once: next save in place ok".into());
+        }
         // A save killed at each step of its record. All the kills first:
         // on a share one wait then covers every dead owner's lock.
         let wait = || {
@@ -3938,6 +4003,20 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
                 cells.push(format!("killed at {step}: n/a"));
             }
         }
+        // Killed mid-copy, and then the incomplete file at the name is
+        // changed (a sync client): it is never taken back, and the open
+        // offers the versions the record proves.
+        let changed = killed_at
+            .iter()
+            .any(|(step, ..)| *step == "mid-copy")
+            .then(|| {
+                let (crashed, native, _) = case("changed mid-copy".into());
+                assert!(killed(&native, &crashed, "real", "mid-copy", "save"));
+                let mut stray = fs::read(&crashed).unwrap();
+                stray[10] ^= 0xff;
+                land(&crashed, &stray);
+                (crashed, native, stray)
+            });
         // And a recovery that is itself killed, after a save killed between
         // its renames (or, where a volume exchanges, right after that).
         let first = if killed_at.iter().any(|(step, ..)| *step == "aside") {
@@ -4001,6 +4080,42 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
         for (step, crashed, native, original) in &killed_at {
             reopen(crashed, native, original, &format!("killed at {step}"));
             cells.push(format!("killed at {step}: reopened ok"));
+        }
+        match &changed {
+            None => cells.push("changed partial copy: n/a".into()),
+            Some((crashed, native, stray)) => {
+                let mut k = kernel(native);
+                k.shell(ShellCall::PrepareOpen {
+                    id: "P".into(),
+                    source: SessionSource::File(crashed.clone()),
+                    electron_profile: None,
+                })
+                .expect_err("not a project at the name");
+                let ShellReply::Leftovers(rows) =
+                    k.shell(ShellCall::Leftovers(crashed.clone())).unwrap()
+                else {
+                    panic!()
+                };
+                let saving = rows
+                    .iter()
+                    .find(|r| r.get("role").and_then(Value::as_str) == Some("saving"))
+                    .and_then(|r| r.get("path").and_then(Value::as_str))
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| panic!("{volume}: {rows:?}"));
+                k.shell(ShellCall::UseLeftover {
+                    path: crashed.clone(),
+                    leftover: saving,
+                })
+                .unwrap_or_else(|e| panic!("{volume}: {e}"));
+                assert_eq!(saved_name(crashed).as_deref(), Some("One"), "{volume}");
+                assert!(
+                    visible_siblings(crashed)
+                        .iter()
+                        .any(|p| fs::read(p).is_ok_and(|b| b == *stray)),
+                    "{volume}: the changed file is kept"
+                );
+                cells.push("changed partial copy: offered, chosen, changed file kept".into());
+            }
         }
         let mut recovering = Vec::new();
         for (second, crashed, native, original) in twice {

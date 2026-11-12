@@ -52,17 +52,27 @@ impl Drop for TempDir {
     }
 }
 
-/// A Trash for tests: a file goes into `dir`, intact, under a fresh name.
+/// A Trash for tests: a file goes into `dir`, intact, under a fresh name;
+/// a file on another volume goes into a `.Trashes` folder beside it, as the
+/// system's Trash has one per volume.
 pub fn trash(dir: &Path) -> pm_kernel::project_io::TrashHook {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = dir.to_owned();
     pm_kernel::project_io::TrashHook(std::sync::Arc::new(move |path: &Path| {
-        std::fs::create_dir_all(&dir)?;
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let to = dir.join(format!("{}-{name}", N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::rename(path, &to)?;
-        Ok(to)
+        let name = format!("{}-{name}", N.fetch_add(1, Ordering::Relaxed));
+        std::fs::create_dir_all(&dir)?;
+        let to = dir.join(&name);
+        match std::fs::rename(path, &to) {
+            Err(e) if e.raw_os_error() == Some(18) => {
+                let volume = path.parent().unwrap_or(Path::new(".")).join(".Trashes");
+                std::fs::create_dir_all(&volume)?;
+                let to = volume.join(&name);
+                std::fs::rename(path, &to).map(|()| to)
+            }
+            other => other.map(|()| to),
+        }
     }))
 }
 
