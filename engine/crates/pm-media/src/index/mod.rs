@@ -241,6 +241,27 @@ pub(crate) mod rational_serde {
     }
 }
 
+/// Reads the `len` bytes a container declares at `offset`. A corrupt or
+/// truncated file can declare any length (an 8-byte MXF BER length, a
+/// 32-bit AVI chunk size); one the file cannot hold is refused before
+/// anything is allocated, so the probe fails cleanly instead of aborting.
+pub(crate) fn read_declared(f: &File, offset: u64, len: u64) -> Result<Vec<u8>> {
+    let size = f.metadata()?.len();
+    if offset.checked_add(len).is_none_or(|end| end > size) {
+        return Err(MediaError::invalid(format!(
+            "a block of {len} bytes at {offset} runs past the end of the file"
+        )));
+    }
+    let len = usize::try_from(len).map_err(|_| MediaError::OutOfMemory(usize::MAX))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| MediaError::OutOfMemory(len))?;
+    bytes.resize(len, 0);
+    f.read_exact_at(&mut bytes, offset)?;
+    Ok(bytes)
+}
+
 impl FrameIndex {
     /// Sorts frames into presentation order and fills the counts.
     pub(crate) fn finish(&mut self) {

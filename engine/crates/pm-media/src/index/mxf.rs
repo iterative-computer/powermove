@@ -154,8 +154,7 @@ pub fn partitions(f: &File) -> Result<Vec<Partition>> {
                 0x01,
             ])
         {
-            let mut v = vec![0u8; k.len as usize];
-            f.read_exact_at(&mut v, k.value)?;
+            let v = super::read_declared(f, k.value, k.len)?;
             // (BodySID u32, ByteOffset u64) pairs, then the 4-byte length.
             for e in v[..v.len().saturating_sub(4)].chunks_exact(12) {
                 offsets.push(u64::from_be_bytes(e[4..12].try_into().unwrap()));
@@ -276,8 +275,7 @@ fn segments_in(f: &File, p: &Partition, len: u64) -> Result<Vec<IndexSegment>> {
             header_left = header_left.saturating_sub(size);
         } else {
             if k.is_index_segment() {
-                let mut v = vec![0u8; k.len as usize];
-                f.read_exact_at(&mut v, k.value)?;
+                let v = super::read_declared(f, k.value, k.len)?;
                 out.push(parse_segment(&v)?);
             }
             index_left = index_left.saturating_sub(size);

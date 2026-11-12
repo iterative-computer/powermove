@@ -98,8 +98,7 @@ impl Movie {
             .iter()
             .find(|b| &b.ty == b"moov")
             .ok_or_else(|| MediaError::invalid("no moov box"))?;
-        let mut moov = vec![0u8; (m.size - m.header) as usize];
-        f.read_exact_at(&mut moov, m.offset + m.header)?;
+        let moov = super::read_declared(f, m.offset + m.header, m.size.saturating_sub(m.header))?;
         let mvhd = need(&moov, b"mvhd")?;
         let mut c = Cur::new(mvhd);
         let v = c.u8()?;
@@ -534,8 +533,7 @@ fn fragment_samples(
     stats: &mut IndexStats,
 ) -> Result<()> {
     for m in top.iter().filter(|b| &b.ty == b"moof") {
-        let mut moof = vec![0u8; (m.size - m.header) as usize];
-        f.read_exact_at(&mut moof, m.offset + m.header)?;
+        let moof = super::read_declared(f, m.offset + m.header, m.size.saturating_sub(m.header))?;
         stats.scan_reads += 1;
         // End of the previous track fragment's data, for trafs without a base.
         let mut implicit_base = m.offset;
