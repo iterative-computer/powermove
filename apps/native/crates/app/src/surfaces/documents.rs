@@ -204,7 +204,12 @@ pub fn kept_beside(file: &str, rows: &[(String, Option<String>)]) -> Option<Aler
     };
     let restored = rows.iter().any(|(why, _)| why == "restored");
     let (arrived, other, unfinished) = (named("arrived"), named("other"), named("unfinished"));
-    if !restored && arrived.is_none() && other.is_none() && unfinished.is_none() {
+    let (undecided, unconfirmed) = (named("undecided"), named("unconfirmed"));
+    if !restored
+        && [&arrived, &other, &unfinished, &undecided, &unconfirmed]
+            .iter()
+            .all(|kept| kept.is_none())
+    {
         return None;
     }
     let mut said = Vec::new();
@@ -226,9 +231,23 @@ pub fn kept_beside(file: &str, rows: &[(String, Option<String>)]) -> Option<Aler
             "The last time this project was saved, something else (a sync app or another computer) had put a different version of “{file}” in its place. Your save is in “{file}”. The other version is next to it as “{kept}”."
         ));
     }
+    if let Some(kept) = &undecided {
+        said.push(format!(
+            "A save of this project did not finish and left a file Powermove could not identify. It was not moved: it is next to “{file}” as “{kept}”."
+        ));
+    }
+    if unconfirmed.is_some() {
+        said.push(format!(
+            "The last time “{file}” was saved, its drive could not confirm that the save arrived, and the file there now is not that version. The version you saved is kept on this Mac."
+        ));
+    }
     said.push("Nothing was lost.".to_owned());
-    let message = if restored || (arrived.is_none() && unfinished.is_some()) {
+    let kept_another = arrived.is_some() || other.is_some();
+    let message = if restored || (arrived.is_none() && unfinished.is_some()) || undecided.is_some()
+    {
         format!("Powermove was interrupted while saving “{file}”.")
+    } else if unconfirmed.is_some() && !kept_another {
+        format!("The last save of “{file}” may not have arrived.")
     } else {
         format!("Another version of “{file}” was kept.")
     };
@@ -325,6 +344,29 @@ mod write_failure_tests {
         );
         assert_eq!(alert.labels(), ["Save As…", "Show in Finder", "OK"]);
         assert!(!alert.informative.contains('/'), "names, never paths");
+    }
+
+    #[test]
+    fn a_save_the_drive_could_not_confirm_and_a_file_left_unmoved_are_said() {
+        let alert = kept_beside(
+            "cut.pmv",
+            &[("unconfirmed".into(), Some("0f8f.pmv".into()))],
+        )
+        .expect("said");
+        assert_eq!(
+            alert.message,
+            "The last save of “cut.pmv” may not have arrived."
+        );
+        assert!(alert.informative.contains("kept on this Mac"));
+        assert!(alert.informative.ends_with("Nothing was lost."));
+        let alert = kept_beside(
+            "cut.pmv",
+            &[("undecided".into(), Some(".cut.pmv.0f8f.aside".into()))],
+        )
+        .expect("said");
+        assert!(alert.message.contains("interrupted while saving"));
+        assert!(alert.informative.contains("It was not moved"));
+        assert!(alert.informative.contains("“.cut.pmv.0f8f.aside”"));
     }
 
     #[test]

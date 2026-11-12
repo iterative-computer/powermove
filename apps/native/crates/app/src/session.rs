@@ -1608,6 +1608,31 @@ impl Controller {
     /// version that arrived during a save no window showed the end of (at
     /// quit), or what a save that was cut short left. Said once, in a sheet
     /// with a way to them, and in the Error Log.
+    /// The person has been shown the notice about the kept files `paths`
+    /// (and, with `restored`, that the last saved version was put back;
+    /// with `other`, the notices that are not about a kept file): the
+    /// kernel stops reporting them. Called only once the sheet was answered.
+    fn kept_seen(
+        &mut self,
+        paths: Vec<PathBuf>,
+        restored: bool,
+        other: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let seen = self.kernel.shell(ShellCall::KeptSeen {
+            session,
+            paths,
+            restored,
+            other,
+        });
+        cx.spawn(async move |_, _| {
+            let _ = seen.await;
+        })
+        .detach();
+    }
     fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
@@ -1643,8 +1668,17 @@ impl Controller {
             }) else {
                 return;
             };
-            if answer.recv().await.ok().flatten()
-                == Some(crate::surfaces::documents::Action::ShowInFinder)
+            let answered = answer.recv().await.ok().flatten();
+            // Shown and answered: only now is it not to be told again.
+            let _ = this.update(cx, |v, cx| {
+                v.kept_seen(
+                    rows.iter().filter_map(|(_, path)| path.clone()).collect(),
+                    rows.iter().any(|(why, _)| why == "restored"),
+                    true,
+                    cx,
+                )
+            });
+            if answered == Some(crate::surfaces::documents::Action::ShowInFinder)
                 && let Some(path) = reveal
             {
                 platform::reveal(&path);
@@ -2080,8 +2114,13 @@ impl Controller {
         );
         let answer =
             other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
-        cx.spawn(async move |_, _| {
-            if answer.recv().await.ok().flatten() == Some(Action::ShowInFinder) {
+        cx.spawn(async move |this, cx| {
+            let answered = answer.recv().await.ok().flatten();
+            // Shown and answered: the notice about this file was seen.
+            let _ = this.update(cx, |v, cx| {
+                v.kept_seen(vec![kept.clone()], false, false, cx)
+            });
+            if answered == Some(Action::ShowInFinder) {
                 platform::reveal(&kept);
             }
         })
@@ -2110,9 +2149,19 @@ impl Controller {
                 path,
             ),
         };
+        let kept = pm_kernel::project_io::kept_beside(detail);
         let answer = alert.sheet(&self.host.borrow().window);
-        cx.spawn(
-            async move |this, cx| match answer.recv().await.ok().flatten() {
+        cx.spawn(async move |this, cx| {
+            let answered = answer.recv().await.ok().flatten();
+            // The save's own kept file was shown. Whatever else that save
+            // kept (another version it found on the way) is told next.
+            if let Some(kept) = kept {
+                let _ = this.update(cx, |v, cx| {
+                    v.kept_seen(vec![kept], false, false, cx);
+                    v.tell_kept_beside(cx);
+                });
+            }
+            match answered {
                 Some(Action::SaveAs) => {
                     let _ = this.update(cx, |v, cx| v.save_dialog(cx));
                 }
@@ -2122,8 +2171,8 @@ impl Controller {
                     }
                 }
                 _ => {}
-            },
-        )
+            }
+        })
         .detach();
     }
     /// An edit the kernel refused or could not answer: plain words in the
