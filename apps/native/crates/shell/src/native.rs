@@ -319,6 +319,45 @@ fn sidebar_material(
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
 }
+/// Gives a sheet a new content height. The first time, its top edge is put
+/// where a sheet `tallest` high stands centred in its parent (the most it
+/// will grow to, so it never runs off its parent); from then on the top stays
+/// there, so a sheet whose content changes height grows and shrinks downwards
+/// and is never centred again on the way (AppKit centres a sheet on every
+/// new frame; the window class hangs it from the pinned top instead). The
+/// frame is set on a later turn of the run loop, because a view asks for
+/// this while its window is being drawn and resizing calls back into it.
+pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let view: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    cx.spawn(async move |_| {
+        let frame = window.frame();
+        let grow = f64::from(height) - window.contentRectForFrameRect(frame).size.height;
+        if grow.abs() < 0.25 {
+            return;
+        }
+        let tall = frame.size.height + grow;
+        if window.respondsToSelector(sel!(pmPinSheetTop:)) {
+            let most = tall.max(tall + f64::from(tallest - height));
+            let _: () = unsafe { msg_send![&*window, pmPinSheetTop: most] };
+        }
+        window.setFrame_display(
+            NSRect::new(
+                NSPoint::new(frame.origin.x, frame.origin.y - grow),
+                NSSize::new(frame.size.width, tall),
+            ),
+            true,
+        );
+    })
+    .detach();
+}
 /// A window laid out as Home is: a sidebar on the window's glass and a
 /// content sheet beside it (Settings). The GPUI window is transparent over
 /// the behind-window blur; the sidebar's material stands in the leading
