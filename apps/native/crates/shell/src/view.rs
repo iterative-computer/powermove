@@ -645,6 +645,19 @@ impl Editor {
             }
             return;
         }
+        // `reviewPopup:hover:3`, `leave:`, `type:exp`, `key:down`: the open
+        // palette or menu, as the pointer and the keyboard drive it.
+        #[cfg(debug_assertions)]
+        if let Some((action, value)) = cmd
+            .name
+            .strip_prefix("reviewPopup:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let Some(host) = &self.host {
+                host.borrow().review_popup(action, value);
+            }
+            return;
+        }
         #[cfg(debug_assertions)]
         if cmd.name == "reviewViews" {
             if let (Some(host), Ok(dir)) = (&self.host, std::env::var("PM_NATIVE_REVIEW_SAVE_DIR"))

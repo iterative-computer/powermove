@@ -392,6 +392,10 @@ const ROLES: &[(&str, &str)] = &[
         "Window-colour tint on system glass that carries labels",
     ),
     (
+        "translucency.glass_menu",
+        "Floating colour under a palette's or menu's rows on system glass",
+    ),
+    (
         "colors.faint",
         "Placeholders, shortcut hints, disabled labels (derived)",
     ),

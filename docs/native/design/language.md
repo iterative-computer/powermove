@@ -20,7 +20,12 @@ text field's `metadata.search`; `metrics.symbol_action`;
 variant `quiet`; `pm_shell::sidebar_frame`; source-list rows (`ListItem`,
 `TreeItem`) are rounded; `pm_shell::resize_from_top`;
 `NativeControl::stretch` (a `SegmentedControl` with `flexGrow`); a sheet's
-`data-pm-slot="body"`; a `Switch` in a sheet. Nothing was renamed or removed.
+`data-pm-slot="body"`; a `Switch` in a sheet; `translucency.glass_menu`;
+`Kit::menu_light` and `Kit::menu_heading`; a `transient::Choice` has a
+`category` and a `checked` state (`Choice::new(..).within(..).checked(..)`).
+One change of meaning: `transient::Picker::selected` is gone. A menu has no
+selected row; it has the keyboard's row (`keyed`) and the pointer's (`hover`),
+and `lit()` is the one that shows. `Kit::menu_row` no longer washes itself.
 
 ## Colour
 
@@ -122,7 +127,10 @@ Real system material through AppKit, for what the system itself makes glass:
   sheet stands out from it: the change of value is the only line between
   them.
 - Popovers with their own window: `popover_frame`. The palette and field menu
-  are pooled child windows (`native::Popup`).
+  are pooled child windows (`native::Popup`) on glass, with the floating
+  colour laid under their rows (`translucency.glass_menu`): glass alone takes
+  its value from what is behind it, so dark ink over a dark viewer in the
+  light appearance would not read, and a glass tint does not hold it.
 - The window ground is a tint over a behind-window blur.
 
 The viewer, the timeline and dense panels are solid. Glass has no hover of its
@@ -144,8 +152,9 @@ ticks while nothing moves.
 | `Show`, `Pop` | A row appearing; a mark confirming an action |
 
 Press answers on pointer-down with no animation. Keyboard-driven changes do
-not animate. Reduce Motion snaps anything that moves and turns fades into a
-0.15 s cross-fade.
+not animate, with one exception: a menu's highlight glides one row for one
+key press, and steps without the glide while a key repeats. Reduce Motion
+snaps anything that moves and turns fades into a 0.15 s cross-fade.
 
 ## Controls
 
@@ -184,6 +193,29 @@ per frame, then: `button` (primary, neutral, quiet, destructive),
 `empty_state`, `banner`, `tooltip`, `disabled`. Text and numeric fields are
 `pm_shell::text::TextField` (a native field in a drawn well). Right-click
 menus are `NSMenu` (`Host::context_menu`).
+
+Menus. The system's menu (`NSMenu`) is for a right-click and for a pop-up
+button. A menu a button of ours opens, and the command palette, are ours and
+share their parts, in AppKit (`native::Popup`) and drawn (`Kit::menu`):
+
+- Nothing is lit when it opens. One highlight (`Kit::menu_light`) shows the
+  lit row: the row under the pointer while the pointer is over one, else the
+  keyboard's. It appears on the row it lands on, glides between rows on the
+  layout spring and leaves with the pointer. `transient::Picker` holds that
+  state for both.
+- Rows are the Body role with a check column when any row has a state,
+  section headings in the Caption role and the muted ink
+  (`Kit::menu_heading`; the palette lists a command under its menu), and
+  shortcut hints right-aligned in the faint ink.
+- Keys: the arrows, Home and End move the highlight (wrapping), Return
+  chooses the lit row and does nothing when none is lit, Escape closes. The
+  palette and the field menu filter as you type in the system's search field
+  and light the best match; a section stays whole and stands where its best
+  match does. A menu with no field lights the first row a typed letter
+  starts.
+- Corners are concentric: the palette is 16 with rows 6 inside it (row corner
+  10), a menu is 12 with rows 4 inside (row corner 8).
+- It opens on the enter spring and closes on the exit fade.
 
 Every drawn control: arrow cursor, hover wash, pressed fill, neutral
 keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context

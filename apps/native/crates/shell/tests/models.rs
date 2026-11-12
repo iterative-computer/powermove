@@ -202,19 +202,78 @@ fn picker_search_wrap_and_commit() {
         open: true,
         choices: ["Position", "Scale", "Rotation"]
             .iter()
-            .map(|s| Choice {
-                label: s.to_string(),
-                command: s.to_string(),
-            })
+            .map(|s| Choice::new(*s, *s))
             .collect(),
         ..Default::default()
     };
+    // Nothing is lit when it opens, and Return then does nothing.
+    assert_eq!(p.lit(), None);
+    assert_eq!(p.navigate("enter"), None);
+    assert!(p.open);
     p.navigate("up");
-    assert_eq!(p.selected, 2);
+    assert_eq!(p.lit(), Some(2));
+    p.navigate("down");
+    assert_eq!(p.lit(), Some(0));
     p.search("sc".into());
     assert_eq!(p.filtered(), [1]);
     assert_eq!(p.navigate("enter"), Some("Scale".into()));
     assert!(!p.open);
+}
+#[test]
+fn picker_light_follows_the_pointer_and_leaves_with_it() {
+    let mut p = Picker {
+        open: true,
+        choices: ["Position", "Scale", "Rotation"]
+            .iter()
+            .map(|s| Choice::new(*s, *s))
+            .collect(),
+        ..Default::default()
+    };
+    assert!(p.point(Some(1)));
+    assert_eq!(p.lit(), Some(1));
+    assert!(!p.point(Some(1)));
+    // It leaves with the pointer: nothing was lit before it came.
+    assert!(p.point(None));
+    assert_eq!(p.lit(), None);
+    // A key takes the light from the pointer and steps from where it was.
+    p.point(Some(1));
+    p.navigate("down");
+    assert_eq!((p.hover, p.keyed), (None, Some(2)));
+    // The pointer has it while over a row, and gives it back as it leaves.
+    p.point(Some(0));
+    assert_eq!(p.lit(), Some(0));
+    p.point(None);
+    assert_eq!(p.lit(), Some(2));
+    // A menu with no search field: typing lights the first row it starts.
+    assert!(p.type_ahead("ro"));
+    assert_eq!(p.lit(), Some(2));
+    assert!(!p.type_ahead("x"));
+    // Clearing a query lights nothing again.
+    p.search("s".into());
+    assert_eq!(p.lit(), Some(0));
+    p.search(String::new());
+    assert_eq!(p.lit(), None);
+}
+#[test]
+fn picker_keeps_sections_whole_and_orders_them_by_best_match() {
+    let row = |label: &str, category: &str| Choice::new(label, label).within(category);
+    let mut p = Picker {
+        choices: vec![
+            row("New Project", "File"),
+            row("Export…", "File"),
+            row("Copy", "Edit"),
+            row("Show Export Queue", "View"),
+            row("Paste", "Edit"),
+        ],
+        ..Default::default()
+    };
+    // No query: sections in the order they first appear, each one whole.
+    assert_eq!(p.filtered(), [0, 1, 2, 4, 3]);
+    // A prefix match brings its section first; the word match's follows.
+    p.search("exp".into());
+    assert_eq!(p.filtered(), [1, 3]);
+    p.search("p".into());
+    assert_eq!(p.filtered(), [4, 2, 0, 1, 3]);
 }
 #[test]
 fn spring_retarget_preserves_value_and_velocity() {
