@@ -2090,34 +2090,17 @@ fn media_content(path: &Path, hash: &mut blake3::Hasher) {
     }
 }
 
-/// The installed fonts, by file: what resolves a family by name.
+/// The fonts text can resolve to: every font file CoreText has registered
+/// now (`pm_text::system_fonts::available_files`: installed for the system
+/// or the user, activated from anywhere else, or registered by the
+/// process), with its length and modification time. The list is current as
+/// soon as a font is installed or removed; the font generation observes
+/// again when it changes.
 fn fonts_identity(hash: &mut blake3::Hasher) {
-    let mut files = Vec::new();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let roots = [
-        Some(PathBuf::from("/System/Library/Fonts")),
-        Some(PathBuf::from("/Library/Fonts")),
-        home.map(|h| h.join("Library/Fonts")),
-    ];
-    fn walk(dir: &Path, out: &mut Vec<Stamp>, depth: u32) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(t) if t.is_dir() && depth < 4 => walk(&path, out, depth + 1),
-                Ok(t) if t.is_file() => out.push(stamp(&path, None)),
-                _ => {}
-            }
-        }
-    }
-    for root in roots.into_iter().flatten() {
-        walk(&root, &mut files, 0);
-    }
-    files.sort();
-    for (path, len, modified, _) in files {
+    for file in pm_text::system_fonts::available_files() {
+        let (path, len, modified, _) = stamp(&file, None);
         hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(&[0]);
         hash.update(&len.to_le_bytes());
         hash.update(&modified.to_le_bytes());
     }

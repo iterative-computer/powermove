@@ -37,3 +37,4 @@ pub mod sanitize;
 pub mod served;
 pub mod sfnt;
 pub mod subset;
+pub mod system_fonts;

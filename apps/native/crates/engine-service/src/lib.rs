@@ -512,6 +512,17 @@ struct Shared {
     #[cfg(test)]
     slow_frames: std::sync::atomic::AtomicBool,
 }
+impl Shared {
+    /// The fonts changed: every viewer draws again, under a new stamp.
+    fn fonts_changed(&self) {
+        let mut state = self.state.lock().unwrap();
+        for v in state.views.values_mut() {
+            v.stamp.sequence += 1;
+            v.dirty = true;
+        }
+        self.wake.try_send(()).ok();
+    }
+}
 #[derive(Clone)]
 pub struct Viewer {
     id: u64,
@@ -993,6 +1004,17 @@ impl EngineService {
             #[cfg(test)]
             slow_frames: Default::default(),
         });
+        // A font installed or removed while a project is open: every viewer
+        // draws again with fonts of the new generation, and the frame its
+        // engine observes for the render cache has a new font identity, so
+        // frames rendered with the fonts before are not this state's.
+        let fonts = Arc::downgrade(&shared);
+        pm_text::system_fonts::on_change(move || {
+            fonts.upgrade().is_some_and(|shared| {
+                shared.fonts_changed();
+                true
+            })
+        });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
         let redraw = Arc::downgrade(&shared);
@@ -1020,12 +1042,7 @@ impl EngineService {
     }
     /// Call after the main-thread font broker's generation changes.
     pub fn fonts_changed(&self) {
-        let mut state = self.shared.state.lock().unwrap();
-        for v in state.views.values_mut() {
-            v.stamp.sequence += 1;
-            v.dirty = true;
-        }
-        self.shared.wake.try_send(()).ok();
+        self.shared.fonts_changed();
     }
     /// The disk render cache: Render Selection, Keep Rendered, Delete
     /// Rendered Frames and the timeline's render bar.
