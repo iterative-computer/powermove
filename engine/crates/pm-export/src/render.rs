@@ -821,21 +821,22 @@ pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
-    /// The export's samples: the range's mix length
-    /// ([`export_audio_samples`]), not the frames' span.
+    /// The export's samples: the frames' span ([`export_audio_samples`]),
+    /// so the sound ends with the picture.
     pub samples: i64,
-    /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
-    /// its clips and envelopes start from `t0` (`pm_audio::today`).
+    /// The mixed span in seconds, from the range's start to the last frame's
+    /// end, as today's `renderOffline(t0, t1)` receives it: its clips and
+    /// envelopes start from `t0` (`pm_audio::today`).
     pub range: (f64, f64),
 }
 
-/// An export's mix length (X-K3, authored timing): `ceil((t1 − t0) × rate)`
-/// with the range in seconds. Range ends are ticks of seconds the sheet
-/// chose, so the division gives back the same double.
-pub fn export_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
-    let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
-    let span = (seconds(end) - seconds(start)).max(0.0);
-    (span * f64::from(sample_rate)).ceil() as i64
+/// An export's mix length: the samples its frames span, from the first
+/// frame's start to the last frame's end, so a file's sound lasts as long as
+/// its picture (frames ÷ rate) to the sample, at NTSC rates too.
+pub fn export_audio_samples(timeline: &Timeline, sample_rate: u32) -> i64 {
+    let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), sample_rate);
+    let (_, end) = timeline.samples(timeline.frames.saturating_sub(1), sample_rate);
+    (end - first).max(0)
 }
 
 /// Source blocks kept decoded for one export's mix.
@@ -1307,10 +1308,10 @@ fn plan_export_checked(
                 // Today's export OfflineAudioContext is always stereo 48 kHz,
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
-                samples: export_audio_samples(s.range.start, s.range.end, 48_000),
+                samples: export_audio_samples(&timeline, 48_000),
                 range: (
                     s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
-                    s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
+                    timeline.tick(timeline.frames).get() as f64 / TICKS_PER_SECOND as f64,
                 ),
                 graph: Arc::new(graph),
                 cache,
@@ -1578,7 +1579,7 @@ where
         (
             mixer,
             a.sample_rate,
-            // Today's mix ends here, before or after the last frame's end.
+            // The mix ends with the last frame.
             first + a.samples,
         )
     });
