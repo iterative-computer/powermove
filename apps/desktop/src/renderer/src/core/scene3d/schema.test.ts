@@ -45,10 +45,14 @@ describe('reusable scene validation schemas', () => {
 
   it.each([
     { x: Infinity }, { x: 100001 }, { rx: 360001 }, { sx: -10001 },
-    { visible: 'true' }, { typo: 2 }, { x: { v: 0, kf: [{ t: -1, v: 2 }] } },
-    { x: { v: 0, kf: [{ t: 1, v: 'bad' }] } }
+    { visible: 'true' }, { typo: 2 }, { x: { v: 0, kf: [{ t: 1, v: 'bad' }] } }
   ])('continues to reject invalid transforms %#', p => {
     expect(() => parseScene({ objects: [{ id: 'invalid', source: { primitive: 'box' }, p }] })).toThrow();
     expect(createObject('valid').p.x).toEqual({ v: 0, kf: [], expr: null });
+  });
+
+  it('keeps keys before a trimmed layer\'s in point at negative layer-local times', () => {
+    const scene = parseScene({ objects: [{ id: 'trimmed', source: { primitive: 'box' }, p: { x: { v: 0, kf: [{ t: -1, v: 2 }] } } }] });
+    expect(scene.objects[0]!.p.x!.kf[0]).toMatchObject({ t: -1, v: 2 });
   });
 });
