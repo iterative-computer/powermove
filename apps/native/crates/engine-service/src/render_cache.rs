@@ -32,7 +32,7 @@
 //! - The shared state is never held across disk IO; the render bar reads a
 //!   snapshot published on every change.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -1314,6 +1314,13 @@ impl DiskFrames {
                 Err(Late) => Read::Late(size),
             },
         }
+    }
+
+    /// The media files the open composition's rendered frames are drawn
+    /// from, by asset.
+    pub fn rendered_from(&self) -> Option<BTreeMap<String, PathBuf>> {
+        let state = self.inner.state.lock().unwrap();
+        Some(state.frames.as_ref()?.source.scene.media.paths.clone())
     }
 
     /// Whether `scene`'s frame at `time` is rendered on disk: playback

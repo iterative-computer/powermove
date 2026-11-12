@@ -1302,6 +1302,9 @@ struct Work {
     id: u64,
     stamp: Stamp,
     scene: Scene,
+    /// What rendered frames are drawn from: a paused frame's media (never
+    /// Automatic's HD proxies), whatever this frame's moment reads.
+    rendered_media: Arc<pm_export::render::MediaPaths>,
     spec: FrameSpec,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
@@ -2201,6 +2204,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 id,
                 stamp: v.stamp,
                 scene,
+                rendered_media: v.paused_paths.clone(),
                 spec: FrameSpec {
                     time,
                     output: v.config.output,
@@ -2288,6 +2292,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             id,
             stamp,
             scene,
+            rendered_media,
             spec,
             layer,
             overlays,
@@ -2323,8 +2328,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // Fonts sync before the cache observes: a font change is seen
             // before this frame looks for a disk frame.
             let fonts = engine.font_generation();
+            // Rendered frames are a paused frame's picture: observed (and
+            // so fingerprinted and filled) with its media even while a
+            // playing frame reads an HD proxy, or they would be drawn from
+            // the proxy and orphaned at every pause and play.
+            let rendered = Scene {
+                media: rendered_media,
+                ..scene.clone()
+            };
             if shared.disk.observe(
-                &scene,
+                &rendered,
                 engine.definitions(),
                 overrides,
                 engine.tone_identity(),

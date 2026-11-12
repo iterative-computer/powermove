@@ -469,6 +469,39 @@ fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do
         Some("original.mov")
     );
 }
+/// Rendered frames are drawn from what a paused frame reads, never from
+/// Automatic's HD proxy, even when the frame that opened the composition
+/// to the disk cache was a playing one reading that proxy.
+#[test]
+fn rendered_frames_are_drawn_from_originals_while_playback_reads_an_hd_proxy() {
+    let service = EngineService::start(pm_gpu::Gpu::new("rendered-media-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let mut config = config(snapshot());
+    config.media = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    let viewer = service.viewer(config).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let start = Instant::now();
+    while viewer.status().presented < 3 {
+        assert!(start.elapsed() < Duration::from_secs(20), "no playback");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let from = disk.rendered_from().expect("the composition is observed");
+    assert_eq!(from["large"].to_str(), Some("original.mov"));
+    viewer.retire();
+}
+
 #[test]
 fn worker_exact_cache_and_revision_resize_retirement() {
     let s = snapshot();
