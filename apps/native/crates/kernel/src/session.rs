@@ -1011,9 +1011,33 @@ impl Kernel {
                     continue;
                 }
             };
+            // Asked first, with nobody here to answer. Only a journal that
+            // replays whole is folded in. One this build cannot replay, or
+            // whose end is missing, is the person's to decide at the next
+            // open: the project is not opened at all, so nothing saves its
+            // older slot and nothing removes the journal as saved.
+            let opened =
+                match self.open_session_mode(id.clone(), source.clone(), None, RecoveryMode::Ask) {
+                    Ok(ShellReply::RecoveryRequired { ticket, recovery }) => {
+                        self.pending_recovery.remove(&ticket);
+                        if !matches!(
+                            recovery,
+                            RecoveryResult::Recovered { truncated: false }
+                                | RecoveryResult::OfferCopy {
+                                    truncated: false,
+                                    ..
+                                }
+                        ) {
+                            continue;
+                        }
+                        self.open_session(id, source, None)
+                    }
+                    // Nothing to recover: it is open.
+                    opened => opened,
+                };
             let Ok(ShellReply::Opened {
                 session, recovery, ..
-            }) = self.open_session(id, source, None)
+            }) = opened
             else {
                 continue;
             };

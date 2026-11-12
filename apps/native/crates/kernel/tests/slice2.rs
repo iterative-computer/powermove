@@ -1635,6 +1635,68 @@ fn a_leftover_journal_that_cannot_be_folded_never_fails_a_quit() {
         "the journal is kept for the next open"
     );
 }
+/// A closed project's slot reads fine, but the journal that holds its
+/// unsaved work cannot be replayed by this build (here: written by a newer
+/// one). A quit does not open that project: opening it would have ignored
+/// the journal, saved the older slot and removed the journal as "saved".
+/// Slot and journal are byte for byte what they were, for the next open to
+/// put to the person.
+#[test]
+fn a_quit_leaves_a_journal_it_cannot_recover_exactly_as_it_is() {
+    let dir = common::TempDir::new("quit-unrecoverable");
+    let native = dir.path("native");
+    let mut k = kernel(&native);
+    open(&mut k, "P", SessionSource::New(value()));
+    edit(&mut k, "P", 40.0);
+    k.sync_all();
+    // The app ends without closing it: its journal holds the edit.
+    drop(k);
+    let journal = native.join("journals/P");
+    let session = pm_kernel::journal::sessions(&journal).pop().unwrap();
+    let segment = session.join("journal-00000000.log");
+    let text = fs::read_to_string(&segment).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    let mut head = parse(first.split_once(' ').unwrap().1).unwrap();
+    head.as_object_mut().unwrap().insert(
+        "version",
+        Value::Number(f64::from(pm_kernel::journal::FORMAT + 1)),
+    );
+    let head = to_canonical_string(&head);
+    let sum = &pm_model::hash::sha256_hex(head.as_bytes())[..16];
+    fs::write(&segment, format!("{sum} {head}\n{rest}")).unwrap();
+    let slot = native.join("store/project.P.json");
+    let stored = fs::read(&slot).expect("the project's slot");
+    let before = tree(&journal);
+
+    let mut k = kernel(&native);
+    assert!(matches!(
+        k.shell(ShellCall::PrepareQuit).unwrap(),
+        ShellReply::Compacted { .. }
+    ));
+    k.shell(ShellCall::ReleaseLibrary).unwrap();
+    drop(k);
+    assert_eq!(tree(&journal), before, "the journal's bytes are untouched");
+    assert_eq!(
+        fs::read(&slot).unwrap(),
+        stored,
+        "the slot is not rewritten"
+    );
+    // The next open is told, and still nothing is thrown away.
+    let mut k = kernel(&native);
+    let (_, offer) = prepare(
+        &mut k,
+        "P",
+        SessionSource::Library {
+            profile: native.clone(),
+            project: "P".into(),
+        },
+    );
+    assert!(
+        matches!(offer, RecoveryResult::Unrecoverable { .. }),
+        "{offer:?}"
+    );
+    assert_eq!(tree(&journal), before);
+}
 #[test]
 fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");
