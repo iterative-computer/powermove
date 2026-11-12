@@ -16,6 +16,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 
@@ -165,6 +166,10 @@ def main():
             (out / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(report), flush=True)
         finally:
+            # A storage/error stop must stop an in-flight export immediately.
+            # Closing MCP stdin alone waits for its synchronous render to finish.
+            if sys.exc_info()[0] is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
             process.stdin.close()
             try:
                 process.wait(timeout=30)
