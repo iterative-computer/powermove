@@ -12,7 +12,8 @@ Kit API, additive changes since the first hand-back: `Kit::disabled`;
 `pm_shell::native_control` (the real AppKit control host, moved from the app,
 with `Radio`, `Segmented` and `Slider` kinds, `tint` and `symbol`);
 `typography.display_weight`; `Strip::glow`, `Strip::grid`, `Strip::under_label`
-and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`.
+and `Strip::rim_inset`; `translucency.glass_tint`; `pm_shell::request_close`;
+the surface host's native `SegmentedControl`; the `flexWrap` panel style.
 Nothing was renamed or removed.
 
 ## Colour
@@ -129,7 +130,11 @@ sits in its own clipping wrapper above the GPUI view and is staged with the
 element's bounds and the content mask of its scroll region, so it scrolls and
 clips with the panel. Focus, disabled state, Reduce Transparency and both
 appearances are the system's own. Extension panels get the same controls from
-the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`).
+the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
+`SegmentedControl`). A panel's header is the child it marks
+`data-pm-slot="header"`: the dock shows it as the panel's one title row. A
+composer is the kit's multi-line `TextField` with `metadata.submitOnReturn`,
+written on a surface its panel draws.
 
 Drawn controls (`pm_shell::kit`) are for where a view per control cannot work:
 long scrolling lists, the timeline, anything over the viewer, and windows with
