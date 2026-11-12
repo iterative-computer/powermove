@@ -17,16 +17,28 @@ use std::{
 };
 
 /// `shared/media-formats.ts`. Formats the engine decodes natively need no proxy.
+/// The stills the still path draws (`pm_media::image::read`), EXR at its
+/// depth. DPX (planar samples not drawn at depth yet), TGA and PSD (outside
+/// the renderer's still classes) are not offered.
 const IMAGES: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic", "heif",
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic",
+    "heif", "exr",
 ];
 const AUDIO: &[&str] = &[
-    "wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "weba", "flac", "aif", "aiff",
+    "wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "weba", "flac", "aif", "aiff", "aifc", "caf",
+];
+/// Camera raw: named when refused (no raw development in the engine).
+const RAW_EXTENSIONS: &[&str] = &[
+    "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef",
+    "srw", "x3f", "3fr", "iiq", "erf", "mos", "braw", "r3d", "ari",
 ];
 const VIDEO: &[&str] = &[
     "mp4", "mov", "m4v", "webm", "mkv", "avi", "wmv", "asf", "flv", "mpg", "mpeg", "m2v", "mts",
     "m2ts", "ts", "3gp", "3g2", "mxf", "ogv", "dv", "vob",
 ];
+/// What Import Media says of a camera raw file.
+const RAW: &str =
+    "Camera raw files can't be imported yet · export TIFF or EXR from your raw developer";
 /// Every extension Import Media accepts, for the open panel's filter.
 pub fn extensions() -> Vec<&'static str> {
     [IMAGES, AUDIO, VIDEO].concat()
@@ -86,6 +98,9 @@ fn mime(path: &Path, kind: &str) -> String {
         ("image", "jpg" | "jpeg") => "image/jpeg".into(),
         ("image", "svg") => "image/svg+xml".into(),
         ("image", "tif") => "image/tiff".into(),
+        ("image", "exr") => "image/x-exr".into(),
+        ("audio", "aif" | "aifc") => "audio/aiff".into(),
+        ("audio", "caf") => "audio/x-caf".into(),
         ("video", "mov") => "video/quicktime".into(),
         ("video", "mkv") => "video/x-matroska".into(),
         ("audio", "mp3") => "audio/mpeg".into(),
@@ -460,7 +475,10 @@ impl Builtins {
                 None => kind(&path).or(model.map(|_| "model")),
             };
             let Some(kind) = kind else {
-                outcome.failed.push((name, "Unsupported file".into()));
+                let raw = RAW_EXTENSIONS.contains(&extension(&path).as_str());
+                outcome
+                    .failed
+                    .push((name, if raw { RAW } else { "Unsupported file" }.into()));
                 continue;
             };
             let type_ = match (&sequence, model) {
@@ -1063,6 +1081,190 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stills_and_sound_a_pro_receives_import_and_draw_at_their_depth() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        let scratch = tempfile::tempdir().unwrap();
+        let make = |name: &str, args: &[&str]| {
+            let path = scratch.path().join(name);
+            let status = std::process::Command::new(ffmpeg())
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                .args(args)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}");
+            path
+        };
+        let color = "color=c=0x336699:s=16x16";
+        let one = ["-frames:v", "1"];
+        // (file, decoded bits, float, scene-linear samples)
+        let stills = [
+            (
+                make("deep.tif", &[color, one[0], one[1], "-pix_fmt", "rgba64le"]),
+                16,
+                false,
+                false,
+            ),
+            (
+                make(
+                    "half.exr",
+                    &[
+                        color,
+                        one[0],
+                        one[1],
+                        "-pix_fmt",
+                        "gbrapf32le",
+                        "-format",
+                        "half",
+                    ],
+                ),
+                16,
+                true,
+                true,
+            ),
+            (
+                make(
+                    "float.exr",
+                    &[
+                        color,
+                        one[0],
+                        one[1],
+                        "-pix_fmt",
+                        "gbrpf32le",
+                        "-format",
+                        "float",
+                    ],
+                ),
+                32,
+                true,
+                true,
+            ),
+        ];
+        let srgb = |v: f32| {
+            if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1. / 2.4) - 0.055
+            }
+        };
+        for (path, bits, float, linear) in &stills {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let still = pm_media::image::read(path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert_eq!((still.bit_depth, still.float), (*bits, *float), "{name}");
+            let (f, _session) = opened(
+                r##"{"id":"p","name":"Film","compId":"c","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000","colorDepth":32,"assets":{},"comps":{},"layers":[]}"##,
+            );
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path.clone()],
+                        place_at: Some(0.),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, std::slice::from_ref(&name), "{outcome:?}");
+            let published = f.actor.handle().published("p").unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            let id = pm_kernel::asset_order::keys(&root).remove(0);
+            let retained = f.root.join(&name);
+            published
+                .media
+                .get(&id)
+                .unwrap()
+                .copy_to(&retained)
+                .unwrap();
+            let mut resolver = MapResolver::default();
+            resolver.paths.insert(id, retained);
+            let mut renderer = Renderer::headless().unwrap();
+            let frame = renderer
+                .render(
+                    &published.snapshot.document,
+                    &published.snapshot.open_comp().unwrap(),
+                    Ticks::ZERO,
+                    &RenderRequest::sized(Size::new(16, 16), Precision::Float32),
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
+            let pixel = &renderer.read_rgba(&frame).unwrap()[(8 * 16 + 8) * 4..][..3];
+            for (got, code) in pixel.iter().zip([0x33, 0x66, 0x99]) {
+                let v = code as f32 / 255.;
+                // Scene-linear files hold the code value as light.
+                let want = if *linear { srgb(v) } else { v };
+                assert!((got - want).abs() < 0.01, "{name}: {pixel:?}");
+            }
+        }
+        let tone = ["sine=f=440:d=1:sample_rate=48000"];
+        for (name, codec) in [("take.caf", "pcm_s24le"), ("take.aifc", "pcm_f32be")] {
+            let format = if name.ends_with("caf") { "caf" } else { "aiff" };
+            let path = make(name, &[tone[0], "-c:a", codec, "-f", format]);
+            let f = fixture();
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path],
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, [name], "{outcome:?}");
+            let root = f
+                .actor
+                .handle()
+                .published("p")
+                .unwrap()
+                .snapshot
+                .root()
+                .unwrap()
+                .to_value();
+            let asset = root
+                .get("assets")
+                .unwrap()
+                .get(&pm_kernel::asset_order::keys(&root)[0])
+                .unwrap()
+                .clone();
+            let field = |key: &str| asset.get(key).and_then(Value::as_f64);
+            assert_eq!(asset.get("kind").unwrap().as_str(), Some("audio"), "{name}");
+            assert_eq!(
+                (field("channels"), field("sampleRate")),
+                (Some(1.), Some(48000.)),
+                "{name}"
+            );
+            assert!(
+                (field("dur").unwrap() - 1.).abs() < 0.01,
+                "{name}: {asset:?}"
+            );
+        }
+        // Camera raw is named, not "unsupported".
+        let f = fixture();
+        let raw = write(&f.root, "A001.dng", b"II*\0");
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![raw],
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.failed, [("A001.dng".to_owned(), RAW.to_owned())]);
     }
 
     #[test]

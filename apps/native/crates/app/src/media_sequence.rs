@@ -7,7 +7,7 @@ use pm_builtins::media_import::{ImportRequest, SequenceImport, order_sequence};
 use std::{path::PathBuf, rc::Rc};
 
 /// The picker's filter: `IMAGE_SEQUENCE_ACCEPT`.
-pub const ACCEPT: [&str; 5] = ["png", "jpg", "jpeg", "webp", "bmp"];
+pub const ACCEPT: [&str; 8] = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "exr"];
 const TITLE: &str = "Import Image Sequence";
 const INTRO: &str = "Turn your numbered images into one clip.";
 const SKIPPED: &str = "You can still import. Missing frames show as Media Offline until they are rendered into the folder.";
