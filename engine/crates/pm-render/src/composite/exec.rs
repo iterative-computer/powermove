@@ -28,14 +28,30 @@ use crate::error::LayerFailure;
 use crate::exec::{Exec, Resolved};
 use crate::plan::{CompPlan, Content};
 
-/// The padding a node's effects need around the region.
-fn node_padding(node: &Node) -> Padding {
+/// The grid a padded pass aligns to (`Region::align`): an effect's
+/// reduced-resolution passes down to 1/16 keep the whole frame's texels.
+const EFFECT_GRID: u32 = 16;
+
+/// The padding a node's effects need around the region. In a final frame
+/// an effect draws over the whole frame: a program's pixels follow its
+/// target's size (interpolated coordinates round with it, `u_texel` and
+/// `v_st` scale with it, and a program may pack reduced-resolution tiles
+/// into its target), so only the whole frame's passes produce the whole
+/// frame's bits. A viewer's crop keeps the declared spread.
+fn node_padding(node: &Node, final_frame: bool) -> Padding {
+    let of = |e: &PreparedEffects| {
+        if final_frame {
+            Padding::Full
+        } else {
+            e.padding
+        }
+    };
     match node {
         // A transition reads the whole frame (its program sees the full
         // level, as today's).
         Node::Layer(l) if l.transition.is_some() => Padding::Full,
-        Node::Layer(l) => l.effects.as_ref().map_or(Padding::NONE, |e| e.padding),
-        Node::Adjustment(a) => a.effects.padding,
+        Node::Layer(l) => l.effects.as_ref().map_or(Padding::NONE, of),
+        Node::Adjustment(a) => of(&a.effects),
     }
 }
 
@@ -257,11 +273,14 @@ impl Exec<'_> {
             .draws
             .iter()
             .filter_map(|d| match &d.content {
-                Content::Composite(n) => Some(node_padding(n)),
+                Content::Composite(n) => Some(node_padding(n, self.final_frame)),
                 _ => None,
             })
             .fold(Padding::NONE, Padding::max);
-        let rect = want.grow(padding, full);
+        let mut rect = want.grow(padding, full);
+        if padding > Padding::NONE {
+            rect = rect.align(EFFECT_GRID, full);
+        }
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
         // The accumulator: the caller's target until a node writes a new one.
         // `owned`: the loop took it (`take_scoped`) and gives it back once a

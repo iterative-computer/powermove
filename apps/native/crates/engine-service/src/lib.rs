@@ -512,6 +512,17 @@ struct Shared {
     #[cfg(test)]
     slow_frames: std::sync::atomic::AtomicBool,
 }
+impl Shared {
+    /// The fonts changed: every viewer draws again, under a new stamp.
+    fn fonts_changed(&self) {
+        let mut state = self.state.lock().unwrap();
+        for v in state.views.values_mut() {
+            v.stamp.sequence += 1;
+            v.dirty = true;
+        }
+        self.wake.try_send(()).ok();
+    }
+}
 #[derive(Clone)]
 pub struct Viewer {
     id: u64,
@@ -993,6 +1004,17 @@ impl EngineService {
             #[cfg(test)]
             slow_frames: Default::default(),
         });
+        // A font installed or removed while a project is open: every viewer
+        // draws again with fonts of the new generation, and the frame its
+        // engine observes for the render cache has a new font identity, so
+        // frames rendered with the fonts before are not this state's.
+        let fonts = Arc::downgrade(&shared);
+        pm_text::system_fonts::on_change(move || {
+            fonts.upgrade().is_some_and(|shared| {
+                shared.fonts_changed();
+                true
+            })
+        });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
         let redraw = Arc::downgrade(&shared);
@@ -1020,12 +1042,7 @@ impl EngineService {
     }
     /// Call after the main-thread font broker's generation changes.
     pub fn fonts_changed(&self) {
-        let mut state = self.shared.state.lock().unwrap();
-        for v in state.views.values_mut() {
-            v.stamp.sequence += 1;
-            v.dirty = true;
-        }
-        self.shared.wake.try_send(()).ok();
+        self.shared.fonts_changed();
     }
     /// The disk render cache: Render Selection, Keep Rendered, Delete
     /// Rendered Frames and the timeline's render bar.
@@ -1320,6 +1337,9 @@ struct Work {
     id: u64,
     stamp: Stamp,
     scene: Scene,
+    /// What rendered frames are drawn from: a paused frame's media (never
+    /// Automatic's HD proxies), whatever this frame's moment reads.
+    rendered_media: Arc<pm_export::render::MediaPaths>,
     spec: FrameSpec,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
@@ -1342,9 +1362,11 @@ const DECODE_SHARE: f64 = 0.35;
 /// playhead, one batch at a time: far enough ahead that the answers land
 /// before their frames (the realm's measured time), as many frames per batch
 /// as cost about a tenth of a second. A realm slower than real time answers
-/// every few frames; the frames between draw the nearest answer.
+/// every few frames; the frames between draw the nearest answer. A frame
+/// rendered on disk is read, not drawn: nothing is asked for it.
 fn ask_ahead(
     engine: &mut render::Engine,
+    disk: &render_cache::DiskFrames,
     scene: &Scene,
     spec: FrameSpec,
     rate: Option<pm_protocol::common::PlaybackRate>,
@@ -1371,6 +1393,9 @@ fn ask_ahead(
     let Ok(at) = Ticks::new(at) else {
         return;
     };
+    if disk.rendered(scene, at) {
+        return;
+    }
     let needs = engine.compat_needs(scene, at, spec);
     store.request_ahead(needs, at.get(), frames, step);
 }
@@ -1573,7 +1598,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
-    let mut played_since_idle = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
         // Objects Metal and Core Animation autorelease on this thread outside
@@ -1767,7 +1791,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
-                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"cache_hit":t.cache_hit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
@@ -1830,6 +1854,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 if readback.is_some() {
                     v.capture_owed = false;
                 }
+                // The fast paused picture is reported: its refinement, a
+                // new picture of the same time, is drawn next. (Asked for
+                // at submission, the new stamp made this report stale and
+                // the fast picture was never reported.)
+                // A picture read from disk is the composition-size frame
+                // already: nothing to refine.
+                if let Some(r) = runtime.get_mut(&f.id)
+                    && r.full_owed == Some(f.stamp)
+                {
+                    r.full_owed = None;
+                    r.full_due = t.disk != 2;
+                }
             }
             state.notify();
         }
@@ -1868,7 +1904,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .project_releases
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if last_view_closed {
-                    played_since_idle = false;
                     // Metal command queues and wgpu encoder pools retain
                     // their playback high-water storage after caches empty.
                     // No viewer uses this device now; retire those owners as
@@ -2204,6 +2239,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 id,
                 stamp: v.stamp,
                 scene,
+                rendered_media: v.paused_paths.clone(),
                 spec: FrameSpec {
                     time,
                     output: v.config.output,
@@ -2291,6 +2327,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             id,
             stamp,
             scene,
+            rendered_media,
             spec,
             layer,
             overlays,
@@ -2326,17 +2363,28 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // Fonts sync before the cache observes: a font change is seen
             // before this frame looks for a disk frame.
             let fonts = engine.font_generation();
+            // Rendered frames are a paused frame's picture: observed (and
+            // so fingerprinted and filled) with its media even while a
+            // playing frame reads an HD proxy, or they would be drawn from
+            // the proxy and orphaned at every pause and play.
+            let rendered = Scene {
+                media: rendered_media,
+                ..scene.clone()
+            };
             if shared.disk.observe(
-                &scene,
+                &rendered,
                 engine.definitions(),
                 overrides,
                 engine.tone_identity(),
                 fonts,
                 stamp.doc_id,
                 spec.time,
-            ) && let Some(recorder) = &recorder
-            {
-                recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+            ) {
+                // A frame uploaded ahead is of the state before.
+                engine.drop_upload_ahead();
+                if let Some(recorder) = &recorder {
+                    recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+                }
             }
             let landed_before = engine.media_landed();
             let tap = shared
@@ -2424,7 +2472,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
             {
-                played_since_idle = true;
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
                     r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
@@ -2495,10 +2542,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             // rests, the same time is drawn again exact.
                             if spec.moment == Moment::Scrub {
                                 r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
-                            }
-                            if r.full_owed == Some(stamp) {
-                                r.full_owed = None;
-                                r.full_due = true;
                             }
                             if capture {
                                 r.capture_waiting = None;
@@ -2650,14 +2693,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             drop(state);
             if spec.moment == Moment::Playing {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
-                ask_ahead(&mut engine, &scene, spec, rate);
+                ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                // The next frame, if it is rendered, is uploaded in this
+                // frame's slack instead of at its own turn.
+                let step = frame_ticks * i64::from(rate.map_or(1, |r| r.num.signum()));
+                if let Ok(next) = Ticks::new(spec.time.get() + step) {
+                    engine.upload_ahead(&scene, next);
+                }
             }
-            if let Some(at) = prepare_at {
+            // A frame rendered on disk is read, not drawn: planning it and
+            // opening its media ahead would only hold this thread (a quarter
+            // of a second on a heavy project) while frames are due.
+            if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);
                 }
-            } else if let Some(at) = refine_at {
+            } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 engine.prepare(&scene, at, spec);
             }
         } else {
@@ -2726,23 +2778,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         audio.send(audio::AudioCtl::MemoryPressure);
                     }
                 }
-            }
-            if played_since_idle
-                && engine.idle_memory_released()
-                && flights.is_empty()
-                && runtime.values().all(|r| !r.transport.running())
-            {
-                match engine.renew_idle() {
-                    Ok(next) => {
-                        engine = next;
-                        *shared.device.lock().unwrap() = engine.metal().to_owned();
-                    }
-                    Err(error) => eprintln!(
-                        "Viewer cleanup could not renew stopped recording pools: {error:#}"
-                    ),
-                }
-                played_since_idle = false;
-                crate::memory::pressure_relief();
             }
             let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
         }
@@ -3021,7 +3056,17 @@ mod worker_tests {
             assert!(status.error.is_none(), "{:?}", status.error);
             if let Some(frame) = status.frame {
                 assert_ne!(frame.stamp, old);
-                assert_eq!(frame.stamp, v.stamp().unwrap());
+                // The new revision's picture: the current one, or the fast
+                // picture whose refinement (the next stamp) is being drawn.
+                let now = v.stamp().unwrap();
+                assert_eq!(
+                    (frame.stamp.generation, frame.stamp.revision),
+                    (now.generation, now.revision)
+                );
+                assert!(
+                    now.sequence - frame.stamp.sequence <= 1,
+                    "{frame:?} {now:?}"
+                );
                 assert!(status.stale_rejections >= 1);
                 break;
             }
@@ -4414,6 +4459,7 @@ fn refusal_kind(error: &anyhow::Error) -> &'static str {
         Some(pm_render::RenderError::WatchdogPending) => "watchdog",
         Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
         _ if error.is::<render::CompilerBusy>() => "shader-compiler",
+        _ if error.is::<render::DiskFramePending>() => "disk-frame",
         _ => "fonts",
     }
 }

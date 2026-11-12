@@ -1082,7 +1082,7 @@ impl crate::composite::EffectHost for Effects {
             .map(|s| self.source_key(DefinitionKind::Effect, &s.definition))
             .collect();
         Ok(Ok(Some(crate::composite::PreparedEffects {
-            padding: plan::chain_padding(&steps),
+            padding: plan::region_padding(&steps),
             backdrop: steps.iter().any(|s| s.backdrop),
             passes: exec::chain_passes(exec::Chain {
                 inputs: vec![],

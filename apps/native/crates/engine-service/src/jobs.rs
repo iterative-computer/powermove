@@ -384,7 +384,7 @@ fn disk_reserve() -> u64 {
 /// Space an export may use on the volume that will hold `destination` (its
 /// nearest existing ancestor: a PNG folder does not exist yet). This is the
 /// figure Finder shows: free space plus what macOS purges on demand.
-fn free_bytes(destination: &Path) -> Result<u64> {
+pub(crate) fn free_bytes(destination: &Path) -> Result<u64> {
     use objc2_foundation::{NSNumber, NSString, NSURL};
     let volume = destination
         .ancestors()
@@ -1407,8 +1407,12 @@ fn fill_cache(
         let spec = crate::render::FrameSpec::exact(time_of(frame)?, output);
         Ok(
             render_as(renderer, frame, spec, Some(export_request))?.map(|(read, _)| {
-                // Every bit of the export's values (finer than half floats).
-                let bytes: Vec<u8> = read.rgba.iter().flat_map(|v| v.to_le_bytes()).collect();
+                // The export's values as the viewer's surface holds them.
+                let bytes: Vec<u8> = read
+                    .rgba
+                    .iter()
+                    .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                    .collect();
                 crate::frame_codec::encode(&bytes, fill.width, fill.height)
             }),
         )

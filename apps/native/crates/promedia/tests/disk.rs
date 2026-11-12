@@ -123,19 +123,45 @@ fn cache_refuses_oversized_entry_and_missing_keep() {
     assert!(c.put(&key(), b"long frame").is_err());
     assert!(c.keep_rendered(&key(), true).is_err());
 }
+/// A damaged entry is told from a read that failed, is never returned, and
+/// is no bytes at all to a writer: the frame rendered again replaces it
+/// (its Keep Rendered mark stays). A sound entry is never overwritten by
+/// other bytes.
 #[test]
-fn cache_detects_corruption_and_preserves_corrupt_bytes() {
+fn cache_detects_corruption_and_replaces_a_damaged_entry() {
     let dir = tempfile::tempdir().unwrap();
     let c = RenderCache::open(dir.path(), 1024).unwrap();
     let k = key();
     c.put(&k, b"frame").unwrap();
+    c.keep_rendered(&k, true).unwrap();
+    assert!(c.put(&k, b"other").is_err(), "a sound entry stays");
+    assert_eq!(c.get(&k).unwrap().as_deref(), Some(&b"frame"[..]));
     let path = dir.path().join(format!("{}.frame", k.digest().unwrap()));
-    let mut bytes = fs::read(&path).unwrap();
-    bytes[48] ^= 1;
-    fs::write(&path, &bytes).unwrap();
-    assert!(c.get(&k).is_err());
-    assert!(c.put(&k, b"new").is_err());
-    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let sound = fs::read(&path).unwrap();
+    // A flipped payload byte, a cut payload, and a file cut inside its header.
+    for damage in 0..3 {
+        let mut bytes = sound.clone();
+        match damage {
+            0 => bytes[48] ^= 1,
+            1 => bytes.truncate(50),
+            _ => bytes.truncate(10),
+        }
+        fs::write(&path, &bytes).unwrap();
+        let error = c.get(&k).unwrap_err();
+        assert!(corrupt(&error), "{damage}: {error}");
+        c.put(&k, b"frame").unwrap();
+        assert_eq!(c.get(&k).unwrap().as_deref(), Some(&b"frame"[..]));
+        assert_eq!(c.presence(&k).unwrap(), Some(true), "still kept");
+    }
+    // A read that failed for another reason is not corruption.
+    assert!(!corrupt(&std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied
+    )));
+    fs::write(&path, b"damaged").unwrap();
+    c.discard(&k).unwrap();
+    assert!(!path.exists());
+    assert_eq!(c.presence(&k).unwrap(), None);
+    c.discard(&k).unwrap();
 }
 #[test]
 fn cache_rejects_truncated_headers_lengths_and_magic() {

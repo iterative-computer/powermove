@@ -45,6 +45,16 @@ pub fn set_job_qos(class: JobQos) -> Result<(), String> {
     Ok(())
 }
 
+/// Raises the calling thread to the user-interactive class: a thread a
+/// frame on screen is waiting for (the disk frame readers while playing).
+pub fn set_interactive_qos() {
+    #[cfg(target_vendor = "apple")]
+    // SAFETY: sets the calling thread's QoS class; no pointers involved.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
 /// Sets the calling thread's QoS class for `process`.
 pub fn apply_process_qos(process: EngineProcess) -> Result<(), String> {
     if process != EngineProcess::Job {
