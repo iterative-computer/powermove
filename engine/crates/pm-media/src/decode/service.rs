@@ -593,7 +593,7 @@ impl DecodeService {
     /// Whether a drag asked for video in the last half second, with
     /// PM_FIX_VIDEO2 on: decoders and reorder windows are then kept.
     pub fn scrubbing(&self) -> bool {
-        (super::diag::knob("PM_FIX_VIDEO2") == Some(1)
+        (super::diag::video2()
             || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
             && self.scrubbed_within(std::time::Duration::from_millis(500))
     }

@@ -1745,7 +1745,7 @@ impl MediaCache {
                     // the drag's run (one or two frames on); a jump stands in.
                     let step = self.scrub_last.insert(path.to_path_buf(), n);
                     let continues = step.is_some_and(|last| n > last && n - last <= 2);
-                    let video2 = pm_media::decode::diag::knob("PM_FIX_VIDEO2") == Some(1);
+                    let video2 = pm_media::decode::diag::video2();
                     let gated = video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
                     match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS").or(video2.then_some(8)) {
                         Some(ms) if ms > 0 && (!gated || continues) => {

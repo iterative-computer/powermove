@@ -1439,7 +1439,7 @@ impl Engine {
         // PM_FIX_OUT_HALF: the output frame cache keeps within half the
         // engine's grant, leaving the rest to decode and conversion.
         let limit = if pm_media::decode::diag::knob("PM_FIX_OUT_HALF") == Some(1)
-            || pm_media::decode::diag::knob("PM_FIX_VIDEO2") == Some(1)
+            || pm_media::decode::diag::video2()
             || pm_media::decode::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0)
             || pm_media::decode::diag::knob("PM_FIX_SHARES") == Some(1)
         {

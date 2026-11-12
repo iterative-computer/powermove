@@ -41,8 +41,17 @@ pub fn bump(counter: &AtomicU64, by: u64) {
     counter.fetch_add(by, Relaxed);
 }
 
-/// Benchmark switches (`PM_ABL_*` ablations, `PM_FIX_*` candidate fixes),
-/// read once from the environment. Unset means today's behaviour.
+/// Whether video decoders and reorder frames are kept while a drag scrubs,
+/// the output frame cache keeps within half the engine's grant, and a drag
+/// waits up to 8 ms for a frame that continues its run. On unless
+/// `PM_FIX_VIDEO2=0`.
+pub fn video2() -> bool {
+    knob("PM_FIX_VIDEO2") != Some(0)
+}
+
+/// Benchmark switches (`PM_ABL_*` ablations, `PM_FIX_*` fixes), read once
+/// from the environment. Unset means the shipped behaviour: the adopted fixes
+/// on, every ablation and candidate off.
 pub fn knob(name: &str) -> Option<u64> {
     static KNOBS: std::sync::OnceLock<std::collections::HashMap<String, u64>> =
         std::sync::OnceLock::new();
