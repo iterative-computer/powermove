@@ -572,8 +572,8 @@ fn volume_of(dir: &Path) -> Option<(u64, String)> {
 }
 
 /// Whether the volume `destination` is on really exchanges two names
-/// atomically, proven by doing it: two empty staging files are exchanged and
-/// each must come back under the other's name. The call's own answer is not
+/// atomically, proven by doing it: two one-byte staging files are exchanged
+/// and each must come back under the other's name. The call's own answer is not
 /// proof. One filesystem driver answers it with success and renames instead,
 /// which destroys whatever was at the destination (measured on a FAT32
 /// volume). A volume proven once is not probed again while it stays mounted.
@@ -593,16 +593,18 @@ pub(crate) fn exchanges(destination: &Path, hooks: &PublishHooks) -> Result<bool
     {
         return Ok(true);
     }
-    let (a, _) = TempFile::create(destination)?;
-    let (b, _) = TempFile::create(destination)?;
-    let identity = |path: &Path| lstat_file(path).ok().flatten().map(|s| (s.dev, s.ino));
-    let (first, second) = (identity(&a.path), identity(&b.path));
-    let works = first.is_some()
-        && second.is_some()
-        && first != second
-        && swap_files(&a.path, &b.path, hooks)?
-        && identity(&a.path) == second
-        && identity(&b.path) == first;
+    // Told apart by a byte of content each: an empty file has no stable
+    // inode number on FAT-family volumes.
+    let stage = |text: &[u8]| -> Result<TempFile, ProjectIoError> {
+        use std::io::Write;
+        let (temp, mut file) = TempFile::create(destination)?;
+        file.write_all(text).map_err(|e| io_err(&temp.path, e))?;
+        Ok(temp)
+    };
+    let (a, b) = (stage(b"a")?, stage(b"b")?);
+    let holds = |path: &Path, text: &[u8]| fs::read(path).is_ok_and(|read| read == text);
+    let works =
+        swap_files(&a.path, &b.path, hooks)? && holds(&a.path, b"b") && holds(&b.path, b"a");
     if works
         && !simulated
         && let Some(volume) = volume
