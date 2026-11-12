@@ -172,6 +172,19 @@ impl Drop for Scratch {
     }
 }
 
+/// Benchmark-only: decode counters and cache usage at each phase start.
+static DIAG: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+fn diag_mark(phase: &str, service: &EngineService) {
+    let counters: serde_json::Map<String, serde_json::Value> = pm_media::decode::diag::snapshot()
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), json!(v)))
+        .collect();
+    let usage = serde_json::to_value(service.memory_usage()).unwrap_or_default();
+    DIAG.lock()
+        .unwrap()
+        .push(json!({"phase":phase,"decode":counters,"usage":usage}));
+}
+
 pub fn run() -> anyhow::Result<()> {
     let _scratch = Scratch;
     let hz: f64 = arg("hz", "120").parse()?;
@@ -275,6 +288,7 @@ pub fn run() -> anyhow::Result<()> {
         rate: PlaybackRate::NORMAL,
     })?;
     let skipped_before = viewer.status().skipped_targets;
+    diag_mark("playback", &service);
     println!("PHASE playback");
     let started = Instant::now();
     let mut next = started;
@@ -323,6 +337,7 @@ pub fn run() -> anyhow::Result<()> {
     };
     let mut seek_tally = Tally::default();
     let mut seek_ats = Vec::new();
+    diag_mark("seek", &service);
     println!("PHASE seek");
     let mut seeks = Vec::new();
     let mut stuck = Vec::new();
@@ -409,10 +424,13 @@ pub fn run() -> anyhow::Result<()> {
     };
     let scrub_from = (from * pm_protocol::common::TICKS_PER_SECOND as f64) as i64 / frame * frame;
     let frames = (2. * rate.to_f64()).round() as i64;
+    diag_mark("scrub_forward", &service);
     println!("PHASE scrub_forward");
     let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
+    diag_mark("scrub_back", &service);
     println!("PHASE scrub_back");
     let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
+    diag_mark("scrub_cached", &service);
     println!("PHASE scrub_cached");
     let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
     // The playhead stops: its frame is drawn exact, at the requested
@@ -531,8 +549,10 @@ pub fn run() -> anyhow::Result<()> {
         out.sort_by(f64::total_cmp);
         Ok(out)
     };
+    diag_mark("skim_forward", &service);
     println!("PHASE skim_forward");
     let skim_forward = skim_pass(true)?;
+    diag_mark("skim_back", &service);
     println!("PHASE skim_back");
     let skim_back = skim_pass(false)?;
     viewer.skim(None, pm_engine_service::trace::now())?;
@@ -540,6 +560,7 @@ pub fn run() -> anyhow::Result<()> {
     // positions the viewer is asked for a capture, which the engine delivers
     // only from an exact frame (paused, full resolution, no stand-in). The
     // pixels are fingerprinted so two builds can be compared frame by frame.
+    diag_mark("exact", &service);
     println!("PHASE exact");
     let mut exact_frames = Vec::new();
     let mut positions = vec![last];
@@ -597,6 +618,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     // Gate: nothing asked for four seconds (past the engine's two-second idle
     // release): the footprint it settles to.
+    diag_mark("idle", &service);
     println!("PHASE idle");
     let idling = Instant::now();
     while idling.elapsed() < Duration::from_secs(4) {
@@ -604,6 +626,7 @@ pub fn run() -> anyhow::Result<()> {
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
         std::thread::sleep(Duration::from_millis(16));
     }
+    diag_mark("end", &service);
     println!("PHASE end");
     let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"p99":percentile(v,0.99),"max":v.last()});
     let result = json!({
@@ -623,7 +646,7 @@ pub fn run() -> anyhow::Result<()> {
             "stuck":{"seek":stuck.len(),"scrub_forward":gate_sweeps[0].1,"scrub_back":gate_sweeps[1].1,"scrub_cached":gate_sweeps[2].1},
             "settle":settle_report,"exact_capture":exact_frames},
         "skim_ms":{"counts":skim_counts,"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
-        "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
+        "diag":DIAG.lock().unwrap().clone(),"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
         arg("report", "/tmp/es2-service-offscreen.json"),

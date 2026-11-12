@@ -218,13 +218,16 @@ impl Session {
         self.stats.requests += 1;
         if let Some(f) = self.window.get(&s) {
             self.stats.window_hits += 1;
+            super::diag::bump(&super::diag::WINDOW_HITS, 1);
             return Ok(Some(f.clone()));
         }
         let sync = self.index.sync_for(s);
         if self.continues(s) {
             self.stats.continued += 1;
+            super::diag::bump(&super::diag::CONTINUED, 1);
         } else {
             self.stats.seeks += 1;
+            super::diag::bump(&super::diag::SEEKS, 1);
             self.decoder.reset()?;
             self.window.clear();
             self.run_start = Some(sync);
@@ -242,6 +245,7 @@ impl Session {
             let t = std::time::Instant::now();
             self.decoder.sync(&mut out)?;
             self.stats.wait_us += t.elapsed().as_micros() as u64;
+            super::diag::bump(&super::diag::DECODE_WAIT_US, t.elapsed().as_micros() as u64);
             self.absorb(&mut out)?;
         }
         // Decoders with reorder delay output s after later samples.
@@ -329,6 +333,7 @@ impl Session {
                 }
                 self.decoder.send(p, out)?;
                 self.stats.samples_fed += 1;
+                super::diag::bump(&super::diag::SAMPLES_FED, 1);
             }
             self.stats.send_us += t.elapsed().as_micros() as u64;
             self.next = chunk[chunk.len() - 1] + 1;

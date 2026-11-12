@@ -15,6 +15,7 @@
 //! | Everything else (DNxHD/DNxHR, CineForm, MJPEG, DV, MPEG-2, ...) | FFmpeg |
 
 pub mod arbiter;
+pub mod diag;
 pub mod scrub;
 pub mod service;
 pub mod session;

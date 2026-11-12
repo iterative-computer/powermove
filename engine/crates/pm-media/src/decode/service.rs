@@ -396,11 +396,23 @@ impl Drop for SessionGuard<'_> {
             // and closes when that is still not enough (always for a zero
             // share, as in `fit_decoders`).
             let zero = svc.decoder_budget.load(Ordering::Relaxed) == 0;
+            // PM_FIX_KEEP_SESSION: over the share, a session gives back its
+            // window but stays open as its key's one idle session; cold
+            // sources and idle release close it.
+            let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
+                || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
+                && svc
+                    .idle
+                    .lock()
+                    .unwrap()
+                    .get(&self.key)
+                    .is_none_or(|l| l.is_empty());
             if zero || svc.decoders_over() {
                 s.clear_window();
-                if zero || svc.decoders_over() {
+                if !keep && (zero || svc.decoders_over()) {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
+                    super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
                     svc.fit_decoders();
                     return;
                 }
@@ -410,6 +422,7 @@ impl Drop for SessionGuard<'_> {
             if list.len() < svc.config.idle_sessions {
                 list.push(s);
             } else {
+                super::diag::bump(&super::diag::SESSIONS_CLOSED_IDLE_FULL, 1);
                 svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -497,8 +510,11 @@ impl DecodeService {
                 let reader = PacketReader::new(source.path(), source.stream)?;
                 let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
                 s.set_window(self.config.session_window);
-                s.set_window_bytes(32 << 20);
+                s.set_window_bytes(
+                    super::diag::knob("PM_ABL_WINDOW_MIB").map_or(32 << 20, |m| (m << 20) as usize),
+                );
                 self.open_sessions.fetch_add(1, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_OPENED, 1);
                 s
             }
         };
@@ -520,6 +536,7 @@ impl DecodeService {
             if drop {
                 self.open_sessions
                     .fetch_sub(v.len() as u64, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_RELEASED, v.len() as u64);
             }
             !drop
         });
@@ -560,12 +577,17 @@ impl DecodeService {
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.decoder_budget.load(Ordering::Relaxed) == 0;
-        while zero || self.decoders_over() {
+        // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
+        // their decoder (windows and free pool memory go above); only a zero
+        // share (idle release, project close) closes them.
+        let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2);
+        while zero || (!keep && self.decoders_over()) {
             let Some(s) = idle.values_mut().find_map(|l| l.pop()) else {
                 break;
             };
             drop(s);
             self.open_sessions.fetch_sub(1, Ordering::Relaxed);
+            super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
             self.trim_free();
         }
         idle.retain(|_, l| !l.is_empty());

@@ -377,14 +377,28 @@ impl Engine {
             self.budgeted_surfaces = surfaces;
             // In-flight surfaces are pinned. Divide only the remainder,
             // so every independently reusable cache shares the same allowance.
-            let cache = share.saturating_sub(surfaces);
+            let knob = pm_media::decode::diag::knob;
+            let cache = if knob("PM_ABL_SURFACES") == Some(0) {
+                share
+            } else {
+                share.saturating_sub(surfaces)
+            };
+            // PM_FIX_SHARES: the remainder after output frames favours
+            // decoded frames (35 %) over stills (10 %); the parts still sum
+            // to the grant.
+            let shares = knob("PM_FIX_SHARES") == Some(1);
+            let (frame_part, image_part) = if shares { (35, 10) } else { (15, 20) };
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
-                    frame_cache: (cache * 15 / 100) as usize,
-                    decoders: (cache / 4) as usize,
+                    frame_cache: knob("PM_ABL_FRAME_CACHE_MIB")
+                        .map_or((cache * frame_part / 100) as usize, |m| (m << 20) as usize),
+                    decoders: knob("PM_ABL_DECODERS_MIB")
+                        .map_or((cache / 4) as usize, |m| (m << 20) as usize),
                 });
-            self.renderer.set_image_cache_budget(cache / 5);
-            self.renderer.set_converted_frame_budget(cache / 10);
+            self.renderer.set_image_cache_budget(cache * image_part / 100);
+            self.renderer.set_converted_frame_budget(
+                knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20),
+            );
             self.renderer.set_target_pool_budget(cache / 10);
             self.renderer.set_vector_cache_budget(cache / 20, 512);
             self.renderer.trim(cache / 20);
@@ -881,7 +895,9 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
-                self.renderer.set_preview_media(!spec.exact);
+                self.renderer.set_preview_media(
+                    !spec.exact && pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0),
+                );
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
@@ -1080,7 +1096,16 @@ impl Engine {
     /// room in the cache first.
     fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
         let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-        let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
+        // PM_FIX_OUT_HALF: the output frame cache keeps within half the
+        // engine's grant, leaving the rest to decode and conversion.
+        let limit = if pm_media::decode::diag::knob("PM_FIX_OUT_HALF") == Some(1)
+            || pm_media::decode::diag::knob("PM_FIX_SHARES") == Some(1)
+        {
+            FRAME_CACHE_BYTES.min(self.memory_client.grant() / 2)
+        } else {
+            FRAME_CACHE_BYTES
+        };
+        let capacity = ((limit / bytes).clamp(1, 8)) as usize;
         while self.cache.len() >= capacity {
             self.cache.pop_front();
         }
