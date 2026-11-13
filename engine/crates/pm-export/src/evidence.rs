@@ -39,7 +39,7 @@
 //! sampled regions, and one wrong block of a long-GOP predicted frame.
 
 use crate::convert::{EncoderInput, sample_ycbcra};
-use crate::settings::{Codec, ProResProfile};
+use crate::settings::Codec;
 
 /// Side of a block judged against its neighbours.
 pub const BLOCK: u32 = 16;
@@ -421,27 +421,30 @@ pub fn pixel_tolerance(codec: Codec) -> f64 {
 /// How far most of the picture of every frame may sit from the encoder
 /// input's the same way, in code values at the codec's depth, for channel
 /// `k` (Y′, Cb, Cr, A). A wrong level, range or matrix moves every frame;
-/// a codec's quantisation of a flat saturated picture can too, in every
-/// frame of a slate, and that sets the allowance: twice the largest such
-/// shift measured on full-frame primary and secondary slates, very dark
-/// and flat frames, at the lowest rate of each codec
-/// (`tests/hard_delivery.rs`).
+/// so does a codec's quantisation of the DC of a flat or saturated
+/// picture, by whole quantisation steps, in every frame of a slate and at
+/// a starved rate in every frame of a detailed picture. The allowance is
+/// twice the largest such shift measured on full-frame primary and
+/// secondary slates, grey, very dark, grainy and HDR pictures at every
+/// rate from 0.1 Mb/s (`tests/hard_delivery.rs`,
+/// `measure_the_shared_shift_by_rate`): H.264 5 codes, HEVC 1, HEVC Main10
+/// 5 (10 bits), ProRes 0.48 (10 bits; Proxy on a magenta slate), 4444 0.19
+/// (12 bits). A range mistake is caught by its gain as well.
 pub fn level_tolerance(codec: Codec, k: usize) -> f64 {
-    let chroma = k == 1 || k == 2;
     match codec {
         Codec::Png { .. } => 0.0,
-        Codec::ProRes(p) if p.is_4444() => match k {
-            3 => 64.0,
-            _ if chroma => 16.0,
-            _ => 8.0,
-        },
-        Codec::ProRes(ProResProfile::Proxy) if chroma => 16.0,
-        Codec::ProRes(_) if chroma => 4.0,
+        Codec::ProRes(p) if p.is_4444() => {
+            if k == 3 {
+                64.0
+            } else {
+                8.0
+            }
+        }
         Codec::ProRes(_) => 2.0,
-        Codec::Hevc { ten_bit: true, .. } if chroma => 12.0,
-        Codec::Hevc { ten_bit: true, .. } => 6.0,
-        _ if chroma || k == 3 => 3.0,
-        _ => 1.5,
+        Codec::H264 { .. } => 10.0,
+        Codec::Hevc { ten_bit: true, .. } => 10.0,
+        Codec::Hevc { .. } => 2.0,
+        Codec::Vp9 { .. } | Codec::Vp8 { .. } => 10.0,
     }
 }
 
@@ -1092,7 +1095,7 @@ pub fn check_frames<'a>(
 mod tests {
     use super::*;
     use crate::convert::{ConvertParams, WorkingFrame, convert};
-    use crate::settings::{AlphaOutput, InputFormat, WorkingEncoding};
+    use crate::settings::{AlphaOutput, InputFormat, ProResProfile, WorkingEncoding};
 
     const HQ: Codec = Codec::ProRes(ProResProfile::Hq);
     const H264: Codec = Codec::H264 {
@@ -1326,10 +1329,10 @@ mod tests {
         let starved = [flat(120.0), flat(121.3), flat(118.9), flat(121.0)];
         let found = frame_problems(H264, &want, &starved);
         assert!(found.is_empty(), "{found:?}");
-        let lifted = [flat(122.5), flat(123.0), flat(122.6), flat(122.5)];
+        let lifted = [flat(132.5), flat(133.0), flat(132.6), flat(132.5)];
         assert_eq!(
             frame_problems(H264, &want, &lifted),
-            ["luma is +2.5 codes from what was rendered in every frame"]
+            ["luma is +12.5 codes from what was rendered in every frame"]
         );
     }
 
