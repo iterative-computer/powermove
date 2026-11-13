@@ -1000,17 +1000,11 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
     #[cfg(target_os = "macos")]
     {
         proven("exclusive rename", destination, |a, b| {
-            let refused = sys::renamex(&a.path, &b.path, sys::RENAME_EXCL)
-                .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
-                && holds(&a.path, b"a")
-                && holds(&b.path, b"b");
-            let free = TempFile {
-                path: temporary_sibling(destination),
-                keep: false,
-            };
-            Ok(refused
-                && sys::renamex(&a.path, &free.path, sys::RENAME_EXCL).is_ok()
-                && holds(&free.path, b"a"))
+            Ok(exclusive_rename_probe(
+                &a.path,
+                &b.path,
+                temporary_sibling(destination),
+            ))
         })
     }
     #[cfg(not(target_os = "macos"))]
@@ -1037,6 +1031,51 @@ impl From<ProjectIoError> for Box<Unplaced> {
             partial: false,
             created: None,
         })
+    }
+}
+
+/// [`excludes`]' probe on the two staging files `a` (holding "a") and `b`
+/// (holding "b") and the name `free`, which should hold nothing.
+#[cfg(target_os = "macos")]
+fn exclusive_rename_probe(a: &Path, b: &Path, free: PathBuf) -> bool {
+    let refused = sys::renamex(a, b, sys::RENAME_EXCL)
+        .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
+        && holds(a, b"a")
+        && holds(b, b"b");
+    if !refused || sys::renamex(a, &free, sys::RENAME_EXCL).is_err() {
+        return false;
+    }
+    // Only now does the name hold the probe's own file: it is the probe's
+    // to remove from here on, and never a file that was already there.
+    let free = TempFile {
+        path: free,
+        keep: false,
+    };
+    holds(&free.path, b"a")
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod probe_tests {
+    use super::*;
+
+    /// The probe moves a staging file to a name that should be free. A
+    /// file that is under that name all the same is not the probe's: the
+    /// rename refuses it, and the probe must not remove it either.
+    #[test]
+    fn the_probe_never_removes_a_file_it_found_under_its_free_name() {
+        let dir = std::env::temp_dir().join(format!("pm-probe-{}", random_uuid()));
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b, taken) = (dir.join("a"), dir.join("b"), dir.join("taken"));
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        fs::write(&taken, b"someone's file").unwrap();
+        assert!(!exclusive_rename_probe(&a, &b, taken.clone()));
+        assert_eq!(fs::read(&taken).unwrap(), b"someone's file");
+        // A name that is free: the probe's file lands there and goes again.
+        let free = dir.join("free");
+        assert!(exclusive_rename_probe(&a, &b, free.clone()));
+        assert!(!free.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 
