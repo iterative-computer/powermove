@@ -596,6 +596,9 @@ pub(crate) fn check_pixel_blocks(
     let lossless = matches!(codec, Codec::Png { .. });
     let flat = pixel_tolerance(codec);
     let scale = |k: usize| channel_scale(codec, k);
+    // The codec's flat noise in each channel's own codes: the same part of
+    // its range as in luma (alpha is 16 bits in ProRes, 8 in HEVC).
+    let noise = |k: usize| flat * scale(k) / scale(0);
     let mut regions = 0usize;
     // Per frame: each judged region's best one-pixel move and its ratio.
     let mut moves: std::collections::BTreeMap<u64, Vec<(usize, f64)>> = Default::default();
@@ -629,7 +632,7 @@ pub(crate) fn check_pixel_blocks(
                     continue;
                 };
                 let (rr, dd) = (rms(r.iter().copied()), rms(d.iter().copied()));
-                if rr * scale(k) < FINGERPRINT_CONTRAST * flat.max(1.0)
+                if rr * scale(k) < FINGERPRINT_CONTRAST * noise(k).max(1.0)
                     || rr < FINGERPRINT_SHARE * w.activity[k]
                 {
                     continue;
@@ -735,8 +738,8 @@ pub(crate) fn check_pixel_blocks(
                 let around =
                     median(neighbours.iter().map(|o| o.foreign[k]).collect()).unwrap_or(0.0);
                 let f = b.foreign[k];
-                if f > FOREIGN_BLOCK * around + 2.0 * flat
-                    && f > FOREIGN_SHARE * b.own[k] + 2.0 * flat
+                if f > FOREIGN_BLOCK * around + 2.0 * noise(k)
+                    && f > FOREIGN_SHARE * b.own[k] + 2.0 * noise(k)
                 {
                     local.push((
                         got.frame,

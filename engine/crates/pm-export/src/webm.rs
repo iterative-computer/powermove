@@ -1577,7 +1577,11 @@ mod sampled_decode_tests {
                 .iter()
                 .flat_map(|(n, input)| verify::block_means(input, *n))
                 .collect();
-            assert_eq!(expected.len(), verify::sampled_frames(frames).len() * 9);
+            assert_eq!(
+                expected.len(),
+                verify::sampled_frames(frames).len()
+                    * verify::block_regions(spec.width, spec.height).len()
+            );
             for decode_gap in [gap, 0] {
                 let cropped: Vec<_> =
                     decoded_samples_with(&delivered.path, &spec, decode_gap, None, |f, n| {

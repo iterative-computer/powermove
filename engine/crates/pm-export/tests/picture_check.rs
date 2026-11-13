@@ -855,7 +855,7 @@ fn measure_the_check_on_a_long_uhd_export() {
     let delivered = job.finish().unwrap();
     let finishing = started.elapsed().as_secs_f64();
     let timing = spec.timing().unwrap();
-    let mut check = |readers: u64| {
+    let check = |readers: u64| {
         let started = std::time::Instant::now();
         let checked = AtomicU64::new(0);
         pm_export::mac::reader::decode_frames_with(

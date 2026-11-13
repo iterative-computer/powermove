@@ -684,6 +684,7 @@ fn rational(v: &Value, key: &str) -> Option<(u64, u64)> {
     Some((n.parse().ok()?, d.parse().ok()?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn probe_and_verify(
     tools: &SoftwareTools,
     path: &Path,
