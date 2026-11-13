@@ -292,9 +292,16 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
             );
         } else {
             out.extend(
-                disk::walk(&path)?
-                    .into_iter()
-                    .map(|(p, v)| (PathBuf::from(family).join(p), v)),
+                disk::walk_filtered(
+                    &path,
+                    if *family == "extensions" {
+                        &["node_modules", "extensions-build", ".git", ".cache"]
+                    } else {
+                        &[]
+                    },
+                )?
+                .into_iter()
+                .map(|(p, v)| (PathBuf::from(family).join(p), v)),
             );
         }
     }
