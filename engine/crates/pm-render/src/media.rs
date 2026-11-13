@@ -2065,6 +2065,11 @@ impl MediaCache {
         self.image_over
     }
 
+    /// Decoded stills the prefetch worker holds for frames to come.
+    pub fn still_prefetch_bytes(&self) -> u64 {
+        self.stills.held_bytes()
+    }
+
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
@@ -2080,6 +2085,9 @@ impl MediaCache {
     /// everything.
     pub fn trim_images(&mut self, budget: u64) {
         self.image_budget = budget;
+        if budget == 0 {
+            self.stills.release();
+        }
         self.evict_images(if budget == 0 {
             u64::MAX
         } else {
@@ -2236,6 +2244,7 @@ impl MediaCache {
 
     /// Queue-owned GPU references remain valid; this only drops cache handles.
     pub fn release_idle_frames(&mut self) {
+        self.stills.release();
         self.frames.clear();
         self.retired_frames.clear();
         self.free_frames.clear();

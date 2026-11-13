@@ -1370,6 +1370,11 @@ impl Renderer {
         self.media.image_bytes()
     }
 
+    /// Decoded stills held ahead of the playhead (`media/stills.rs`).
+    pub fn still_prefetch_bytes(&self) -> u64 {
+        self.media.still_prefetch_bytes()
+    }
+
     /// Explicit viewer opt-in, for stills and for video: a copy at the
     /// view's resolution instead of the source's. CLI exact/reference and
     /// export paths keep native source resolution and precision by default.

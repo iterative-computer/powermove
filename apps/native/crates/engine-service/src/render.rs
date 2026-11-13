@@ -437,6 +437,7 @@ impl Engine {
             target_pool_idle: self.renderer.target_pool_idle(),
             targets_created: self.renderer.target_pool_created(),
             image_bytes: self.renderer.image_cache_bytes(),
+            still_prefetch_bytes: self.renderer.still_prefetch_bytes(),
             converted_frame_bytes: self.renderer.converted_frame_bytes(),
             decoded_frame_bytes: media.frame_cache as u64,
             decoder_bytes: media.decoders as u64,
@@ -610,6 +611,7 @@ impl Engine {
                     u.pyramid_bytes
                         + u.target_pool_bytes
                         + u.image_bytes
+                        + u.still_prefetch_bytes
                         + u.converted_frame_bytes
                         + u.text_bytes
                         + u.vector_bytes,

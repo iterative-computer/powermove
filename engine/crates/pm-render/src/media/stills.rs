@@ -261,12 +261,20 @@ impl StillPrefetch {
             {
                 Ok((key, still)) => {
                     let done = is(&key);
-                    self.pending.remove(&key);
+                    let asked =
+                        self.pending.remove(&key) || done || self.abandoned.as_ref() == Some(&key);
                     if self.abandoned.as_ref() == Some(&key) {
                         // Its frame gave up on it; the wanted mark is this
                         // frame's now.
                         self.abandoned = None;
                     }
+                    // Released while it decoded: not kept.
+                    let still = still.filter(|(still, _)| {
+                        asked || {
+                            self.held.fetch_sub(bytes(still), Ordering::AcqRel);
+                            false
+                        }
+                    });
                     if let Some(still) = still {
                         self.ready.insert(key, (still, now));
                     }
@@ -335,11 +343,34 @@ impl StillPrefetch {
         }
     }
 
+    /// Decoded bytes held: ready, and on their way to the frame.
+    pub(crate) fn held_bytes(&self) -> u64 {
+        self.held.load(Ordering::Acquire) as u64
+    }
+
+    /// Lets go of every decoded still (a cache budget of zero, a viewer at
+    /// rest, memory pressure), and of the answers of decodes already
+    /// running when they arrive: nothing asked for them since.
+    pub(crate) fn release(&mut self) {
+        self.drain();
+        self.pending.clear();
+        for ((still, _), _) in std::mem::take(&mut self.ready).into_values() {
+            self.held.fetch_sub(bytes(&still), Ordering::AcqRel);
+        }
+    }
+
     fn drain(&mut self) {
         let now = Instant::now();
         if let Some(worker) = &self.worker {
             while let Ok((key, still)) = worker.answers.try_recv() {
-                self.pending.remove(&key);
+                let asked = self.pending.remove(&key) || self.abandoned.as_ref() == Some(&key);
+                // Released while it decoded: not kept.
+                let still = still.filter(|(still, _)| {
+                    asked || {
+                        self.held.fetch_sub(bytes(still), Ordering::AcqRel);
+                        false
+                    }
+                });
                 if self.abandoned.as_ref() == Some(&key) {
                     self.abandoned = None;
                     let mut progress = self.progress.lock().unwrap();
@@ -792,5 +823,40 @@ mod tests {
         holder.join().unwrap();
         settle(&mut prefetch);
         assert!(prefetch.take(&path, stamp, ask, None).is_some());
+    }
+
+    /// A release (budget zero, idle, pressure) lets go of every decoded
+    /// still and of the answer of a decode already running when it lands;
+    /// the held bytes are what a governor counts.
+    #[test]
+    fn a_release_lets_go_of_held_stills_and_late_answers() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let mut prefetch = StillPrefetch::default();
+        let ask = StillAsk::default();
+        prefetch.request(&path, stamp, ask, &pool);
+        settle(&mut prefetch);
+        assert!(prefetch.held_bytes() > 0, "a decoded still is counted");
+        prefetch.release();
+        assert_eq!(prefetch.held_bytes(), 0);
+        assert!(prefetch.ready.is_empty());
+        // Released while the worker decodes: the answer is not kept.
+        let (go, holder) = stall_worker(&prefetch);
+        prefetch.request(&path, (stamp.0, stamp.1 + 1), ask, &pool);
+        decoding(&prefetch);
+        prefetch.release();
+        drop(go);
+        holder.join().unwrap();
+        let started = Instant::now();
+        while prefetch.progress.lock().unwrap().decoding.is_some()
+            || started.elapsed() < Duration::from_millis(50)
+        {
+            assert!(started.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        prefetch.drain();
+        assert!(prefetch.ready.is_empty(), "a late answer was kept");
+        assert_eq!(prefetch.held_bytes(), 0);
     }
 }

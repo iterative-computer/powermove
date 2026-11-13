@@ -1156,3 +1156,26 @@ fn critical_pressure_lets_go_of_stills_after_the_frame() {
     assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0]]) > 0);
     assert!(media.image_bytes() > 0, "kept while frames draw it");
 }
+
+/// What the still prefetch holds is counted and goes with a budget of zero
+/// and with an idle release, like the converted stills.
+#[test]
+fn the_still_prefetch_hold_goes_at_budget_zero_and_at_rest() {
+    let gpu = pm_gpu::Gpu::new("prefetch hold").unwrap();
+    let (_dir, s) = distinct_stills(2);
+    let mut media = MediaCache::new(&gpu.device);
+    let hold = |media: &mut MediaCache| {
+        for path in &s {
+            media.prepare_image(path, None, false);
+        }
+        media.wait_for_stills();
+        assert!(media.still_prefetch_bytes() > 0, "the hold is counted");
+    };
+    hold(&mut media);
+    media.trim_images(0);
+    assert_eq!(media.still_prefetch_bytes(), 0, "budget zero");
+    media.trim_images(48 << 20);
+    hold(&mut media);
+    media.release_idle_frames();
+    assert_eq!(media.still_prefetch_bytes(), 0, "at rest");
+}
