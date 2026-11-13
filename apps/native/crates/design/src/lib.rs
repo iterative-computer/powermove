@@ -911,6 +911,12 @@ impl Tokens {
             (self.colors.text, self.translucency.edge)
         }
     }
+    /// The veil over the timeline's tracks outside the work area, as
+    /// (colour, alpha): the canvas's second step, so strips there fade
+    /// toward the ground in either appearance. Names are painted over it.
+    pub fn work_area_veil(&self) -> (u32, f32) {
+        (self.colors.panel_secondary, 0.3)
+    }
     /// Divider under a panel header, between list columns and above the status line.
     pub fn line(&self) -> (u32, f32) {
         if self.accessibility.increase_contrast {

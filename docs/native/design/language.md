@@ -347,8 +347,10 @@ below lives in pm-design, none in the timeline's code.
   step deeper and fuller. A neutral layer (null, camera) is light grey glass.
 - Both: disabled (hidden, muted, offline) drops chroma and opacity, so the
   strip fades toward the canvas; outside the work area the tracks are veiled
-  with the canvas's own second step, so strips there fade toward the ground
-  in either appearance; dragging lifts the strip on a shadow. Corners are
+  with the canvas's own second step (`Tokens::work_area_veil`), so strips
+  there fade toward the ground in either appearance, and names are painted
+  over the veil, so a name reads there as it does inside; dragging lifts
+  the strip on a shadow. Corners are
   continuous and about a quarter of the strip's height (`strip_radius`); an
   even `strip_gap` parts neighbours; the ruler's grid reads through the body
   as a line strongest at the strip's top edge and gone by the middle of its
@@ -395,6 +397,14 @@ ruler 24, layer rows 30 (strip 26), property rows 22, bottom bar 24.
   press beside it bringing the thumb there. Rows scroll with a thumb of the
   same recipe at the tracks' trailing edge. Thumbs are ink at 22 %, 38 %
   under the pointer or held, and are absent when there is nothing to scroll.
+- A property row's value ends at the row's trailing edge in every row; a
+  scale's aspect link stands before its value, one glyph whose ink says
+  linked or not.
+- The graph is the same piece: the tracks' ground, the ruler's time lines
+  and the markers' lines running on through it, curves and keys in the ink,
+  value labels in the muted ink. Beside the dope sheet it takes the lower
+  half from the first row edge there, so it never cuts a strip or a row of
+  keys in two. With no curve to show it says how to get one, in its middle.
 - A strip too short for three letters of its name shows its colour alone.
 - Playing changes the playhead layer and the timecode only: the canvas, the
   bar and the rows are not repainted.

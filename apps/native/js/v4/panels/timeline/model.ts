@@ -116,7 +116,6 @@ export interface TimelineFrame {
   hasComposition: boolean;
   mode: Mode;
   view: View;
-  graphEmpty: boolean;
   playing: boolean;
   snapping: boolean;
   timecode: string;
@@ -203,12 +202,9 @@ export function checkFrame(
   windowRequest(request.first, request.visible);
   const w = frame.window;
   if (
-    [
-      frame.hasComposition,
-      frame.graphEmpty,
-      frame.playing,
-      frame.snapping,
-    ].some((value) => typeof value !== "boolean") ||
+    [frame.hasComposition, frame.playing, frame.snapping].some(
+      (value) => typeof value !== "boolean",
+    ) ||
     [
       frame.timecode,
       frame.spokenTime,

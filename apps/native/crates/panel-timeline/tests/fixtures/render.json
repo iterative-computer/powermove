@@ -1796,33 +1796,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            26.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -2077,33 +2050,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            56.0,
-            392.4,
-            26.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -2261,33 +2207,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            86.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -2436,33 +2355,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            116.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -3449,13 +3341,121 @@
             416.0
           ],
           "color": 16119287,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            26.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            56.0,
+            392.4,
+            26.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            86.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            116.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -5398,33 +5398,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            26.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -5679,33 +5652,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            56.0,
-            392.4,
-            26.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -5863,33 +5809,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            86.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -6038,33 +5957,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            116.0,
-            438.0,
-            26.0
-          ],
-          "color": 21596,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -7051,13 +6943,121 @@
             416.0
           ],
           "color": 16119287,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            26.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            56.0,
+            392.4,
+            26.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            86.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            116.0,
+            438.0,
+            26.0
+          ],
+          "color": 21596,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -8897,33 +8897,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            28.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -9201,33 +9174,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            58.0,
-            391.4,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -9408,33 +9354,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            88.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -9606,33 +9525,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            118.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -10637,13 +10529,121 @@
             416.0
           ],
           "color": 16119287,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            28.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            58.0,
+            391.4,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            88.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            118.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -12483,33 +12483,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            28.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -12787,33 +12760,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            58.0,
-            391.4,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -12994,33 +12940,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            88.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -13192,33 +13111,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            118.0,
-            437.0,
-            22.0
-          ],
-          "color": 1908517,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -14223,13 +14115,121 @@
             416.0
           ],
           "color": 16119287,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            28.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            58.0,
+            391.4,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            88.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            118.0,
+            437.0,
+            22.0
+          ],
+          "color": 1908517,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -16172,33 +16172,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            26.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -16453,33 +16426,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            56.0,
-            392.4,
-            26.0
-          ],
-          "color": 16119284,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -16637,33 +16583,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            86.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -16812,33 +16731,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            116.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -17825,13 +17717,121 @@
             416.0
           ],
           "color": 1381137,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            26.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            56.0,
+            392.4,
+            26.0
+          ],
+          "color": 16119284,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            86.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            116.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -19774,33 +19774,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            26.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -20055,33 +20028,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            56.0,
-            392.4,
-            26.0
-          ],
-          "color": 16119284,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -20239,33 +20185,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            86.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -20414,33 +20333,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            116.0,
-            438.0,
-            26.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -21427,13 +21319,121 @@
             416.0
           ],
           "color": 1381137,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            26.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            56.0,
+            392.4,
+            26.0
+          ],
+          "color": 16119284,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            86.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            116.0,
+            438.0,
+            26.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -23273,33 +23273,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            28.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -23577,33 +23550,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            58.0,
-            391.4,
-            22.0
-          ],
-          "color": 16119284,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -23784,33 +23730,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            88.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -23982,33 +23901,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            118.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -25013,13 +24905,121 @@
             416.0
           ],
           "color": 1381137,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            28.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            58.0,
+            391.4,
+            22.0
+          ],
+          "color": 16119284,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            88.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            118.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
@@ -26859,33 +26859,6 @@
           ]
         },
         {
-          "id": "clip-content:selected",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            28.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "selected.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "trim:selected",
           "shape": "rect",
           "bounds": [
@@ -27163,33 +27136,6 @@
           ]
         },
         {
-          "id": "clip-content:offline",
-          "shape": "text",
-          "bounds": [
-            376.6,
-            58.0,
-            391.4,
-            22.0
-          ],
-          "color": 16119284,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "offline.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": "exclamationmark.triangle.fill",
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"offline\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -27370,33 +27316,6 @@
           ]
         },
         {
-          "id": "clip-content:loading",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            88.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 0.7,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "Loading…",
-          "fontSize": 11.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": null
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
           "id": "key:[\"loading\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -27568,33 +27487,6 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
-          },
-          "clip": [
-            320.0,
-            24.0,
-            640.0,
-            416.0
-          ]
-        },
-        {
-          "id": "clip-content:locked",
-          "shape": "text",
-          "bounds": [
-            331.0,
-            118.0,
-            437.0,
-            22.0
-          ],
-          "color": 16777215,
-          "opacity": 1.0,
-          "radius": 0.0,
-          "stroke": 0.0,
-          "text": "locked.mov",
-          "fontSize": 12.0,
-          "detail": {
-            "truncate": "tail",
-            "offlineSymbol": null,
-            "lockSymbol": "lock"
           },
           "clip": [
             320.0,
@@ -28599,13 +28491,121 @@
             416.0
           ],
           "color": 1381137,
-          "opacity": 0.3,
+          "opacity": 0.30000001192092896,
           "radius": 0.0,
           "stroke": 0.0,
           "text": null,
           "fontSize": 0.0,
           "detail": null,
           "clip": null
+        },
+        {
+          "id": "clip-content:selected",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            28.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "selected.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            376.6,
+            58.0,
+            391.4,
+            22.0
+          ],
+          "color": 16119284,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "offline.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": "exclamationmark.triangle.fill",
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:loading",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            88.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 0.7,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Loading…",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": null
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:locked",
+          "shape": "text",
+          "bounds": [
+            331.0,
+            118.0,
+            437.0,
+            22.0
+          ],
+          "color": 16777215,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "locked.mov",
+          "fontSize": 12.0,
+          "detail": {
+            "truncate": "tail",
+            "offlineSymbol": null,
+            "lockSymbol": "lock"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
         },
         {
           "id": "column-edge",
