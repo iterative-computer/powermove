@@ -116,6 +116,26 @@ pub(crate) fn in_place(
     }))
 }
 
+/// The identity of a sequence read in place (`pm_media::image::sequence::Manifest`,
+/// the file its asset retains): the aggregate of its frames' bytes and rate
+/// ([`SequenceManifest::content_hash`]), which keys its proxies. `None` for
+/// any other file. Reads every frame: call on a worker. A missing frame
+/// fails, naming it.
+pub fn sequence_identity(
+    path: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Option<String>> {
+    let control = GenerationControl {
+        cancel,
+        pause: &|| false,
+        on_pause: &|_| {},
+        on_progress: &|_| {},
+    };
+    in_place(path, &control)?
+        .map(|manifest| manifest.content_hash())
+        .transpose()
+}
+
 fn wait_for_idle(control: &GenerationControl<'_>) -> Result<()> {
     let mut reported = false;
     loop {

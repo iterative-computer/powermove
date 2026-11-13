@@ -13,6 +13,9 @@ mod sequence;
 mod store;
 
 #[cfg(feature = "generation")]
+pub use sequence::sequence_identity;
+
+#[cfg(feature = "generation")]
 pub use generate::{
     GeneratedProxy, GenerationControl, GenerationRequest, PauseReason, generate,
     generate_with_disk_probe,

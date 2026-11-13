@@ -66,8 +66,15 @@ pub fn generate_with_disk_probe(
         return crate::sequence::generate_sequence(request, disk_space, manifest, false);
     }
     if let Some(manifest) = crate::sequence::in_place(request.source, &request.control)? {
-        // The proxy is of the frames' bytes (and rate), wherever they live.
+        // The proxy is of the frames' bytes (and rate), wherever they live,
+        // and only of the frames the host identified: a frame rendered again
+        // since is another sequence, with another identity.
         let hash = manifest.content_hash()?;
+        if hash != request.source_hash.to_ascii_lowercase() {
+            return Err(ProxyError::InvalidMedia(
+                "the sequence's files changed since it was identified".into(),
+            ));
+        }
         let GenerationRequest {
             source,
             format,

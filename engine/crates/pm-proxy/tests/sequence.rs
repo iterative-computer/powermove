@@ -261,10 +261,10 @@ mod real {
         let ffmpeg = ffmpeg_dir.join("bin/ffmpeg");
         let ffprobe = ffmpeg_dir.join("bin/ffprobe");
         let level = |n: u16| [n * 12_000, 65_535 - n * 12_000, 30_000];
-        for n in 1..=4u16 {
+        let render = |n: u16, picture: u16| {
             let mut bytes = Vec::new();
             for _ in 0..WIDTH * HEIGHT {
-                for code in level(n) {
+                for code in level(picture) {
                     bytes.extend_from_slice(&code.to_be_bytes());
                 }
             }
@@ -274,6 +274,9 @@ mod real {
             encoder.set_depth(png::BitDepth::Sixteen);
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&bytes).unwrap();
+        };
+        for n in 1..=4u16 {
+            render(n, n);
         }
         let sequence = pm_media::image::sequence::Manifest {
             powermove_image_sequence: 1,
@@ -287,11 +290,12 @@ mod real {
         };
         let source = dir.path().join("retained");
         fs::write(&source, sequence.to_bytes()).unwrap();
-        let source_hash = blake3::hash(&fs::read(&source).unwrap())
-            .to_hex()
-            .to_string();
-        let store = ProxyStore::open(dir.path().join("generated")).unwrap();
         let cancel = AtomicBool::new(false);
+        // The identity a host keys this proxy by: the frames' bytes and rate.
+        let source_hash = pm_proxy::sequence_identity(&source, &cancel)
+            .unwrap()
+            .unwrap();
+        let store = ProxyStore::open(dir.path().join("generated")).unwrap();
         let never_pause = || false;
         let on_pause = |_| {};
         let make_request = || GenerationRequest {
@@ -345,7 +349,49 @@ mod real {
             );
         }
 
+        // A frame rendered again is another sequence: the identity it was
+        // asked for is refused, and its new identity makes a new proxy that
+        // shows the new picture.
+        render(2, 4);
+        assert!(matches!(
+            generate_with_disk_probe(make_request(), &quota),
+            Err(ProxyError::InvalidMedia(_))
+        ));
+        let rendered_again = pm_proxy::sequence_identity(&source, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_ne!(rendered_again, source_hash);
+        let remade = generate_with_disk_probe(
+            GenerationRequest {
+                source_hash: &rendered_again,
+                ..make_request()
+            },
+            &quota,
+        )
+        .unwrap();
+        assert!(!remade.reused);
+        assert_ne!(remade.stored.path, made.stored.path);
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&remade.stored.path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb48le", "-"])
+            .output()
+            .unwrap();
+        let center = frame_bytes + (HEIGHT / 4 * WIDTH / 2 + WIDTH / 4) as usize * 6;
+        let red = u16::from_le_bytes([decoded.stdout[center], decoded.stdout[center + 1]]);
+        assert!(
+            (i32::from(red) - i32::from(level(4)[0])).abs() < 600,
+            "the remade proxy's frame 2 has red {red}, its new file {}",
+            level(4)[0]
+        );
+
         fs::remove_file(dir.path().join("shot.0003.png")).unwrap();
+        assert_eq!(
+            pm_proxy::sequence_identity(&source, &cancel)
+                .unwrap_err()
+                .to_string(),
+            "I/O: frame 3 of the image sequence is missing: shot.0003.png"
+        );
         let Err(ProxyError::Io(error)) = generate_with_disk_probe(make_request(), &quota) else {
             panic!("a missing frame fails the proxy");
         };
