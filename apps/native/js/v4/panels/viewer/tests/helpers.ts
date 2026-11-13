@@ -30,6 +30,14 @@ export function fixture(): ViewerSnapshot {
       frame: { resource: "synthetic:last-good", loading: false, failed: false },
       source: null,
       interaction: "idle",
+      transport: {
+        time: 2.75,
+        timecode: "00:00:02:22",
+        spokenTime: "2 seconds, 22 frames",
+        duration: "00:00:20:00",
+        playing: false,
+        looping: false,
+      },
     },
   };
 }

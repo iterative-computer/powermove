@@ -9,7 +9,7 @@ beforeAll(() => {
   binaries();
 }, 120_000);
 
-const actions: ViewerActions = { drive() {}, open() {} };
+const actions: ViewerActions = { drive() {}, open() {}, command() {} };
 const cases: [string, (s: ViewerSnapshot) => void][] = [
   [
     "empty-no-project",
@@ -131,6 +131,15 @@ const cases: [string, (s: ViewerSnapshot) => void][] = [
     },
   ],
   [
+    // The native timecode layer draws the time while playing; the bar's
+    // readout steps aside and Play reads Pause.
+    "transport-playing-looping",
+    (s) => {
+      s.host.transport!.playing = true;
+      s.host.transport!.looping = true;
+    },
+  ],
+  [
     "playing-auto-half",
     (s) => {
       s.model!.effectiveQuality = 0.5;
@@ -206,9 +215,25 @@ for (const [name, change] of cases) {
       !state.model
         ? ["viewer.open"]
         : state.host.presentation !== "Docked"
-          ? ["viewer.canvas", ...lost, "viewer.zoom", "viewer.quality"]
+          ? [
+              "viewer.canvas",
+              ...lost,
+              "viewer.channels",
+              "viewer.zoom",
+              "viewer.quality",
+            ]
           : [
-              ...(state.host.source ? ["viewer.source.close"] : []),
+              ...(state.host.source
+                ? ["viewer.source.close"]
+                : [
+                    "gotoStart",
+                    "prevFrame",
+                    "play",
+                    "nextFrame",
+                    "gotoEnd",
+                    "loop",
+                  ].map((id) => `viewer.transport.${id}`)),
+              "viewer.channels",
               "viewer.zoom",
               "viewer.quality",
               "viewer.canvas",
@@ -298,6 +323,7 @@ test("every zoom and resolution change emits the matching model ID once", async 
       state={fixture()}
       actions={{
         open() {},
+        command() {},
         drive: (...args) => {
           seen.push(args);
         },
@@ -384,5 +410,38 @@ test("source Back and empty Open callbacks; no visible viewer title or unrelated
       .nodes.some((n) => /safe|grid|guides/.test(String(n.props.id))),
   ).toBe(false);
   expect(root.inspect().nodes.some((n) => n.text === "Viewer")).toBe(false);
+  await root.dispose();
+});
+test("the transport runs the app's own commands, once each", async () => {
+  const seen: string[] = [];
+  const { root } = recorder();
+  await root.render(
+    <ViewerPanel
+      state={fixture()}
+      actions={{ open() {}, drive() {}, command: (name) => seen.push(name) }}
+    />,
+  );
+  for (const id of [
+    "gotoStart",
+    "prevFrame",
+    "play",
+    "nextFrame",
+    "gotoEnd",
+    "loop",
+  ]) {
+    const node = root
+      .inspect()
+      .nodes.find((n) => n.props.id === `viewer.transport.${id}`)!;
+    expect(node).toBeDefined();
+    await root.drive(node.id, "click", {});
+  }
+  expect(seen).toEqual([
+    "gotoStart",
+    "prevFrame",
+    "play",
+    "nextFrame",
+    "gotoEnd",
+    "toggleLoop",
+  ]);
   await root.dispose();
 });

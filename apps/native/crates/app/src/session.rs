@@ -102,6 +102,11 @@ pub struct Controller {
     pub notes: crate::notes_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
+    /// What the viewer shows of the picture (display only).
+    pub channels: pm_engine_service::Channels,
+    /// View ▸ Show Rulers and Show Grid.
+    pub rulers: bool,
+    pub grid: bool,
     pub skimming: crate::skimming::Skimming,
     pub shuttle: crate::shuttle::Shuttle,
     pub playback: crate::play_range::Playback,
@@ -333,6 +338,7 @@ impl pm_shell::integration::Integration for Bridge {
             if snapping {
                 on.insert("timeline.toggleSnapping".to_owned());
             }
+            on.insert(timeline.read(cx).edit_tool().command());
             if timeline.read(cx).graph_merged() {
                 on.insert("graph.merge".to_owned());
             }
@@ -397,6 +403,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
+            v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
         });
@@ -668,6 +675,9 @@ impl Controller {
             notes: Default::default(),
             safe_areas: false,
             guides: false,
+            channels: Default::default(),
+            rulers: false,
+            grid: false,
             skimming: Default::default(),
             shuttle: Default::default(),
             playback: Default::default(),
@@ -2617,6 +2627,15 @@ impl Controller {
             // The viewer's View-menu actions, for the palette and for keys.
             "viewer.safeAreas"
             | "viewer.guides"
+            | "viewer.showRGB"
+            | "viewer.showRed"
+            | "viewer.showGreen"
+            | "viewer.showBlue"
+            | "viewer.showAlpha"
+            | "viewer.showAlphaOverlay"
+            | "viewer.rulers"
+            | "viewer.grid"
+            | "viewer.clearGuides"
             | "viewer.popout"
             | "viewer.toggleProxies"
             | "viewer.renderSelection"
@@ -2894,12 +2913,10 @@ impl Controller {
                     });
                 }
             }
-            "actualSize" => {
-                self.view.place(Some(1.), self.view.pan);
-                self.write_view(None, cx);
-            }
-            "zoomIn" => self.step_zoom(1.25, cx),
-            "zoomOut" => self.step_zoom(0.8, cx),
+            "actualSize" => self.step_zoom(1., Some(1.), window, cx),
+            "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),
+            "zoomIn" => self.step_zoom(1.25, None, window, cx),
+            "zoomOut" => self.step_zoom(0.8, None, window, cx),
             "shuttleBackward" | "shuttleStop" | "shuttleForward" | "shuttleRelease" => {
                 use crate::shuttle::Press;
                 use pm_engine_service::transport::ShuttleKey;
@@ -2948,6 +2965,38 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // Space came up after arming the hand over the viewer: it plays
+            // only if the hand did not pan (After Effects' rule).
+            "viewer.spaceUp" => {
+                let panned = self
+                    .builtins
+                    .gizmos
+                    .clone()
+                    .is_some_and(|g| g.update(cx, |g, cx| g.release_space(window, cx)));
+                if !panned {
+                    self.host.borrow().send_command("play", vec![]);
+                }
+            }
+            // Space held over the viewer is the hand: Play waits for the key
+            // to come up (no drag) instead of starting on the way down.
+            "play"
+                if cmd.token.is_some()
+                    && self.viewer.is_some()
+                    && self
+                        .builtins
+                        .gizmos
+                        .as_ref()
+                        .is_some_and(|g| g.read(cx).pointer_over(window))
+                    && self.host.borrow().on_release(
+                        cmd.token.unwrap(),
+                        "viewer.spaceUp",
+                        vec![],
+                    ) =>
+            {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.arm_space(cx));
+                }
+            }
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd" => {
                 // Final Cut: Space plays from the skimmer, only while the
                 // pointer is over the timeline now; otherwise from the playhead.

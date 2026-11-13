@@ -13,9 +13,13 @@ pub enum ClientError {
     OriginMismatch,
     ConcurrentRelativeGesture,
 }
+/// The status line shows the kernel's own sentence, not the variant.
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Kernel(message) | Self::Rejected(message) => f.write_str(message),
+            other => write!(f, "{other:?}"),
+        }
     }
 }
 impl std::error::Error for ClientError {}
@@ -198,6 +202,7 @@ impl TimelineClient {
             && matches!(
                 drag.kind,
                 DragKind::ProEdit(_)
+                    | DragKind::Timing(_)
                     | DragKind::Keys { .. }
                     | DragKind::GraphKeys { .. }
                     | DragKind::StretchKeys { .. }

@@ -230,7 +230,8 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
         ),
         (107_892, true, 30, Some("A001"))
     );
-    assert_eq!(r.pixels.len(), 27);
+    // Nine 16-pixel blocks in each of nine regions of three frames.
+    assert_eq!(r.pixels.len(), 243);
     assert!(r.max_pixel_error_cv() <= verify::pixel_tolerance(s.codec));
     if let Some(p) = probe(
         &done.path,
@@ -566,25 +567,39 @@ fn verification_rejects_mismatches() {
     let movie = Movie::read(&done.path).unwrap();
     let timing = s.timing().unwrap();
     let format = s.input_format();
-    let decoded: Vec<_> = verify::sampled_frames(s.frames)
-        .into_iter()
-        .map(|f| {
-            (
-                f,
-                pm_export::mac::reader::decode_frame(&done.path, f, timing, format).unwrap(),
-            )
-        })
-        .collect();
-    let blocks: Vec<_> = decoded
-        .iter()
-        .flat_map(|(f, d)| verify::block_means(d, *f))
-        .collect();
-    let base = Expected::new(&s, timing, 0, blocks.clone());
+    // The evidence a sink would hold of frames that decode to this file.
+    let (mut decoded, mut evidence) = (verify::Decoded::default(), verify::Evidence::default());
+    let frames = std::sync::Mutex::new(vec![]);
+    let checked = std::sync::atomic::AtomicU64::new(0);
+    pm_export::mac::reader::decode_frames(
+        &done.path,
+        timing,
+        format,
+        s.frames,
+        &|n, buffer| {
+            let frame = buffer.read(format)?;
+            // Read in place, a frame's signature is the copied frame's.
+            assert_eq!(buffer.signature(format)?, verify::frame_signature(&frame));
+            frames.lock().unwrap().push((n, frame));
+            Ok(())
+        },
+        &checked,
+    )
+    .unwrap();
+    assert_eq!(checked.into_inner(), s.frames);
+    let mut frames = frames.into_inner().unwrap();
+    frames.sort_by_key(|(n, _)| *n);
+    for (n, frame) in frames {
+        evidence.add(n, s.frames, &frame);
+        decoded.add(n, s.frames, frame);
+    }
+    decoded.complete = true;
+    let base = Expected::new(&s, timing, 0, evidence.clone());
     assert!(verify::check(&base, &movie, &decoded).is_ok());
     let mut wrong = s.clone();
     wrong.tags = ColorTags::Rec709Broadcast;
     let e = verify::check(
-        &Expected::new(&wrong, timing, 0, blocks.clone()),
+        &Expected::new(&wrong, timing, 0, evidence.clone()),
         &movie,
         &decoded,
     )
@@ -594,7 +609,7 @@ fn verification_rejects_mismatches() {
     wrong.frames = 5;
     assert!(
         verify::check(
-            &Expected::new(&wrong, timing, 0, blocks.clone()),
+            &Expected::new(&wrong, timing, 0, evidence.clone()),
             &movie,
             &decoded
         )
@@ -606,22 +621,33 @@ fn verification_rejects_mismatches() {
     wrong.codec = Codec::ProRes(ProResProfile::Standard);
     assert!(
         verify::check(
-            &Expected::new(&wrong, timing, 0, blocks.clone()),
+            &Expected::new(&wrong, timing, 0, evidence.clone()),
             &movie,
             &decoded
         )
         .is_err()
     );
-    // A block whose decoded mean is far from what the encoder was handed.
-    let mut shifted = blocks.clone();
-    shifted[4].mean[0] += 0.05;
-    let e = verify::check(&Expected::new(&s, timing, 0, shifted), &movie, &decoded).unwrap_err();
-    assert!(e.to_string().contains("differs by"), "{e}");
+    // A frame that decoded without the colour the encoder was handed (its
+    // neighbours' pictures are this test's same flat picture, so it is
+    // named as holding theirs).
+    let mut coloured = evidence.clone();
+    coloured.frames[2].cells[1] = [0.1; 64];
+    let e = verify::check(&Expected::new(&s, timing, 0, coloured), &movie, &decoded).unwrap_err();
+    assert!(e.to_string().contains("frame 2 "), "{e}");
+    // A file with fewer frames than were encoded.
+    let mut longer = evidence.clone();
+    longer.frames.push(longer.frames[0].clone());
+    let e = verify::check(&Expected::new(&s, timing, 0, longer), &movie, &decoded).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("decodes to 4 frames, 5 were rendered"),
+        "{e}"
+    );
     let mut with_audio = s.clone();
     with_audio.audio = Some(AudioSpec::default_for(with_audio.container, 48_000, 2));
     assert!(
         verify::check(
-            &Expected::new(&with_audio, timing, 100, blocks),
+            &Expected::new(&with_audio, timing, 100, evidence),
             &movie,
             &decoded
         )

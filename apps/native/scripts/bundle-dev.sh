@@ -48,6 +48,13 @@ for name in codex claude; do
     echo "  install it, or set $(echo "$name" | tr a-z A-Z)_BINARY to an executable (release pins: Codex 0.159.1, Claude 2.1.280)" >&2
   fi
 done
+# Review launches can hand the app environment, which LaunchServices does not
+# pass from the launcher: PM_DEV_BUNDLE_ENV="PM_NATIVE_APPEARANCE=light ..."
+# becomes the bundle's LSEnvironment. Unset, the bundle has none.
+for pair in ${PM_DEV_BUNDLE_ENV:-}; do
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$app/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment:${pair%%=*} string ${pair#*=}" "$app/Contents/Info.plist"
+done
 xcrun actool "$here/Assets.xcassets" --compile "$app/Contents/Resources" \
   --platform macosx --minimum-deployment-target 14.0 --accent-color AccentColor \
   --output-partial-info-plist "$out/assets-info.plist" >/dev/null

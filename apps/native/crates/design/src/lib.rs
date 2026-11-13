@@ -78,6 +78,13 @@ pub struct Colors {
     /// Badges drawn over media (duration, offline): always dark, drawn at
     /// `metrics.media_badge_opacity`.
     pub media_badge: u32,
+    /// The viewer's ruler guides: a cyan (the accent marks selection handles
+    /// there), deeper in the light appearance, where they also cross the
+    /// light surround.
+    pub viewer_guide: u32,
+    /// The viewer's grid: a light neutral over the picture, drawn at
+    /// `translucency.line`.
+    pub viewer_grid: u32,
     /// Red channel scope trace; data colour drawn with dark-scheme viewer tokens.
     pub scope_red: u32,
     /// Green channel scope trace; data colour drawn with dark-scheme viewer tokens.
@@ -246,15 +253,21 @@ pub struct Metrics {
     pub pill_inset: f32,
     /// Segment and tab corner inside a pill: `pill_radius − pill_inset`.
     pub segment_radius: f32,
-    /// Inspector value wells: height inside a `row`, and the shared column width.
+    /// Inspector value wells: height inside a `row`, and the least width of
+    /// a row's value column (it takes what the label column leaves).
     pub field: f32,
     pub value_column: f32,
+    /// The most a row's label takes before its value; it gives way first
+    /// when the panel is too narrow for both.
+    pub label_column: f32,
     /// Keyframe-toggle diamond and its column.
     pub keyframe: f32,
     /// Timeline geometry.
     pub track_row: f32,
     pub property_row: f32,
     pub ruler: f32,
+    /// The viewer's rulers: a band along the top and the leading edge.
+    pub viewer_ruler: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -567,6 +580,14 @@ impl Colors {
                 oklch(0.514, 0.11, 161.)
             },
             media_badge: 0x000000,
+            // Over a light surround a lighter cyan fades; a deeper one
+            // still reads over a dark picture.
+            viewer_guide: if dark {
+                oklch(0.78, 0.13, 215.)
+            } else {
+                oklch(0.62, 0.13, 220.)
+            },
+            viewer_grid: 0xd8d8d8,
             scope_red: 0xff6b62,
             scope_green: 0x4fd58a,
             scope_blue: 0x6ba6ff,
@@ -681,12 +702,14 @@ impl Tokens {
                 segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
+                label_column: 120.,
                 keyframe: 9.,
                 // v1's row height: the strip is 26 pt, tall enough for its
                 // material to read, with no density lost against v1.
                 track_row: 30.,
                 property_row: 22.,
                 ruler: 24.,
+                viewer_ruler: 16.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
@@ -910,6 +933,12 @@ impl Tokens {
         } else {
             (self.colors.text, self.translucency.edge)
         }
+    }
+    /// The veil over the timeline's tracks outside the work area, as
+    /// (colour, alpha): the canvas's second step, so strips there fade
+    /// toward the ground in either appearance. Names are painted over it.
+    pub fn work_area_veil(&self) -> (u32, f32) {
+        (self.colors.panel_secondary, 0.3)
     }
     /// Divider under a panel header, between list columns and above the status line.
     pub fn line(&self) -> (u32, f32) {
