@@ -10,6 +10,15 @@
         "properties": {
           "target": {
             "type": "string"
+          },
+          "pick": {
+            "type": "array",
+            "description": "Optional [x, y] in composition pixels: returns pick {layerId, materialIndex, slotName, point, distance} for the imported-model part under that point through the shot camera (the material slot edit_3d's materialIndex addresses), or null.",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 2
           }
         }
       }

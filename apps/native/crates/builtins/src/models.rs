@@ -231,6 +231,9 @@ impl Backend {
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         self.native.properties.failures = self.native.facts["layerFailures"].clone();
+        self.native
+            .properties
+            .focus_part(&self.native.facts["focusPart"]);
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }

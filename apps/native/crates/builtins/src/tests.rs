@@ -4242,4 +4242,51 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
     assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
     assert_eq!(rough["animation"], "static");
     assert!(row(&p, "3d.part.0.roughness").is_none());
+    // A viewer double-click on the glass part opens and marks its section;
+    // the same request doesn't reopen it after the user closes it.
+    let section = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], false);
+    assert_eq!(section(&p, "3d.part.1")["focused"], true);
+    assert_eq!(section(&p, "3d.part.0")["focused"], false);
+    presenter
+        .intent(
+            &mut pm_panel_inspector::Inspector::new(
+                kernel.published("synthetic").unwrap(),
+                Default::default(),
+            ),
+            Caller::native(),
+            &json!({"type":"collapse","section":"3d.part.1","collapsed":true}),
+            0.,
+        )
+        .unwrap();
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    // Leaving the model leaves its part.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::SelectionCall::Clear),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    presenter.snapshot(&mut model, 0., false).unwrap();
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["focused"], false);
 }

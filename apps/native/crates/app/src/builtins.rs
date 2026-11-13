@@ -429,7 +429,7 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
-            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
             "mediaSettings":self.media_settings_fact(),"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
@@ -985,6 +985,20 @@ impl Controller {
     pub(crate) fn close_export_sheet(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.builtins.windows.remove("export") {
             let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+    }
+    /// A viewer double-click on an imported model's part: Properties opens
+    /// and scrolls to that material slot's section (`None` leaves it).
+    pub fn focus_part(&mut self, layer: &str, slot: Option<u64>, cx: &mut Context<Self>) {
+        let seq = self.part_focus.as_ref().map_or(0, |f| f.2) + 1;
+        self.part_focus = slot.map(|slot| (layer.to_owned(), slot, seq));
+        self.update_builtins(cx);
+        if let Some(slot) = slot
+            && let Some(view) = self.builtins.views.get("inspector").cloned()
+        {
+            view.update(cx, |v, cx| {
+                v.reveal_semantic(format!("section:3d.part.{slot}"), cx)
+            });
         }
     }
     pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1719,6 +1733,21 @@ impl crate::gizmo::Host for ControllerDelegate {
                 pm_engine_service::SurfaceQueryKind::Click,
             )
             .ok()
+    }
+    fn open_composition(&self, comp: String, cx: &mut App) {
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
+    }
+    fn scene3d_assets(&self, cx: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let c = self.0.upgrade()?;
+        let originals = c.read(cx).media.originals.clone();
+        Some(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            originals.into_iter().collect(),
+        )))
+    }
+    fn focus_part(&self, layer: &str, slot: Option<u64>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.focus_part(layer, slot, cx));
     }
     fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
         if let Some(c) = self.0.upgrade()

@@ -164,6 +164,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// A semantic id to scroll into view once a publication has it.
+    reveal: Option<(String, std::time::Instant)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -220,6 +222,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            reveal: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -313,6 +316,7 @@ impl SurfaceView {
         self.prepared = Rc::new(compiled.prepared);
         self.reconcile(window, cx);
         self.try_focus_text(cx);
+        self.try_reveal(cx);
         cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
@@ -983,6 +987,23 @@ impl SurfaceView {
             scroll.set_offset(point(offset.x, (offset.y - px(by)).clamp(-most, px(0.))));
         }
         cx.notify();
+    }
+    /// Scroll `semantic` into view now, or when a publication within two
+    /// seconds first has it (a section the panel is about to add or open).
+    pub fn reveal_semantic(&mut self, semantic: String, cx: &mut Context<Self>) {
+        self.reveal = Some((semantic, std::time::Instant::now()));
+        self.try_reveal(cx);
+    }
+    fn try_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some((semantic, asked)) = self.reveal.clone() else {
+            return;
+        };
+        if asked.elapsed() > std::time::Duration::from_secs(2) {
+            self.reveal = None;
+        } else if self.prepared.semantics.contains_key(&semantic) {
+            self.reveal = None;
+            self.scroll_semantic(&semantic, cx);
+        }
     }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)

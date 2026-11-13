@@ -32,6 +32,10 @@ pub struct Properties {
     /// per asset into `slots`).
     pub originals: BTreeMap<String, std::path::PathBuf>,
     slots: BTreeMap<String, Vec<Value>>,
+    /// The model part a viewer double-click focused, `(layer, slot)`, and
+    /// the request number it came with (each request opens its section once).
+    part_focus: Option<(String, u64)>,
+    part_request: u64,
 }
 /// What Add Expression… starts from, as the shipped editor did.
 pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
@@ -79,12 +83,39 @@ impl Properties {
         };
         Ok(json!({"handle":handle,"channels":[id]}))
     }
+    /// The viewer's `focusPart` fact: a new request opens that slot's
+    /// section and marks it; `null` leaves part focus.
+    pub fn focus_part(&mut self, fact: &Value) {
+        let (Some(layer), Some(slot), Some(request)) = (
+            fact["layer"].as_str(),
+            fact["slot"].as_u64(),
+            fact["seq"].as_u64(),
+        ) else {
+            self.part_focus = None;
+            return;
+        };
+        if request != self.part_request {
+            self.part_request = request;
+            self.part_focus = Some((layer.to_owned(), slot));
+            self.collapsed.insert(format!("3d.part.{slot}"), false);
+        }
+    }
     pub fn snapshot(
         &mut self,
         model: &mut Inspector,
         time: f64,
         playing: bool,
     ) -> Result<Value, String> {
+        // Leaving the model leaves its part (Electron's scene3d api.ts): a
+        // selection that changes to anything but the model alone.
+        if self.selection != model.selected_layers()
+            && self
+                .part_focus
+                .as_ref()
+                .is_some_and(|(layer, _)| model.selected_layers() != [layer.clone()])
+        {
+            self.part_focus = None;
+        }
         if self.document != Some(model.document_id()) || self.selection != model.selected_layers() {
             self.adapter.retire();
             self.handles.clear();
@@ -820,7 +851,13 @@ impl Properties {
             rows.push(json!({"id":id,"label":"Color Map","locked":locked,"animation":null,"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
             let id = format!("3d.part.{index}");
             let collapsed = self.collapsed.get(&id).copied().unwrap_or(true);
-            sections.push(json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows}));
+            let focused = self
+                .part_focus
+                .as_ref()
+                .is_some_and(|(l, s)| l == layer && *s == index);
+            sections.push(
+                json!({"id":id,"title":title,"collapsed":collapsed,"focused":focused,"rows":rows}),
+            );
         }
         Ok(sections)
     }

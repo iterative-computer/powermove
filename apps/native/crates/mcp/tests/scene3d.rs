@@ -474,3 +474,62 @@ fn light_presets_aim_and_part_materials_are_headless_commands() {
     let read = ok(s.call("get_3d_scene", json!({"target":"model"})));
     assert!(!read["channels"].as_array().unwrap().iter().any(|c| c["path"] == "mi.3.roughness"), "{read}");
 }
+
+/// A viewer double-click's part pick, headless: get_3d_scene {pick:[x, y]}
+/// names the imported part under a composition pixel and its material slot.
+#[test]
+fn get_3d_scene_picks_the_imported_part_under_a_pixel() {
+    let f = Fixture::new();
+    let path = f.root.join("camera.bin");
+    // The body covers the middle of the frame; the lens sits to its right.
+    std::fs::write(
+        &path,
+        pm_scene3d::import::quads_glb(&[
+            (
+                "Body",
+                [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]],
+            ),
+            (
+                "Lens",
+                [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]],
+            ),
+        ]),
+    )
+    .unwrap();
+    {
+        let mut host = f.host.lock().unwrap();
+        let revision = host.revision(&f.id).unwrap();
+        host.apply_commands(&f.id, vec![pm_kernel::MediaCommand::AddAsset {
+            asset_id:"asset".into(), asset:pm_scene3d::to_model(&json!({"id":"asset","kind":"model","name":"camera.glb","format":"glb","native3dMaterials":[{"index":0,"name":"Body"},{"index":1,"name":"Lens"}]})),
+        }.into()], "Synthetic camera", pm_kernel::Origin::Mcp, revision, 1).unwrap();
+        host.engine = Some(Arc::new(GeometryEngine { path }));
+    }
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"asset"},"useSourceMaterials":true}})));
+    let doc = f.read();
+    let (w, h) = (
+        doc["w"].as_f64().unwrap_or(1920.),
+        doc["h"].as_f64().unwrap_or(1080.),
+    );
+    let body = ok(session.call("get_3d_scene", json!({"pick":[w / 2., h / 2.]})));
+    assert_eq!(body["pick"]["layerId"], "model");
+    assert_eq!(body["pick"]["materialIndex"], 0);
+    assert_eq!(body["pick"]["slotName"], "Body");
+    assert!(body["pick"]["distance"].as_f64().unwrap() > 0.);
+    // Sweep right across the frame's middle until the lens answers.
+    let lens = (1..40)
+        .map(|i| w / 2. + i as f64 * w / 80.)
+        .map(|x| ok(session.call("get_3d_scene", json!({"pick":[x, h / 2.]})))["pick"].clone())
+        .find(|p| p["materialIndex"] == 1)
+        .expect("the lens is to the right of the body");
+    assert_eq!(lens["slotName"], "Lens");
+    // A corner of the frame is empty; the read stays read-only.
+    let before = f.read();
+    assert!(ok(session.call("get_3d_scene", json!({"pick":[1., 1.]})))["pick"].is_null());
+    assert_eq!(f.read(), before);
+    assert!(
+        session
+            .dispatch("get_3d_scene", &json!({"pick":[1.]}))
+            .is_err()
+    );
+}

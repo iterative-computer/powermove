@@ -146,6 +146,40 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
     if !issues.is_empty() {
         result["upgradeIssues"] = json!(issues);
     }
+    // A viewer double-click's part pick, headless: the imported-model part
+    // under composition pixel [x, y] through the shot camera.
+    if let Some(at) = args.get("pick").filter(|v| !v.is_null()) {
+        let at = at
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .and_then(|a| Some([a[0].as_f64()?, a[1].as_f64()?]))
+            .filter(|a| a.iter().all(|v| v.is_finite()))
+            .ok_or_else(|| Error::invalid("pick must be [x, y] in composition pixels"))?;
+        let snapshot = host.view(id)?.snapshot;
+        let geometry = host.scene_geometry(id)?;
+        let hit = pm_panel_studio3d::viewport::pick_part_at(&snapshot, time, at, &*geometry)
+            .map_err(|e| Error::invalid(e.to_string()))?;
+        result["pick"] = match hit {
+            Some((layer, hit)) => {
+                let asset = p["layers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|l| l["id"] == layer.as_str())
+                    .and_then(|l| l["d"]["data"]["object"]["source"]["assetId"].as_str())
+                    .unwrap_or_default();
+                let name = p["assets"][asset]["native3dMaterials"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s["index"] == hit.slot)
+                    .and_then(|s| s["name"].as_str())
+                    .map_or_else(|| hit.name.clone(), str::to_owned);
+                json!({"layerId":layer,"materialIndex":hit.slot,"slotName":name,"point":hit.point,"distance":hit.distance})
+            }
+            None => Value::Null,
+        };
+    }
     if let Some(issue) = p.get("native3dHistoryIssue") {
         result["historyUpgradeIssue"] = issue.clone();
     }
