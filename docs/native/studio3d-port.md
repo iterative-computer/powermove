@@ -2852,3 +2852,50 @@ matte-receiver observation safeguard. The observation regression covers BVH
 and hardware RT, both analytic and mesh receivers, and continued adaptive
 stopping in quiet regions. Full-HD and exported-frame verification remain
 pending; these small results do not certify the full-size finding.
+
+
+### Packaged saved-project validation
+
+`--studio3d-estimate-probe` is available in release builds as well as development
+builds. It opens the source project read-only, extracts media into a fresh
+evidence directory, requests the four-preset estimate, writes `estimate.json`,
+and exits without opening a window:
+
+```sh
+Powermove.app/Contents/MacOS/powermove-native --studio3d-estimate-probe \
+  PROJECT.pmv NEW_EVIDENCE_DIRECTORY 30 1 0
+```
+
+The evidence directory's existing parent must be below `~/Developer/pm-shots`.
+The optional arguments are frame count, explicit render scale, and the first
+sample time in seconds. Full size (`1`) remains the default. Use a different
+new directory for each invocation. Set `PM_STUDIO_OIDN_DEVICE=cpu` or `metal`
+for a controlled runtime check and inspect each non-Draft preset's
+`calibration.denoiseBackend`. Automatic mode prefers Metal and retains CPU
+fallback. A package check must not supply a development OIDN search path,
+which could hide missing bundled libraries.
+
+For packaging paths that do not call `bundle-dev.sh`, run
+`OIDN_DIR=<verified-install> python3 apps/native/scripts/bundle-oidn.py APP`
+after copying the final executable and before signing the complete app. The
+OIDN-enabled integration package uses the existing opt-in
+`pm-engine-service/studio-oidn` feature; the guided-filter fallback remains
+available when OIDN is disabled. The current image acceptance results certify
+the explicitly reported OIDN backends, not that fallback. All build, package
+and render commands retain the shared lock and storage requirements.
+
+
+The denoiser follow-up keeps a persistent beauty filter for each contribution
+layer, so a cropped object and full-size catcher no longer rebuild one shared
+network graph each frame. Changed inputs, changed crops, half-size guides and
+padded channels match fresh Metal filters within 0.000001. Ordinary catcher
+transport retains its 16-observation minimum; only active caustic transport
+uses the additional 24-observation safeguard. A strengthened test enables a
+real emitter and verifies both minima, mesh receivers and early adaptive
+stopping on BVH and hardware RT.
+
+The combined follow-up passes 28 selected tests, including all four small
+Production/Final scenes and the two-seed checks. The chrome-set floor measures
+noise 0.005907, bias p95 0.009778 and flicker 0.005517 with the unchanged
+limits. This is correctness evidence; new real-export speed and full-HD
+acceptance are still pending.

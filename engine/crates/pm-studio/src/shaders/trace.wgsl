@@ -1679,7 +1679,7 @@ fn path(px: vec2f)->Sample {
         // first batches, yet boil on the broad smooth receiver after OIDN.
         // This observation floor applies only to the guarded offline policy;
         // legacy MC references and the requested ceiling remain unchanged.
-        specular_observation=24.;
+        specular_observation=select(16.,24.,photons_on);
         let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);
         s.bg = P.backdrop.xyz * catcher_ratio(p)*transmission;
         s.void_hit = transmission;
