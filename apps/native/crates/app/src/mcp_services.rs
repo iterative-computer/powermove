@@ -68,6 +68,15 @@ fn resources_of(doc_id: u64, wait: bool) -> Option<Resources> {
         all = SETTLED.wait_timeout(all, left).unwrap().0;
     }
 }
+/// A capture draws a missing effect bypassed, as the viewer does, but never
+/// one its window's extensions may still register: past the wait it fails
+/// saying the effect is still loading instead of showing the frame without it.
+fn bypasses_missing(
+    look: bool,
+    resources: &pm_engine_service::resources::ResourceSnapshot,
+) -> bool {
+    look && !resources.pending
+}
 /// Install the production engine hosts. Call on a worker before serving.
 pub fn connect_engine(
     tools: &Tools,
@@ -246,7 +255,7 @@ impl EngineJobs {
             request.resources = (*resources).clone();
         }
         // A capture shows the project as the viewer does; a video is a delivery.
-        request.bypass_missing_effects = look;
+        request.bypass_missing_effects = bypasses_missing(look, &request.resources);
         // As the shipped app's agent exports: silent offline clips are left
         // out, not asked about; missing audio still fails by name. Captures
         // refuse offline media unless they draw the card (agent stills).
@@ -1255,6 +1264,19 @@ mod tests {
     /// An export, poster or agent still of a document whose window is still
     /// loading extensions waits for them; an extension's own capture (its
     /// realm may be the one loading) takes what is registered.
+    /// A capture taken after the wait while an extension still loads (one
+    /// that hangs) is refused, never drawn without that extension's effect.
+    #[test]
+    fn a_capture_never_bypasses_an_effect_still_loading() {
+        let loaded = ResourceSnapshot::default();
+        let loading = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        assert!(bypasses_missing(true, &loaded));
+        assert!(!bypasses_missing(true, &loading));
+        assert!(!bypasses_missing(false, &loaded));
+    }
     #[test]
     fn captures_wait_for_their_window_extensions_to_load() {
         let doc = 0x5e77_1ed0;

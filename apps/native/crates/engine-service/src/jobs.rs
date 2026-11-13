@@ -992,7 +992,7 @@ pub fn run_child() -> Result<()> {
                 // The app waits for extensions before it starts a delivery;
                 // one sent early is never told an effect is missing.
                 None if request.resources.pending => anyhow::bail!(
-                    "{} is still loading ({uses}{others}). Export again once the project's extensions have loaded.",
+                    "{} is still loading ({uses}{others}). Try again once the project's extensions have loaded.",
                     missing.effect
                 ),
                 None => anyhow::bail!(
