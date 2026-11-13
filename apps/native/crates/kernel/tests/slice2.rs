@@ -2045,6 +2045,76 @@ fn a_save_whose_folder_failed_to_sync_once_does_not_block_the_next_save() {
         assert_eq!(saved_name(&file).as_deref(), Some("Three"), "{disk}");
     }
 }
+/// Save As writes the new file, and the folder fails to sync once right
+/// after. The save is reported failed, but the file is there with the work
+/// in it. The retry adopts all of it together: the session is that file's
+/// from then on (its name, its lock), not the file it was opened from.
+/// Another copy of the app cannot open the new file for writing meanwhile,
+/// and the original is never written.
+#[test]
+fn a_save_as_whose_folder_failed_to_sync_once_is_adopted_with_its_file_and_its_lock() {
+    for again in ["in place", "save as"] {
+        let dir = common::TempDir::new("finalize-save-as");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let target = dir.path("job/second.pmv");
+        let mut k = kernel(&dir.path("native"));
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    1 => (Some(5), None),
+                    _ => (None, None),
+                }
+            })),
+            ..Default::default()
+        });
+        let plan = k
+            .prepare_session_save(session.clone(), Some(target.clone()), false)
+            .unwrap();
+        k.finish_session_save(plan.run())
+            .expect_err("the folder did not sync");
+        assert_eq!(saved_name(&target).as_deref(), Some("One"), "{again}");
+        k.set_publish_hooks(Default::default());
+        rename_comp(&mut k, "P", "Two");
+        let path = (again == "save as").then(|| target.clone());
+        let plan = k
+            .prepare_session_save(session.clone(), path, true)
+            .unwrap_or_else(|e| panic!("{again}: {e}"));
+        k.finish_session_save(plan.run())
+            .unwrap_or_else(|e| panic!("{again}: {e}"));
+        assert_eq!(saved_name(&target).as_deref(), Some("Two"), "{again}");
+        assert_eq!(fs::read(&file).unwrap(), original, "{again}: untouched");
+        assert_eq!(
+            k.session_metadata("P").unwrap().destination,
+            SessionDestination::File(target.clone()),
+            "{again}: the session is the new file's"
+        );
+        // Its lock is held: another copy of the app gets a copy, and the
+        // file the session left is free again.
+        let mut second = kernel(&dir.path("second-profile"));
+        let (_, decision) = open_file(&mut second, &target);
+        assert_eq!(
+            decision,
+            OpenDecision::AsCopy(CopyReason::Locked),
+            "{again}"
+        );
+        let mut third = kernel(&dir.path("third-profile"));
+        let (_, decision) = open_file(&mut third, &file);
+        assert_eq!(decision, OpenDecision::Writable, "{again}");
+        rename_comp(&mut k, "P", "Three");
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run()).unwrap();
+        assert_eq!(saved_name(&target).as_deref(), Some("Three"), "{again}");
+        assert_eq!(fs::read(&file).unwrap(), original, "{again}");
+    }
+}
 /// On a network share no save can be proven durable from this Mac: the
 /// server alone decides when a rename survives. So the local copy of the
 /// last save there is its checkpoint. A save whose local copy cannot be

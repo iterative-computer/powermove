@@ -343,10 +343,18 @@ pub(crate) struct Session {
     pub rejected_history: Option<Value>,
     pub pending_save: Option<PendingSave>,
     /// A save whose file was installed but whose folder did not sync after
-    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save in
-    /// place once the folder syncs, so that save expects the file that is
-    /// there.
-    pub unfinalized: Option<Box<crate::SaveReceipt>>,
+    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save of
+    /// that file once the folder syncs, so that save expects the file that
+    /// is there.
+    pub unfinalized: Option<Unfinalized>,
+}
+/// A save that installed its file and could not sync the folder, whole:
+/// what it wrote, and for a Save As where to and the lock taken there. All
+/// of it is adopted together or none of it.
+pub struct Unfinalized {
+    receipt: Box<crate::SaveReceipt>,
+    path: Option<PathBuf>,
+    lock: Option<FileLock>,
 }
 /// The session metadata member that lists files kept beside the project
 /// file which the person has not been told about.
@@ -966,8 +974,24 @@ impl Kernel {
         replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
-        if path.is_none() {
+        // A save whose folder did not sync is adopted first, by a save in
+        // place and by a Save As to that same file again (which is then a
+        // save in place of the file the session has become).
+        let mut path = path;
+        let again = self.sessions[&session.project]
+            .unfinalized
+            .as_ref()
+            .is_some_and(|ticket| ticket.path.is_some() && ticket.path == path);
+        if path.is_none() || again {
             self.adopt_unfinalized(&session.project)?;
+            if again
+                && matches!(&self.sessions[&session.project].destination,
+                    Destination::File(now) if Some(now) == path.as_ref())
+            {
+                path = None;
+            }
+        }
+        if path.is_none() {
             self.follow_file(&session.project);
         }
         let mut lock = None;
@@ -1056,9 +1080,14 @@ impl Kernel {
                 message,
                 receipt: Some(mut receipt),
             }) => {
-                // Kept as a ticket, not as a save still running.
+                // Kept as a ticket, not as a save still running: with where
+                // a Save As went and the lock taken there.
                 receipt.ticket = std::sync::Arc::new(());
-                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(receipt);
+                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(Unfinalized {
+                    receipt,
+                    path: pending.path,
+                    lock: pending.lock,
+                });
                 return Err(failure(crate::ProjectIoError::Finalize {
                     message,
                     receipt: None,
@@ -2755,22 +2784,33 @@ impl Kernel {
     /// still holds exactly that save's file it is adopted, as the save it
     /// is; edits made since stay unsaved and are what this save writes. A
     /// file changed since is not adopted: this save then finds it changed.
+    ///
+    /// A Save As is adopted whole: the store's file, the session's
+    /// destination and the lock taken at the new file change together, and
+    /// the library entry names the new file. Not adopted, none of them
+    /// changes: the session stays the file's it was, and the lock goes.
     fn adopt_unfinalized(&mut self, id: &str) -> Result<(), KernelFailure> {
-        let Some(receipt) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
+        let Some(ticket) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
             return Ok(());
         };
-        let dir = receipt
+        let dir = ticket
+            .receipt
             .path
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_owned();
         if let Err(e) = project_io::folder_sync_now(&dir, &self.publish_hooks) {
-            self.sessions.get_mut(id).unwrap().unfinalized = Some(receipt);
+            self.sessions.get_mut(id).unwrap().unfinalized = Some(ticket);
             return Err(failure(crate::ProjectIoError::Finalize {
                 message: e.to_string(),
                 receipt: None,
             }));
         }
+        let Unfinalized {
+            receipt,
+            path,
+            lock,
+        } = ticket;
         if !receipt.version.is_unchanged().unwrap_or(false) {
             return Ok(());
         }
@@ -2782,6 +2822,14 @@ impl Kernel {
             .finish_save(*receipt)
             .map_err(failure)?;
         self.save_published(id);
+        if let Some(path) = path {
+            let s = self.sessions.get_mut(id).unwrap();
+            s.destination = Destination::File(path);
+            s.lock = lock;
+            if self.library.is_some() {
+                self.save_library_slot(id, id, false)?;
+            }
+        }
         Ok(())
     }
     /// Files a save or a recovery found changed when they were to go and
