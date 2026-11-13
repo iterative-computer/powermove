@@ -1070,3 +1070,38 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
             .definitions
     );
 }
+
+/// A job of a project no window has open stops waiting for its extensions
+/// when it is cancelled (Background Tasks, a stopped capture), at once.
+#[test]
+fn a_cancelled_job_without_a_window_stops_waiting_for_its_extensions() {
+    let f = Fixture::new();
+    let folder = f.host.profile.join("extensions/synthetic-slow");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        json!({"id":"synthetic-slow","name":"Slow","version":"1.0.0","apiVersion":3}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("index.ts"),
+        "export default async function(){await new Promise(r=>setTimeout(r,8000))}",
+    )
+    .unwrap();
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let published = f.host.kernel.published("test").unwrap();
+    let started = std::time::Instant::now();
+    let cancelled = || started.elapsed() > std::time::Duration::from_millis(400);
+    let answer = jobs.resources(&published, true, &cancelled);
+    assert!(
+        answer.is_err(),
+        "a cancelled wait answers with no definitions"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the cancel was honoured after {:?}",
+        started.elapsed()
+    );
+}

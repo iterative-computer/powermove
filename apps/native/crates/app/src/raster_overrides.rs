@@ -70,12 +70,39 @@ pub(crate) struct JobOverrides {
     realm: Arc<Mutex<Option<RasterInbox>>>,
 }
 /// Each open document's [`JobOverrides`], for the jobs agents start: an
-/// agent names a project, not a window.
+/// agent names a project, not a window. A project no window has open is
+/// answered by the host its jobs run ([`Overrides::windowless`]).
 #[derive(Clone, Default)]
-pub struct OverrideWindows(Arc<Mutex<HashMap<u64, JobOverrides>>>);
+pub struct OverrideWindows(
+    Arc<Mutex<HashMap<u64, JobOverrides>>>,
+    Arc<std::sync::OnceLock<Painters>>,
+);
+/// What a host without a window paints base rasters and canvas text with.
+#[derive(Clone)]
+pub(crate) struct Painters {
+    pub layers: Option<Arc<pm_engine_service::compat::LayerRasters>>,
+    pub fonts: pm_text::host::FontBroker,
+}
 impl OverrideWindows {
     pub(crate) fn of(&self, doc_id: u64) -> Option<JobOverrides> {
         self.0.lock().unwrap().get(&doc_id).cloned()
+    }
+    /// The app's own base raster worker and fonts: the ones its windows use.
+    pub(crate) fn set_painters(&self, painters: Painters) {
+        let _ = self.1.set(painters);
+    }
+    /// The app's, or with no app (the MCP process) ones made on first use.
+    pub(crate) fn painters(&self) -> Painters {
+        self.1
+            .get_or_init(|| {
+                let fonts = pm_text::host::FontBroker::new();
+                let render = pm_render::text::host::RenderFonts::new(fonts.clone());
+                Painters {
+                    layers: pm_engine_service::compat::LayerRasters::start(Some(render)).ok(),
+                    fonts,
+                }
+            })
+            .clone()
     }
 }
 
@@ -128,6 +155,39 @@ impl Overrides {
             jobs,
             windows,
         }
+    }
+    /// For a project no window has open: the jobs an agent starts are
+    /// answered by this host's extensions exactly as a window's would be.
+    /// Its state is its own (no viewer asks it), and a window that opens
+    /// the project takes its place.
+    pub(crate) fn windowless(
+        kernel: KernelHandle,
+        project: String,
+        windows: OverrideWindows,
+    ) -> Self {
+        let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
+        let overrides = Self {
+            rasters: windows.painters().layers,
+            jobs: JobOverrides {
+                store: Arc::default(),
+                doc_id,
+                kernel,
+                project,
+                batches: Arc::default(),
+                realm: Arc::default(),
+            },
+            windows,
+        };
+        overrides.register();
+        overrides
+    }
+    /// Answers the project's jobs unless a window does (again, after a
+    /// window that had taken over has closed).
+    pub(crate) fn register(&self) {
+        let mut windows = self.windows.0.lock().unwrap();
+        windows
+            .entry(self.jobs.doc_id)
+            .or_insert_with(|| self.jobs.clone());
     }
     pub(crate) fn jobs(&self) -> JobOverrides {
         self.jobs.clone()
@@ -503,6 +563,59 @@ mod tests {
             if settings.delivery.compat.contains(&pm_protocol::snapshot::CompatSource::RasterOverride))
     }
 
+    /// A project no window has open is answered by the host its jobs run;
+    /// a window that opens it takes over with its own state untouched, and
+    /// once that window has closed the jobs' host answers again.
+    #[test]
+    fn a_project_without_a_window_is_answered_until_a_window_takes_over() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(
+            r##"{"id":"synthetic","name":"Jobs","compId":"root","w":64,"h":64,"fps":30,"dur":1,
+            "bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        kernel
+            .open("synthetic", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let published = kernel.published("synthetic").unwrap();
+        let doc_id = published.snapshot.doc_id;
+        let windows = OverrideWindows::default();
+        let answers = |who: &Overrides| {
+            windows
+                .of(doc_id)
+                .is_some_and(|j| Arc::ptr_eq(&j.realm, &who.jobs.realm))
+        };
+        let agent = Overrides::windowless(kernel.clone(), "synthetic".into(), windows.clone());
+        assert!(answers(&agent));
+        agent.jobs.store.set_state(true, published.revision(), 1);
+        let mut session = session(&published);
+        windows
+            .of(doc_id)
+            .unwrap()
+            .pin(&mut session, &published, false);
+        assert!(overridden(&session), "its wrapper is asked");
+
+        let store = Arc::new(CompatStore::default());
+        let opened = window(&kernel, &store, &windows);
+        store.set_state(true, published.revision(), 7);
+        agent.register();
+        assert!(answers(&opened), "the window answers");
+        drop(agent);
+        assert!(answers(&opened));
+        assert_eq!(windows.of(doc_id).and_then(|j| j.epoch()), Some(7));
+
+        let agent = Overrides::windowless(kernel.clone(), "synthetic".into(), windows.clone());
+        assert!(answers(&opened), "a window is never displaced");
+        drop(opened);
+        assert!(windows.of(doc_id).is_none());
+        agent.register();
+        assert!(answers(&agent));
+        drop(agent);
+        actor.shutdown();
+    }
     /// Jobs are pinned only while an override is registered; a reload's new
     /// extensions keep answering agents after the old ones go; a closed
     /// window answers nothing, at once.

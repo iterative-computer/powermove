@@ -54,8 +54,9 @@ pub trait RealmEvents: Send + Sync + 'static {
     /// A task has run past the watchdog's limit; the user decides (D11).
     fn unresponsive(&self, _execution: u64) {}
     /// A synchronous layout read of measure `request` (already sent with the
-    /// realm's last batch). Blocks the realm's worker only.
-    fn measure_sync(&self, _request: u64) -> SyncLayout {
+    /// realm's last batch), `answering` when a raster answer makes it. Blocks
+    /// the realm's worker only.
+    fn measure_sync(&self, _request: u64, _answering: bool) -> SyncLayout {
         SyncLayout::NoPage
     }
 }
@@ -1629,6 +1630,7 @@ impl EngineProxy for NativeHost {
                 return self.kernel.lock().unwrap().call(input, time);
             }
             "kernel.publication" => return self.kernel.lock().unwrap().publication(),
+            "definitions.builtin" => return Ok(self.kernel.lock().unwrap().builtin_definitions()),
             "kernel.query"
                 if matches!(
                     input["method"].as_str(),
@@ -1746,7 +1748,8 @@ impl EngineProxy for NativeHost {
             let request = input["request"]
                 .as_u64()
                 .ok_or(Error::Invalid("measure request"))?;
-            return Ok(self.events.measure_sync(request).into_json());
+            let answering = input["answering"] == true;
+            return Ok(self.events.measure_sync(request, answering).into_json());
         }
         if operation == "dom.batch" {
             let mut state = self.state.lock().unwrap();
