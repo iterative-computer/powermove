@@ -322,16 +322,23 @@ impl ViewModel {
             // Light panel sliders: `viewer.studio.light.brightness` and so on.
             element if element.starts_with("viewer.studio.light.") => {
                 let key = &element["viewer.studio.light.".len()..];
-                if !matches!(key, "brightness" | "size" | "distance" | "spread") {
-                    return Err(Error::Invalid("light adjustment"));
-                }
-                let n = argument
-                    .as_f64()
-                    .filter(|n| n.is_finite())
-                    .ok_or(Error::Invalid("light value"))?;
+                let value = match key {
+                    "brightness" | "size" | "distance" | "spread" | "temperature" => argument
+                        .as_f64()
+                        .filter(|n| n.is_finite())
+                        .map(Value::from)
+                        .ok_or(Error::Invalid("light value"))?,
+                    // A preset name, or the model to aim at.
+                    "preset" | "aimAt" => argument
+                        .as_str()
+                        .filter(|s| !s.is_empty() && s.len() <= 128)
+                        .map(Value::from)
+                        .ok_or(Error::Invalid("light value"))?,
+                    _ => return Err(Error::Invalid("light adjustment")),
+                };
                 Action::Host(HostAction::Command {
                     id: "studio.light".into(),
-                    args: vec![Value::from(key), Value::from(n)],
+                    args: vec![Value::from(key), value],
                 })
             }
             element if element.starts_with("viewer.studio.") => studio_action(

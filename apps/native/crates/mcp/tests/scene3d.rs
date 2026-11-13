@@ -312,3 +312,51 @@ fn video_render_scale_is_explicit_validated_and_defaults_to_full_size() {
         assert!(VideoOptions::parse(&args).is_err());
     }
 }
+
+#[test]
+fn light_presets_aim_and_part_materials_are_headless_commands() {
+    let f = Fixture::new();
+    let mut s = f.session();
+    ok(s.call("edit_3d", json!({"operation":"add_camera","id":"camera","camera":{"p":{"x":0,"y":0,"z":5}}})));
+    ok(s.call(
+        "edit_3d",
+        json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"offline"}}}),
+    ));
+    // A rim strip lands behind and left of the model as the camera sees it.
+    ok(s.call("edit_3d", json!({"operation":"light_preset","preset":"rim_left","temperature":3200})));
+    let read = ok(s.call("get_3d_scene", json!({})));
+    let light = read["scene"]["lights"].as_array().unwrap().last().unwrap().clone();
+    let p = &light["p"];
+    // Behind (away from the camera on +z) and to the left, sized to the model.
+    assert!(p["x"]["v"].as_f64().unwrap() < -0.5 && p["z"]["v"].as_f64().unwrap() < -0.5, "{light}");
+    assert!(p["height"]["v"].as_f64().unwrap() > 10. * p["width"]["v"].as_f64().unwrap());
+    assert_eq!(p["color"]["v"], pm_scene3d::light_tool::kelvin_hex(3200.));
+    assert!(error(&mut s, json!({"operation":"light_preset","preset":"disco"}))["message"]
+        .as_str()
+        .unwrap()
+        .contains("preset"));
+    // Aim it at a point.
+    let id = read["layers"].as_array().unwrap().iter().find(|l| l["role"] == "light").unwrap()["id"].clone();
+    ok(s.call("edit_3d", json!({"operation":"aim_light","target":id,"at":[0,1,0]})));
+    let read = ok(s.call("get_3d_scene", json!({})));
+    assert_eq!(read["scene"]["lights"].as_array().unwrap().last().unwrap()["p"]["targetY"]["v"], 1);
+    // Part 3's material: sparse overrides on the model's own materials.
+    ok(s.call("edit_3d", json!({"operation":"set_material_properties","target":"model","materialIndex":3,
+        "patch":{"roughness":0.06,"clearcoat":0.4,"iridescence":400}})));
+    let read = ok(s.call("get_3d_scene", json!({"target":"model"})));
+    assert_eq!(read["scene"]["objects"][0]["useSourceMaterials"], true, "{read}");
+    for (path, value) in [("mi.3.roughness", json!(0.06)), ("mi.3.clearcoat", json!(0.4)), ("mi.3.iridescence", json!(400))] {
+        assert!(
+            read["channels"].as_array().unwrap().iter().any(|c| c["path"] == path && c["value"] == value),
+            "{path}: {read}"
+        );
+    }
+    // A layer as the part's colour; null puts the part's own back.
+    ok(s.call("apply_commands",json!({"commands":[{"type":"add_layer","id":"label","layerType":"text","content":{"text":"A","size":60}}]})));
+    ok(s.call("edit_3d", json!({"operation":"set_material_map","target":"model","materialIndex":3,"slot":"color","map":{"layerId":"label"}})));
+    let read = ok(s.call("get_3d_scene", json!({"target":"model"})));
+    assert_eq!(read["scene"]["objects"][0]["sourceMaterials"]["3"]["color"], json!({"layerId":"label"}));
+    ok(s.call("edit_3d", json!({"operation":"set_material_properties","target":"model","materialIndex":3,"patch":{"roughness":null}})));
+    let read = ok(s.call("get_3d_scene", json!({"target":"model"})));
+    assert!(!read["channels"].as_array().unwrap().iter().any(|c| c["path"] == "mi.3.roughness"), "{read}");
+}

@@ -304,6 +304,35 @@ fn target(l: &Value) -> Vec3 {
             .unwrap_or(0.)
     })
 }
+/// The model a light preset lights: the chosen one, else the first model.
+fn product_for<'a>(layers: &'a [Value], chosen: Option<&'a Value>) -> Result<&'a Value> {
+    chosen
+        .filter(|l| schema::role(l) == Some(Role::Object))
+        // An imported model first, else any object that is not the sky.
+        .or_else(|| layers.iter().find(|l| crate::part_material::is_model(l)))
+        .or_else(|| {
+            layers.iter().find(|l| {
+                schema::role(l) == Some(Role::Object) && l["d"]["data"]["object"]["world"].is_null()
+            })
+        })
+        .ok_or_else(|| Error("Add a model first".into()))
+}
+/// A model's centre and radius: its evaluated bounds when loaded, else its
+/// position and a unit-sized product (imported models are normalised to about
+/// one unit) times its largest scale, so presets also work headless.
+fn product_frame(comp: &Value, l: &Value) -> (Vec3, f64) {
+    if let Some(b) = l["id"].as_str().and_then(|id| box_for(comp, id).ok()) {
+        let c = b.center();
+        let r = (length(sub(b.max, b.min)) / 2.).max(1e-3);
+        return (c, r);
+    }
+    let scale = ["scale.x", "scale.y", "scale.z"]
+        .map(|k| l["p"][k]["v"].as_f64().unwrap_or(100.).abs() / 100.)
+        .into_iter()
+        .fold(0., f64::max)
+        .max(0.01);
+    (pos(l), 0.6 * scale)
+}
 fn scalar(args: &Value, k: &str, f: f64) -> Result<f64> {
     match args.get(k) {
         None => Ok(f),
@@ -387,6 +416,8 @@ pub(crate) fn studio_plan(
             "to",
             "on",
             "on_target",
+            "temperature",
+            "side",
         ],
     )?;
     let layers = comp["layers"]
@@ -441,6 +472,41 @@ pub(crate) fn studio_plan(
             let size = scalar(args, "size", distance * 0.6)?;
             edit(
                 json!({"operation":"add_light","name":args["name"].as_str().unwrap_or("Softbox"),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":point[0],"targetY":point[1],"targetZ":point[2],"width":size,"height":size*0.62,"intensity":scalar(args,"intensity",6.)?,"color":args["color"].as_str().unwrap_or("#FFFFFF")}}}),
+            )
+        }
+        "light_preset" => {
+            let preset = args["preset"].as_str().unwrap_or("");
+            let product = product_for(layers, layer)?;
+            let (c, r) = product_frame(comp, product);
+            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let placement = crate::light_tool::preset_placement(preset, c, r, eye)?;
+            let color = match args.get("temperature") {
+                Some(t) => crate::light_tool::kelvin_hex(
+                    t.as_f64().ok_or_else(|| Error("Invalid temperature".into()))?,
+                ),
+                None => args["color"].as_str().unwrap_or("#FFFFFF").to_owned(),
+            };
+            let at = placement.at;
+            edit(
+                json!({"operation":"add_light","name":args["name"].as_str().unwrap_or(placement.name),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":c[0],"targetY":c[1],"targetZ":c[2],"width":placement.width,"height":placement.height,"intensity":scalar(args,"intensity",placement.intensity)?,"color":color}}}),
+            )
+        }
+        "aim_light" => {
+            let l = layer
+                .filter(|l| schema::role(l) == Some(Role::Light))
+                .ok_or_else(|| Error("Choose a light to aim".into()))?;
+            let at = match &args["at"] {
+                Value::String(id) => {
+                    let object = layers
+                        .iter()
+                        .find(|o| o["id"] == id.as_str() && schema::role(o) == Some(Role::Object))
+                        .ok_or_else(|| Error("Aim at a model".into()))?;
+                    product_frame(comp, object).0
+                }
+                v => vec3(v)?,
+            };
+            edit(
+                json!({"operation":"update_light","target":l["id"],"patch":{"p":{"targetX":at[0],"targetY":at[1],"targetZ":at[2]}}}),
             )
         }
         "soften" => {

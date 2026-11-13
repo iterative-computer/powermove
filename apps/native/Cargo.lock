@@ -4714,6 +4714,7 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-runtime-v8",
+ "pm-scene3d",
  "pm-services",
  "pm-surface",
  "pm-text",

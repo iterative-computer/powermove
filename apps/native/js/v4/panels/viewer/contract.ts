@@ -40,7 +40,10 @@ export interface ViewerModel {
         max: number;
         log: boolean;
         tooltip: string;
+        unit?: string;
       }[];
+      /** Imported models a light can aim at. */
+      models?: { v: string; label: string }[];
     };
     lightKind?: string;
     lightAim?: "reflect" | "direct" | "orbit";

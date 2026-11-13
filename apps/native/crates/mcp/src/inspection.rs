@@ -133,6 +133,11 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
             if let Some(format) = a.get("format") {
                 out["format"] = format.clone();
             }
+            // Per-part materials: edit_3d set_material_properties /
+            // set_material_map {target, materialIndex} address these slots.
+            if let Some(slots) = a.get("native3dMaterials") {
+                out["materialSlots"] = slots.clone();
+            }
             out
         })
         .collect::<Vec<_>>();

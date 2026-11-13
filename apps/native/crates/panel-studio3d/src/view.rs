@@ -177,6 +177,63 @@ pub(crate) fn commands(
     id: &str,
     arg: Value,
 ) -> Result<(String, Vec<Command>)> {
+    // The Light panel's presets, colour temperature and Aim At.
+    if let Some(key) = id.strip_prefix("light.adjust.")
+        && matches!(key, "preset" | "temperature" | "aimAt")
+    {
+        let chosen = p.selection.layers().first().cloned();
+        let comp = composition(p)?;
+        let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+        let role_of = |id: &str| {
+            layers
+                .iter()
+                .find(|l| l["id"] == id)
+                .and_then(schema::role)
+        };
+        return match key {
+            "preset" => {
+                let preset = arg.as_str().ok_or_else(|| invalid("Choose a light preset"))?;
+                // Lights the selected model, else the first model.
+                let target = chosen.filter(|id| role_of(id) == Some(Role::Object));
+                let mut args = json!({"operation":"light_preset","preset":preset});
+                if let Some(target) = target {
+                    args["target"] = json!(target);
+                }
+                let name = pm_scene3d::light_tool::preset_placement(preset, [0.; 3], 1., [0., 0., 5.])
+                    .map_err(|e| invalid(e.0))?
+                    .name;
+                Ok((format!("Add {name}"), vec![scene(p, time, args)]))
+            }
+            "temperature" => {
+                let light = chosen
+                    .filter(|id| role_of(id) == Some(Role::Light))
+                    .ok_or_else(|| invalid("Choose a light"))?;
+                let kelvin = arg.as_f64().ok_or_else(|| invalid("Invalid temperature"))?;
+                Ok((
+                    "Light Temperature".into(),
+                    vec![scene(
+                        p,
+                        time,
+                        json!({"operation":"update_light","target":light,"patch":{"p":{"color":pm_scene3d::light_tool::kelvin_hex(kelvin)}}}),
+                    )],
+                ))
+            }
+            _ => {
+                let light = chosen
+                    .filter(|id| role_of(id) == Some(Role::Light))
+                    .ok_or_else(|| invalid("Choose a light"))?;
+                let at = arg.as_str().ok_or_else(|| invalid("Choose a model"))?;
+                Ok((
+                    "Aim Light".into(),
+                    vec![scene(
+                        p,
+                        time,
+                        json!({"operation":"aim_light","target":light,"at":at}),
+                    )],
+                ))
+            }
+        };
+    }
     if let Some(key) = id.strip_prefix("light.adjust.") {
         let label = match key {
             "brightness" => "Light Brightness",
@@ -232,6 +289,9 @@ pub(crate) fn commands(
     }
     if let Some(control) = id.strip_prefix("extrude.") {
         return crate::extrude::commands(p, time, control, arg, &artwork_lights);
+    }
+    if let Some(control) = id.strip_prefix("part.") {
+        return crate::extrude::part_commands(p, time, control, arg);
     }
     let l = selected(p)?;
     if l["lock"] == true {
