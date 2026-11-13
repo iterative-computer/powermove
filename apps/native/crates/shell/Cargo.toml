@@ -37,3 +37,6 @@ harness = false
 [[test]]
 name = "tab_close_gpui"
 harness = false
+[[test]]
+name = "hosted_present"
+harness = false
