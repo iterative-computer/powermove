@@ -2394,10 +2394,11 @@ fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_
             quality.max_samples,
             quality.max_bounces
         ),
-        (32, 256, 8)
+        (8, 128, 8)
     );
-    assert_eq!(quality.noise_threshold, 0.03);
+    assert_eq!(quality.noise_threshold, 0.12);
     assert!(quality.denoise && quality.caustics);
+    assert_eq!(quality.sampling, pm_studio3d_engine::sampling::SamplingPolicy::PRODUCTION);
     assert_eq!(doc.to_value(), before);
 }
 
