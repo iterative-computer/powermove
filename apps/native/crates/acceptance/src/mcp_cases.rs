@@ -5,7 +5,8 @@ type Check = Result<(), String>;
 pub fn union() -> Check {
     let f = Fixture::new()?;
     let actual = f.session.tools();
-    assert_eq!(actual, json!(pm_mcp::catalog::tools()));
+    // The pinned main catalog, then the native window tools (run_command).
+    assert_eq!(actual, json!(pm_mcp::catalog::served_tools()));
     let names = actual
         .as_array()
         .unwrap()
