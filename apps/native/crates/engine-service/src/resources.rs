@@ -49,6 +49,49 @@ impl ResourceSnapshot {
                 && a.project_fonts == b.project_fonts)
     }
 }
+/// One window's resources as they change, for every viewer of that window
+/// (the editor's, a popped-out one). A viewer attached here draws the latest
+/// snapshot and every one published after it: none keeps the snapshot it
+/// happened to start with, so a viewer opened while extensions load does not
+/// wait for them forever, and none draws an effect's old code after a reload.
+#[derive(Clone, Default)]
+pub struct ResourceFeed(std::sync::Arc<std::sync::Mutex<Feed>>);
+#[derive(Default)]
+struct Feed {
+    current: std::sync::Arc<ResourceSnapshot>,
+    viewers: Vec<crate::Viewer>,
+}
+impl ResourceFeed {
+    /// A feed whose viewers draw `snapshot` until another is published.
+    pub fn new(snapshot: std::sync::Arc<ResourceSnapshot>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Feed {
+            current: snapshot,
+            viewers: vec![],
+        })))
+    }
+    /// The viewer draws this feed's resources from now on.
+    pub fn attach(&self, viewer: &crate::Viewer) -> anyhow::Result<()> {
+        let mut feed = self.0.lock().unwrap();
+        feed.viewers.retain(crate::Viewer::live);
+        viewer.resources(feed.current.clone())?;
+        feed.viewers.push(viewer.clone());
+        Ok(())
+    }
+    /// Every attached viewer draws `snapshot` from now on; the first refusal
+    /// is returned once all have been told.
+    pub fn publish(&self, snapshot: std::sync::Arc<ResourceSnapshot>) -> anyhow::Result<()> {
+        snapshot.validate()?;
+        let mut feed = self.0.lock().unwrap();
+        feed.current = snapshot;
+        feed.viewers.retain(crate::Viewer::live);
+        let mut refused = Ok(());
+        for viewer in &feed.viewers {
+            let told = viewer.resources(feed.current.clone());
+            refused = refused.and(told);
+        }
+        refused
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

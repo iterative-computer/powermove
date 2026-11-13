@@ -1360,10 +1360,12 @@ impl Controller {
         self.extensions.awaiting.set(Some((key, awaiting)));
         awaiting
     }
-    /// Every live viewer renders the same contributed definitions.
+    /// Every live viewer of this window (the editor's, the popout's) renders
+    /// the same contributed definitions, now and after each change.
     pub fn apply_extension_resources(&mut self) {
-        if let Some(viewer) = &self.viewer
-            && let Err(error) = viewer.resources(self.extensions.resources.clone())
+        if let Err(error) = self
+            .resource_feed
+            .publish(self.extensions.resources.clone())
         {
             self.message = error.to_string();
         }

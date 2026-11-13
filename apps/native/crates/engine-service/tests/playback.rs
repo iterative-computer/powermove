@@ -593,8 +593,10 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
         .unwrap();
     invert.id = "ext.invert".into();
     invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
-    // Registered while others still load: drawn with it at once.
+    // Registered while others still load: drawn with it at once, and the
+    // line about waiting for it goes with the wait, not when a frame lands.
     v.resources(snapshot(2, vec![invert], true)).unwrap();
+    assert_eq!(v.status().error, None, "the wait line outlived the wait");
     let drawn = wait(&v, "the effect registered", |s| {
         s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
     });
@@ -620,6 +622,173 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
             .any(|m| m.effect == "ext.invert"),
         "{bypassed:?}"
     );
+}
+
+/// Every viewer of a window (the editor's, a popped-out one) follows the
+/// window's extensions as they are now: one opened while an effect loads draws
+/// it once it registers instead of keeping its first snapshot forever, and
+/// after the effect's code is reloaded every viewer draws the new code.
+#[test]
+fn every_viewer_of_a_window_follows_its_extensions_as_they_load_and_reload() {
+    let project = || {
+        snapshot(&format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+            "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+            shape("top", "#FF0000", 320.).replace(
+                r#""fx":[]"#,
+                r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+            )
+        ))
+    };
+    let service = service("window-feed");
+    let feed = pm_engine_service::resources::ResourceFeed::default();
+    let publish = |generation, definitions, pending| {
+        feed.publish(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            definitions,
+            pending,
+            ..Default::default()
+        }))
+        .unwrap()
+    };
+    // The window's extensions are loading when both viewers open.
+    publish(1, vec![], true);
+    let editor = service
+        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    feed.attach(&editor).unwrap();
+    let popout = service
+        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    feed.attach(&popout).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        for v in [&editor, &popout] {
+            let status = v.status();
+            assert!(
+                status.frame.is_none() && status.missing_effects.is_empty(),
+                "held while it loads: {status:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut invert = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    invert.id = "ext.invert".into();
+    invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    let centre = |v: &Viewer, why: &str| {
+        v.capture_next().unwrap();
+        let stamp = v.stamp().unwrap();
+        let drawn = wait(v, why, |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+        });
+        assert!(
+            drawn.missing_effects.is_empty() && drawn.error.is_none(),
+            "{why}: {drawn:?}"
+        );
+        drawn.frame.unwrap().pixels.unwrap()[90 * 320 + 160]
+    };
+    // It registers: both draw it (red inverted is cyan).
+    publish(2, vec![invert.clone()], false);
+    for (v, name) in [(&editor, "editor"), (&popout, "popout")] {
+        let c = centre(v, &format!("the {name} draws the registered effect"));
+        assert!(c[0] < 0.25 && c[1] > 0.9, "{name} inverted: {c:?}");
+    }
+    // Its extension reloads with other code: held, then the new code, in both.
+    publish(3, vec![], true);
+    let mut reloaded = invert;
+    let glsl = reloaded.glsl.as_mut().unwrap();
+    let end = glsl.source.rfind('}').unwrap();
+    glsl.source
+        .insert_str(end, "o = vec4(0.0, 0.0, 1.0, 1.0);\n");
+    publish(4, vec![reloaded], false);
+    for (v, name) in [(&editor, "editor"), (&popout, "popout")] {
+        let c = centre(v, &format!("the {name} draws the reloaded effect"));
+        assert!(
+            c[0] < 0.1 && c[1] < 0.1 && c[2] > 0.9,
+            "{name} reloaded: {c:?}"
+        );
+    }
+    // A retired viewer is forgotten; one opened now starts from the latest.
+    popout.retire();
+    publish(5, vec![], false);
+    let late = service
+        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    feed.attach(&late).unwrap();
+    late.capture_next().unwrap();
+    let bypassed = wait(&late, "the late viewer draws", |s| {
+        s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+    });
+    assert!(
+        bypassed
+            .missing_effects
+            .iter()
+            .any(|m| m.effect == "ext.invert"),
+        "{bypassed:?}"
+    );
+}
+
+/// Who is still loading names a wait; it is not content. While extensions
+/// load, each one that finishes changes the names only: a viewer whose
+/// project needs none of them keeps its frame, its installed effects and its
+/// cached pictures (no new stamp, nothing drawn again).
+#[test]
+fn who_is_still_loading_changes_no_frame_or_render_identity() {
+    let plain = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.)
+    ));
+    let service = service("loading-names");
+    let v = service
+        .viewer(config(plain, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    let loading = |generation, names: &[&str]| {
+        Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            pending: true,
+            loading: names
+                .iter()
+                .map(|n| (n.to_string(), n.to_string()))
+                .collect(),
+            ..Default::default()
+        })
+    };
+    v.resources(loading(1, &["a", "b", "c"])).unwrap();
+    // At rest: the first picture and its full-scale refinement have landed.
+    wait(&v, "the first frame", |s| s.frame.is_some());
+    let rest = Instant::now();
+    let mut stamp = v.stamp().unwrap();
+    while rest.elapsed() < Duration::from_millis(600) {
+        std::thread::sleep(Duration::from_millis(20));
+        stamp = v.stamp().unwrap();
+    }
+    wait(&v, "the frame of this content", |s| {
+        s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
+    });
+    v.resources(loading(2, &["b", "c"])).unwrap();
+    v.resources(loading(3, &["c"])).unwrap();
+    assert_eq!(v.stamp().unwrap(), stamp, "names alone moved the stamp");
+    std::thread::sleep(Duration::from_millis(400));
+    let after = v.status();
+    assert_eq!(
+        after.frame.unwrap().stamp,
+        stamp,
+        "names alone drew a frame"
+    );
+    // The load ending is a change of pins: frames that waited may draw now.
+    v.resources(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+        generation: 4,
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_ne!(v.stamp().unwrap(), stamp);
 }
 
 /// A project saved by the shipped app at current main
