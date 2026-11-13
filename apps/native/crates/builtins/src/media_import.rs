@@ -342,10 +342,21 @@ struct ChosenSequence {
     /// Numbers in the range with no file, as the status line says them.
     missing: Option<String>,
 }
-fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<ChosenSequence, String> {
-    use pm_media::image::sequence::{ImageSequence, Manifest};
+fn choose_sequence(
+    paths: &[PathBuf],
+    sequence: &SequenceImport,
+    cancel: &AtomicBool,
+) -> Result<Option<ChosenSequence>, String> {
+    use pm_media::image::sequence::{ImageSequence, MAX_FRAMES, Manifest};
     order_sequence(paths)?;
     let chosen = ImageSequence::from_paths(paths).map_err(|e| e.to_string())?;
+    if chosen.last().saturating_sub(chosen.first()) >= MAX_FRAMES as i64 {
+        return Err(format!(
+            "These frames are numbered {} to {}, too far apart to be one sequence. Choose frames numbered closer together.",
+            chosen.first(),
+            chosen.last()
+        ));
+    }
     // 23.976 is 24000/1001: the clip's length and frames stay on the grid.
     let rate = pm_time::SUPPORTED_RATES
         .into_iter()
@@ -362,6 +373,23 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
     // The first frame proves the format reads; it gives the clip its size.
     let first = &chosen.frames[0].1;
     decodes(first, "image")?;
+    // Every frame is drawn at that size: one of another size is refused now
+    // (read from each file's header, not decoded).
+    let size_of = |path: &Path| pm_media::image::imageio::pixel_size(path).ok();
+    if let Some(expected) = size_of(first) {
+        for (_, path) in &chosen.frames[1..] {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            if let Some((w, h)) = size_of(path).filter(|size| *size != expected) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                return Err(format!(
+                    "{name} is {w}×{h}, but the sequence’s first frame is {}×{}. Render every frame at one size.",
+                    expected.0, expected.1
+                ));
+            }
+        }
+    }
     let facts =
         pm_media::facts::media_facts_as(first, None, pm_media::clip::ClipTiming::Presentation)
             .map_err(|e| e.to_string())?;
@@ -391,7 +419,9 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
         "fps": fps,
         "imageSequence": {"fps": fps, "frames": frames, "first": manifest.first, "last": manifest.last},
     });
-    let missing = manifest.missing();
+    let Some(missing) = manifest.missing_until(cancel) else {
+        return Ok(None);
+    };
     let missing = (!missing.is_empty()).then(|| {
         let ranges: Vec<String> = missing
             .iter()
@@ -416,12 +446,12 @@ fn choose_sequence(paths: &[PathBuf], sequence: &SequenceImport) -> Result<Chose
         .map_err(|e| e.to_string())?;
     let path = dir.path().join("sequence.json");
     std::fs::write(&path, manifest.to_bytes()).map_err(|e| e.to_string())?;
-    Ok(ChosenSequence {
+    Ok(Some(ChosenSequence {
         _dir: dir,
         path,
         asset,
         missing,
-    })
+    }))
 }
 /// A sequence asset relinked by choosing one of its files in their new
 /// folder: every file numbered as that one is the sequence again, at the
@@ -563,10 +593,20 @@ impl Builtins {
             }
             None => (None, None),
         };
-        let sequence = match (&request.sequence, &relinked) {
-            (Some(sequence), _) => Some(choose_sequence(&request.paths, sequence)?),
-            (None, Some(relinked)) => Some(choose_sequence(&relinked.frames, &relinked.sequence)?),
+        let chosen = match (&request.sequence, &relinked) {
+            (Some(sequence), _) => Some(choose_sequence(&request.paths, sequence, cancel)?),
+            (None, Some(relinked)) => {
+                Some(choose_sequence(&relinked.frames, &relinked.sequence, cancel)?)
+            }
             (None, None) => None,
+        };
+        let sequence = match chosen {
+            Some(None) => {
+                outcome.cancelled = true;
+                return Ok(outcome);
+            }
+            Some(Some(sequence)) => Some(sequence),
+            None => None,
         };
         let (mut folders, mut folder_of) = (vec![], std::collections::HashMap::new());
         let paths = match &sequence {
@@ -1245,6 +1285,73 @@ mod tests {
     /// files there (Replace): the numbering and range are read again from
     /// the new folder, a changed range and missing numbers are reported, and
     /// its layers show the new folder's files.
+    #[test]
+    fn a_sparse_or_mixed_size_sequence_is_refused_in_plain_words() {
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":24,"dur":10,"bg":"#000000","colorDepth":16,"assets":{},"comps":{},"layers":[]}"##,
+        );
+        let import = |request: ImportRequest| {
+            f.runtime
+                .import_media(document(&f), &f.root, request, &AtomicBool::new(false))
+        };
+        let sequence = || {
+            Some(SequenceImport {
+                fps: 24.,
+                progress: Default::default(),
+            })
+        };
+        // Two files a billion numbers apart: refused at once, with no look
+        // at the numbers between.
+        let sparse = f.root.join("sparse");
+        std::fs::create_dir(&sparse).unwrap();
+        let far: Vec<_> = [1, 1_000_000_001]
+            .iter()
+            .map(|n| write(&sparse, &format!("shot.{n:010}.png"), &png16(64, 4, |x, y| coded(1, x, y))))
+            .collect();
+        let started = std::time::Instant::now();
+        let refused = import(ImportRequest {
+            paths: far,
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            refused,
+            "These frames are numbered 1 to 1000000001, too far apart to be one sequence. Choose frames numbered closer together."
+        );
+        // A frame rendered at another size.
+        let renders = f.root.join("renders");
+        std::fs::create_dir(&renders).unwrap();
+        let mut frames: Vec<_> = (1..=3)
+            .map(|n| write(&renders, &format!("shot.{n:04}.png"), &png16(64, 4, |x, y| coded(n, x, y))))
+            .collect();
+        let odd = write(&renders, "shot.0004.png", &png16(32, 4, |x, y| coded(4, x, y)));
+        frames.push(odd.clone());
+        let words = "shot.0004.png is 32×4, but the sequence’s first frame is 64×4. Render every frame at one size.";
+        let refused = import(ImportRequest {
+            paths: frames.clone(),
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused, words);
+        // Imported without it, then relinked to a folder holding it.
+        let imported = import(ImportRequest {
+            paths: frames[..3].to_vec(),
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap();
+        let refused = import(ImportRequest {
+            paths: vec![frames[0].clone()],
+            replace: Some(imported.assets[0].clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused, words);
+    }
+
     #[test]
     fn a_sequence_relinked_by_one_of_its_files_reads_its_numbering_again() {
         use pm_protocol::color::Precision;
