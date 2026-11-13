@@ -27,6 +27,7 @@ mod error_log;
 mod export_coordinator;
 mod expression_sheet;
 mod extension_authoring;
+mod extension_vars;
 mod extensions;
 mod figma_paste;
 mod file_coordination;

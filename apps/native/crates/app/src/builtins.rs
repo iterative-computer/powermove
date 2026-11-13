@@ -223,6 +223,7 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.settled(&mounting);
+                v.bound_open_wait(&mounting, cx);
                 cx.notify();
             });
         })
@@ -250,8 +251,17 @@ impl Controller {
         })
         .detach();
     }
-    /// Every panel of `project` has mounted or failed: the open is over.
-    fn settled(&mut self, project: &str) {
+    /// Every panel of `project` has mounted or failed: the open is over,
+    /// unless its viewer waits for effects its extensions are still loading.
+    pub(crate) fn settled(&mut self, project: &str) {
+        if self.settling.as_deref() == Some(project) && self.awaiting_extension_effects() {
+            self.extensions.settle_after = Some(project.to_owned());
+            return;
+        }
+        self.finish_open(project);
+    }
+    /// The open of `project` is over: its panels show it.
+    pub(crate) fn finish_open(&mut self, project: &str) {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;

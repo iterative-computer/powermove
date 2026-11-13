@@ -860,6 +860,100 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     assert!(backend.native.platform.is_empty());
 }
 
+/// An export whose destination is chosen and that waits to start (for the
+/// window's extensions to load) is shown as preparing: its panel's Cancel is
+/// live and reaches the coordinator. While the destination is being chosen
+/// the form's Cancel is off, so a wait left in that phase could not be
+/// cancelled from the panel.
+#[test]
+fn an_export_waiting_to_start_is_cancelled_from_its_panel() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("export").unwrap());
+    finish(panels.show("export").unwrap());
+    let shown = std::cell::RefCell::new(None::<Publication>);
+    // Presses the panel's control `id` as the view does: a disabled one
+    // sends nothing. Returns whether it was pressed.
+    let press = |panels: &Builtins, id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(p) = panels
+                .take_publications()
+                .into_iter()
+                .rfind(|p| p.panel == "export")
+            {
+                *shown.borrow_mut() = Some(p);
+            }
+            let p = shown.borrow().clone();
+            let found = p.as_ref().and_then(|p| {
+                p.surface.nodes().iter().find_map(|(target, n)| {
+                    (n.props.get("id").and_then(Value::as_str) == Some(id))
+                        .then(|| (*target, n.props.get("disabled") == Some(&Value::Bool(true))))
+                })
+            });
+            if let (Some(p), Some((target, disabled))) = (p, found) {
+                if disabled {
+                    return false;
+                }
+                finish(
+                    panels
+                        .activate(
+                            "export",
+                            p.generation,
+                            p.surface.revision(),
+                            target,
+                            Some(id),
+                            "click",
+                            Default::default(),
+                        )
+                        .unwrap(),
+                );
+                return true;
+            }
+            assert!(Instant::now() < deadline, "no {id} in the export panel");
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // What the panel asked of the coordinator so far; waits up to `wait`
+    // for `operation` to be among it.
+    let seen = std::cell::RefCell::new(Vec::<String>::new());
+    let asked = |panels: &Builtins, operation: &str, wait: Duration| {
+        let deadline = Instant::now() + wait;
+        loop {
+            seen.borrow_mut().extend(
+                panels
+                    .take_platform_requests()
+                    .into_iter()
+                    .map(|r| r.operation),
+            );
+            if seen.borrow().iter().any(|o| o == operation) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    assert!(press(&panels, "export.start"));
+    assert!(
+        asked(&panels, "export.begin", Duration::from_secs(10)),
+        "{:?} {:?}",
+        seen.borrow(),
+        panels.take_errors()
+    );
+    // Choosing the destination: the form's Cancel is off.
+    assert!(!press(&panels, "export.cancel"), "Cancel while choosing");
+    assert!(!asked(&panels, "export.cancel", Duration::from_millis(300)));
+    // The destination is chosen and the export waits: the coordinator says
+    // so before it waits, and Cancel reaches it.
+    finish(panels.observe_export(json!({"phase":"preparing"})).unwrap());
+    thread::sleep(Duration::from_millis(100));
+    assert!(press(&panels, "export.cancel"), "Cancel while it waits");
+    assert!(asked(&panels, "export.cancel", Duration::from_secs(10)));
+    assert!(panels.take_errors().is_empty());
+}
+
 #[test]
 fn a_finished_export_reopens_as_a_fresh_sheet() {
     let actor = actor();

@@ -221,6 +221,51 @@ impl std::fmt::Display for FontsPending {
     }
 }
 impl std::error::Error for FontsPending {}
+/// The frame uses effects no definition provides yet while extensions are
+/// still loading: it waits for them instead of drawing them bypassed.
+#[derive(Debug)]
+pub(crate) struct DefinitionsPending(String);
+impl DefinitionsPending {
+    /// Names who is loading: the extensions whose id is the waiting effects'
+    /// id or prefixes it (`<extension>` or `<extension>.<name>`), or
+    /// every extension still loading when one isn't so named.
+    pub(crate) fn new(effects: &[&str], loading: &[(String, String)]) -> Self {
+        let owner = |effect: &str| {
+            loading.iter().find(|(id, _)| {
+                effect
+                    .strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            })
+        };
+        let mut names: Vec<&str> = vec![];
+        let all_owned = effects.iter().all(|effect| owner(effect).is_some());
+        let named: Vec<&(String, String)> = if all_owned {
+            effects.iter().filter_map(|effect| owner(effect)).collect()
+        } else {
+            loading.iter().collect()
+        };
+        for (_, name) in named {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        let effects = effects.join(", ");
+        Self(match names.as_slice() {
+            [] => format!("the extensions this project uses are loading ({effects})"),
+            [one] => format!("{one} is loading ({effects})"),
+            [a, b] => format!("{a} and {b} are loading ({effects})"),
+            [a, b, rest @ ..] => {
+                format!("{a}, {b} and {} more are loading ({effects})", rest.len())
+            }
+        })
+    }
+}
+impl std::fmt::Display for DefinitionsPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for DefinitionsPending {}
 /// Every compiler slot was taken while definitions were installing. Nothing is
 /// wrong with the shader; a sticky error here would stick to a healthy project.
 #[derive(Debug)]
@@ -246,6 +291,7 @@ impl std::fmt::Display for DiskFramePending {
 impl std::error::Error for DiskFramePending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<FontsPending>()
+        || error.is::<DefinitionsPending>()
         || error.is::<CompilerBusy>()
         || error.is::<DiskFramePending>()
         || matches!(
@@ -894,12 +940,16 @@ impl Engine {
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
         &self.resources.definitions
     }
+    /// Extensions are still loading (`ResourceSnapshot::pending`).
+    pub(crate) fn definitions_pending(&self) -> bool {
+        self.resources.pending
+    }
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
-            self.resources = resources;
             self.studio_content = None;
             self.cache.clear();
         }
+        self.resources = resources;
     }
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
@@ -920,8 +970,23 @@ impl Engine {
             if failures.iter().any(|failure| busy(&failure.message)) {
                 return Err(anyhow::Error::new(CompilerBusy));
             }
-            self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.missing_effects = self.renderer.missing_effects().to_vec();
+            // Not installed only once extensions have settled; until then the
+            // frame waits (and is drawn again when the next snapshot lands).
+            if self.resources.pending {
+                let loading: Vec<&str> = self
+                    .missing_effects
+                    .iter()
+                    .filter(|missing| missing.revision.is_none())
+                    .map(|missing| missing.effect.as_str())
+                    .collect();
+                if !loading.is_empty() {
+                    let waiting = DefinitionsPending::new(&loading, &self.resources.loading);
+                    self.missing_effects.clear();
+                    return Err(waiting.into());
+                }
+            }
+            self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
             // A document's first frame compiles the frame and text pipelines
@@ -2897,5 +2962,51 @@ mod frame_cache_tests {
         let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
         drawn(&mut engine, &scene, reduced);
         assert_eq!(drawn(&mut engine, &scene, full), want);
+    }
+}
+#[cfg(test)]
+mod definitions_pending_tests {
+    use super::DefinitionsPending;
+    #[test]
+    fn a_wait_names_the_extension_that_is_loading() {
+        let loading = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(id, name)| ((*id).into(), (*name).into()))
+                .collect()
+        };
+        let line = |effects: &[&str], list: &[(&str, &str)]| {
+            DefinitionsPending::new(effects, &loading(list)).to_string()
+        };
+        let both = [("deep-glow", "Deep Glow"), ("blur-kit", "Blur Kit")];
+        assert_eq!(
+            line(&["deep-glow.effect"], &both),
+            "Deep Glow is loading (deep-glow.effect)"
+        );
+        assert_eq!(
+            line(&["deep-glow.effect", "blur-kit.radial"], &both),
+            "Deep Glow and Blur Kit are loading (deep-glow.effect, blur-kit.radial)"
+        );
+        // An effect registered under its extension's own id.
+        assert_eq!(line(&["blur-kit"], &both), "Blur Kit is loading (blur-kit)");
+        // An id that names no loading extension: everyone still loading.
+        assert_eq!(
+            line(&["glow"], &[("a", "A"), ("b", "B"), ("c", "C")]),
+            "A, B and 1 more are loading (glow)"
+        );
+        // A prefix is a whole id, not part of one.
+        assert_eq!(
+            line(
+                &["deep-glow-pop.effect"],
+                &[
+                    ("deep-glow", "Deep Glow"),
+                    ("deep-glow-pop", "Deep Glow Pop")
+                ]
+            ),
+            "Deep Glow Pop is loading (deep-glow-pop.effect)"
+        );
+        assert_eq!(
+            line(&["x.y"], &[]),
+            "the extensions this project uses are loading (x.y)"
+        );
     }
 }

@@ -995,7 +995,7 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
         crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
             .unwrap();
     let published = f.host.kernel.published("test").unwrap();
-    let first = jobs.resources(&published).unwrap();
+    let first = jobs.resources(&published, true, &|| false).unwrap();
     let ids: std::collections::BTreeSet<_> =
         first.definitions.iter().map(|d| d.id.as_str()).collect();
     assert!(ids.contains("synthetic-local.tint"), "{ids:?}");
@@ -1024,7 +1024,7 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
         .wait()
         .unwrap()
         .unwrap();
-    let disabled = jobs.resources(&published).unwrap();
+    let disabled = jobs.resources(&published, true, &|| false).unwrap();
     assert!(
         !disabled
             .definitions
@@ -1049,17 +1049,24 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
     // Pins are immutable and the next request reuses the running host.
     assert_eq!(
         first.definitions,
-        jobs.resources(&published).unwrap().definitions
+        jobs.resources(&published, true, &|| false)
+            .unwrap()
+            .definitions
     );
     let window = Arc::new(pm_engine_service::resources::ResourceSnapshot {
         generation: 99,
         ..Default::default()
     });
     crate::mcp_services::set_resources(published.snapshot.doc_id, Some(window.clone()));
-    assert!(Arc::ptr_eq(&window, &jobs.resources(&published).unwrap()));
+    assert!(Arc::ptr_eq(
+        &window,
+        &jobs.resources(&published, true, &|| false).unwrap()
+    ));
     crate::mcp_services::set_resources(published.snapshot.doc_id, None);
     assert_eq!(
         first.definitions,
-        jobs.resources(&published).unwrap().definitions
+        jobs.resources(&published, true, &|| false)
+            .unwrap()
+            .definitions
     );
 }
