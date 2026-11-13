@@ -1334,9 +1334,14 @@ impl Renderer {
         self.pool.created()
     }
 
-    /// Nominal texel bytes retained by image mip pyramids.
+    /// Nominal texel bytes retained by image mip pyramids, with the stills
+    /// only their kept views still own (the media cache has let them go and
+    /// no longer counts them).
     pub fn pyramid_bytes(&self) -> u64 {
         self.pyramids.bytes()
+            + self
+                .pyramids
+                .orphaned_bytes(|texture| self.media.holds_image(texture))
     }
 
     /// Nominal texel bytes of still and converted-video textures.
@@ -1360,11 +1365,16 @@ impl Renderer {
     /// Drops the stills kept at their full size (`MediaCache::release_whole_images`).
     pub fn release_whole_stills(&mut self) {
         self.media.release_whole_images();
-        // Kept bind groups hold their views (and textures) alive.
+        // Kept bind groups and kept pyramids (the views of a still's own
+        // mip chain) hold their textures alive: they go with the stills.
         self.binds.clear();
+        self.pyramids.clear();
     }
     pub fn set_image_cache_budget(&mut self, bytes: u64) {
         self.media.trim_images(bytes);
+        let media = &self.media;
+        self.pyramids
+            .retain_own(|texture| media.holds_image(texture));
     }
     pub fn set_converted_frame_budget(&mut self, bytes: u64) {
         self.media.trim_frames(bytes);

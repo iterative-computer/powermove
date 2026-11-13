@@ -1968,6 +1968,11 @@ impl MediaCache {
         self.bytes
     }
 
+    /// Whether a still kept here is in `texture`.
+    pub(crate) fn holds_image(&self, texture: &wgpu::Texture) -> bool {
+        self.images.values().any(|image| image.texture == *texture)
+    }
+
     /// Drops the stills read whole (not at a view's size). A viewer's
     /// settled paused frame reads them as an export does and keeps none of
     /// them after it: held, large originals cost gigabytes.

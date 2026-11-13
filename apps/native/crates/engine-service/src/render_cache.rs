@@ -3753,16 +3753,10 @@ mod tests {
         }
     }
 
-    /// A large detailed still fitted small is the same in a paused picture
-    /// drawn and one read from disk: a settled paused frame is drawn from
-    /// the original, as an export and a rendered frame are. (Before: the
-    /// viewer drew it from a thumbnail at the size it is shown, and its
-    /// fine texture changed when the render bar turned green.)
-    #[test]
-    fn a_detailed_still_fitted_small_is_the_same_drawn_and_rendered() {
-        let dir = tempfile::tempdir().unwrap();
-        // 2048 × 2048, every pixel its own grey: texture at the finest scale.
-        let (w, h) = (2048u32, 2048u32);
+    /// A square still, every pixel its own grey: texture at the finest
+    /// scale.
+    fn noise_still(path: &Path, side: u32) {
+        let (w, h) = (side, side);
         let mut bmp = Vec::with_capacity((54 + w * h * 3) as usize);
         bmp.extend_from_slice(b"BM");
         bmp.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
@@ -3781,8 +3775,82 @@ mod tests {
             seed ^= seed << 5;
             bmp.extend_from_slice(&[(seed >> 24) as u8; 3]);
         }
+        std::fs::write(path, bmp).unwrap();
+    }
+
+    /// A settled paused frame reads a still whole, here fitted small:
+    /// drawn through the still's own mip chain. Once the frame is drawn the
+    /// engine holds none of the original: not the still, and not the views
+    /// of its mips kept for its draws (they kept the whole texture
+    /// allocated, and uncounted, until they aged out).
+    #[test]
+    fn a_settled_frame_keeps_none_of_its_original_stills() {
+        use crate::render::{Engine, FrameSpec};
+        let dir = tempfile::tempdir().unwrap();
         let still = dir.path().join("texture.bmp");
-        std::fs::write(&still, bmp).unwrap();
+        noise_still(&still, 1024);
+        let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
+        let scene = scene_with(
+            serde_json::json!({
+                "id":"still","type":"image","name":"Texture","from":0,"dur":3,"on":true,
+                "solo":false,"mblur":false,"fx":[],"masks":[],
+                "p":{"position.x":ch(170.),"position.y":ch(30.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                     "scale.x":ch(30.),"scale.y":ch(30.),"rotation":ch(0.),"opacity":ch(100.)},
+                "d":{"asset":"pic","fit":"stretch","w":1024,"h":1024}
+            }),
+            Some(&still),
+        );
+        let mut engine = Engine::new(pm_gpu::Gpu::new("settled-stills").unwrap()).unwrap();
+        let settled = FrameSpec {
+            exact: false,
+            settled: true,
+            ..FrameSpec::exact(
+                second(),
+                crate::Output {
+                    width: 640,
+                    height: 360,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        assert!(settled.final_picture(&scene));
+        let sub = engine
+            .frame(
+                &scene,
+                settled,
+                None,
+                &Default::default(),
+                true,
+                Arc::default(),
+            )
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+        assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+        let usage = engine.memory_usage();
+        // The least the original takes as a texture, without its mips.
+        let original = 1024 * 1024 * 4;
+        assert!(
+            usage.image_bytes + usage.pyramid_bytes < original,
+            "the original still is held after its frame: {} bytes of stills, {} of pyramids",
+            usage.image_bytes,
+            usage.pyramid_bytes
+        );
+    }
+
+    /// A large detailed still fitted small is the same in a paused picture
+    /// drawn and one read from disk: a settled paused frame is drawn from
+    /// the original, as an export and a rendered frame are. (Before: the
+    /// viewer drew it from a thumbnail at the size it is shown, and its
+    /// fine texture changed when the render bar turned green.)
+    #[test]
+    fn a_detailed_still_fitted_small_is_the_same_drawn_and_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let still = dir.path().join("texture.bmp");
+        noise_still(&still, 2048);
         let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
         let scene = scene_with(
             serde_json::json!({
