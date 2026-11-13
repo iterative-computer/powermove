@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
+use super::durable::head_held_back;
 use super::durable::{
     FileVersion, Folder, Host, Placed, PublishHooks, Stray, begins, copy_of, dispose,
     dispose_captured, folder_sync, holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file,
@@ -1504,8 +1505,14 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
         }
     }
     for (to, whole) in copies {
+        // Shorter than the whole file, or as long and still without its
+        // first bytes, which a copy gets last.
         let shorter = match (fs::symlink_metadata(&to), fs::symlink_metadata(whole)) {
-            (Ok(part), Ok(whole)) => part.is_file() && part.len() < whole.len(),
+            (Ok(part), Ok(whole)) => {
+                part.is_file()
+                    && (part.len() < whole.len()
+                        || (part.len() == whole.len() && head_held_back(&to)))
+            }
             _ => false,
         };
         // The file under the name carries this save's mark, the whole file

@@ -811,6 +811,9 @@ pub struct PublishHooks {
     /// Called with the destination half way through a copy into an
     /// exclusively created name.
     pub mid_copy: Option<PublishHook>,
+    /// Called with the destination of a copy into an exclusively created
+    /// name at the moment exactly this many bytes of it were written.
+    pub copy_stops_at: Option<(u64, PublishHook)>,
     /// While set, the next copy into an exclusively created name stops
     /// half way with "No space left on device" (and clears it).
     pub copy_fails: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -846,6 +849,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("step", &self.step.is_some())
             .field("folder_sync", &self.folder_sync.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
+            .field("copy_stops_at", &self.copy_stops_at.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
             .field("before_disposal", &self.before_disposal.is_some())
             .field("before_unlink", &self.before_unlink.is_some())
@@ -1117,6 +1121,13 @@ pub(super) fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io
 /// bytes (and `hash`, when the caller knows what the source holds). A copy
 /// that fails is taken back ([`withdraw`]). A crash mid-copy leaves an
 /// incomplete file under a name that held nothing before.
+///
+/// The file's first bytes ([`HELD_BACK`] of them) are written last, after
+/// everything else is synced; until then they are zeros. So whatever the
+/// name holds while the copy runs is no project file to any reader, on
+/// this machine or on one a sync client replicates it to: a save that only
+/// appended to the previous file would otherwise pass through a moment
+/// where the name holds exactly that previous file.
 fn create_exclusive(
     source: &Path,
     destination: &Path,
@@ -1154,12 +1165,20 @@ fn create_exclusive(
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         let mut reader = &from;
+        let mut written = 0u64;
+        let mut head = Vec::new();
         loop {
             let n = read_retry(|| reader.read(&mut buf)).map_err(|e| io_err(source, e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            // The first bytes wait until the rest is there.
+            if written == 0 {
+                let held = n.min(HELD_BACK);
+                head.extend_from_slice(&buf[..held]);
+                buf[..held].fill(0);
+            }
             if hooks
                 .copy_fails
                 .as_ref()
@@ -1174,9 +1193,39 @@ fn create_exclusive(
                 hook(destination);
                 out.write_all(&buf[n / 2..n])
                     .map_err(|e| io_err(destination, e))?;
+                written += n as u64;
+                continue;
+            }
+            if let Some((at, hook)) = &hooks.copy_stops_at
+                && (written..written + n as u64).contains(at)
+                && *at > written
+            {
+                let first = (*at - written) as usize;
+                out.write_all(&buf[..first])
+                    .map_err(|e| io_err(destination, e))?;
+                hook(destination);
+                out.write_all(&buf[first..n])
+                    .map_err(|e| io_err(destination, e))?;
+                written += n as u64;
                 continue;
             }
             out.write_all(&buf[..n])
+                .map_err(|e| io_err(destination, e))?;
+            written += n as u64;
+        }
+        sync_file(&out).map_err(|e| io_err(destination, e))?;
+        // Complete but for its first bytes: they make it the file it is.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            out.write_all_at(&head, 0)
+                .map_err(|e| io_err(destination, e))?;
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Seek, SeekFrom};
+            out.seek(SeekFrom::Start(0))
+                .and_then(|_| out.write_all(&head))
                 .map_err(|e| io_err(destination, e))?;
         }
         sync_file(&out).map_err(|e| io_err(destination, e))?;
@@ -1238,18 +1287,34 @@ pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
     }
 }
 
-/// Whether `part`'s bytes are the beginning (or all) of `whole`'s.
+/// How many of a file's first bytes [`create_exclusive`] writes last (a
+/// project file's magic number is that long).
+const HELD_BACK: usize = 5;
+
+/// Whether `part` is a copy of `whole` in the making ([`create_exclusive`]):
+/// its bytes are the beginning (or all) of `whole`'s, but for its first
+/// [`HELD_BACK`] bytes, which may still be zeros.
 pub(super) fn begins(whole: &Path, part: &Path) -> bool {
     File::open(part).is_ok_and(|part| begins_file(whole, &part))
 }
 
-/// Whether the bytes behind `part` are the beginning (or all) of `whole`'s.
+/// Whether `path`'s first bytes are still the zeros a copy in the making
+/// has there ([`HELD_BACK`]).
+pub(super) fn head_held_back(path: &Path) -> bool {
+    let mut head = [0u8; HELD_BACK];
+    File::open(path)
+        .and_then(|mut file| file.read(&mut head))
+        .is_ok_and(|n| n > 0 && head[..n].iter().all(|b| *b == 0))
+}
+
+/// [`begins`] for the bytes behind `part`.
 fn begins_file(whole: &Path, part: &File) -> bool {
     let Ok(whole) = File::open(whole) else {
         return false;
     };
     let (mut a, mut b) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
     let (mut whole, mut part) = (io::BufReader::new(whole), io::BufReader::new(part));
+    let mut first = true;
     loop {
         let Ok(n) = read_retry(|| part.read(&mut b)) else {
             return false;
@@ -1257,7 +1322,15 @@ fn begins_file(whole: &Path, part: &File) -> bool {
         if n == 0 {
             return true;
         }
-        if whole.read_exact(&mut a[..n]).is_err() || a[..n] != b[..n] {
+        if whole.read_exact(&mut a[..n]).is_err() {
+            return false;
+        }
+        // A buffered reader's first read is at least the held-back bytes
+        // unless the file is shorter than them.
+        let held = if first { n.min(HELD_BACK) } else { 0 };
+        first = false;
+        let head = a[..held] == b[..held] || b[..held].iter().all(|b| *b == 0);
+        if !head || a[held..n] != b[held..n] {
             return false;
         }
     }

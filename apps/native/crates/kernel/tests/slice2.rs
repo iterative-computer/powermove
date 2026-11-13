@@ -1594,6 +1594,52 @@ fn a_changed_file_that_cannot_be_kept_beside_the_project_is_still_told() {
         assert_eq!(kept_beside(&mut k, &session), [], "{why}: seen");
     }
 }
+/// A save that only appends to the project file writes a file whose first
+/// bytes are the whole previous file. On a volume where the new file can
+/// only be copied to its name, the name must never hold those bytes alone
+/// while the copy runs: a sync client that replicates the file at that
+/// instant would hand another computer a file that opens as the previous
+/// version, with nothing to say a save was under way. Whatever is under the
+/// name before the copy is complete does not open as a project.
+#[test]
+fn a_file_being_copied_to_its_name_never_opens_as_the_previous_version() {
+    let dir = common::TempDir::new("copy-prefix");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let previous = fs::read(&file).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    let replicas = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let seen = replicas.clone();
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        copy_stops_at: Some((
+            previous.len() as u64,
+            std::sync::Arc::new(move |name: &Path| {
+                seen.lock().unwrap().push(fs::read(name).unwrap());
+            }),
+        )),
+        ..child_disk("no-exclusive")
+    });
+    let plan = k.prepare_session_save(session, None, false).unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    let saved = fs::read(&file).unwrap();
+    assert!(
+        saved.starts_with(&previous),
+        "the save appended to the previous file (the case this test is about)"
+    );
+    let replicas = replicas.lock().unwrap().clone();
+    assert_eq!(replicas.len(), 1, "the copy passed that length once");
+    assert_eq!(replicas[0].len(), previous.len());
+    let replica = dir.path("replica.pmv");
+    fs::write(&replica, &replicas[0]).unwrap();
+    assert!(
+        open_project(&replica, OpenOptions::default()).is_err(),
+        "what the name held then is not a project another computer could open"
+    );
+}
 /// Every private file beside `file` (staged, moved aside, retained): what
 /// each holds.
 fn private_versions(file: &Path) -> Vec<Vec<u8>> {
