@@ -383,6 +383,16 @@ fn builtin_effects() -> &'static BTreeSet<String> {
     });
     &BUILTIN
 }
+/// Canvas text for an extension realm, from the fonts `broker` knows: a
+/// window's host and a pageless one measure and draw text alike.
+pub(crate) fn canvas_text(
+    broker: pm_text::host::FontBroker,
+) -> Box<dyn Fn() -> pm_compat_runner::CanvasText + Send> {
+    Box::new(move || {
+        let resolver = BrokerResolver::new(broker.clone(), Default::default());
+        Box::new(pm_recorder::TextEngine::new(resolver)) as pm_compat_runner::CanvasText
+    })
+}
 /// The values entered for extensions' declared `vars` in `profile`, for a
 /// window's host and a pageless one alike: sealed ones only from this
 /// build's own Keychain service, read off the main thread.
@@ -495,12 +505,7 @@ impl Controller {
             roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),
             owner: Some(Arc::new(Clock(clock_tx))),
-            text: self.font_broker.clone().map(|broker| {
-                Box::new(move || {
-                    let resolver = BrokerResolver::new(broker.clone(), Default::default());
-                    Box::new(pm_recorder::TextEngine::new(resolver)) as pm_compat_runner::CanvasText
-                }) as Box<dyn Fn() -> pm_compat_runner::CanvasText + Send>
-            }),
+            text: self.font_broker.clone().map(canvas_text),
             wake: Arc::new(move || {
                 let _ = wake_tx.try_send(());
             }),

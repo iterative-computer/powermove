@@ -136,6 +136,8 @@ pub(super) struct Start {
     pub(super) shared: Arc<Shared>,
     /// Set when the window's extensions stop.
     pub(super) closing: Arc<AtomicBool>,
+    /// Its host has no window: no page will come for its layout reads.
+    pub(super) pageless: bool,
 }
 
 struct Events {
@@ -252,7 +254,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
             early: VecDeque::new(),
         }),
         reading: AtomicBool::new(false),
-        page_missed: AtomicBool::new(false),
+        page_missed: AtomicBool::new(start.pageless),
         dom_pending: AtomicBool::new(false),
         failed: Mutex::default(),
         layout_failed: AtomicBool::new(false),
@@ -400,7 +402,7 @@ impl Run {
         let Some(booted) = self.booted else {
             return false;
         };
-        if self.events.reading.load(Ordering::Acquire) {
+        if self.events.reading.load(Ordering::Acquire) || self.start.pageless {
             return true;
         }
         if booted.elapsed() < PAGE_WAIT {

@@ -1339,6 +1339,7 @@ impl Owner {
                     kernel: self.config.kernel.clone(),
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
+                    pageless: self.config.owner.is_none(),
                 };
                 let spawned = thread::Builder::new()
                     .name("pm-compat-export".into())
