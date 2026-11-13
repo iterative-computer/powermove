@@ -128,7 +128,7 @@ impl FileLock {
         // Older apps update the stable inode. Prefer whichever valid record is
         // newer, so an unflocked legacy writer's fresh heartbeat stays protected.
         let owner = match (legacy, atomic) {
-            (Some(a), Some(b)) => Some(if a.1 > b.1 { a } else { b }),
+            (Some(a), Some(b)) => Some(if a.1 >= b.1 { a } else { b }),
             (a, b) => a.or(b),
         };
         if let Some((pid, heartbeat)) = owner {
