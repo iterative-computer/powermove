@@ -624,10 +624,16 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
     assert_eq!(s.out_of("b"), b_out);
     s.undo(cx);
     assert_eq!(s.start_of("b"), b_in);
-    // Slide: Option-drag B's body keeps its length and the outer bounds.
+    // Slide: Option-Shift-drag B's body keeps its length and the outer
+    // bounds (Option alone duplicates the clip).
     let (length, c_out) = (s.out_of("b") - s.start_of("b"), s.out_of("c"));
     let from = s.at(0, s.start_of("b") + length / 2.);
-    s.drag(cx, from, from + point(px(30.), px(0.)), alt);
+    let slide = Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    s.drag(cx, from, from + point(px(30.), px(0.)), slide);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
@@ -1277,4 +1283,55 @@ fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
     assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
     assert!(!over(&mut s), "Space plays from the playhead");
+}
+/// Option-drag (Premiere, Final Cut, Resolve): the clip stays and a copy
+/// goes where the pointer lets go, selected; one Undo step removes it.
+#[gpui::test]
+fn option_dragging_a_clip_leaves_it_and_places_a_copy(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let layers = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+    };
+    let before = s.start_of("l1");
+    let from = s.at(1, before + 1.);
+    let to = from + point(px(120.), px(0.));
+    let option = Modifiers {
+        alt: true,
+        ..Modifiers::none()
+    };
+    s.drag(cx, from, to, option);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let after = layers(&s);
+    assert_eq!(after.len(), 3, "one copy");
+    assert_eq!(s.start_of("l1"), before, "the dragged clip stays");
+    let copy = after
+        .iter()
+        .find(|l| !["l0", "l1"].contains(&l.id.as_str()))
+        .unwrap();
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    assert!(
+        (copy.in_time - (before + 120. / pps)).abs() <= 1. / 30.,
+        "copy at {}, clip at {before}, pps {pps}",
+        copy.in_time
+    );
+    assert!((copy.out_time - copy.in_time - 2.).abs() < 1e-9);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        p.selection.layers(),
+        std::slice::from_ref(&copy.id),
+        "the copy is selected"
+    );
+    assert_eq!(p.history.undo_label.as_deref(), Some("Duplicate Layers"));
+    s.undo(cx);
+    assert_eq!(layers(&s).len(), 2, "one Undo step");
+    assert_eq!(s.start_of("l1"), before);
+    // Without Option the same drag still moves the clip itself.
+    s.drag(cx, from, to, Modifiers::none());
+    assert_eq!(layers(&s).len(), 2);
+    assert!(s.start_of("l1") > before);
 }
