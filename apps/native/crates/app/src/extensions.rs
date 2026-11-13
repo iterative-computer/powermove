@@ -290,6 +290,15 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions"),
     ]
 }
+/// Window viewers and headless jobs decode the same realm snapshot.
+pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    value["definitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| serde_json::from_value(d.clone()).ok())
+        .collect()
+}
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
 pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
@@ -771,22 +780,30 @@ impl Controller {
     ) {
         self.extensions.next_menu += 1;
         let token = self.extensions.next_menu;
-        let entries = rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                if row.is_null() {
-                    return MenuEntry::separator();
-                }
-                let mut entry = MenuEntry::item(
-                    row["label"].as_str().unwrap_or_default(),
-                    format!("{CHOICE}{token}:{i}"),
-                )
-                .checked(row["checked"] == true);
-                entry.enabled = row["disabled"] != true;
-                entry
-            })
-            .collect();
+        // Rows are numbered in preorder, submenu rows included, as the
+        // plain native menu numbers them (`v4_native::menu_item`).
+        fn entries(rows: &[Value], token: u64, next: &mut usize) -> Vec<MenuEntry> {
+            rows.iter()
+                .map(|row| {
+                    let index = *next;
+                    *next += 1;
+                    if row.is_null() {
+                        return MenuEntry::separator();
+                    }
+                    let label = row["label"].as_str().unwrap_or_default();
+                    let mut entry = match row["children"].as_array() {
+                        Some(children) if !children.is_empty() => {
+                            MenuEntry::submenu(label, entries(children, token, next))
+                        }
+                        _ => MenuEntry::item(label, format!("{CHOICE}{token}:{index}")),
+                    }
+                    .checked(row["checked"] == true);
+                    entry.enabled &= row["disabled"] != true;
+                    entry
+                })
+                .collect()
+        }
+        let entries = entries(rows, token, &mut 0);
         self.extensions.choice = Some((token, choose));
         if let Some(entries) = self.extension_menu(locations, entries, at, cx) {
             self.host.borrow().context_menu(&entries, at.0, at.1);
@@ -1095,12 +1112,7 @@ impl Controller {
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
-        let definitions: Vec<_> = value["definitions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
-            .collect();
+        let definitions = definitions(&value);
         if definitions != self.extensions.resources.definitions {
             self.extensions.resources = Arc::new(ResourceSnapshot {
                 generation: self.extensions.resources.generation + 1,

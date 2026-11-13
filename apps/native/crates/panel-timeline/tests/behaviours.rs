@@ -431,14 +431,21 @@ fn layer_navigation_uses_authored_in_and_exclusive_out() {
 #[test]
 fn visible_event_navigation_includes_strip_edges_and_real_keys() {
     let (_a, mut c) = client();
+    // The marker at 4 s is a stop, as are the work area's ends (1 s, 9 s).
     assert_eq!(
         command(&mut c, "nextVisibleEvent", 3.1),
+        vec![HostEffect::Seek(4.)]
+    );
+    assert_eq!(
+        command(&mut c, "nextVisibleEvent", 4.),
         vec![HostEffect::Seek(5.)]
     );
     assert_eq!(
         command(&mut c, "prevVisibleEvent", 1.1),
         vec![HostEffect::Seek(1.)]
     );
+    // Nothing later than the composition's end: the playhead stays.
+    assert_eq!(command(&mut c, "nextVisibleEvent", 10.), vec![]);
 }
 #[test]
 fn keymap_keeps_control_navigation_distinct_from_command_frames() {

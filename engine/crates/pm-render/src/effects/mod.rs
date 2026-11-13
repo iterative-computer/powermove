@@ -1159,6 +1159,14 @@ impl crate::composite::EffectHost for Effects {
             let Some(def) = self.get(kind, ty) else {
                 return false;
             };
+            // Electron extensions run on the requested output grid, including
+            // physical texels. Resampling a composition-sized result changes
+            // their radius and smooths bitmap glyphs.
+            if kind == DefinitionKind::Effect
+                && def.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn
+            {
+                return false;
+            }
             // Owner-bound main definitions scale their own kernels.
             let owned = kind == DefinitionKind::Effect
                 && self.versioned_builtins

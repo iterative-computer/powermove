@@ -25,6 +25,7 @@ mod dialogs;
 mod entry;
 mod error_log;
 mod export_coordinator;
+mod expression_sheet;
 mod extension_authoring;
 mod extensions;
 mod figma_paste;
@@ -63,9 +64,12 @@ mod panel_bridge;
 mod panel_capture_tests;
 mod panel_library;
 mod panels;
+#[cfg(test)]
+mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;
+mod play_range;
 mod playback;
 mod playhead;
 mod pro_media;
@@ -79,6 +83,7 @@ mod session;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
+mod shuttle;
 mod skimming;
 mod smoke;
 mod store_window;
@@ -341,6 +346,7 @@ fn main() -> Result<()> {
                 entity.update(cx, |c, cx| {
                     c.apply_skimming(cx);
                     c.load_skimming(cx);
+                    c.load_playback(cx);
                 });
                 // Each window owns its project: MCP's slot for this window, and
                 // the window wakes only when MCP changes that slot.

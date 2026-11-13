@@ -257,16 +257,7 @@ impl Pipelines {
             )],
         });
         // Today's texture parameters: LINEAR min and mag, CLAMP_TO_EDGE, no mipmaps.
-        let linear = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("pm linear clamp"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
+        let linear = device.create_sampler(&crate::effects::program::sampler_descriptor());
         let layout_with = |groups: &[&wgpu::BindGroupLayout]| {
             let groups: Vec<Option<&wgpu::BindGroupLayout>> =
                 groups.iter().map(|g| Some(*g)).collect();

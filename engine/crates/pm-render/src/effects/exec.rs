@@ -38,7 +38,9 @@ fn full_quad(w: u32, h: u32) -> [f32; 9] {
 /// `u_texel` is one of them in UV, so a radius, cell or offset in pixels
 /// draws at the 1:1 export's size at any viewer zoom or playback scale.
 /// The clip position (`u_m` against `u_res`) is the same either way. Owner
-/// bound steps (`u_pixelScale`) handle density themselves.
+/// bound steps (`u_pixelScale`) handle density themselves. Extension shaders
+/// instead receive Electron's physical output pixels: their glyph grid and
+/// texel-sized kernels must match Electron at the same output resolution.
 fn effect_space(
     step: &EffectStep,
     out: (u32, u32),
@@ -46,8 +48,11 @@ fn effect_space(
     uv: [f64; 4],
     origin: [f64; 2],
     resolution: [f64; 2],
-) -> [(String, Call); 6] {
-    let d = if step.owner.is_none() && step.density.iter().all(|d| d.is_finite() && *d > 0.) {
+) -> [(String, Call); 8] {
+    let d = if !step.raster_space
+        && step.owner.is_none()
+        && step.density.iter().all(|d| d.is_finite() && *d > 0.)
+    {
         step.density
     } else {
         [1., 1.]
@@ -60,6 +65,8 @@ fn effect_space(
         ),
         ("u_res".into(), f(&[ow, oh])),
         ("u_uv".into(), f(&uv)),
+        ("u_pixelScale".into(), f(&step.density)),
+        ("u_effectScale".into(), f(&step.density)),
         (
             "u_coordRes".into(),
             f(&[resolution[0] / d[0], resolution[1] / d[1]]),
@@ -543,7 +550,16 @@ impl<'c> Gpu<'c> {
             if step.backdrop {
                 calls.push(("u_backdrop".into(), Call::I(2)));
             }
-            calls.extend(effect_space(step, (ow, oh), (w, h), uv, origin, resolution));
+            let previous_size = outputs.last().map_or((w, h), |t| (t.width(), t.height()));
+            calls.extend(effect_space(
+                step,
+                (ow, oh),
+                previous_size,
+                uv,
+                origin,
+                resolution,
+            ));
+            calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
             if let Some(owner) = &step.owner {
@@ -557,8 +573,6 @@ impl<'c> Gpu<'c> {
                 ));
                 calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                 calls.push(("u_layerRes".into(), f(&owner.size)));
-                calls.push(("u_pixelScale".into(), f(&step.density)));
-                calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                 calls.push((
                     "u_sampleLod".into(),
                     f(&[step.spatial.map_or(0., |s| s.lod as f64)]),
@@ -851,6 +865,7 @@ impl<'c> Gpu<'c> {
                     calls.push(("u_backdrop".into(), Call::I(2)));
                 }
                 calls.extend(effect_space(step, (w, h), (w, h), uv, origin, resolution));
+                calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                 calls.push(("u_time".into(), f(&[time])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
                 if let Some(owner) = &step.owner {
@@ -860,8 +875,6 @@ impl<'c> Gpu<'c> {
                     ));
                     calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                     calls.push(("u_layerRes".into(), f(&owner.size)));
-                    calls.push(("u_pixelScale".into(), f(&step.density)));
-                    calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                     calls.push(("u_sampleLod".into(), f(&[0.])));
                 }
                 runner_param_calls(&step.params, &mut calls);
@@ -1547,5 +1560,32 @@ mod tests {
         // The whole level (no region): the view's origin.
         let (_, origin, _) = effect_coordinates(None, (1000, 600), (1000, 600), Some(view));
         assert_eq!(origin, [3000.5, 1200.0]);
+    }
+}
+
+#[cfg(test)]
+mod coordinate_tests {
+    use super::*;
+    #[test]
+    fn extension_uniforms_count_output_pixels_even_for_a_cropped_anisotropic_frame() {
+        let mut definition = super::super::builtin_definitions().definitions.remove(0);
+        definition.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+        let mut step = super::super::plan::effect_step(&definition, "synthetic", &[]);
+        step.density = [0.5, 0.25];
+        let calls = effect_space(
+            &step,
+            (80, 30),
+            (100, 50),
+            [0.1, 0.2, 0.4, 0.3],
+            [20., 10.],
+            [200., 100.],
+        );
+        let get = |name: &str| &calls.iter().find(|(key, _)| key == name).unwrap().1;
+        assert_eq!(get("u_res"), &f(&[80., 30.]));
+        assert_eq!(get("u_texel"), &f(&[0.01, 0.02]));
+        assert_eq!(get("u_coordRes"), &f(&[200., 100.]));
+        assert_eq!(get("u_pxOrigin"), &f(&[20., 10.]));
+        assert_eq!(get("u_effectScale"), &f(&[0.5, 0.25]));
+        assert_eq!(get("u_pixelScale"), &f(&[0.5, 0.25]));
     }
 }
