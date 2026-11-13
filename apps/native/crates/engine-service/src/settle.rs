@@ -19,7 +19,10 @@
 //!   stamp it was asked for. The preview stays up until then.
 //!
 //! Nothing waits for this thread: dropping the [`Settler`] ends it after
-//! the frame it is in.
+//! the frame it is in. A panic while it draws is caught: the picture it was
+//! drawing fails with the panic's message, the thread ends (its renderer is
+//! in no known state), and the engine makes a settler again for the next
+//! picture ([`Settler::dead`]).
 
 use crate::render::{FrameSpec, Scene};
 use anyhow::Result;
@@ -84,6 +87,10 @@ pub(crate) fn gate(
         false
     })
 }
+
+/// A scene of this content makes the settler panic (tests).
+#[cfg(test)]
+pub(crate) const PANICS: u64 = u64::MAX - 7;
 
 pub(crate) struct Job {
     pub key: crate::policy::CacheKey,
@@ -162,6 +169,47 @@ struct Shared {
     done: Mutex<Option<Settled>>,
     held: Mutex<Held>,
     busy: AtomicBool,
+    /// The thread ended (a panic): nothing more is drawn here.
+    dead: AtomicBool,
+    /// The picture sent and not answered yet: what fails if the thread
+    /// ends before it answers.
+    inflight: Mutex<Option<(crate::policy::CacheKey, Scene, Arc<ExportedSurface>, f64)>>,
+}
+impl Shared {
+    /// The thread is ending: the picture it owes fails with `why`.
+    fn end(&self, why: &str, waker: &Waker) {
+        if let Some((key, scene, surface, sent)) = self.inflight.lock().unwrap().take() {
+            let at = crate::trace::now();
+            *self.done.lock().unwrap() = Some(Settled {
+                key,
+                scene,
+                surface,
+                outcome: Outcome::Failed(anyhow::anyhow!(
+                    "Drawing a settled picture panicked: {why}"
+                )),
+                fonts: None,
+                reads: Vec::new(),
+                timing: Timing {
+                    sent,
+                    began: at,
+                    ended: at,
+                    ..Default::default()
+                },
+            });
+        }
+        *self.held.lock().unwrap() = Held::default();
+        self.dead.store(true, Ordering::Release);
+        if let Some(wake) = &*waker.lock().unwrap() {
+            wake.try_send(()).ok();
+        }
+    }
+}
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
 }
 
 pub(crate) struct Settler {
@@ -185,12 +233,30 @@ impl Settler {
             done: Mutex::new(None),
             held: Mutex::default(),
             busy: AtomicBool::new(false),
+            dead: AtomicBool::new(false),
+            inflight: Mutex::default(),
         });
         let (device, queue, worker) = (gpu.device.clone(), gpu.queue.clone(), shared.clone());
         std::thread::Builder::new()
             .name("pm-engine-settle".into())
-            .spawn(move || run(device, queue, effects, inbox, worker, waker))?;
+            .spawn(move || {
+                let (ended, waking) = (worker.clone(), waker.clone());
+                // A panic anywhere on this thread (a picture, making the
+                // renderer, letting it go): the picture owed fails, and
+                // the thread is over.
+                if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(device, queue, effects, inbox, worker, waker)
+                })) {
+                    let why = panic_message(&*panic);
+                    eprintln!("a settled picture panicked: {why}");
+                    ended.end(&why, &waking);
+                }
+            })?;
         Ok(Self { jobs, shared })
+    }
+    /// The thread ended after a panic: a settler is made again.
+    pub(crate) fn dead(&self) -> bool {
+        self.shared.dead.load(Ordering::Acquire)
     }
     /// Whether a picture is being drawn or waits to be taken.
     pub(crate) fn busy(&self) -> bool {
@@ -198,6 +264,12 @@ impl Settler {
     }
     pub(crate) fn draw(&self, job: Job) {
         self.shared.busy.store(true, Ordering::Release);
+        *self.shared.inflight.lock().unwrap() = Some((
+            job.key,
+            job.scene.clone(),
+            job.surface.clone(),
+            crate::trace::now(),
+        ));
         if self
             .jobs
             .send(Message::Draw(Box::new(job), crate::trace::now()))
@@ -286,11 +358,27 @@ fn run(
                 (document, fonts) = (None, None);
             }
             Message::Draw(job, sent) => {
-                let settled = objc2::rc::autoreleasepool(|_| {
-                    draw(&mut renderer, &mut document, &mut fonts, *job, sent)
-                });
+                let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    objc2::rc::autoreleasepool(|_| {
+                        draw(&mut renderer, &mut document, &mut fonts, *job, sent)
+                    })
+                }));
+                let settled = match drawn {
+                    Ok(settled) => settled,
+                    Err(panic) => {
+                        let why = panic_message(&*panic);
+                        eprintln!("a settled picture panicked: {why}");
+                        shared.end(&why, &waker);
+                        // Its renderer is let go, in no known state.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            drop(renderer)
+                        }));
+                        return;
+                    }
+                };
                 // What it holds is known before its picture is taken.
                 *shared.held.lock().unwrap() = held(&renderer);
+                *shared.inflight.lock().unwrap() = None;
                 *shared.done.lock().unwrap() = Some(settled);
                 if let Some(wake) = &*waker.lock().unwrap() {
                     wake.try_send(()).ok();
@@ -328,6 +416,10 @@ fn draw(
         ..Default::default()
     };
     let mut reads = Vec::new();
+    #[cfg(test)]
+    if job.scene.content == PANICS {
+        panic!("a test's settled picture");
+    }
     let outcome = (|| -> Result<Outcome> {
         if (job.gate)(Duration::ZERO) {
             return Ok(Outcome::GaveWay);

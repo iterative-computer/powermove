@@ -1882,6 +1882,14 @@ impl Engine {
         if self.settler.as_ref().is_some_and(|settler| settler.busy()) {
             return Ok(Asked::Busy);
         }
+        // One that panicked is made again ([`crate::settle::Settler::dead`]).
+        if self.settler.as_ref().is_some_and(|settler| settler.dead()) {
+            self.settler = Some(crate::settle::Settler::spawn(
+                &self.gpu,
+                self.renderer.effects().sibling(),
+                self.waker.clone(),
+            )?);
+        }
         let mut request = spec.request(scene)?;
         request.output_tone = self.output_tone;
         let surface = self.cache_surface(size)?;
@@ -2246,6 +2254,59 @@ mod lifetime_tests {
         assert!(!engine.settle_now(&scene, spec, || false).unwrap());
         assert!(engine.settled.is_none() && engine.cache.is_empty());
         assert!(engine.settle_now(&scene, spec, || false).unwrap());
+        assert!(engine.settled.is_some());
+    }
+    /// A panic while a settled picture is drawn is caught: the picture
+    /// fails with why (its viewer keeps the preview and says so), nothing
+    /// waits for it forever, and the next settled picture is drawn by a
+    /// settler made again.
+    #[test]
+    fn a_panic_while_settling_fails_that_picture_and_settling_goes_on() {
+        let mut engine = Engine::new(Gpu::new("settle-panic-test").unwrap()).unwrap();
+        let scene = |content| Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        // Nothing may wait for it forever.
+        let answered = Arc::new(AtomicBool::new(false));
+        let watch = answered.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+            if !watch.load(std::sync::atomic::Ordering::Acquire) {
+                eprintln!("waited a minute for a settled picture whose drawing panicked");
+                std::process::abort();
+            }
+        });
+        let why = engine
+            .settle_now(&scene(crate::settle::PANICS), spec, || false)
+            .err()
+            .expect("the picture fails")
+            .to_string();
+        answered.store(true, std::sync::atomic::Ordering::Release);
+        assert!(why.contains("a settled picture panicked"), "{why}");
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        assert!(engine.settle_now(&scene(2), spec, || false).unwrap());
         assert!(engine.settled.is_some());
     }
     #[test]
