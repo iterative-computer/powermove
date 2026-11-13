@@ -374,6 +374,19 @@ impl CubeLut {
                 "The table has a value beyond ±65504, the most a frame can hold.".into(),
             ));
         }
+        // The renderer divides by these spans in f32.
+        let spans = (0..3)
+            .map(|c| (self.domain[0][c], self.domain[1][c]))
+            .chain([(self.cube_range[0], self.cube_range[1])]);
+        for (lo, hi) in spans {
+            let (lo, hi) = (lo as f32, hi as f32);
+            if !(lo.is_finite() && hi.is_finite() && (hi - lo).is_finite() && hi > lo) {
+                return Err(LutError(
+                    "The table’s input range is too narrow or too large for a frame’s numbers."
+                        .into(),
+                ));
+            }
+        }
         let n = self.size;
         let columns = if n == 0 { 1 } else { n.min(MAX_ROW / n) };
         let rows_per_blue = if n == 0 { 0 } else { n.div_ceil(columns) };
@@ -419,13 +432,18 @@ impl CubeLut {
 
     /// Clamp input coordinates to declared domains; preserve extended table output.
     /// 1D interpolation is channel independent; 3D interpolation is tetrahedral.
+    /// An infinite input is outside the domain like any other (the nearer
+    /// end); one that is not a number reads as the domain's low end, as in
+    /// OpenColorIO's lookups and the shader.
     pub fn apply(&self, rgb: [f64; 3]) -> Result<[f64; 3], LutError> {
-        if rgb.iter().any(|v| !v.is_finite()) {
-            return Err(LutError("nonfinite input".into()));
-        }
-        let mut p = std::array::from_fn(|c| {
-            ((rgb[c] - self.domain[0][c]) / (self.domain[1][c] - self.domain[0][c])).clamp(0., 1.)
-        });
+        let unit = |v: f64, lo: f64, hi: f64| {
+            if v.is_nan() {
+                0.
+            } else {
+                ((v - lo) / (hi - lo)).clamp(0., 1.)
+            }
+        };
+        let mut p = std::array::from_fn(|c| unit(rgb[c], self.domain[0][c], self.domain[1][c]));
         if !self.shaper.is_empty() {
             for (c, value) in p.iter_mut().enumerate() {
                 let x = *value * (self.shaper.len() - 1) as f64;
@@ -435,8 +453,7 @@ impl CubeLut {
             }
             if self.size > 0 {
                 for v in &mut p {
-                    *v = ((*v - self.cube_range[0]) / (self.cube_range[1] - self.cube_range[0]))
-                        .clamp(0., 1.);
+                    *v = unit(*v, self.cube_range[0], self.cube_range[1]);
                 }
             }
         }
@@ -710,6 +727,44 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "The input line’s largest value is 40, too low for a .3dl: its values are whole code values of 8 bits or more."
+        );
+    }
+
+    /// The renderer's spans are f32: a domain that is real in f64 but empty
+    /// or infinite there is refused, never divided by.
+    #[test]
+    fn a_domain_the_renderer_cannot_hold_is_refused() {
+        const SENTENCE: &str =
+            "The table’s input range is too narrow or too large for a frame’s numbers.";
+        for text in [
+            "LUT_1D_SIZE 2\nDOMAIN_MIN 1 1 1\nDOMAIN_MAX 1.000000001 1.000000001 1.000000001\n0 0 0\n1 1 1\n",
+            "LUT_1D_SIZE 2\nDOMAIN_MIN -1e100 -1e100 -1e100\nDOMAIN_MAX 1e100 1e100 1e100\n0 0 0\n1 1 1\n",
+            "LUT_1D_SIZE 2\nDOMAIN_MIN 0 0 -3e38\nDOMAIN_MAX 1 1 3e38\n0 0 0\n1 1 1\n",
+            "LUT_1D_SIZE 2\nLUT_1D_INPUT_RANGE 0 1e-50\n0 0 0\n1 1 1\n",
+            "LUT_1D_SIZE 2\nLUT_3D_SIZE 2\nLUT_3D_INPUT_RANGE 16777216 16777217\n0 0 0\n1 1 1\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+        ] {
+            let lut = CubeLut::parse(text).expect("a real range in f64");
+            assert_eq!(lut.gpu().unwrap_err().to_string(), SENTENCE, "{text}");
+        }
+        // The narrowest and widest a frame's numbers can tell apart are kept.
+        for text in [
+            "LUT_1D_SIZE 2\nDOMAIN_MIN 1 1 1\nDOMAIN_MAX 1.0000002 1.0000002 1.0000002\n0 0 0\n1 1 1\n",
+            "LUT_1D_SIZE 2\nDOMAIN_MIN -1e38 -1e38 -1e38\nDOMAIN_MAX 1e38 1e38 1e38\n0 0 0\n1 1 1\n",
+        ] {
+            assert!(CubeLut::parse(text).unwrap().gpu().is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_not_finite_has_a_stated_lookup() {
+        let lut = CubeLut::parse(
+            "LUT_1D_SIZE 3\nDOMAIN_MIN -0.5 -0.5 -0.5\nDOMAIN_MAX 1.5 1.5 1.5\n0.1 0.2 0.3\n0.4 0.5 0.6\n0.7 0.8 0.9\n",
+        )
+        .unwrap();
+        // Infinite: the nearer end of the domain. Not a number: its low end.
+        assert_eq!(
+            lut.apply([f64::INFINITY, f64::NEG_INFINITY, f64::NAN]).unwrap(),
+            [0.7, 0.2, 0.3]
         );
     }
 

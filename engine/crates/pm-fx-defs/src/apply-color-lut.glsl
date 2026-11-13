@@ -51,7 +51,8 @@ float lut_log_dec(float v,int s){
  if(s==5){if(v<.181)return (v-.125)/5.6;return pow(10.,(v-.598206)/.241514)-.00873;}
  if(s==6){if(v>.1496578)return (pow(10.,(v-.385537)/.24719)-.052272)/5.555556;return (v-.092809)/5.367655;}
  if(s==7){float a=262128./117.45,b=928./1023.,c=95./1023.;float t=(lut_pow2(14.*(-c/b)+6.)-64.)/a;float k=7.*log(2.)*lut_pow2(7.-14.*c/b)/(a*b);if(v>=0.)return (lut_pow2(14.*(v-c)/b+6.)-64.)/a;return v*k+t;}
- float p=pow(max(v,0.),32./2523.);return 10000.*pow(max(p-3424./4096.,0.)/(2413./128.-2392./128.*p),16384./2610.)/203.;
+ // PQ is defined on codes 0..1: a table's code past either end is that end (0 or 10,000 nits).
+ float p=pow(clamp(v,0.,1.),32./2523.);return 10000.*pow(max(p-3424./4096.,0.)/(2413./128.-2392./128.*p),16384./2610.)/203.;
 }
 mat3 lut_to_gamut(int s){if(s==2)return mat3(0.627403896,0.069097289,0.016391439,0.329283038,0.919540395,0.088013308,0.043313066,0.011362316,0.895595253); if(s==3)return mat3(0.645679478,0.087529992,0.036957420,0.259114547,0.759699563,0.129280905,0.095205975,0.152770446,0.833761675); if(s==4)return mat3(0.566049080,0.076961379,0.022350913,0.342763087,0.799054500,0.108612051,0.091187833,0.123984121,0.869037036); if(s==5)return mat3(0.585196147,0.078588567,0.022794238,0.322641622,0.819627115,0.114217024,0.092162231,0.101784318,0.862988738); if(s==6)return mat3(0.631321023,0.036819934,0.017369732,0.270800727,0.793036966,0.148789185,0.097878250,0.170143100,0.833841083); if(s==7)return mat3(0.565836540,0.088625637,0.017750040,0.340330999,0.809346842,0.109447621,0.093832461,0.102027521,0.872802339); if(s==8)return mat3(0.627403896,0.069097289,0.016391439,0.329283038,0.919540395,0.088013308,0.043313066,0.011362316,0.895595253); return mat3(1.);}
 mat3 lut_from_gamut(int s){if(s==2)return mat3(1.660491002,-0.124550475,-0.018150763,-0.587641139,1.132899897,-0.100578898,-0.072849863,-0.008349423,1.118729661); if(s==3)return mat3(1.626947410,-0.178515527,-0.044436115,-0.540138539,1.417940927,-0.195919966,-0.086808871,-0.239425400,1.240356081); if(s==4)return mat3(1.877915128,-0.176806981,-0.026201126,-0.794168761,1.350999621,-0.148422262,-0.083746367,-0.174192640,1.174623389); if(s==5)return mat3(1.806575884,-0.170090343,-0.025205784,-0.695697274,1.305955216,-0.154468329,-0.110878610,-0.135864873,1.179674113); if(s==6)return mat3(1.617523436,-0.070572741,-0.021101728,-0.537286622,1.334613062,-0.226953875,-0.080236814,-0.264040321,1.248055603); if(s==7)return mat3(1.893123443,-0.205700358,-0.012705743,-0.780881504,1.340257489,-0.152184876,-0.112241939,-0.134557131,1.164890619); if(s==8)return mat3(1.660491002,-0.124550475,-0.018150763,-0.587641139,1.132899897,-0.100578898,-0.072849863,-0.008349423,1.118729661); return mat3(1.);}
@@ -74,21 +75,29 @@ vec3 lut_tetrahedral(vec3 p){
 }
 float lut_shaper_at(int i,int ch){int w=int(u_lutRes.x);return texelFetch(u_lut,ivec2(i%w,int(u_lutShaperRow)+i/w),0)[ch];}
 float lut_shaper(float v,int ch){float m=u_lutShaperSize-1.;float x=v*m;int i=int(min(floor(x),m-1.));float lo=lut_shaper_at(i,ch);return lo+(lut_shaper_at(i+1,ch)-lo)*(x-float(i));}
+// Read from the bits, which no compiler assumption about numbers removes.
+bool lut_finite(float v){return (floatBitsToUint(v)&0x7f800000u)!=0x7f800000u;}
+bool lut_nan(float v){return !lut_finite(v)&&(floatBitsToUint(v)&0x007fffffu)!=0u;}
+// Where a value sits in the table's domain, 0..1: outside it (an infinite one
+// too) is the nearer end, and a value that is not a number is the low end.
+float lut_unit(float v,float lo,float hi){return lut_nan(v)?0.:clamp((v-lo)/(hi-lo),0.,1.);}
 vec3 lut_apply(vec3 v){
- vec3 p=clamp((v-u_lutDomainMin)/(u_lutDomainMax-u_lutDomainMin),0.,1.);
+ vec3 p=vec3(lut_unit(v.r,u_lutDomainMin.r,u_lutDomainMax.r),lut_unit(v.g,u_lutDomainMin.g,u_lutDomainMax.g),lut_unit(v.b,u_lutDomainMin.b,u_lutDomainMax.b));
  if(u_lutShaperSize>.5){
   p=vec3(lut_shaper(p.r,0),lut_shaper(p.g,1),lut_shaper(p.b,2));
   if(u_lutCubeSize<.5)return p;
-  p=clamp((p-u_lutCubeRange.x)/(u_lutCubeRange.y-u_lutCubeRange.x),0.,1.);
+  p=vec3(lut_unit(p.r,u_lutCubeRange.x,u_lutCubeRange.y),lut_unit(p.g,u_lutCubeRange.x,u_lutCubeRange.y),lut_unit(p.b,u_lutCubeRange.x,u_lutCubeRange.y));
  }
  return lut_tetrahedral(p);
 }
 void main(){
-vec4 c=texture(u_tex,v_st);if(u_has_lut<.5||u_amount<=0.||c.a<=0.){o=c;return;}
+vec4 c=texture(u_tex,v_st);if(u_has_lut<.5||u_amount<=0.||c.a<=0.||!lut_finite(c.a)){o=c;return;}
  vec3 x=c.rgb/c.a;int from=int(u_inputSpace+.5),to=int(u_outputSpace+.5);
  vec3 e=lut_encode(x,from),graded=lut_apply(e),result=lut_decode(graded,to);
  // A channel the table leaves alone keeps its stored bits: no divide and multiply by alpha, no trip through the space.
  vec3 same=from==to?lut_decode(e,to):x;
- vec3 mixed=mix(x,result,clamp(u_amount/100.,0.,1.))*c.a;
+ // A channel that is not a finite number has no original to blend with: it takes the table's value.
+ vec3 base=vec3(lut_finite(x.r)?x.r:result.r,lut_finite(x.g)?x.g:result.g,lut_finite(x.b)?x.b:result.b);
+ vec3 mixed=mix(base,result,clamp(u_amount/100.,0.,1.))*c.a;
  o=vec4(result.r==same.r?c.r:mixed.r,result.g==same.g?c.g:mixed.g,result.b==same.b?c.b:mixed.b,c.a);
 }

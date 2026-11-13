@@ -71,7 +71,12 @@ mod reference {
         lut
     }
 
+    /// Where `v` sits in a domain: outside it (an infinite value too) is the
+    /// nearer end; a value that is not a number is the low end (OpenColorIO).
     fn unit(v: f64, lo: f64, hi: f64) -> f64 {
+        if v.is_nan() {
+            return 0.;
+        }
         ((v - lo) / (hi - lo)).clamp(0., 1.)
     }
 
@@ -280,6 +285,16 @@ fn half_step(v: f64) -> f64 {
     2f64.powi(exponent - 10)
 }
 
+/// A comparison counts only finite numbers: a NaN is never the larger of two
+/// errors, so it would pass any tolerance.
+#[track_caller]
+fn finite(rendered: f32, expected: f64, at: &str) {
+    assert!(
+        rendered.is_finite() && expected.is_finite(),
+        "{at}: rendered {rendered}, reference {expected}"
+    );
+}
+
 /// The largest difference between the rendered table and the reference over
 /// the field, in units of `tolerance(reference value)`.
 fn worst(
@@ -297,6 +312,7 @@ fn worst(
         let rgb = [input[0], input[1], input[2]].map(f64::from);
         let expected = reference::apply(lut, rgb);
         for c in 0..3 {
+            finite(out[c], expected[c], &format!("pixel {i} channel {c}, in {rgb:?}"));
             let error = (f64::from(out[c]) - expected[c]).abs() / tolerance(expected[c]);
             if error > worst.0 {
                 worst = (
@@ -458,6 +474,7 @@ fn the_reference_agrees_with_ffmpeg() {
         for (i, out) in filtered.iter().enumerate() {
             let expected = reference::apply(lut, pixel(i).map(f64::from));
             for c in 0..3 {
+                finite(out[c], expected[c], &format!("{name}, pixel {i} channel {c}"));
                 worst = worst.max((f64::from(out[c]) - expected[c]).abs());
             }
         }
@@ -567,7 +584,8 @@ fn spaces() -> Vec<Space> {
             8.,
             Some(P::BT2020),
             Box::new(|v| T::Pq.from_linear((v * 203.0 / 10000.0).max(0.0))),
-            Box::new(|v| T::Pq.to_linear(v) * 10000.0 / 203.0),
+            // PQ is defined on codes 0..1: past either end is that end.
+            Box::new(|v| T::Pq.to_linear(v.clamp(0.0, 1.0)) * 10000.0 / 203.0),
         ),
     ]
 }
@@ -602,10 +620,102 @@ fn a_lut_is_applied_on_its_stated_input_encoding() {
             let working = [input[0], input[1], input[2]].map(f64::from);
             let expected = decode(reference::apply(&lut, encode(working)));
             for c in 0..3 {
+                finite(out[c], expected[c], &format!("{name}, in {working:?}"));
                 worst = worst.max((f64::from(out[c]) - expected[c]).abs());
             }
         }
         assert!(worst < 1e-4, "{name}: {worst:e} from the reference");
+    }
+}
+
+/// A pixel that is not a finite number has a stated lookup, the reference's:
+/// an infinite value is outside the domain like any other, and one that is
+/// not a number reads as the domain's low end. The result is finite at any
+/// amount (a channel with no finite original takes the table's value).
+#[test]
+fn a_pixel_that_is_not_a_finite_number_has_a_stated_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    // Zero only when the frame is drawn, so no compiler folds the divisions;
+    // the NaN by its bits, which no rule of arithmetic rewrites.
+    let code = "void main(){float z=min(gl_FragCoord.x,0.0);float one=1.0+z;\
+                fragColor=vec4(one/z,-one/z,uintBitsToFloat(0x7fc00000u),1.0);}";
+    let inputs = draw(
+        &mut renderer,
+        &project_with(code, None, 32),
+        &MapResolver::default(),
+    );
+    assert!(
+        inputs[0] == f32::INFINITY && inputs[1] == f32::NEG_INFINITY && inputs[2].is_nan(),
+        "the field holds +inf, -inf and NaN: {:?}",
+        &inputs[..4]
+    );
+    for (name, text) in tables() {
+        let files = resolver(&dir, &text);
+        let lut = reference::read(&text);
+        let expected = reference::apply(&lut, [f64::INFINITY, f64::NEG_INFINITY, f64::NAN]);
+        for amount in [100., 50.] {
+            let graded = project_with(code, Some(lut_effect(amount, 0., 0.)), 32);
+            let pixels = draw(&mut renderer, &graded, &files);
+            for (i, out) in pixels.chunks_exact(4).enumerate() {
+                for c in 0..3 {
+                    finite(out[c], expected[c], &format!("{name}, amount {amount}, pixel {i}"));
+                    assert!(
+                        (f64::from(out[c]) - expected[c]).abs() < 1e-4,
+                        "{name}, amount {amount}: rendered {:?}, reference {expected:?}",
+                        &out[..3]
+                    );
+                }
+                assert_eq!(out[3], 1.0);
+            }
+        }
+    }
+    // Through a camera encoding the same pixel still leaves finite.
+    let text = format!("LUT_3D_SIZE 17\n{}", cube_rows(17, graded));
+    let files = resolver(&dir, &text);
+    for (name, index, _, _) in spaces() {
+        let project = project_with(code, Some(lut_effect(100., index, index)), 32);
+        let pixels = draw(&mut renderer, &project, &files);
+        assert!(
+            pixels.iter().all(|v| v.is_finite()),
+            "{name}: {:?}",
+            &pixels[..4]
+        );
+    }
+}
+
+/// PQ is defined on codes 0..1. A table that answers with a code past either
+/// end gives that end: black, or PQ's 10,000 nits; never an undefined power.
+#[test]
+fn a_pq_code_past_either_end_of_pq_is_that_end() {
+    use pm_reference::color::{Primaries as P, Transfer as T, apply, invert, mul};
+    let dir = tempfile::tempdir().unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let to_709 = mul(&invert(&P::BT709.to_xyz()), &P::BT2020.to_xyz());
+    let code = "void main(){fragColor=vec4(0.5,0.5,0.5,1.0);}";
+    for (table, end) in [
+        ([2.0, 2.0, 2.0], [1.0, 1.0, 1.0]),
+        ([1.5, 1.0, 3.0], [1.0, 1.0, 1.0]),
+        ([-0.5, 2.0, 0.25], [0.0, 1.0, 0.25]),
+        ([65504.0, -65504.0, 0.75], [1.0, 0.0, 0.75]),
+    ] {
+        let text = format!(
+            "LUT_3D_SIZE 2\n{}",
+            cube_rows(2, |_, _, _| table)
+        );
+        let files = resolver(&dir, &text);
+        let project = project_with(code, Some(lut_effect(100., 8., 8.)), 32);
+        let pixels = draw(&mut renderer, &project, &files);
+        let light = apply(&to_709, end.map(|v| T::Pq.to_linear(v) * 10000.0 / 203.0));
+        let expected = light.map(|v| T::Srgb.from_linear(v));
+        for c in 0..3 {
+            finite(pixels[c], expected[c], &format!("table {table:?}"));
+            assert!(
+                (f64::from(pixels[c]) - expected[c]).abs() < 1e-3 * expected[c].abs().max(1.0),
+                "table {table:?}: rendered {:?}, expected {expected:?}",
+                &pixels[..3]
+            );
+        }
     }
 }
 
@@ -741,8 +851,65 @@ fn a_3dl_table_matches_ffmpeg() {
     let mut worst = 0f64;
     for (i, out) in pixels.chunks_exact(4).enumerate() {
         for (c, plane) in [2, 0, 1].into_iter().enumerate() {
+            finite(out[c], at(plane, i), &format!("pixel {i} channel {c}"));
             worst = worst.max((f64::from(out[c]) - at(plane, i)).abs());
         }
     }
     assert!(worst < 2e-6, "{worst:e} from FFmpeg");
+}
+
+/// A `.3dl` input line that is not evenly spaced is a 1D table before the
+/// cube, at its own depth (10-bit here, before a 12-bit cube), and a table
+/// with a superwhite keeps its white at 1: the renderer against the
+/// reference built by hand from the file's numbers.
+#[test]
+fn a_3dl_input_line_and_a_superwhite_are_rendered_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let size = 5usize;
+    let line = [0., 250., 500., 750., 1000.];
+    let at = |i: usize| i as f64 / (size - 1) as f64;
+    let code_of = |v: f64| (v.clamp(0., 1.1) * 4095.).round();
+    let mut text = String::from("Mesh 2 12\n0 250 500 750 1000\n");
+    let mut lut = reference::Lut {
+        max: [1.; 3],
+        shaper: line.iter().map(|v| [v / 1023.; 3]).collect(),
+        size,
+        cube: vec![[0.; 3]; size * size * size],
+        cube_range: [0., 1.],
+        ..reference::Lut::default()
+    };
+    for r in 0..size {
+        for g in 0..size {
+            for b in 0..size {
+                // Above white at the top of the table: 4504 of 4095.
+                let v = graded(at(r), at(g), at(b)).map(code_of);
+                text += &format!("{} {} {}\n", v[0], v[1], v[2]);
+                lut.cube[r + size * (g + size * b)] = v.map(|v| v / 4095.);
+            }
+        }
+    }
+    assert!(lut.cube.iter().flatten().any(|v| *v > 1.05), "a superwhite");
+    let file = dir.path().join("grade.3dl");
+    std::fs::write(&file, &text).unwrap();
+    let mut files = MapResolver::default();
+    files.paths.insert("grade".into(), file);
+    let mut renderer = Renderer::headless().unwrap();
+    let code = field(true);
+    let inputs = draw(&mut renderer, &project_with(&code, None, 32), &files);
+    for declared in [true, false] {
+        // Without its Mesh line the depth comes from the largest value, 4504:
+        // still 12 bits, not 14.
+        let body = if declared {
+            text.clone()
+        } else {
+            text.replace("Mesh 2 12\n", "")
+        };
+        std::fs::write(files.paths.get("grade").unwrap(), body).unwrap();
+        let mut project = project_with(&code, Some(lut_effect(100., 0., 0.)), 32);
+        project["assets"]["grade"]["format"] = json!("3dl");
+        let pixels = draw(&mut Renderer::headless().unwrap(), &project, &files);
+        let (error, at) = worst(&pixels, &inputs, &lut, |_| 1e-4);
+        assert!(error <= 1.0, "Mesh line {declared}: {error:.3} at {at}");
+    }
+    let _ = &mut renderer;
 }
