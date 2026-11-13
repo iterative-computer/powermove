@@ -3532,6 +3532,87 @@ mod tests {
         drop(host);
         drop(actor);
     }
+    /// A value that has been taken away (its entry removed, its declaration
+    /// gone) is gone from the extension's next load: each load replaces what
+    /// the realm holds with what the host chose for it, nothing is kept.
+    #[test]
+    fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
+        const SECRET: &str = "sk-removed-later";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const seen=api.storage.get('seen')||[];
+               seen.push(api.vars.keys());
+               api.storage.set('seen',seen);
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entered = Arc::new(AtomicBool::new(true));
+        let source = entered.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(Arc::new(move |_: &str, keys: &[String]| {
+                keys.iter()
+                    .filter(|_| source.load(Ordering::Acquire))
+                    .map(|key| (key.clone(), SECRET.to_owned()))
+                    .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let seen = |rounds: usize| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let seen = stored(&kernel, "seen").unwrap_or(json!([]));
+                if seen.as_array().is_some_and(|s| s.len() == rounds) && host.publication().settled
+                {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "{seen} {:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(seen(1), json!([["API_KEY"]]));
+        // The person removes the value; the extension is turned off and on.
+        entered.store(false, Ordering::Release);
+        for enabled in [false, true] {
+            let entry = kernel.state().extensions["needs-key"].clone();
+            kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while host.records().iter().any(|r| r["enabled"] != enabled) {
+                assert!(Instant::now() < deadline, "{:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(seen(2), json!([["API_KEY"], []]), "the removed value");
+        drop(host);
+        drop(actor);
+    }
     /// A run with a secret value entered for an extension leaves it nowhere
     /// but in that extension's `api.vars`: not in the load trace or anything
     /// else the process prints, the published contributions and records,

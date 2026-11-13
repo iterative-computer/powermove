@@ -17,8 +17,11 @@ for (const [key, value] of [
   const held = Object.create(null);
   const { engine } = runtime;
   const { freeze, keys } = Object;
+  // A load carries every value its records have now: what an earlier load
+  // brought (a value since removed, an extension since gone) is dropped.
   const take = (token) => {
     const staged = engine("extension.vars", { token });
+    for (const id of keys(held)) delete held[id];
     for (const id of keys(staged)) held[id] = freeze(staged[id]);
   };
   // The host's entries for a load: an extension cannot replace them to see a
