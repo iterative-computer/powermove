@@ -403,6 +403,28 @@ fn bring_my_workspace_opens_a_thread_with_the_request_and_sends_the_agent_its_st
     }
     assert_eq!(agent_host::expand_request("Make it blue"), "Make it blue");
     panels.close();
+
+    // The Settings row's button hands the transfer to the app's window.
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "builtin-application".into(),
+    };
+    let mut settings = data::Backend::new(actor.handle(), identity, "settings", true).unwrap();
+    let revision = settings.settings_snapshot().unwrap()["revision"].clone();
+    settings
+        .native_command(
+            "panel.settings",
+            &json!({"revision":revision,"action":{"type":"row","id":"workspace","action":"workspace.import"}}),
+        )
+        .expect("the button no longer ends in an error");
+    assert!(
+        settings
+            .native
+            .platform
+            .iter()
+            .any(|(kind, request)| kind == "command" && request["name"] == "bringWorkspace")
+    );
 }
 
 #[test]
