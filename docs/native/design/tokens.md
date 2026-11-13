@@ -59,7 +59,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F4` | `#1D1F25` | `#F5F5F4` |
 | `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#090807` | `#E6E6EA` | `#090807` |
 | `colors.viewer_grid` | The viewer's grid over the picture | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` |
-| `colors.viewer_guide` | Ruler guides over the viewer's picture | `#2CCCEB` | `#2CCCEB` | `#2CCCEB` | `#2CCCEB` |
+| `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
 | `colors.warning` | Warnings, missing-but-recoverable states | `#A15C01` | `#F59E0A` | `#A15C01` | `#F59E0A` |
 | `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `metrics.agent_width` | Default agent panel width | 360 | 360 | 360 | 360 |

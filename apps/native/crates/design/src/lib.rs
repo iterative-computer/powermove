@@ -78,8 +78,9 @@ pub struct Colors {
     /// Badges drawn over media (duration, offline): always dark, drawn at
     /// `metrics.media_badge_opacity`.
     pub media_badge: u32,
-    /// The viewer's ruler guides: over the picture, so one cyan in either
-    /// appearance (the accent marks selection handles there).
+    /// The viewer's ruler guides: a cyan (the accent marks selection handles
+    /// there), deeper in the light appearance, where they also cross the
+    /// light surround.
     pub viewer_guide: u32,
     /// The viewer's grid: a light neutral over the picture, drawn at
     /// `translucency.line`.
@@ -579,7 +580,13 @@ impl Colors {
                 oklch(0.514, 0.11, 161.)
             },
             media_badge: 0x000000,
-            viewer_guide: oklch(0.78, 0.13, 215.),
+            // Over a light surround a lighter cyan fades; a deeper one
+            // still reads over a dark picture.
+            viewer_guide: if dark {
+                oklch(0.78, 0.13, 215.)
+            } else {
+                oklch(0.62, 0.13, 220.)
+            },
             viewer_grid: 0xd8d8d8,
             scope_red: 0xff6b62,
             scope_green: 0x4fd58a,
