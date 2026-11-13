@@ -20,8 +20,13 @@ fn metal_cpu_picture_tolerance_rebinding_and_padded_channels() {
         return;
     };
     let cpu = Denoiser::new_with_device(DevicePreference::Cpu).unwrap();
-    assert_eq!(Denoiser::new_with_device(DevicePreference::Auto).unwrap().backend(), Backend::Metal,
-        "automatic selection did not prefer an available Metal device");
+    assert_eq!(
+        Denoiser::new_with_device(DevicePreference::Auto)
+            .unwrap()
+            .backend(),
+        Backend::Metal,
+        "automatic selection did not prefer an available Metal device"
+    );
     for (w, h, stride, half, quality) in [
         (97, 65, 4, false, Quality::High),
         (513, 257, 5, true, Quality::Balanced),
@@ -121,4 +126,72 @@ fn cancelled_metal_frame_keeps_original_and_next_frame_renders() {
     let mut expected = input;
     fresh.run(&mut expected, &albedo, &normal, 4, w, h).unwrap();
     assert!(out.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-6));
+}
+
+#[test]
+fn stable_multi_layer_metal_filters_match_fresh_filters_after_input_and_crop_changes() {
+    let Some(reused) = metal() else { return };
+    let (w, h, stride) = (768, 512, 4);
+    let albedo = vec![0.5; w * h * stride];
+    let normal: Vec<f32> = (0..w * h).flat_map(|_| [0., 0., 1., 0.]).collect();
+    for phase in 0..3 {
+        let right = 500 + if phase == 2 { 8 } else { 0 };
+        let color: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let x = i % w;
+                let y = i / w;
+                if (220..right).contains(&x) && (160..350).contains(&y) {
+                    [
+                        0.5 + (i % 13) as f32 * 0.005 + phase as f32 * 0.03,
+                        0.3,
+                        0.2,
+                        0.25,
+                    ]
+                } else {
+                    [0., 0., 0., 0.25]
+                }
+            })
+            .collect();
+        let shade: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let v = 0.7 + ((i + phase) % 17) as f32 * 0.005;
+                [v, v, v, 0.75]
+            })
+            .collect();
+        let mut actual = [color.clone(), shade.clone()];
+        let mut expected = [color, shade];
+        let fresh = metal().unwrap();
+        for (d, images) in [(&reused, &mut actual), (&fresh, &mut expected)] {
+            d.set_quality(Quality::Balanced);
+            d.set_half_resolution_guides(true);
+            let (a, b) = images.split_at_mut(1);
+            d.run_layers_interruptible(
+                &mut [&mut a[0], &mut b[0]],
+                &albedo,
+                &normal,
+                stride,
+                w,
+                h,
+                None,
+            )
+            .unwrap();
+        }
+        for (layer, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            let max = actual
+                .iter()
+                .zip(expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max < 1e-6,
+                "stale layer/filter binding, phase={phase} layer={layer}: {max}"
+            );
+            assert!(
+                actual
+                    .chunks_exact(stride)
+                    .all(|p| p[3] == if layer == 0 { 0.25 } else { 0.75 })
+            );
+        }
+        assert_eq!(reused.backend(), Backend::Metal);
+    }
 }
