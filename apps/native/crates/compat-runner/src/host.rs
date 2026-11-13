@@ -27,7 +27,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
@@ -162,6 +162,7 @@ pub struct HostConfig {
 
 enum Input {
     Kernel,
+    Sync(Sender<()>),
     Viewport(f32, f32, f32),
     Realm(Writer, RealmEnvelope),
     Moved,
@@ -227,6 +228,7 @@ struct Published {
     canvases: BTreeMap<(u64, String), CanvasFrame>,
     surfaces: Vec<Value>,
     ready: bool,
+    activations: usize,
     /// The realm generation drawing now, 0 with none. Its page is keyed by this.
     view: u64,
     revision: u64,
@@ -234,6 +236,7 @@ struct Published {
 
 struct Shared {
     published: Mutex<Published>,
+    changed: Condvar,
     /// What the confined helpers registered, in contribution-list form.
     store: Mutex<Value>,
     sessions: Mutex<BTreeMap<String, StoreSession>>,
@@ -252,6 +255,7 @@ impl Shared {
             change(&mut published);
             published.revision += 1;
         }
+        self.changed.notify_all();
         (self.wake)();
     }
 }
@@ -605,6 +609,7 @@ impl ExtensionHost {
         let (inbox, input) = mpsc::channel();
         let shared = Arc::new(Shared {
             published: Mutex::default(),
+            changed: Condvar::new(),
             store: Mutex::new(json!({})),
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
@@ -668,6 +673,39 @@ impl ExtensionHost {
     /// Latest contributions, or `None` until the first activation pass finishes.
     pub fn contributions(&self) -> Option<Arc<Value>> {
         self.shared.published.lock().unwrap().contributions.clone()
+    }
+    /// A worker's definition pin after activation, including confined Store
+    /// helpers. No DOM page or AppKit is needed. Never deliver a partial boot.
+    pub fn wait_contributions(&self, timeout: Duration) -> Result<(u64, Arc<Value>)> {
+        let started = std::time::Instant::now();
+        // Fence saved enable changes and disk reloads on the owner before
+        // reading its publication. A request immediately after Disable must
+        // not pin the definitions from before that change.
+        let (tx, rx) = mpsc::channel();
+        self.inbox
+            .send(Input::Sync(tx))
+            .map_err(|_| Error::Host("The extension host stopped".into()))?;
+        rx.recv_timeout(timeout)
+            .map_err(|_| Error::Host("Extensions did not finish starting".into()))?;
+        let (published, _) = self
+            .shared
+            .changed
+            .wait_timeout_while(
+                self.shared.published.lock().unwrap(),
+                timeout.saturating_sub(started.elapsed()),
+                |p| !p.ready,
+            )
+            .unwrap();
+        if !published.ready {
+            return Err(Error::Host("Extensions did not finish starting".into()));
+        }
+        Ok((
+            published.revision,
+            published
+                .contributions
+                .clone()
+                .unwrap_or_else(|| Arc::new(json!({}))),
+        ))
     }
     pub fn revision(&self) -> u64 {
         self.shared.published.lock().unwrap().revision
@@ -1117,6 +1155,15 @@ impl Owner {
     }
     fn handle(&mut self, message: Input) {
         match message {
+            Input::Sync(done) => {
+                self.follow_state();
+                let stamp = self.stamp();
+                if stamp != self.disk {
+                    self.disk = stamp;
+                    self.rescan();
+                }
+                let _ = done.send(());
+            }
             Input::Run(id, args) => {
                 if !self.run_store(&id, &args) {
                     let source = format!("__compat.run({},{args})", json!(id));
@@ -1226,7 +1273,10 @@ impl Owner {
             Input::Health(id, health) => self.set_health(&id, health),
             Input::Enabled(id, enabled) => self.set_enabled(&id, enabled),
             Input::Booted(generation) if generation == self.writer.generation => {
-                self.shared.update(|p| p.ready = true);
+                self.shared.update(|p| {
+                    p.activations = p.activations.saturating_sub(1);
+                    p.ready = p.activations == 0;
+                });
                 self.reopen_panels(None);
             }
             Input::Rescan => self.rescan(),
@@ -1592,6 +1642,10 @@ impl Owner {
             self.publish_store();
         } else {
             let records = self.realm_plan();
+            self.shared.update(|p| {
+                p.activations += 1;
+                p.ready = false;
+            });
             self.eval(&format!(
                 "__compat.update({records},{},\"enable\")",
                 json!([id])
@@ -1980,7 +2034,11 @@ impl Owner {
             events,
         });
         let view = u64::from(self.writer.generation);
-        self.shared.update(|p| p.view = view);
+        self.shared.update(|p| {
+            p.view = view;
+            p.activations = 1;
+            p.ready = false;
+        });
         Ok(())
     }
     fn boot(&mut self) {
@@ -2085,6 +2143,10 @@ impl Owner {
         self.publish_records();
         self.publish_store();
         let records = self.realm_plan();
+        self.shared.update(|p| {
+            p.activations += 1;
+            p.ready = false;
+        });
         self.eval(&format!(
             "__compat.update({records},{},\"rescan\")",
             Value::Array(changed)

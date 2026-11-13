@@ -942,3 +942,124 @@ fn a_connection_acts_as_the_run_that_launched_it() {
     );
     assert_eq!(recorder.0.lock().unwrap().len(), 1);
 }
+
+/// No page, viewer or window realm: jobs still use the production extension
+/// discovery, saved enable state and isolated Store registration path.
+#[test]
+fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
+    let f = Fixture::new();
+    for (id, store, enabled) in [
+        ("synthetic-local", false, true),
+        ("synthetic-store", true, true),
+        ("synthetic-disabled", false, false),
+    ] {
+        let folder = f.host.profile.join("extensions").join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("manifest.json"),
+            json!({
+                "id":id,"name":id,"version":"1.0.0","apiVersion":3
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(folder.join("index.ts"), format!(
+            "export default function(api){{api.effects.register({{id:'{id}.tint',label:'Tint',group:'Stylize',params:[],frag:'o = vec4(1.0,0.0,0.0,1.0);'}})}}"
+        )).unwrap();
+        if store {
+            std::fs::write(
+                folder.join(".powermove-store.json"),
+                r#"{"repoId":"synthetic","releaseId":"synthetic"}"#,
+            )
+            .unwrap();
+        }
+        if !enabled {
+            f.host
+                .kernel
+                .state_transaction(state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![state::StateOp::Extension(state::ExtensionEntry {
+                        id: id.into(),
+                        installed: true,
+                        enabled,
+                        version: "1.0.0".into(),
+                        source: model(&json!({})),
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        }
+    }
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let published = f.host.kernel.published("test").unwrap();
+    let first = jobs.resources(&published).unwrap();
+    let ids: std::collections::BTreeSet<_> =
+        first.definitions.iter().map(|d| d.id.as_str()).collect();
+    assert!(ids.contains("synthetic-local.tint"), "{ids:?}");
+    assert!(ids.contains("synthetic-store.tint"), "{ids:?}");
+    assert!(!ids.contains("synthetic-disabled.tint"));
+    assert_eq!(
+        first
+            .definitions
+            .iter()
+            .find(|d| d.id.as_str() == "synthetic-store.tint")
+            .unwrap()
+            .origin,
+        pm_protocol::definitions::DefinitionOrigin::Store
+    );
+    first.validate().unwrap();
+    let entry = f.host.kernel.state().extensions["synthetic-local"].clone();
+    f.host
+        .kernel
+        .state_transaction(state::StateTransaction {
+            expected_revision: None,
+            ops: vec![state::StateOp::Extension(state::ExtensionEntry {
+                enabled: false,
+                ..entry.clone()
+            })],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let disabled = jobs.resources(&published).unwrap();
+    assert!(
+        !disabled
+            .definitions
+            .iter()
+            .any(|d| d.id.as_str() == "synthetic-local.tint")
+    );
+    assert!(
+        first
+            .definitions
+            .iter()
+            .any(|d| d.id.as_str() == "synthetic-local.tint")
+    );
+    f.host
+        .kernel
+        .state_transaction(state::StateTransaction {
+            expected_revision: None,
+            ops: vec![state::StateOp::Extension(entry)],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    // Pins are immutable and the next request reuses the running host.
+    assert_eq!(
+        first.definitions,
+        jobs.resources(&published).unwrap().definitions
+    );
+    let window = Arc::new(pm_engine_service::resources::ResourceSnapshot {
+        generation: 99,
+        ..Default::default()
+    });
+    crate::mcp_services::set_resources(published.snapshot.doc_id, Some(window.clone()));
+    assert!(Arc::ptr_eq(&window, &jobs.resources(&published).unwrap()));
+    crate::mcp_services::set_resources(published.snapshot.doc_id, None);
+    assert_eq!(
+        first.definitions,
+        jobs.resources(&published).unwrap().definitions
+    );
+}

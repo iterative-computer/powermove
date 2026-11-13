@@ -327,9 +327,9 @@ pub trait EffectHost: Send + Sync {
     }
 
     /// Whether `layer` has an effect or transition at `time` that must read
-    /// the composition's pixel grid: without an owner binding, and in final
-    /// output any, in a viewer frame one whose shader addresses physical
-    /// texels (`crate::plan::comp_pass`).
+    /// the composition's pixel grid (`crate::plan::comp_pass`). Built-ins
+    /// without an owner binding preserve that grid in final output; Electron
+    /// extension effects address the requested output raster directly.
     fn needs_composition_density<'d>(
         &self,
         _scope: &mut Scope<'_, 'd>,
