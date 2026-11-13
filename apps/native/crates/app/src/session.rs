@@ -317,6 +317,9 @@ impl pm_shell::integration::Integration for Bridge {
             on.insert("toggleLoop".to_owned());
         }
         if let Some(timeline) = &v.builtins.timeline {
+            if timeline.read(cx).hides_shy() {
+                on.insert("timeline.toggleShy".to_owned());
+            }
             let (tracks, snapping) = timeline.read(cx).toggles();
             if tracks {
                 on.insert("timeline.toggleMode".to_owned());

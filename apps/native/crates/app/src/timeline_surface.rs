@@ -468,6 +468,10 @@ impl TimelineSurface {
             !self.model.track_snap_disabled,
         )
     }
+    /// View ▸ Hide Shy Layers is on.
+    pub fn hides_shy(&self) -> bool {
+        self.model.hide_shy
+    }
     /// The keyframe clipboard payload, or nothing with no keys selected.
     pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {
         self.model.copy_keys(self.model.selection.keys())

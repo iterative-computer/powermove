@@ -65,6 +65,9 @@ pub struct TimelineModel {
     pub reveal: RevealState,
     pub key_selection_active: bool,
     pub track_snap_disabled: bool,
+    /// Hide Shy Layers: shy layers (and what a shy group holds) have no row.
+    /// They still draw, play and export.
+    pub hide_shy: bool,
     pub search: String,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
@@ -143,6 +146,9 @@ impl TimelineModel {
                 continue;
             }
             let layer = &self.index.layers[i];
+            if self.hide_shy && layer.shy {
+                continue;
+            }
             let disclosure = self.reveal.layers.get(&layer.id);
             let collapsed = disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed);
             let group_closed = disclosure

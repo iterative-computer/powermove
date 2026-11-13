@@ -470,6 +470,41 @@ impl TimelineModel {
                 )?;
                 Plan::default()
             }
+            // Hide Shy Layers (After Effects' master shy switch).
+            "timeline.toggleShy" => {
+                self.hide_shy = !self.hide_shy;
+                self.rebuild_rows();
+                Plan::default()
+            }
+            // The Shy switch of the selected layers: all on unless all are.
+            "toggleShy" => {
+                let selected: Vec<_> = layers
+                    .iter()
+                    .filter_map(|id| self.index.layer(id))
+                    .filter(|l| !l.effectively_locked)
+                    .collect();
+                let shy = !selected.iter().all(|l| l.shy);
+                if selected.is_empty() {
+                    Plan::default()
+                } else {
+                    Plan::edit(
+                        selected
+                            .iter()
+                            .map(|l| {
+                                LayerCommand::Set {
+                                    layer_id: l.id.clone(),
+                                    patch: LayerPatch {
+                                        shy: Some(shy),
+                                        ..Default::default()
+                                    },
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        self.index.revision,
+                    )
+                }
+            }
             "timeline.mode:layers" => {
                 self.mode = TimelineMode::Layers;
                 Plan::default()
@@ -781,6 +816,10 @@ impl TimelineModel {
                 three_d: Some(!l.three_d),
                 ..Default::default()
             },
+            LayerSwitch::Shy => LayerPatch {
+                shy: Some(!l.shy),
+                ..Default::default()
+            },
         };
         Ok(Plan::edit(
             vec![
@@ -820,6 +859,7 @@ pub enum LayerSwitch {
     Locked,
     Solo,
     ThreeD,
+    Shy,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipboardTrack {

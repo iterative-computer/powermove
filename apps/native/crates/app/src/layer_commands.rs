@@ -232,6 +232,8 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.toggleHold"
             | "timeline.toggleSnapping"
             | "timeline.toggleMode"
+            | "timeline.toggleShy"
+            | "toggleShy"
             | "timeline.zoomIn"
             | "timeline.zoomOut"
             | "timeline.fit"
@@ -1441,6 +1443,7 @@ pub fn disabled(
 const SELECTION: &[&str] = &[
     "rippleDelete",
     "nudgeLayerTime",
+    "toggleShy",
     "alignLayers",
     "distributeLayers",
     "split",
@@ -1471,6 +1474,7 @@ const DOCUMENT: &[&str] = &[
     "timeline.toggleHold",
     "timeline.toggleSnapping",
     "timeline.toggleMode",
+    "timeline.toggleShy",
     "timeline.zoomIn",
     "timeline.zoomOut",
     "timeline.fit",

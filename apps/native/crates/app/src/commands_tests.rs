@@ -277,6 +277,66 @@ fn arrow_keys_nudge_position_and_undo_restores(cx: &mut TestAppContext) {
     undo(&mut s, cx);
     assert_eq!(value(&s, "position.x"), before);
 }
+/// Shy, as After Effects has it: a switch on each layer, and Hide Shy Layers
+/// taking those rows out of the timeline while they keep drawing.
+#[gpui::test]
+fn shy_layers_leave_the_timeline_while_hide_shy_layers_is_on(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let rows = |s: &Stage| -> Vec<String> {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model())
+            .rows()
+            .iter()
+            .filter_map(|row| match &row.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let shy = |s: &Stage, id: &str| {
+        let p = published(&s.rig.kernel);
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, id).unwrap();
+        pm_kernel::model::layer_at(root, &at)
+            .unwrap()
+            .to_value()
+            .get("shy")
+            .and_then(Value::as_bool)
+            == Some(true)
+    };
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // Composition ▸ Shy Selected Layers: one Undo step, the row stays.
+    select(&mut s, cx, &["l1"]);
+    run(&mut s, cx, "toggleShy", &[]);
+    assert!(shy(&s, "l1") && !shy(&s, "l0"));
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // View ▸ Hide Shy Layers: the shy row goes, and the menu row is checked.
+    let hidden = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.hides_shy());
+    run(&mut s, cx, "timeline.toggleShy", &[]);
+    assert!(hidden(&s));
+    assert_eq!(rows(&s), ["l0", "l2"]);
+    // The layer is still in the project and still on.
+    assert!(layer(&s, "l1").visible);
+    // Unshy it (it is still selected) and it is back while hiding stays on.
+    run(&mut s, cx, "toggleShy", &[]);
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    undo(&mut s, cx);
+    assert!(shy(&s, "l1"));
+    assert_eq!(rows(&s), ["l0", "l2"]);
+    run(&mut s, cx, "timeline.toggleShy", &[]);
+    assert!(!hidden(&s));
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // Both are menu rows, so the palette lists them.
+    let palette = pm_shell::menu::palette_rows();
+    for (menu, label) in [
+        ("View", "Hide Shy Layers"),
+        ("Composition", "Shy Selected Layers"),
+    ] {
+        assert!(palette.iter().any(|(m, _, l)| *m == menu && l == label));
+    }
+    let off = disabled(None, &[], &Clipboard::Empty);
+    assert!(off.contains("toggleShy") && off.contains("timeline.toggleShy"));
+}
 #[gpui::test]
 fn selection_chords_walk_the_stack(cx: &mut TestAppContext) {
     let mut s = stage(cx, 3);

@@ -195,6 +195,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 // here: the Layer menu lists registry bindings only.
                 k("Hide/Show Selected Layers", "toggleVisibility", ""),
                 k("Solo Selected Layers", "toggleSolo", ""),
+                k("Shy Selected Layers", "toggleShy", ""),
                 k("Fit to Composition", "fitToComposition", ""),
                 k("Separate Audio", "separateAudio", ""),
                 sep(),
@@ -320,6 +321,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 k("Timeline in Tracks", "timeline.toggleMode", ""),
                 k("Snapping", "timeline.toggleSnapping", ""),
+                k("Hide Shy Layers", "timeline.toggleShy", ""),
                 k("Value Graph", "graph.value", ""),
                 k("Speed Graph", "graph.speed", ""),
                 k("Merge Selected Curves", "graph.merge", ""),
