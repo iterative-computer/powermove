@@ -19,6 +19,7 @@ export async function mountViewer(options: {
   subscription: string;
   rootOptions: RootOptions;
   open: () => void;
+  command?: (name: string) => void;
   onError: (error: unknown) => void;
 }) {
   const root = createRoot(
@@ -30,6 +31,7 @@ export async function mountViewer(options: {
   let rendered = Promise.resolve();
   const actions = {
     open: options.open,
+    command: (name: string) => options.command?.(name),
     drive(element: string, argument?: import("../../src").Json) {
       void service.drive(element, argument).catch(options.onError);
     },

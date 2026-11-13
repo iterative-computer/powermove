@@ -16,6 +16,8 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
+#[path = "viewer_rulers.rs"]
+pub mod viewer_rulers;
 #[path = "text_edit.rs"]
 pub mod text;
 
@@ -255,6 +257,12 @@ pub struct GizmoSurface {
     picks: usize,
     controls: bool,
     panning: Option<Point<Pixels>>,
+    /// Space is held over the viewer: a press pans whatever the tool, and
+    /// whether it did decides if the key's release plays.
+    space_hand: bool,
+    space_panned: bool,
+    /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
+    rulers: viewer_rulers::Rulers,
     cursor: CursorStyle,
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
@@ -509,6 +517,9 @@ impl GizmoSurface {
             picks: 0,
             controls: true,
             panning: None,
+            space_hand: false,
+            space_panned: false,
+            rulers: Default::default(),
             cursor: CursorStyle::Arrow,
             refreshing: false,
             sketch: None,
@@ -620,8 +631,70 @@ impl GizmoSurface {
     fn stem(&self, scale: f64) -> f64 {
         self.tokens.metrics.rotation_stem as f64 / scale
     }
+    /// Whether the pointer is over the viewer now (Space held there pans).
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
+    }
+    /// View ▸ Show Rulers / Show Grid.
+    pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
+        self.rulers.shown = shown;
+        self.rulers.grid = grid;
+        cx.notify();
+    }
+    /// View ▸ Clear Guides.
+    pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        self.rulers.guides.clear();
+        self.rulers.dragging = None;
+        cx.notify();
+    }
+    /// The ruler guides, in composition pixels.
+    #[cfg(test)]
+    pub fn ruler_guides(&self) -> &[viewer_rulers::RulerGuide] {
+        &self.rulers.guides
+    }
+    /// Space went down over the viewer: the hand, until it comes up.
+    pub fn arm_space(&mut self, cx: &mut Context<Self>) {
+        self.space_hand = true;
+        self.space_panned = false;
+        self.set_cursor(CursorStyle::OpenHand, cx);
+    }
+    /// Space came up: the tool returns; true when the hand panned (then the
+    /// key does not play).
+    pub fn release_space(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let panned = std::mem::take(&mut self.space_panned);
+        self.space_hand = false;
+        self.panning = None;
+        self.hover(window.mouse_position(), cx);
+        panned
+    }
+    fn set_cursor(&mut self, cursor: CursorStyle, cx: &mut Context<Self>) {
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+    }
+    /// Panning with the middle button, whatever the tool.
+    fn on_middle(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.panning = Some(event.position);
+        self.set_cursor(CursorStyle::ClosedHand, cx);
+    }
     /// The cursor promises what a press here does.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.rulers.shown && self.rulers.pointer != Some(position) {
+            self.rulers.pointer = Some(position);
+            cx.notify();
+        }
+        if self.space_hand {
+            let hand = if self.panning.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+            self.set_cursor(hand, cx);
+            return;
+        }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
@@ -631,7 +704,9 @@ impl GizmoSurface {
             && self
                 .text_session()
                 .is_some_and(|s| s.contains(at, frame.scale));
+        let ruler = self.rulers_cursor(position, frame);
         let cursor = match tool {
+            _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
@@ -681,6 +756,17 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
+        // Space held over the viewer: the hand, whatever the tool.
+        if self.space_hand {
+            self.panning = Some(event.position);
+            self.set_cursor(CursorStyle::ClosedHand, cx);
+            return;
+        }
+        // A ruler makes a guide; a guide is carried.
+        if self.rulers_down(event.position, frame) {
+            cx.notify();
+            return;
+        }
         let at = self.to_comp(event.position, frame);
         let time = self.host.time(cx);
         let mut tool = self.host.tool(cx);
@@ -940,8 +1026,18 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.rulers.dragging.is_some()
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+            && self.rulers_move(event.position, frame)
+        {
+            cx.notify();
+            return;
+        }
         if let Some(last) = self.panning {
             self.panning = Some(event.position);
+            if event.position != last {
+                self.space_panned |= self.space_hand;
+            }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
@@ -1076,7 +1172,22 @@ impl GizmoSurface {
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
-        self.panning = None;
+        if self.rulers.dragging.is_some() {
+            let at = window
+                .as_ref()
+                .map_or(Point::default(), |w| w.mouse_position());
+            self.rulers_up(at);
+            cx.notify();
+            return;
+        }
+        if self.panning.take().is_some() {
+            let open = if self.space_hand || self.host.tool(cx) == Tool::Hand {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::Arrow
+            };
+            self.set_cursor(open, cx);
+        }
         if !self.guides.is_empty() {
             self.guides.clear();
             cx.notify();
@@ -2011,6 +2122,10 @@ impl Render for GizmoSurface {
                     s.on_context(event, window, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_middle(event, cx)),
+            )
             .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
                 s.on_wheel(event, window.line_height(), cx);
             }))
@@ -2034,6 +2149,7 @@ impl Render for GizmoSurface {
                                 s.marquee_paint(frame, window);
                                 s.guides_paint(frame, window);
                                 s.text_paint(frame, window);
+                                s.rulers_paint(frame, window, cx);
                             }
                         });
                         let moved = this.clone();

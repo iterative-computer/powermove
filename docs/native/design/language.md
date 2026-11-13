@@ -368,6 +368,31 @@ panels built from `InspectorRow`), from the kit, so a panel never sets it:
   what is typed, the parser's answer under it and the names an expression
   can use under that; Return is a new line and ⌘Return applies.
 
+## Viewer
+
+- One bar, the panel's header: the time at the leading edge (Timecode role;
+  while playing a native layer draws it, as in the timeline's header) with
+  the duration muted after it; the transport centred (start, previous frame,
+  Play, next frame, end, Loop; Play in the text ink, the rest secondary); at
+  the trailing edge Channels, zoom and Preview Resolution, inline pop-ups.
+  The transport and Loop are the app's own commands, so the bar, the
+  timeline's header, the menus and the keys share one state.
+- Space held over the viewer is the hand: Play waits for the key to come up
+  and plays only if nothing panned. The middle button pans with any tool.
+  Zoom from the keyboard (⌘=, ⌘−, ⌘1, ⌘2) keeps the point under the pointer
+  when it is over the viewer, else the middle.
+- Rulers (⌘R): bands of `metrics.viewer_ruler` in the panel's ground with a
+  hairline at their inner edge, ticks and tabular labels in composition
+  pixels (the side ruler's digits stacked), the pointer's place marked in
+  both; the composition fits inside them. A guide is dragged out of a ruler,
+  settles on the composition's edges and centre or on whole pixels, and is
+  dragged back into a ruler to go (Clear Guides). The grid (⌘') lies on the
+  picture only, the finest 1, 2, 5 step a hit target apart. Guides and grid
+  are drawn by GPUI from the same frame as the handles
+  (`colors.viewer_guide`, `colors.viewer_grid` at `translucency.line`).
+- Channels (⌥1 to ⌥5, the pop-up, View ▸ Channels) is a display mode of the
+  presenter alone: never in a render, a capture, the scopes or an export.
+
 ## Timeline strips
 
 `Tokens::strip(layer colour, StripState)` (`crates/design/src/strip.rs`): a
