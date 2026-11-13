@@ -19,7 +19,17 @@ pub struct ProxyRecipe {
     pub height: u32,
     pub source_depth: u8,
     pub source_has_alpha: bool,
+    /// An image sequence's encoding pipeline ([`SEQUENCE_PIPELINE`]), for
+    /// a proxy of a sequence only. A recipe without it (any other media,
+    /// and every sequence proxy of an earlier pipeline) keeps its key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u32>,
 }
+
+/// The image-sequence encoding pipeline. 2: associated alpha unpremultiplied
+/// by the native reader, and PQ scene 1.0 at the 203 cd/m² the renderer
+/// reads. A sequence proxy of an earlier pipeline is never reused.
+pub const SEQUENCE_PIPELINE: u32 = 2;
 
 impl ProxyRecipe {
     pub const VERSION: u32 = 3;
@@ -76,6 +86,7 @@ impl ProxyRecipe {
             height,
             source_depth,
             source_has_alpha,
+            sequence: None,
         })
     }
 

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// A generated rendition of an original.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Rendition {
     Proxy,
     Optimized,
@@ -251,6 +251,15 @@ struct File {
     /// forgotten.
     #[serde(default)]
     attached: bool,
+    /// A generated rendition of an image sequence: the sequence pipeline it
+    /// was encoded with (`pm_proxy::SEQUENCE_PIPELINE`; 0 for any other,
+    /// and for an earlier build's sequence renditions).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    sequence: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// What one content has.
@@ -318,9 +327,52 @@ struct Index {
     assets: BTreeMap<String, BTreeMap<String, String>>,
     /// Always Play Original: project → assets.
     play_original: BTreeMap<String, BTreeSet<String>>,
+    /// Generated renditions retired because an earlier pipeline made them
+    /// (project, asset, kind): made again when the asset is identified.
+    regenerate: BTreeSet<(String, String, Rendition)>,
 }
 
 impl Index {
+    /// Retires every generated rendition of an image sequence that an
+    /// earlier sequence pipeline made (its alpha or PQ white may be wrong),
+    /// including an earlier build's association of a sequence by its
+    /// manifest object (`obj:`), and notes the assets that had one so they
+    /// are made again. Attached files are never touched.
+    fn retire_earlier_sequences(&mut self, objects: &Path) {
+        let is_sequence = |content: &str| {
+            content.starts_with("seq:")
+                || content.strip_prefix("obj:").is_some_and(|name| {
+                    matches!(
+                        pm_media::image::sequence::Manifest::read(&objects.join(name)),
+                        Ok(Some(_))
+                    )
+                })
+        };
+        let mut retired = Vec::new();
+        for (content, record) in &mut self.contents {
+            for kind in [Rendition::Proxy, Rendition::Optimized] {
+                let slot = record.slot(kind);
+                if slot.as_ref().is_some_and(|f| {
+                    !f.attached && f.sequence != pm_proxy::SEQUENCE_PIPELINE
+                }) && is_sequence(content)
+                {
+                    retired.push((content.clone(), kind, slot.take().unwrap()));
+                }
+            }
+        }
+        self.contents
+            .retain(|_, r| r.proxy.is_some() || r.optimized.is_some());
+        for (content, kind, file) in retired {
+            self.retire_file(&file);
+            for (project, assets) in &self.assets {
+                for (asset, _) in assets.iter().filter(|(_, c)| **c == content) {
+                    self.regenerate
+                        .insert((project.clone(), asset.clone(), kind));
+                }
+            }
+        }
+    }
+
     /// Records naming `path` as a proxy or optimized file.
     fn references(&self, path: &Path) -> usize {
         self.contents
@@ -497,15 +549,17 @@ fn measure(storage: &Storage) -> Usage {
     }
 }
 
-fn load(profile: &Path) -> Index {
-    std::fs::read(index_path(profile))
+fn load(profile: &Path, objects: &Path) -> Index {
+    let mut index = std::fs::read(index_path(profile))
         .ok()
         .and_then(|b| serde_json::from_slice::<Index>(&b).ok())
         .filter(|i| i.version == INDEX_VERSION)
         .unwrap_or(Index {
             version: INDEX_VERSION,
             ..Default::default()
-        })
+        });
+    index.retire_earlier_sequences(objects);
+    index
 }
 
 /// The FFmpeg pair pm-proxy encodes with.
@@ -1049,6 +1103,7 @@ impl Inner {
             File {
                 path: file.to_path_buf(),
                 attached: true,
+                sequence: 0,
             },
         );
         state.present.insert(file.to_path_buf());
@@ -1265,6 +1320,7 @@ impl Inner {
         let made = File {
             path: generated.stored.path,
             attached: false,
+            sequence: generated.stored.recipe.sequence.unwrap_or(0),
         };
         self.publish(&content, kind, before.as_ref(), made);
         self.save();
@@ -1315,7 +1371,7 @@ impl ProMedia {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
-                    index: load(&profile),
+                    index: load(&profile, &objects),
                     known: HashMap::new(),
                     present: HashSet::new(),
                     jobs: BTreeMap::new(),
@@ -1461,6 +1517,20 @@ impl ProMedia {
                                 .is_some_and(|f| !f.attached)
                             {
                                 renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                            }
+                        }
+                    }
+                    // Retired at load: an earlier sequence pipeline made it.
+                    {
+                        let mut state = inner.state.lock().unwrap();
+                        for (kind, title) in [
+                            (Rendition::Proxy, "Update proxy"),
+                            (Rendition::Optimized, "Update optimized media"),
+                        ] {
+                            let key = (project.clone(), asset.clone(), kind);
+                            if state.index.regenerate.remove(&key) {
+                                renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                                changed = true;
                             }
                         }
                     }
@@ -2235,6 +2305,7 @@ mod tests {
             File {
                 path: path.to_path_buf(),
                 attached: false,
+                sequence: 0,
             },
         )
     }
@@ -2287,6 +2358,7 @@ mod tests {
             File {
                 path: proxy.clone(),
                 attached: true,
+                sequence: 0,
             },
         );
         media.clear("none".into(), vec![]).recv_blocking().unwrap();
@@ -2376,6 +2448,7 @@ mod tests {
         let mine = File {
             path: files[0].clone(),
             attached: true,
+            sequence: 0,
         };
         let inner = &media.inner;
         inner
@@ -2547,6 +2620,138 @@ mod tests {
         catalog.originals.insert("a".into(), original.clone());
         media.decorate("p", &mut catalog, &["a".into()]);
         assert_eq!(catalog.proxies.get("a"), None);
+    }
+
+    /// Waits for every queued media task and asserts each completed.
+    fn finish_tasks(media: &ProMedia) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
+            if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
+                assert!(
+                    tasks.iter().all(|t| t.state == TaskState::Completed),
+                    "{:?}",
+                    tasks
+                        .iter()
+                        .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
+                        .collect::<Vec<_>>()
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "tasks never finished");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        settle(media);
+    }
+
+    /// Four opaque 320×180 16-bit frames numbered from 11, at 24 fps,
+    /// retained as the media cache keeps an asset's original.
+    fn small_sequence(objects: &Path, folder: &Path) -> PathBuf {
+        std::fs::create_dir_all(folder).unwrap();
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24"])
+            .args(["-frames:v", "4", "-start_number", "11", "-pix_fmt", "rgb48be"])
+            .arg(folder.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: folder.to_path_buf(),
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 11,
+            last: 14,
+            rate: [24, 1],
+        };
+        let original = objects.join("retained-sequence");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        original
+    }
+
+    /// A sequence proxy an earlier build made (before its associated alpha
+    /// and PQ reference white were corrected) is never used again: the
+    /// index forgets and deletes it when it loads, the same proxy is made
+    /// again from the frames when the project identifies its media, and a
+    /// proxy the person attached is left as it is.
+    #[test]
+    fn a_sequence_proxy_an_earlier_build_made_is_made_again() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let profile = dir.path().join("profile");
+        let objects = crate::media::objects_dir(&profile);
+        let original = small_sequence(&objects, &dir.path().join("renders"));
+        identify(&media, "p", &[("a", &original)]);
+        let prefs = media.preferences();
+        media
+            .create("p", Rendition::Proxy, &prefs, vec![("a".into(), "shot".into(), original.clone())])
+            .unwrap();
+        finish_tasks(&media);
+        let catalog = |media: &ProMedia| {
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into(), "b".into()]);
+            catalog
+        };
+        let current = catalog(&media).proxies["a"].clone();
+        let content = media.inner.state.lock().unwrap().known[&original].clone();
+        let hash = content.strip_prefix("seq:").unwrap().to_owned();
+        drop(media);
+
+        // The earlier build's store entry (a recipe without the sequence
+        // pipeline) and its index record, as that build wrote them.
+        let store = pm_proxy::ProxyStore::open(current.parent().unwrap().parent().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(current.with_extension("json")).unwrap()).unwrap();
+        let recipe: pm_proxy::ProxyRecipe = serde_json::from_value(record["recipe"].clone()).unwrap();
+        assert_eq!(recipe.sequence, Some(pm_proxy::SEQUENCE_PIPELINE));
+        let earlier_recipe = pm_proxy::ProxyRecipe {
+            sequence: None,
+            ..recipe.clone()
+        };
+        let staged = tempfile::NamedTempFile::new_in(store.root()).unwrap();
+        std::fs::copy(&current, staged.path()).unwrap();
+        let earlier = store.commit(&hash, &earlier_recipe, staged).unwrap().path;
+        store.remove(&hash, &recipe).unwrap();
+        let attached = dir.path().join("mine.mov");
+        std::fs::copy(&earlier, &attached).unwrap();
+        let index = index_path(&profile);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        saved["contents"][&content]["proxy"] = serde_json::json!({"path": earlier});
+        let other = format!("seq:{}", "f".repeat(64));
+        saved["contents"][&other]["proxy"] = serde_json::json!({"path": attached, "attached": true});
+        saved["assets"]["p"]["b"] = serde_json::json!(other);
+        // (Hashed-file stamps hold u128 times a JSON value can't carry.)
+        saved["stamps"] = serde_json::json!([]);
+        std::fs::write(&index, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        // The next launch.
+        let media = ProMedia::new(profile.clone(), objects, Arc::new(AtomicBool::new(false)));
+        let opened = catalog(&media);
+        assert_eq!(opened.proxies.get("a"), None, "the earlier build's proxy is used");
+        assert!(!earlier.exists(), "the earlier build's proxy is kept");
+        assert_eq!(
+            media.inner.state.lock().unwrap().index.contents[&other]
+                .proxy
+                .as_ref()
+                .map(|f| &f.path),
+            Some(&attached),
+            "an attached proxy is forgotten"
+        );
+        identify(&media, "p", &[("a", &original)]);
+        finish_tasks(&media);
+        let again = catalog(&media).proxies["a"].clone();
+        assert!(again.is_file() && again != earlier);
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(again.with_extension("json")).unwrap()).unwrap();
+        assert_eq!(record["recipe"]["sequence"], serde_json::json!(pm_proxy::SEQUENCE_PIPELINE));
+        assert!(attached.is_file());
     }
 
     #[test]

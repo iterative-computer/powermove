@@ -998,7 +998,10 @@ pub(crate) fn generate_sequence(
         verify_frames(&manifest, &request.control)?;
     }
     let (width, height, depth, alpha, color) = frame_facts(&manifest, &request.control)?;
-    let recipe = ProxyRecipe::new(request.format, request.size, width, height, depth, alpha)?;
+    let recipe = ProxyRecipe {
+        sequence: Some(crate::store::SEQUENCE_PIPELINE),
+        ..ProxyRecipe::new(request.format, request.size, width, height, depth, alpha)?
+    };
     match request.store.lookup(&hash, &recipe) {
         Ok(Some(stored)) => {
             return Ok(GeneratedProxy {
