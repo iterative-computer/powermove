@@ -948,6 +948,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// The window's tree was painted: the next `draw` carries a new scene.
+    /// A `draw` with no paint before it shows the last scene again, and a
+    /// platform that places hosted views from what a paint staged leaves
+    /// them where they are.
+    fn painted(&self) {}
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;

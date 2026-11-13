@@ -224,3 +224,8 @@ has been made. No measurements from a locked or occluded session certify pacing.
   slots takes its drawable from the layer and presents with the transaction
   (the link is released and started again), because a `CAMetalDisplayLink`
   drawable is shown at the link's own time, after the transaction.
+- **A scene shown again moves no hosted view:** `PlatformWindow::painted`
+  (called at the end of `Window::draw`) tells the platform a new scene
+  follows. GPUI keeps presenting the last scene for a second after fast
+  input; such a `draw` staged nothing, and placing slots from it hid every
+  hosted control and field until the next paint.

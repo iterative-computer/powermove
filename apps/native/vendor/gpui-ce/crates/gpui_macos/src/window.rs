@@ -845,6 +845,8 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    /// GPUI painted since hosted views were last placed.
+    painted: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1356,6 +1358,7 @@ impl MacWindow {
                 frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
+                painted: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -2296,6 +2299,10 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().toggle_tab_bar_callback = Some(callback);
     }
 
+    fn painted(&self) {
+        self.0.lock().painted = true;
+    }
+
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         // Hosted views move in the frame that carries the scene they were
@@ -2307,7 +2314,11 @@ impl PlatformWindow for MacWindow {
             this.force_render_pending = true;
             return;
         }
-        let transaction = crate::composition::present(this.native_view.as_ptr() as usize);
+        // A scene shown again (GPUI keeps presenting for a moment after fast
+        // input) staged nothing new: hosted views stay as its paint put them.
+        let painted = std::mem::take(&mut this.painted);
+        let transaction =
+            crate::composition::present(this.native_view.as_ptr() as usize, painted);
         // Powermove P-120: block on the transaction only when slot geometry moved
         // (or AppKit is painting synchronously), and reset it on every other frame.
         #[cfg(not(feature = "wgpu"))]
