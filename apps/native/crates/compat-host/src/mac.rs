@@ -405,7 +405,9 @@ impl Bridge {
             let page = child.clone();
             let cancel = Box::new(move || unsafe {
                 page.evaluateJavaScript_completionHandler(
-                    &NSString::from_str("document.querySelector('[data-pm-modal-dismiss]')?.click()"),
+                    &NSString::from_str(
+                        "document.querySelector('[data-pm-modal-dismiss]')?.click()",
+                    ),
                     None,
                 )
             });
