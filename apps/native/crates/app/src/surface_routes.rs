@@ -73,6 +73,12 @@ impl Controller {
                     .detach();
                 }
             }
+            // Development builds: hold a modifier for the pointer input
+            // an on-screen review sends (`reviewModifiers:alt`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewModifiers:") => {
+                crate::panel_bridge::hold_review_modifier(&command["reviewModifiers:".len()..]);
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {

@@ -85,6 +85,8 @@ pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
 enum Spec {
     Layers,
+    /// Option-drag: copies follow the pointer, the originals stay.
+    Duplicate,
     Trim(Edge),
     Offset,
     Ripple(Edge),
@@ -1004,14 +1006,17 @@ impl TimelineSurface {
                 }
                 None if mods.command() && mods.alt => Spec::Offset,
                 None if tracks && mods.control => Spec::Slip,
-                None if tracks && mods.alt => Spec::Slide,
+                None if tracks && mods.alt && mods.shift => Spec::Slide,
+                // Option-drag duplicates, as in Premiere, Final Cut and
+                // Resolve (Slide took Option alone before; it has Shift now).
+                None if mods.alt => Spec::Duplicate,
                 None => Spec::Layers,
             };
             let selected = self.model.selection.contains(&layer);
             // Pro-edit modifiers choose the tool; they must not toggle selection.
             let picking = if matches!(
                 spec,
-                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
+                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide | Spec::Duplicate
             ) {
                 Mods::default()
             } else {
@@ -1728,8 +1733,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             Ok(vec![])
         }
         Job::Finish(commit) => {
-            if client.active_drag().is_some() {
+            if let Some(drag) = client.active_drag() {
+                let copies = drag.copies().map(<[String]>::to_vec);
                 client.finish_drag(commit).await.map_err(text)?;
+                // An Option-drag leaves its copies selected.
+                if let (true, Some(ids)) = (commit, copies) {
+                    client
+                        .dispatch(Plan {
+                            calls: vec![SelectionCall::Layers { ids, add: false }.into()],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(text)?;
+                }
             }
             Ok(vec![])
         }
@@ -1877,6 +1893,28 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
     };
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
+        Spec::Duplicate => {
+            // A selected group brings its members: only the tops are copied.
+            let inside = |id: &str| {
+                let mut at = model.index.layer(id).and_then(|l| l.group.clone());
+                for _ in 0..256 {
+                    let Some(group) = at else { return false };
+                    if ids.contains(&group) {
+                        return true;
+                    }
+                    at = model.index.layer(&group).and_then(|l| l.group.clone());
+                }
+                false
+            };
+            let tops: Vec<String> = ids.iter().filter(|id| !inside(id)).cloned().collect();
+            if tops.is_empty() {
+                return Err("Select a layer first".into());
+            }
+            DragKind::DuplicateLayers {
+                new_ids: tops.iter().map(|_| pm_kernel::new_id("L")).collect(),
+                ids: tops,
+            }
+        }
         Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },

@@ -736,6 +736,12 @@ pub enum DragKind {
     Layers {
         ids: Vec<String>,
     },
+    /// Option-drag: copies of `ids` (`new_ids`, in the same order) follow the
+    /// pointer and the originals stay. One Undo step.
+    DuplicateLayers {
+        ids: Vec<String>,
+        new_ids: Vec<String>,
+    },
     TrimIn {
         ids: Vec<String>,
     },
@@ -833,6 +839,19 @@ impl Drag {
                     }
                 }
             }
+            DragKind::DuplicateLayers { ids, new_ids } => {
+                if ids.is_empty() || ids.len() != new_ids.len() {
+                    return Err(ModelError::InvalidGesture);
+                }
+                for id in ids.iter() {
+                    let layer = index
+                        .layer(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    if layer.effectively_locked {
+                        return Err(ModelError::Locked(id.clone()));
+                    }
+                }
+            }
             DragKind::Keys { ids }
             | DragKind::GraphKeys { ids }
             | DragKind::StretchKeys { ids, .. }
@@ -864,7 +883,7 @@ impl Drag {
         }
         let mut anchors = Vec::new();
         match &kind {
-            DragKind::Layers { ids } => {
+            DragKind::Layers { ids } | DragKind::DuplicateLayers { ids, .. } => {
                 for id in ids {
                     let l = index.layer(id).unwrap();
                     if l.kind != "group" {
@@ -929,7 +948,10 @@ impl Drag {
         let track_snap = if model.mode == TimelineMode::Tracks
             && matches!(
                 kind,
-                DragKind::Layers { .. } | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+                DragKind::Layers { .. }
+                    | DragKind::DuplicateLayers { .. }
+                    | DragKind::TrimIn { .. }
+                    | DragKind::TrimOut { .. }
             ) {
             Some(!model.track_snap_disabled)
         } else {
@@ -962,6 +984,7 @@ impl Drag {
                 }
             }
             DragKind::Layers { .. } => "Move clip",
+            DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
             DragKind::Keys { .. } => "Move keyframe",
@@ -1073,6 +1096,30 @@ impl Drag {
                         .into(),
                     );
                 }
+            }
+            // The copies exist only in this gesture's writes: each step
+            // makes them again from the start and places them.
+            DragKind::DuplicateLayers { ids, new_ids } => {
+                let first = self.start.layer(&ids[0]).unwrap();
+                let step = if self.snap.lock.is_some() {
+                    delta
+                } else {
+                    frame(first.from + sample.time_delta, self.start.fps) - first.from
+                };
+                out.push(
+                    LayerCommand::Duplicate {
+                        layer_ids: ids.clone(),
+                        new_ids: new_ids.clone(),
+                    }
+                    .into(),
+                );
+                out.push(
+                    TimingCommand::Move {
+                        layer_ids: new_ids.clone(),
+                        delta: step,
+                    }
+                    .into(),
+                );
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
                 for id in ids {
@@ -1283,6 +1330,13 @@ impl Drag {
             | DragKind::TrimOut { ids }
             | DragKind::QuickOffsetLayers { ids } => ids,
             _ => &[],
+        }
+    }
+    /// The copies an Option-drag made, to select when it ends.
+    pub fn copies(&self) -> Option<&[String]> {
+        match &self.kind {
+            DragKind::DuplicateLayers { new_ids, .. } => Some(new_ids),
+            _ => None,
         }
     }
     fn moving_keys(&self) -> &[String] {
