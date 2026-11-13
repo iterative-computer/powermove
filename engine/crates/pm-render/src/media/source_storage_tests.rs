@@ -51,6 +51,100 @@ fn subsampled_still_then_exact_read_matches_an_independent_full_read() {
     assert_eq!(media.image_bytes(), 0);
 }
 
+/// One still read at two sizes keeps both: a frame that draws it at each
+/// (two layers, or a preview and an exact read) decodes it once per size,
+/// not once per draw per frame.
+#[test]
+fn a_still_keeps_each_size_it_was_read_at() {
+    let gpu = pm_gpu::Gpu::new("still sizes kept").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let mut media = MediaCache::new(&gpu.device);
+    let mut read = |edge| {
+        let before = pm_perf::snapshot();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .image_scaled(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                edge,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let work = pm_perf::snapshot().since(&before);
+        (
+            read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap(),
+            work.get(pm_perf::Counter::StillDecodes),
+        )
+    };
+    let (small, decoded) = read(Some(16));
+    assert!(decoded > 0);
+    let (full, decoded) = read(None);
+    assert!(decoded > 0);
+    for _ in 0..3 {
+        assert_eq!(read(Some(16)), (small.clone(), 0), "the preview is kept");
+        assert_eq!(read(None), (full.clone(), 0), "the exact read is kept");
+    }
+}
+
+/// A still larger than the whole image budget stays while frames keep
+/// drawing it (it was decoded again for every frame), goes once two frames
+/// passed without it, and a budget of zero releases it at once.
+#[test]
+fn a_still_larger_than_the_budget_stays_while_frames_draw_it() {
+    let gpu = pm_gpu::Gpu::new("still over budget").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    let frame = |media: &mut MediaCache, draw: bool| {
+        media.begin_frame();
+        let before = pm_perf::snapshot();
+        if draw {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            media
+                .image_scaled(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    WorkingEncoding::Standard,
+                    Precision::Float16,
+                    None,
+                    None,
+                )
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+        }
+        pm_perf::snapshot()
+            .since(&before)
+            .get(pm_perf::Counter::StillDecodes)
+    };
+    assert!(frame(&mut media, true) > 0);
+    assert!(media.image_bytes() > 1, "kept beyond the budget");
+    for _ in 0..4 {
+        assert_eq!(frame(&mut media, true), 0, "drawn again without a decode");
+    }
+    // Two frames without it: the budget applies again.
+    frame(&mut media, false);
+    frame(&mut media, false);
+    media.trim_images(1);
+    assert_eq!(media.image_bytes(), 0);
+    assert!(
+        frame(&mut media, true) > 0,
+        "decoded again once it had gone"
+    );
+    media.trim_images(0);
+    assert_eq!(media.image_bytes(), 0, "a budget of zero releases at once");
+}
+
 #[test]
 fn preview_video_conversion_does_not_replace_the_exact_source() {
     let gpu = pm_gpu::Gpu::new("preview source isolation").unwrap();

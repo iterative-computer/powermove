@@ -1405,10 +1405,14 @@ impl MediaCache {
                 format,
             );
         }
-        // Older versions of the same file are dropped.
+        // Older versions of the same file are dropped. This version's other
+        // sizes and readings stay: one still drawn at two sizes in a frame
+        // (two layers, or a preview and an exact read) would otherwise drop
+        // each other's texture and be decoded again for every frame.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images.retain(|k, _| {
             k.path != key.path
+                || (k.len == key.len && k.modified == key.modified)
                 || k.precision != key.precision
                 || k.linear != key.linear
                 || k.hdr_light != key.hdr_light
@@ -1746,8 +1750,11 @@ impl MediaCache {
                     let step = self.scrub_last.insert(path.to_path_buf(), n);
                     let continues = step.is_some_and(|last| n > last && n - last <= 2);
                     let video2 = pm_media::decode::diag::video2();
-                    let gated = video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
-                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS").or(video2.then_some(8)) {
+                    let gated =
+                        video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
+                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS")
+                        .or(video2.then_some(8))
+                    {
                         Some(ms) if ms > 0 && (!gated || continues) => {
                             Want::Playback(std::time::Duration::from_millis(ms))
                         }
@@ -1963,10 +1970,21 @@ impl MediaCache {
         self.image_budget = budget;
         self.image_seen
             .retain(|key, _| self.images.contains_key(key));
+        // What the frame being drawn reads, and the frame before it read,
+        // stays whatever the budget: a still whose texture alone is larger
+        // than the budget (a full-size read on a 3D plane) was dropped as
+        // soon as it was cached and decoded again for every frame. A budget
+        // of zero (a viewer at rest, memory pressure) releases everything.
+        let floor = if budget == 0 {
+            u64::MAX
+        } else {
+            self.frame_epoch.saturating_sub(1)
+        };
         while self.image_bytes() > budget {
             let Some(key) = self
                 .image_seen
                 .iter()
+                .filter(|(_, at)| **at < floor)
                 .min_by_key(|(_, at)| **at)
                 .map(|(k, _)| k.clone())
             else {
