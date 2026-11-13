@@ -1,13 +1,24 @@
 //! The timeline's drawn materials: layer and clip strips, the playhead and the
-//! trim grip. A strip is a slab of tinted glass on the solid timeline canvas:
-//! a deep, saturated top that opens into a luminous lower half, a 1 px rim of
-//! light in its own hue (brightest along the top edge and round the corners)
-//! instead of an outline, continuous corners about a quarter of its height,
-//! and the ruler's grid reading through the body. Hover and selection only
-//! brighten and whiten the rim. The same slab is used in both appearances: a
-//! clip is an object with its own colour, not a tint of the panel. It is
-//! drawn by the timeline renderer (hundreds on screen while scrolling), never
-//! a system view.
+//! trim grip. A strip is a slab of tinted glass on the solid timeline canvas,
+//! derived from the layer's hue for the appearance it stands in.
+//!
+//! On the dark canvas (`Tokens::strip`): a deep, saturated top that
+//! opens into a luminous lower half, a 1 px rim of light in its own hue
+//! (brightest along the top edge and round the corners) instead of an
+//! outline, and pale names. Hover and selection brighten and whiten the rim.
+//!
+//! On the light canvas (`Tokens::strip_light`): a pale tint of the hue the
+//! canvas shows through, a step deeper at the top and lit toward white in
+//! the foot, a 1 px rim in a deeper shade of the hue with a light edge along
+//! the top, and names in a dark shade of the hue. Hover deepens the rim;
+//! selection is a 2 px ring in the hue's deepest shade on a body a step
+//! deeper. A dark slab on a near-white canvas reads as a weight, not as
+//! glass, so nothing here is shared with the dark recipe but the hue.
+//!
+//! Both have continuous corners about a quarter of the strip's height and
+//! the ruler's grid reading through the body. Strips are drawn by the
+//! timeline renderer (hundreds on screen while scrolling), never a system
+//! view.
 use crate::{
     Scheme, Tokens,
     color::{mix, oklch, to_oklch},
@@ -31,8 +42,9 @@ pub struct Strip {
     /// Body gradient, top to bottom: deep and saturated, then luminous.
     pub top: u32,
     pub bottom: u32,
-    /// The body where it is lightest under a name: at the foot of the
-    /// name's descenders. Labels hold their contrast against this.
+    /// The body where a name holds the least contrast: on the dark canvas
+    /// its lightest part under a name (the foot of the descenders), on the
+    /// light canvas its deepest (the top). Labels hold their contrast here.
     pub under_label: u32,
     /// Body opacity over the canvas.
     pub opacity: f32,
@@ -56,7 +68,8 @@ pub struct Strip {
     pub grid: (u32, f32),
     /// Drop shadow under a dragged strip as (colour, alpha, y, blur); alpha 0 = none.
     pub shadow: (u32, f32, f32, f32),
-    /// Names and glyphs on the strip: a pale tint of its own hue.
+    /// Names and glyphs on the strip, in its own hue: a pale tint on the
+    /// dark canvas, a dark shade on the light one.
     pub foreground: u32,
     /// Waveforms and marks: the hue again, between body and foreground.
     pub primary: u32,
@@ -93,6 +106,41 @@ const GLOW_MOST: f32 = 0.46;
 /// How far down a strip the ruler's grid line reaches before it has faded out.
 pub const GRID_FADE: f32 = 0.55;
 
+/// The light canvas's strip, in OKLCH lightness unless said otherwise.
+struct LightStrip {
+    /// The body: its top, a step deeper, and its foot.
+    top: f32,
+    bottom: f32,
+    /// The hue's chroma in the body (moderate: a tint, not a paint).
+    chroma: f32,
+    /// How much of the canvas the body covers, at rest and when disabled.
+    opacity: f32,
+    faded: f32,
+    /// The white gathered in the foot (alpha at the bottom edge).
+    glow: f32,
+    /// The rim's shade, the selected ring's, a name's lightest shade, and
+    /// the shade of waveforms and marks.
+    rim: f32,
+    ring: f32,
+    label: f32,
+    mark: f32,
+    /// How much deeper a selected body is.
+    selected_step: f32,
+}
+const LIGHT: LightStrip = LightStrip {
+    top: 0.84,
+    bottom: 0.895,
+    chroma: 0.1,
+    opacity: 0.9,
+    faded: 0.5,
+    glow: 0.42,
+    rim: 0.58,
+    ring: 0.42,
+    label: 0.38,
+    mark: 0.54,
+    selected_step: 0.045,
+};
+
 impl Tokens {
     /// Corner of a strip `height` points tall: about a quarter of its height.
     pub fn strip_radius(&self, height: f32) -> f32 {
@@ -114,8 +162,29 @@ impl Tokens {
             (true, _) => 0.15,
         };
         if self.accessibility.increase_contrast {
-            let body = oklch(0.42, chroma * 0.7, hue);
             let selected = state == StripState::Selected;
+            if !dark {
+                // Increase Contrast on the light canvas: a flat pale body
+                // outlined and named in the ink.
+                let body = oklch(0.88, chroma * 0.5, hue);
+                let ink = self.colors.text;
+                return Strip {
+                    top: body,
+                    bottom: body,
+                    under_label: body,
+                    opacity: 1.,
+                    glow: (0, 0.),
+                    rim: (ink, if selected { 1. } else { 0.7 }),
+                    rim_top: (ink, if selected { 1. } else { 0.7 }),
+                    rim_width: if selected { 2. } else { 1. },
+                    rim_inset: 0.,
+                    grid: (ink, 0.),
+                    shadow: (0, 0., 0., 0.),
+                    foreground: ink,
+                    primary: ink,
+                };
+            }
+            let body = oklch(0.42, chroma * 0.7, hue);
             return Strip {
                 top: body,
                 bottom: body,
@@ -125,20 +194,17 @@ impl Tokens {
                 rim: (0xffffff, if selected { 1. } else { 0.6 }),
                 rim_top: (0xffffff, if selected { 1. } else { 0.6 }),
                 rim_width: if selected { 2. } else { 1. },
-                rim_inset: if selected && !dark { 2. } else { 0. },
+                rim_inset: 0.,
                 grid: (0xffffff, 0.),
                 shadow: (0, 0., 0., 0.),
                 foreground: 0xffffff,
                 primary: 0xffffff,
             };
         }
-        // A light canvas shows through the body, so the slab is a step deeper
-        // there to keep its labels at 4.5:1.
-        let (top, bottom, opacity, faded) = if dark {
-            (0.39, 0.52, 0.92, 0.55)
-        } else {
-            (0.33, 0.46, 0.95, 0.85)
-        };
+        if !dark {
+            return self.strip_light(hue, coloured, state);
+        }
+        let (top, bottom, opacity, faded) = (0.39, 0.52, 0.92, 0.55);
         let light = oklch(0.9, chroma * 0.55, hue);
         let (rim, side, edge) = match state {
             StripState::Rest => (light, 0.13, 0.5),
@@ -161,7 +227,7 @@ impl Tokens {
         // while the band a name stands on stays deep.
         let glow = oklch(0.84, chroma * 0.8, hue);
         let opacity_now = match state {
-            StripState::Dragging if dark => opacity - 0.06,
+            StripState::Dragging => opacity - 0.06,
             StripState::Disabled => faded,
             _ => opacity,
         };
@@ -207,15 +273,79 @@ impl Tokens {
             rim: (rim, side),
             rim_top: (rim, edge),
             rim_width: if selected { 2. } else { 1. },
-            rim_inset: if selected && !dark { 2. } else { 0. },
+            rim_inset: 0.,
             grid: (light, if disabled { 0.1 } else { 0.34 }),
             shadow: if state == StripState::Dragging {
-                (0x000000, if dark { 0.45 } else { 0.22 }, 6., 16.)
+                (0x000000, 0.45, 6., 16.)
             } else {
                 (0, 0., 0., 0.)
             },
             foreground,
             primary: oklch(0.8, chroma * 0.62, hue),
+        }
+    }
+    /// The strip on the light canvas (see the module's note).
+    fn strip_light(&self, hue: f32, coloured: bool, state: StripState) -> Strip {
+        let l = &LIGHT;
+        let disabled = state == StripState::Disabled;
+        let selected = state == StripState::Selected;
+        let chroma = match (coloured, disabled) {
+            (false, _) => 0.,
+            (true, true) => l.chroma * 0.3,
+            (true, false) => l.chroma,
+        };
+        // A selected strip is a step deeper and fuller as well as ringed.
+        let (deeper, fuller) = if selected {
+            (l.selected_step, 1.2)
+        } else {
+            (0., 1.)
+        };
+        let deep = oklch(l.top - deeper, chroma * fuller, hue);
+        let body = oklch(l.bottom - deeper, chroma * fuller * 0.85, hue);
+        let opacity = match state {
+            StripState::Dragging => l.opacity - 0.06,
+            StripState::Disabled => l.faded,
+            _ => l.opacity,
+        };
+        // The rim: a deeper shade of the hue round the slab, a light edge
+        // along its top. A neutral strip takes the ink's own grey.
+        let edge = oklch(l.rim, chroma * 1.3, hue);
+        let ring = oklch(l.ring, (chroma * 1.6).min(0.17), hue);
+        let (rim, rim_top) = match state {
+            StripState::Rest => ((edge, 0.4), (0xffffff, 0.75)),
+            StripState::Hover => ((edge, 0.7), (0xffffff, 0.9)),
+            StripState::Selected => ((ring, 1.), (ring, 1.)),
+            StripState::Dragging => ((edge, 0.6), (0xffffff, 0.9)),
+            StripState::Disabled => ((edge, 0.18), (0xffffff, 0.4)),
+        };
+        // Names are the hue's dark shade, as light as still holds 4.5:1 on
+        // the deepest part of the body as it lands on the canvas.
+        let landed = mix(self.colors.panel, deep, opacity);
+        let foreground = (0..=12)
+            .map(|step| oklch(l.label - step as f32 * 0.02, (chroma * 1.3).min(0.14), hue))
+            .find(|label| crate::color::contrast(*label, landed) >= 4.6)
+            .unwrap_or(self.colors.text);
+        Strip {
+            top: deep,
+            bottom: body,
+            under_label: deep,
+            opacity,
+            glow: (
+                oklch(0.985, chroma * 0.2, hue),
+                if disabled { 0. } else { l.glow },
+            ),
+            rim,
+            rim_top,
+            rim_width: if selected { 2. } else { 1. },
+            rim_inset: 0.,
+            grid: (edge, if disabled { 0.1 } else { 0.3 }),
+            shadow: if state == StripState::Dragging {
+                (0x000000, 0.22, 6., 16.)
+            } else {
+                (0, 0., 0., 0.)
+            },
+            foreground,
+            primary: oklch(l.mark, (chroma * 1.4).min(0.15), hue),
         }
     }
     pub fn playhead(&self) -> Playhead {
@@ -228,7 +358,13 @@ impl Tokens {
     }
     pub fn trim_grip(&self) -> TrimGrip {
         TrimGrip {
-            color: 0xffffff,
+            // White on the dark canvas's deep strips, the ink on the light
+            // canvas's pale ones.
+            color: if self.scheme == Scheme::Dark {
+                0xffffff
+            } else {
+                self.colors.text
+            },
             width: 3.,
             height: 0.6,
             inset: 4.,

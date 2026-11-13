@@ -3354,6 +3354,22 @@ mod worker_tests {
     }
 
     #[test]
+    fn the_notice_reports_a_refused_effect_bypassed_on_a_drawn_layer() {
+        let status = ViewerStatus {
+            layer_failures: vec![pm_render::LayerFailure {
+                composition: "c".into(),
+                layer: "caption".into(),
+                message: "effect shadow bypassed: no definition for invalid input".into(),
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 1 layer: effect shadow bypassed: no definition for invalid input")
+        );
+    }
+
+    #[test]
     fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
         let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
             effect: effect.into(),

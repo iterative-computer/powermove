@@ -1149,12 +1149,18 @@ impl Backend {
         }
         let value = match command {
             "panel.inspector" => {
-                if let Some(request) = self.native.properties.intent(
+                let request = self.native.properties.intent(
                     self.model.as_mut().ok_or("No open project")?,
                     self.caller,
                     args,
                     time,
-                )? {
+                );
+                for (name, args) in self.native.properties.commands.drain(..) {
+                    self.native
+                        .platform
+                        .push(("command".into(), json!({"name":name,"args":args})));
+                }
+                if let Some(request) = request? {
                     return Ok(NativeCommand::Kernel(request));
                 }
                 self.inspector_snapshot()?

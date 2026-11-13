@@ -1893,6 +1893,7 @@ fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_la
 
 mod effect_delta;
 mod effect_registry;
+mod expressions;
 mod text_animators;
 
 mod precomp_delta;

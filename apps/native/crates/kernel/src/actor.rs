@@ -305,6 +305,11 @@ pub enum KernelEvent {
         project: String,
         message: String,
     },
+    /// Something the person is not asked about but can look up: a line for
+    /// the host's Error Log.
+    Log {
+        message: String,
+    },
     /// A request failed with an internal error (a contained panic); the
     /// kernel keeps serving. Hosts show it in the Error Log.
     /// A panic was contained to one call. `projects` stopped
@@ -407,6 +412,9 @@ enum Msg {
         stage: crate::fault_injection::Stage,
         project: String,
     },
+    /// `KernelHandle::set_history_budget_later`.
+    #[cfg(any(test, feature = "fault-injection"))]
+    HistoryBudget(usize),
     Shutdown,
 }
 
@@ -652,6 +660,13 @@ impl KernelHandle {
             stage,
             project: project.to_owned(),
         });
+    }
+
+    /// Tests: the shared undo budget in entries, applied by the next call
+    /// that maintains it.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn set_history_budget_later(&self, max_entries: usize) {
+        self.send(Msg::HistoryBudget(max_entries));
     }
 
     /// Runs `request` on `project`; resolves with the acknowledgement.
@@ -925,6 +940,8 @@ fn shell_scope(call: &crate::session::ShellCall) -> Scope {
         | DeferClose(session)
         | DiscardClose(session)
         | CopiesOf(session)
+        | KeptBeside(session)
+        | KeptSeen { session, .. }
         | SaveAs { session, .. } => Scope::Project(session.project.clone()),
         _ => Scope::Every,
     }
@@ -948,7 +965,7 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::DurabilityErrors
         | Msg::Shutdown => Scope::Nothing,
         #[cfg(any(test, feature = "fault-injection"))]
-        Msg::ArmFault { .. } => Scope::Nothing,
+        Msg::ArmFault { .. } | Msg::HistoryBudget(_) => Scope::Nothing,
     }
 }
 
@@ -1242,6 +1259,9 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             };
             let revision = publish(kernel, shared, &id);
             reply(result);
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
+            }
             if let Some(revision) = revision {
                 emit(
                     shared,
@@ -1323,6 +1343,9 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 if !ids.contains(&id) {
                     emit(shared, KernelEvent::Closed { project: id });
                 }
+            }
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
             }
         }
         Msg::Call {
@@ -1510,6 +1533,8 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
         }
         #[cfg(any(test, feature = "fault-injection"))]
         Msg::ArmFault { stage, project } => crate::fault_injection::arm(stage, project),
+        #[cfg(any(test, feature = "fault-injection"))]
+        Msg::HistoryBudget(max_entries) => kernel.set_history_budget_later(max_entries),
         Msg::DurabilityErrors => {
             if let Some(d) = kernel.durability() {
                 for (project, message) in d.take_errors() {

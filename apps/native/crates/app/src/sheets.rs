@@ -169,7 +169,8 @@ pub fn from_surface(
 ) -> (Sheet, BTreeMap<String, Retained<NSTextField>>) {
     let mtm = MainThreadMarker::new().unwrap();
     let mut descriptions = BTreeMap::new();
-    let mut sheet = Sheet::new(&surface.title, tokens, false, mtm);
+    // An expression editor is the wide sheet: its field holds a line of source.
+    let mut sheet = Sheet::new(&surface.title, tokens, surface.expression_editor, mtm);
     if let Some(line) = &surface.line {
         sheet.line(line, tokens.typography.body.into(), tokens.colors.secondary);
     }
@@ -218,6 +219,7 @@ pub fn from_surface(
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
             }
+            _ if surface.expression_editor => sheet.source(&field.id, &field.label, value),
             _ => sheet.text(&field.id, &field.label, value, field.secure, field.enabled),
         }
         if let (Some(placeholder), Some(control)) = (field.placeholder, sheet.fields.get(&field.id))
@@ -236,7 +238,13 @@ pub fn from_surface(
             } else {
                 tokens.colors.muted
             };
-            let label = sheet.note(text, &reserve, rgb);
+            // Under an expression, on the sheet's full width: the names it
+            // can use, then what the parser says about what is typed.
+            let label = if surface.expression_editor {
+                sheet.line_reserving(text, &reserve, tokens.typography.label.into(), rgb)
+            } else {
+                sheet.note(text, &reserve, rgb)
+            };
             descriptions.insert(field.id.clone(), label);
         }
         if let Some(error) = field.error {
