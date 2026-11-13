@@ -1,5 +1,5 @@
 import { SettingsPanel, SettingsModel, type Publication } from "./index";
-import { generalRows } from "./catalogue";
+import { generalRows, sections } from "./catalogue";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 import type { Json } from "../../src/protocol";
 
@@ -105,8 +105,8 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     await stop();
     await dispose();
   };
-  mounted.show = async () => {
-    model.show();
+  mounted.show = async (target?: string) => {
+    model.show(sections.find((s) => s === target));
     await r.flush();
   };
   return mounted;

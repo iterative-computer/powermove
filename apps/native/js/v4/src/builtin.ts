@@ -158,7 +158,8 @@ export interface Mounted {
   /** Resolves when the panel's model has applied what it was sent. */
   settle?(): Promise<unknown>;
   /** The panel was revealed (sheets, Settings). */
-  show?(): Promise<unknown>;
+  /** Brings it forward; Settings takes the page to show. */
+  show?(target?: string): Promise<unknown>;
   /** A publication wake: pull host-side registries before settling. */
   publish?(): void;
   /** A command from outside the panel changed its model: show it again. */

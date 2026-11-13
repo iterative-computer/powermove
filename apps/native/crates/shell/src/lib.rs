@@ -3,6 +3,7 @@ pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod integration;
 pub mod keyboard;
+pub mod keymap;
 #[cfg(target_os = "macos")]
 pub mod kit;
 pub mod layout;

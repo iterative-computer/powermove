@@ -2524,18 +2524,58 @@ fn value_text(value: &Value) -> String {
 
 pub struct HeaderView {
     view: Entity<SurfaceView>,
+    /// In a tab group: the tab names the panel, so the header's own title
+    /// (its first text) is left out and only its actions stay.
+    tabbed: bool,
     _observe: Subscription,
 }
 impl HeaderView {
     pub fn new(view: Entity<SurfaceView>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&view, |_, _, cx| cx.notify());
-        Self { view, _observe }
+        Self {
+            view,
+            tabbed: false,
+            _observe,
+        }
+    }
+    pub fn set_tabbed(&mut self, tabbed: bool, cx: &mut Context<Self>) {
+        if self.tabbed != tabbed {
+            self.tabbed = tabbed;
+            cx.notify();
+        }
+    }
+}
+impl SurfaceView {
+    /// A header's title: the header itself when it is only its title
+    /// (Effects), else its first child that is text (words of its own, or
+    /// only words inside) and not a control.
+    pub(crate) fn header_title(&self, header: Id) -> Option<Id> {
+        let words = |n: &NodeView| {
+            n.text.is_some()
+                || (!n.children.is_empty()
+                    && n.children
+                        .iter()
+                        .all(|c| self.prepared.node(*c).is_some_and(|k| k.is_plain_text)))
+        };
+        let node = self.prepared.node(header)?;
+        if node.component.is_none() && words(node) {
+            return Some(header);
+        }
+        node.children.iter().copied().find(|c| {
+            self.prepared
+                .node(*c)
+                .is_some_and(|n| n.component.is_none() && words(n))
+        })
     }
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabbed = self.tabbed;
         self.view.update(cx, |v, cx| match v.prepared.header {
-            Some(id) => v.element(id, window, cx, None),
+            Some(id) => {
+                let skip = if tabbed { v.header_title(id) } else { None };
+                v.element(id, window, cx, skip)
+            }
             None => div().into_any_element(),
         })
     }

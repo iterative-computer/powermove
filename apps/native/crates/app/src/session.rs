@@ -182,6 +182,13 @@ pub struct Controller {
         Option<crate::media_import::ExtensionImport>,
     )>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Settings › Shortcuts: the row whose next key is being taken, the
+    /// state revision and keymap value this window's keys follow, and the
+    /// page as last built (`stamp` changes with it).
+    pub(crate) shortcut_recording: Option<String>,
+    pub(crate) keymap_revision: Option<u64>,
+    pub(crate) keymap_seen: Option<pm_model::Value>,
+    pub(crate) shortcuts_page: serde_json::Value,
     /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
     /// (keymap.ts): the history mark taken before the first, and the timer
     /// that squashes the burst once the keys rest.
@@ -409,7 +416,21 @@ impl pm_shell::integration::Integration for Bridge {
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| v.hide_extension_panels(shown));
+        self.0.update(cx, |v, _| {
+            v.hide_extension_panels(shown);
+            // A panel not on screen (another one maximised, a workspace
+            // without it) leaves no native playhead or timecode behind.
+            let mut gone = false;
+            if !shown.contains(&"timeline") {
+                gone |= v.builtins.timeline_place.take().is_some();
+            }
+            if !shown.contains(&"viewer") {
+                gone |= v.builtins.viewer_place.take().is_some();
+            }
+            if gone && let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
     }
     fn panel_menu(
         &self,
@@ -425,6 +446,7 @@ impl pm_shell::integration::Integration for Bridge {
         &self,
         id: &str,
         bounds: pm_shell::layout::Rect,
+        tabbed: bool,
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -432,7 +454,7 @@ impl pm_shell::integration::Integration for Bridge {
             if id == "scopes" {
                 return Some(v.scopes_header(cx));
             }
-            v.builtin_header(id, bounds, w, cx)
+            v.builtin_header(id, bounds, tabbed, w, cx)
         })
     }
     fn project_id(&self, cx: &App) -> Option<String> {
@@ -724,6 +746,10 @@ impl Controller {
             close_after_save: None,
             imports: Default::default(),
             importing: None,
+            shortcut_recording: None,
+            keymap_revision: None,
+            keymap_seen: None,
+            shortcuts_page: serde_json::Value::Null,
             nudge_mark: None,
             nudge_idle: None,
         }
@@ -2513,6 +2539,33 @@ impl Controller {
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }
+        match cmd.name.as_str() {
+            "shortcuts" => {
+                let action = cmd.args.first().cloned().unwrap_or_default();
+                self.shortcuts_action(&action, window, cx);
+                return true;
+            }
+            "shortcuts.recorded" => {
+                let chord = cmd
+                    .args
+                    .first()
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default();
+                self.shortcut_recorded(chord, cx);
+                return true;
+            }
+            // V (or A in the Final Cut and Resolve keys) is the Selection tool
+            // everywhere: the timeline's edit tool goes back to Selection too.
+            "toolSelect" => {
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    timeline.update(cx, |t, cx| {
+                        t.command("timeline.tool:selection", time, None, false, cx)
+                    });
+                }
+            }
+            _ => {}
+        }
         if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
             self.restore_take(id, cx);
             return true;
@@ -2902,6 +2955,11 @@ impl Controller {
                 }
             }
             // Settings, at the open project's own page.
+            // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
+            "keyboardShortcuts" => {
+                self.builtins.settings_page = Some("shortcuts".into());
+                self.show_builtin("settings", window, cx);
+            }
             "projectSettings" => {
                 if self.published.is_none() {
                     return false;

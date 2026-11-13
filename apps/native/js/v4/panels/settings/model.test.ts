@@ -12,6 +12,7 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
     expect(model.availableSections).toEqual([
       ...(project ? ["project" as const, "memory" as const] : []),
       "general",
+      "shortcuts",
       "media",
       "accounts",
       "transcription",
@@ -152,7 +153,7 @@ test("sidebar arrows/Home/End navigate matching sections only; scroll tracking c
   model.navigate("Home");
   expect(model.active).toBe("general");
   model.navigate("ArrowDown");
-  expect(model.active).toBe("media");
+  expect(model.active).toBe("shortcuts");
   model.navigate("ArrowUp");
   expect(model.active).toBe("general");
   await model.search("instant");
@@ -437,4 +438,66 @@ test("project memory is read-only, searchable and only available with a project"
   model.publish(publication({ revision: 2 }));
   expect(model.availableSections).not.toContain("memory");
   expect(model.active).toBe("general");
+});
+
+test("Shortcuts: found by command, menu or key, and its rows send their actions", async () => {
+  const row = (
+    id: string,
+    label: string,
+    chords: string[],
+    keys: string[],
+    patch = {},
+  ) => ({
+    id,
+    menu: "Layer",
+    label,
+    keys,
+    chords,
+    changed: false,
+    fixed: false,
+    recording: false,
+    ...patch,
+  });
+  const { model, actions } = fixture({
+    shortcuts: {
+      preset: "after-effects",
+      changed: false,
+      rows: [
+        row(
+          "rippleTrimIn",
+          "Ripple Trim In Point to Playhead",
+          ["alt+shift+["],
+          ["⌥⇧["],
+        ),
+        row("toggleAudioSkimming", "Audio Skimming", ["alt+shift+s"], ["⌥⇧S"]),
+        row("save", "Save", ["cmd+s"], ["⌘S"], { fixed: true, menu: "File" }),
+      ],
+      conflicts: [],
+    },
+  });
+  model.show();
+  expect(model.availableSections).toContain("shortcuts");
+  const found = async (query: string) => {
+    await model.search(query);
+    return [...model.matches.rows].filter((id) => id.startsWith("shortcut."));
+  };
+  expect(await found("ripple trim")).toEqual(["shortcut.rippleTrimIn"]);
+  expect(await found("⌥⇧S")).toEqual(["shortcut.toggleAudioSkimming"]);
+  expect(await found("option-shift-s")).toEqual([
+    "shortcut.toggleAudioSkimming",
+  ]);
+  expect(await found("opt shift [")).toEqual(["shortcut.rippleTrimIn"]);
+  expect(await found("file")).toEqual(["shortcut.save"]);
+  await model.search("");
+  expect(
+    await model.perform({ type: "shortcut", op: "record", id: "rippleTrimIn" }),
+  ).toBe(true);
+  // The menu bar's own keys are not the page's to change.
+  expect(
+    await model.perform({ type: "shortcut", op: "record", id: "save" }),
+  ).toBe(false);
+  expect(actions).toEqual([
+    { type: "shortcut", op: "record", id: "rippleTrimIn" },
+  ]);
+  model.dispose();
 });

@@ -467,8 +467,8 @@ async function mountExtension(
     await this.publish();
     return true;
   },
-  async show() {
-    await mounted?.show?.();
+  async show(target?: string) {
+    await mounted?.show?.(target);
     await settle();
     return true;
   },
