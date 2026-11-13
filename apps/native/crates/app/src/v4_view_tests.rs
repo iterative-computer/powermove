@@ -828,10 +828,13 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
     vcx.run_until_parked();
     let hex = view.read_with(&vcx, |v, _| {
-        v.prepared
-            .nodes
-            .get(&7)
-            .map(|n| (n.bare, n.style.background.is_some(), v.disabled_field_text(n)))
+        v.prepared.nodes.get(&7).map(|n| {
+            (
+                n.bare,
+                n.style.background.is_some(),
+                v.disabled_field_text(n),
+            )
+        })
     });
     assert_eq!(
         hex,
@@ -853,7 +856,10 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     // Once: the number decoration leaves a disabled field's value to it (a
     // locked layer's wells read "100 px100 px").
     let decorated = view.read_with(&vcx, |v, _| {
-        v.prepared.nodes.get(&3).map(|n| (n.number.is_some(), v.draws_number(n)))
+        v.prepared
+            .nodes
+            .get(&3)
+            .map(|n| (n.number.is_some(), v.draws_number(n)))
     });
     assert_eq!(decorated, Some((true, false)));
 }
