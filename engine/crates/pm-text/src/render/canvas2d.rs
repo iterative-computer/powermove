@@ -24,7 +24,7 @@ pub(crate) struct GlyphMask {
     pub top: i32,
     pub coverage: Vec<u8>,
 }
-type Key = (u64, u32, u16, u32, Vec<(u32, u32)>, u8, u32);
+type Key = (u64, u32, u16, u32, Vec<(u32, u32)>, u8, u32, Option<u64>);
 #[derive(Default)]
 pub(crate) struct CanvasMasks {
     fonts: CoreTextReference,
@@ -50,6 +50,7 @@ impl CanvasMasks {
         quarter: u8,
         skew: f32,
         bounds: kurbo::Rect,
+        bold_path: Option<(&kurbo::BezPath, f64)>,
     ) -> Option<Arc<GlyphMask>> {
         let key = (
             face.id,
@@ -59,6 +60,9 @@ impl CanvasMasks {
             coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
             quarter,
             skew.to_bits(),
+            // Fake-bold stroke width depends on the source font size before
+            // its device transform; equal strike sizes can have other widths.
+            bold_path.map(|(_, scale)| scale.to_bits()),
         );
         if let Some(mask) = self.masks.get(&key) {
             return Some(mask.clone());
@@ -74,14 +78,61 @@ impl CanvasMasks {
             glyphs: vec![],
             color: [0., 0., 0., 1.],
         };
-        let font = self.fonts.font_of(face.id, &run)?;
-        let mask = Arc::new(draw(&font, glyph, MaskStyle { quarter, skew }, bounds)?);
+        let mask = Arc::new(match bold_path {
+            Some((path, scale)) => draw_path(path, scale, quarter, bounds)?,
+            None => {
+                let font = self.fonts.font_of(face.id, &run)?;
+                draw(&font, glyph, MaskStyle { quarter, skew }, bounds)?
+            }
+        });
         self.bytes += mask.coverage.len();
         self.masks.insert(key, mask.clone());
         Some(mask)
     }
 }
 const PAD: i32 = 4;
+/// SkTypeface_Mac::onFilterRec uses useStrokeForFakeBold. Such strikes go
+/// through SkScalerContext::GenerateImageFromPath, without CoreGraphics' font
+/// dilation. Their geometric A8 coverage still takes the same preblend table.
+fn draw_path(
+    path: &kurbo::BezPath,
+    scale: f64,
+    quarter: u8,
+    bounds: kurbo::Rect,
+) -> Option<GlyphMask> {
+    if !scale.is_finite()
+        || scale <= 0.
+        || ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+            .iter()
+            .all(|v| v.is_finite())
+    {
+        return None;
+    }
+    let left = bounds.x0.floor() as i32 - PAD;
+    let top = bounds.y0.floor() as i32 - PAD;
+    let w = (bounds.x1.ceil() as i32 + PAD + 1 - left).max(1) as u32;
+    let h = (bounds.y1.ceil() as i32 + PAD - top).max(1) as u32;
+    if w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut context = vello_cpu::RenderContext::new(w as u16, h as u16);
+    context.set_paint(vello_cpu::color::palette::css::WHITE);
+    context.set_transform(
+        kurbo::Affine::translate((f64::from(-left) + f64::from(quarter) / 4., f64::from(-top)))
+            * kurbo::Affine::scale(scale),
+    );
+    context.fill_path(path);
+    context.flush();
+    let mut pixels = vello_cpu::Pixmap::new(w as u16, h as u16);
+    context.render(&mut pixels, &mut vello_cpu::Resources::new());
+    Some(GlyphMask {
+        width: w,
+        height: h,
+        left,
+        top,
+        coverage: pixels.data().iter().map(|p| p.a).collect(),
+    })
+}
 fn draw(
     font: &CFRetained<CTFont>,
     glyph: u16,
@@ -207,4 +258,28 @@ pub fn luminance_bucket(rgb: [f64; 3]) -> usize {
 /// The mask table for paint `rgb` (`mask_tables::TABLES`).
 pub fn mask_table(rgb: [f64; 3]) -> &'static [u8; 256] {
     &super::mask_tables::TABLES[luminance_bucket(rgb).min(3)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::Shape;
+    #[test]
+    fn synthetic_bold_paths_have_area_coverage_without_font_dilation() {
+        let rect = kurbo::Rect::new(0., 0., 2.25, 8.);
+        let mask = draw_path(&rect.to_path(0.01), 1., 1, rect).unwrap();
+        let pixel = |x: i32, y: i32| {
+            mask.coverage[((y - mask.top) as u32 * mask.width + (x - mask.left) as u32) as usize]
+        };
+        // A quarter-pixel pen: [0.25, 2.5]. No fitted expansion or vertical
+        // offset may thicken this independently specified outline.
+        assert!((i32::from(pixel(0, 3)) - 191).abs() <= 1);
+        assert_eq!(pixel(1, 3), 255);
+        assert!((i32::from(pixel(2, 3)) - 128).abs() <= 1);
+        assert_eq!(pixel(0, -1), 0);
+        assert_eq!(pixel(0, 8), 0);
+        assert!(
+            (mask.coverage.iter().map(|v| f64::from(*v)).sum::<f64>() / 255. - 18.).abs() < 0.04
+        );
+    }
 }

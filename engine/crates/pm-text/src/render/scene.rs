@@ -1106,8 +1106,26 @@ impl Painter<'_> {
         let residual = device_residual(m, scale);
         for run in runs {
             let device_size = f64::from(run.size) * scale;
+            let [a, b, c, d, _, _] = m.as_coeffs();
+            let canvas_mask = cfg!(all(target_os = "macos", feature = "canvas2d"))
+                && self.smoothing == super::smoothing::Smoothing::Canvas2d
+                && stroke.is_none()
+                && device_size < 162.0
+                && b == 0.0
+                && c == 0.0
+                && a > 0.0
+                && (a - d).abs() < 1e-9
+                && color[..3].iter().all(|c| (0.0..=1.0).contains(c))
+                && matches!(run.coords, Coords::User(_));
             // Fills take the smoothing's weight; strokes are plain paths.
-            let weight = if stroke.is_none() {
+            let weight = if canvas_mask && run.synthetic_bold {
+                // Skia fake bold is a stroked path mask: it retains the glyph
+                // strike's subpixel grid but never CoreGraphics' dilation.
+                super::smoothing::Weight {
+                    snap: true,
+                    ..super::smoothing::Weight::EXACT
+                }
+            } else if stroke.is_none() {
                 self.smoothing.at(device_size)
             } else {
                 super::smoothing::Weight::EXACT
@@ -1201,16 +1219,7 @@ impl Painter<'_> {
                 };
                 #[cfg(all(target_os = "macos", feature = "canvas2d"))]
                 {
-                    let [a, b, c, d, _, _] = m.as_coeffs();
-                    if self.smoothing == super::smoothing::Smoothing::Canvas2d
-                        && stroke.is_none()
-                        && !run.synthetic_bold
-                        && device_size < 162.0
-                        && b == 0.0
-                        && c == 0.0
-                        && a > 0.0
-                        && (a - d).abs() < 1e-9
-                        && color[..3].iter().all(|c| (0.0..=1.0).contains(c))
+                    if canvas_mask
                         && let super::outline::Coords::User(coords) = run.coords
                         && let Ok(id) = u16::try_from(glyph.id)
                     {
@@ -1225,6 +1234,7 @@ impl Painter<'_> {
                             quarter,
                             skew(run) as f32,
                             bounds,
+                            run.synthetic_bold.then_some((&outline.path, scale)),
                         ) {
                             let table = super::canvas2d::mask_table([color[0], color[1], color[2]]);
                             let mut data = Vec::with_capacity(mask.coverage.len() * 4);

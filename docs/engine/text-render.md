@@ -68,7 +68,12 @@ and exponent cannot reproduce that hinting and discrete preblend.
 and retains an 8 MiB mask cache. Its immutable fonts move with their owning
 render thread; bitmap contexts stay within one call.
 
-Color glyphs, strokes, synthesized bold, large or transformed glyph strikes
+Synthesized bold uses its stroked outline's geometric A8 coverage and the
+same mask preblend, matching Skia's path-generated strikes. CoreGraphics font
+dilation does not apply to that path. Its cache also keys the source scale,
+since fake-bold width is computed before the device transform.
+
+Color glyphs, strokes, large or transformed glyph strikes
 retain their existing painters. `TextWeight::Exact` and level 2 retain exact
 outline coverage. Layout and font choice are unchanged.
 
