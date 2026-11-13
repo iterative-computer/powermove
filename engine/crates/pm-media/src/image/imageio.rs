@@ -381,6 +381,29 @@ pub fn pixel_size(path: &Path) -> Result<(u32, u32)> {
     })
 }
 
+/// The bytes a whole decode of the image at `path` holds at most, from its
+/// header (pixel size and bits per sample: 8-bit RGBA, 16-bit or half RGBA,
+/// float RGBA), without decoding it.
+pub fn decoded_bytes_estimate(path: &Path) -> Result<usize> {
+    let (w, h) = pixel_size(path)?;
+    let src = source(path)?;
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+        ))
+    }
+    .ok_or_else(|| MediaError::Image(format!("ImageIO cannot read {}", path.display())))?;
+    let depth = unsafe { cf_i64(cf_dict_get(props.as_ptr(), "Depth")) }.unwrap_or(32);
+    let sample = match depth {
+        ..=8 => 1,
+        9..=16 => 2,
+        _ => 4,
+    };
+    Ok(w as usize * h as usize * 4 * sample)
+}
+
 /// Frame count and delays; None for a single image.
 pub fn animation(path: &Path) -> Result<Option<Animation>> {
     let src = source(path)?;
