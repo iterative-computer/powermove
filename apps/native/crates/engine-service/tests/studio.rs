@@ -4076,3 +4076,40 @@ fn imported_electron_scene_keeps_raster_materials_and_native_scene_keeps_tracing
     assert!(!flags.is_empty());
     assert!(flags.iter().all(|studio| !*studio));
 }
+
+
+// Test-only transport probe for a saved intrinsic project. No AppKit window,
+// source-project writes or preset changes; the same native export source/compositor is
+// retained for every frame. Media is extracted into an owned canonical tempdir.
+#[test]
+#[ignore = "explicit saved-project GPU diagnostic; hold the shared build lock"]
+fn native_saved_project_transport_probe() {
+    let path=std::env::var_os("PM_STUDIO_PERF_PROJECT").expect("set PM_STUDIO_PERF_PROJECT");
+    let opened=pm_kernel::project_io::open_project(std::path::Path::new(&path),Default::default()).unwrap();
+    let media_dir=tempfile::tempdir().unwrap();
+    let media_root=media_dir.path().canonicalize().unwrap();
+    let mut media=pm_export::render::MediaPaths::default();
+    for (index,entry) in opened.file.media.iter().enumerate() {
+        let extension=match entry.media_type.to_string().as_str() {
+            "model/obj"|"text/plain"=>"obj","model/gltf+json"=>"gltf","model/gltf-binary"=>"glb","model/fbx"=>"fbx",
+            "image/png"=>"png","image/jpeg"=>"jpg","image/vnd.radiance"=>"hdr",_=>"bin",
+        };
+        let path=media_root.join(format!("media-{index}.{extension}"));entry.copy_to(&path).unwrap();
+        media.insert(entry.id.to_string(),path);
+    }
+    let comp=opened.open_comp.clone().expect("open composition");
+    let doc=pm_kernel::DocumentStore::open(opened).snapshot().document;
+    let original=doc.to_value();
+    let mut renderer=Renderer::headless().unwrap();
+    studio::attach_with_quality(&mut renderer,doc.clone(),&media,&comp,json!("production")).unwrap();
+    let mut r=RenderRequest::sized(Size::new(1920,1080),Precision::Float16);
+    r.export=true;r.output_kind=OutputKind::Final;
+    for frame in 0..4 {
+        let time=Ticks::new(317_520_000+frame*23_520_000).unwrap();
+        eprintln!("NATIVE_FIXTURE_FRAME {frame} ticks={}",time.get());
+        let rendered=renderer.render(&doc,&comp,time,&r,&pm_render::MapResolver::default()).unwrap();
+        assert!(rendered.failures.is_empty(),"{:?}",rendered.failures);
+        assert!(!renderer.read_rgba(&rendered).unwrap().is_empty());
+    }
+    assert_eq!(doc.to_value(),original);
+}

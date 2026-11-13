@@ -2966,3 +2966,53 @@ The unchanged regression passes: Live RGB is 0.89347 / 0.88000 with alpha 1,
 Refine 0.58229 / 0.58550, and Final 0.62345 / 0.62375 (without / with surface).
 The existing bounded native-studio fog activation regression also passes.
 This is a foreground/volume-visibility check, not a Cycles fog-matching claim.
+
+
+### Floor regression decision: restore the pre-targeting transport
+
+The floor repair is **reverted**, including its added 24-observation receiver
+rules. Chrome floor fireflies remain **known, post-v1**. The backdrop-band,
+invalid-normal, Live-fog and portable GPU-OIDN fixes remain. All numeric image
+and flicker assertions, MC references and the new lower-left floor ROI stay
+unchanged; this decision does not claim that the restored floor passes that
+new ROI gate. Only the behavior tests for the reverted 24-observation feature
+are reverted with it.
+
+The photon-map investigation tried bounded allocation and a four-sample
+pinhole catcher-query cache. Independent MC/reference queries and lens rays
+retained their original paths; the photon budget did not change. Small image
+checks passed, but the restoration limit was not met, so none of those runtime
+changes is retained:
+
+| Diagnostic variant, 1080p / four frames | Warm trace s/frame | Decision |
+| --- | ---: | --- |
+| Matched R1 application control | 10.2807 | Restoration baseline |
+| Original floor repair / development app | 25.0211 | Regression |
+| Same floor repair / release app | 25.0739 | Regression |
+| Bounded 256 MiB map, native fixture probe | 16.8685 | Not accepted |
+| 256 MiB plus four-sample query reuse, native probe | 12.7815 | Not accepted |
+| 64 MiB plus four-sample query reuse, native probe | 12.7122 | Not accepted |
+
+The last two trials passed all four small Production/Final fixtures, both
+seeds, display coverage and the floor ROI. The 64 MiB Production floor
+measured RMS 0.013622, noise 0.005952, bias p95 0.009753 and flicker 0.005566;
+Final measured 0.012870 / 0.005518 / 0.008423 / 0.003351. The unchanged limits
+are 0.02 / 0.006 / 0.012 / 0.006. Capacity repair removed saturation, but it
+also enlarged the gather's memory footprint. Even the best candidate did not
+prove trace at or below 11.3088 s, the 10% restoration limit. Native fixture
+probes omit video encoding and are not new real-30 export budget results.
+
+Rollback was applied before the 12:30 backstop. R3 specialization and R4 glass
+retuning were not started while this correctness/performance regression was
+unresolved. Current-source rollback validation and final regression results
+follow separately.
+
+
+Restored-source validation passes: the four-frame native probe traces
+8.8658, 8.9801, 9.1674, 9.3545 s, with warm mean
+9.1673 s. The unchanged legacy-volume and bounded-studio fog
+checks pass, as does the original polished/catcher adaptive-observation test.
+The ignored saved-project transport probe remains available for reproducible
+headless diagnostics; it extracts media into an owned canonical temporary
+directory and asserts that the source document is unchanged. It does not
+encode video and therefore does not replace the real-export speed gate.
