@@ -347,6 +347,22 @@ enum ParentMessage {
         agree: std::result::Result<(), Dispute>,
     },
 }
+/// A row in `$PM_ENGINE_TRACE.jobs.jsonl` (diagnostics only).
+fn job_diagnostic(row: serde_json::Value) {
+    let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") else {
+        return;
+    };
+    let mut path = PathBuf::from(trace).into_os_string();
+    path.push(".jobs.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{row}");
+    }
+}
 /// Why the app did not agree with a job's faces.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "why", rename_all = "camelCase")]
@@ -1133,28 +1149,13 @@ pub fn run_child() -> Result<()> {
             .set_document_effects(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
         // What a job's start cost (diagnostics only).
-        if let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") {
-            let mut path = PathBuf::from(trace).into_os_string();
-            path.push(".jobs.jsonl");
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                use std::io::Write;
-                let _ = writeln!(
-                    file,
-                    "{}",
-                    serde_json::json!({
-                        "job_start": if fill.is_some() { "fill" } else { "export" },
-                        "renderer_ms": made.as_secs_f64() * 1e3,
-                        "effects_ms": (starting.elapsed() - made).as_secs_f64() * 1e3,
-                        "shader_cache": shaders.is_some(),
-                        "definitions": request.resources.definitions.len(),
-                    })
-                );
-            }
-        }
+        job_diagnostic(serde_json::json!({
+            "job_start": if fill.is_some() { "fill" } else { "export" },
+            "renderer_ms": made.as_secs_f64() * 1e3,
+            "effects_ms": (starting.elapsed() - made).as_secs_f64() * 1e3,
+            "shader_cache": shaders.is_some(),
+            "definitions": request.resources.definitions.len(),
+        }));
         // Only what this export draws: enabled effects in its composition.
         let uninstalled = renderer.missing_effects_in(&doc, composition.as_str());
         if request.bypass_missing_effects {
@@ -1410,8 +1411,16 @@ impl Faces {
             id,
             answers: ask.clone(),
         };
+        let asked = std::time::Instant::now();
         send(&mut std::io::stdout().lock(), &message).map_err(|e| e.to_string())?;
-        match answered.recv_timeout(std::time::Duration::from_secs(30)) {
+        let answer = answered.recv_timeout(std::time::Duration::from_secs(30));
+        job_diagnostic(serde_json::json!({
+            "faces_compared": ask.answers.len(),
+            "faces": ask.faces.len(),
+            "ms": asked.elapsed().as_secs_f64() * 1e3,
+            "agreed": matches!(answer, Ok(Ok(()))),
+        }));
+        match answer {
             Ok(Ok(())) => {
                 agreed.merge(&ask);
                 Ok(())
