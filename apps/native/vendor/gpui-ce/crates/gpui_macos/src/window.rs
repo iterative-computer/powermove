@@ -2298,6 +2298,15 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        // Hosted views move in the frame that carries the scene they were
+        // laid out with: a frame with no drawable to reach (a link drawable
+        // of the size before a resize, a draw outside the link's update)
+        // moves nothing and is painted again on the next update.
+        #[cfg(not(feature = "wgpu"))]
+        if !this.renderer.drawable_ready() {
+            this.force_render_pending = true;
+            return;
+        }
         let transaction = crate::composition::present(this.native_view.as_ptr() as usize);
         // Powermove P-120: block on the transaction only when slot geometry moved
         // (or AppKit is painting synchronously), and reset it on every other frame.
@@ -2316,6 +2325,19 @@ impl PlatformWindow for MacWindow {
             );
             this.renderer.set_presents_with_transaction(sync);
         }
+        // A link's drawable reaches the screen at the link's own time, frames
+        // after a transaction committed now: a frame that moved hosted views
+        // would show them in their new places over the previous scene. Such
+        // a frame takes its drawable from the layer, as AppKit's synchronous
+        // paints do, and the link starts again after it.
+        #[cfg(not(feature = "wgpu"))]
+        let relink = this.ca_display_link.is_some()
+            && transaction.as_ref().is_some_and(|t| t.moved());
+        #[cfg(not(feature = "wgpu"))]
+        if relink {
+            this.renderer.set_display_link_drawable(None);
+            this.release_display_link_for_sync_present();
+        }
         #[cfg(feature = "wgpu")]
         if this.renderer.draw(scene) {
             this.force_render_pending = true;
@@ -2325,6 +2347,10 @@ impl PlatformWindow for MacWindow {
             // No link-supplied drawable while a CAMetalDisplayLink owns the
             // layer: the link's next update paints this scene.
             this.force_render_pending = true;
+        }
+        #[cfg(not(feature = "wgpu"))]
+        if relink {
+            this.start_display_link();
         }
         // Committing the slot transaction runs AppKit's display cycle, which
         // calls back into this window (cursor rects take this lock): release

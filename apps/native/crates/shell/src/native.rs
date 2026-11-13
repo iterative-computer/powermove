@@ -2867,11 +2867,34 @@ impl Host {
     /// Development builds: resizes the window by (`dw`, `dh`) in twelve
     /// steps, two frames apart, its top-left corner kept, and writes
     /// `resize.txt` to `--save-dir`: for every hosted AppKit control, how far
-    /// it stood right after a step from where the following frames put it.
-    /// All zeros means the controls stay attached while the window resizes.
+    /// it stood, at the end of the run-loop turn that set a step's frame,
+    /// from where the following frames put it. A line names a step AppKit
+    /// displayed a turn later (the content and the controls then move
+    /// together in that turn); what the screen showed is read from captures
+    /// taken during the run.
     #[cfg(debug_assertions)]
     pub fn review_resize(&self, dw: f64, dh: f64) {
         use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
+        use std::ffi::c_void;
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            static kCFRunLoopCommonModes: *const c_void;
+            fn CFRunLoopGetMain() -> *mut c_void;
+            fn CFRunLoopObserverCreateWithHandler(
+                allocator: *const c_void,
+                activities: usize,
+                repeats: u8,
+                order: isize,
+                block: &block2::Block<dyn Fn(*mut c_void, usize)>,
+            ) -> *mut c_void;
+            fn CFRunLoopAddObserver(
+                run_loop: *mut c_void,
+                observer: *mut c_void,
+                mode: *const c_void,
+            );
+            fn CFRelease(object: *mut c_void);
+        }
+        const BEFORE_WAITING: usize = 1 << 5;
         const STEPS: usize = 12;
         fn controls(view: &NSView, skip: &NSView, out: &mut Vec<(String, NSRect)>) {
             if std::ptr::eq(view, skip) || view.isHidden() {
@@ -2954,7 +2977,24 @@ impl Host {
             frame.origin.y -= dh / STEPS as f64;
             drop(s);
             window.setFrame_display(frame, true);
-            state.borrow_mut().1 = read();
+            // Read once Core Animation has committed this turn of the run
+            // loop (its observer runs at order 2,000,000): what the screen
+            // gets together with the window's new size.
+            let (state, read) = (state.clone(), read.clone());
+            let committed = block2::RcBlock::new(move |_: *mut c_void, _: usize| {
+                state.borrow_mut().1 = read();
+            });
+            unsafe {
+                let observer = CFRunLoopObserverCreateWithHandler(
+                    std::ptr::null(),
+                    BEFORE_WAITING,
+                    0,
+                    2_000_001,
+                    &committed,
+                );
+                CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+                CFRelease(observer);
+            }
         });
         let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(1. / 30., true, &step) };
         unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
