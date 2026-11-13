@@ -9,6 +9,42 @@ for (const [key, value] of [
   ["devicePixelRatio", 2],
 ])
   globalThis[key] = value;
+{
+  // The values people entered for extensions' declared `vars`. They live in
+  // this block's scope only: the host stages them for a load it asks for and
+  // hands that load a single-use token; nothing an extension can call or read
+  // (the engine bridge, the loader, `__compat`) selects an extension or a key.
+  const held = Object.create(null);
+  const { engine } = runtime;
+  const { freeze, keys } = Object;
+  const take = (token) => {
+    const staged = engine("extension.vars", { token });
+    for (const id of keys(staged)) held[id] = freeze(staged[id]);
+  };
+  // The host's entries for a load: an extension cannot replace them to see a
+  // token before it is spent.
+  Object.defineProperty(globalThis, "__compatHost", {
+    value: freeze({
+      boot(records, token) {
+        take(token);
+        __compat.boot(records);
+      },
+      update(records, ids, reason, token) {
+        take(token);
+        __compat.update(records, ids, reason);
+      },
+    }),
+  });
+  // The loader's read of them, taken once by `create` before any extension
+  // runs; then no global leads here.
+  let reader = (id) => held[id] ?? {};
+  globalThis.__compatVars = () => {
+    const once = reader;
+    reader = null;
+    delete globalThis.__compatVars;
+    return once;
+  };
+}
 globalThis.__compat = {
   /** The editor window's viewport changed (points and backing scale). */
   viewport(width, height, scale) {
@@ -24,6 +60,7 @@ globalThis.__compat = {
   },
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
+    const varsOf = __compatVars();
     initial ??= call("kernel.publication");
     const unavailable = (operation, input) => call(operation, input);
     this.errors = [];
@@ -1091,12 +1128,8 @@ globalThis.__compat = {
       progress: () => this.contributionsChanged?.(),
       // v1's loader: each activation reads the values entered for the keys
       // its manifest declares (apiVersion 2+); a key without one is absent.
-      vars: (record) => {
-        const keys = (record.manifest?.vars ?? [])
-          .map((decl) => decl?.key)
-          .filter((key) => typeof key === "string");
-        return keys.length ? call("extension.vars", { id: record.id, keys }) : {};
-      },
+      // The host chose them from the manifests it read (`__compatHost`).
+      vars: (record) => varsOf(record.id),
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;

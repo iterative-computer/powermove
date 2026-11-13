@@ -343,7 +343,6 @@ fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
 struct Events {
     shared: Arc<Shared>,
     kernel: KernelHandle,
-    vars: Option<crate::VarsSource>,
     writer: Writer,
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
@@ -367,10 +366,32 @@ pub(crate) fn vars_of(source: Option<&crate::VarsSource>, id: &str, keys: &[Stri
         .collect();
     Value::Object(values)
 }
-impl RealmEvents for Arc<Events> {
-    fn vars(&self, id: &str, keys: &[String]) -> Value {
-        vars_of(self.vars.as_ref(), id, keys)
+/// The keys an extension's manifest declares, as the host read it from disk.
+pub(crate) fn declared_keys(manifest: &Value) -> Vec<String> {
+    manifest["vars"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|decl| decl["key"].as_str().map(str::to_owned))
+        .collect()
+}
+/// What a trusted realm's load receives: for each of `records` that
+/// declares keys, the declared keys that have a value. Chosen here, by the
+/// host, from the manifests it read; the realm selects nothing.
+pub(crate) fn staged_vars(source: Option<&crate::VarsSource>, records: &Value) -> Value {
+    let mut all = serde_json::Map::new();
+    for record in records.as_array().into_iter().flatten() {
+        let Some(id) = record["id"].as_str() else {
+            continue;
+        };
+        let values = vars_of(source, id, &declared_keys(&record["manifest"]));
+        if values.as_object().is_some_and(|values| !values.is_empty()) {
+            all.insert(id.to_owned(), values);
+        }
     }
+    Value::Object(all)
+}
+impl RealmEvents for Arc<Events> {
     fn health(&self, id: &str, health: &Value) {
         let _ = self
             .inbox
@@ -1678,10 +1699,7 @@ impl Owner {
             self.publish_store();
         } else {
             let records = self.realm_plan();
-            self.eval(&format!(
-                "__compat.update({records},{},\"enable\")",
-                json!([id])
-            ));
+            self.load(&records, "update", &format!(",{},\"enable\"", json!([id])));
         }
         self.publish_records();
     }
@@ -1953,15 +1971,11 @@ impl Owner {
             refused: AtomicBool::new(false),
         });
         // As the shipped app's sandbox init: the values for its declared keys.
-        let keys: Vec<String> = found
+        let keys = found
             .manifest
             .as_ref()
-            .ok()
-            .and_then(|manifest| manifest["vars"].as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|decl| decl["key"].as_str().map(str::to_owned))
-            .collect();
+            .map(declared_keys)
+            .unwrap_or_default();
         let started = StoreExtension::start(
             Arc::new(self.config.kernel.clone()),
             &self.config.project,
@@ -2044,7 +2058,6 @@ impl Owner {
         let events = Arc::new(Events {
             shared: self.shared.clone(),
             kernel: self.config.kernel.clone(),
-            vars: self.config.vars.clone(),
             writer: self.writer,
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
@@ -2142,7 +2155,19 @@ impl Owner {
         self.publish_store();
         let records = self.realm_plan();
         self.replay_window();
-        self.eval(&format!("__compat.boot({records})"));
+        self.load(&records, "boot", "");
+    }
+    /// Asks the realm for a load pass (`boot`, or `update` with its
+    /// arguments) of `records`, with the values their manifests declare
+    /// staged for that pass alone.
+    fn load(&mut self, records: &Value, entry: &str, arguments: &str) {
+        let Some(live) = &self.realm else { return };
+        let token = live
+            .host
+            .stage_vars(staged_vars(self.config.vars.as_ref(), records));
+        self.eval(&format!(
+            "__compatHost.{entry}({records}{arguments},\"{token}\")"
+        ));
     }
     /// A new realm learns the window it lives in before anything activates.
     fn replay_window(&mut self) {
@@ -2206,10 +2231,11 @@ impl Owner {
         self.publish_records();
         self.publish_store();
         let records = self.realm_plan();
-        self.eval(&format!(
-            "__compat.update({records},{},\"rescan\")",
-            Value::Array(changed)
-        ));
+        self.load(
+            &records,
+            "update",
+            &format!(",{},\"rescan\"", Value::Array(changed)),
+        );
     }
     /// D11: "not responding — Wait / Stop", named for the extension that was
     /// activating when there is one. The task keeps running while the user decides.
@@ -2317,7 +2343,7 @@ impl Owner {
                 self.publish_records();
                 let records = self.realm_plan();
                 self.replay_window();
-                self.eval(&format!("__compat.boot({records})"));
+                self.load(&records, "boot", "");
             }
             Err(error) => self.shared.update(|p| {
                 p.toasts
@@ -3193,6 +3219,246 @@ mod tests {
                 vec!["API_KEY".to_owned(), "MODEL".to_owned(), "EMPTY".to_owned()]
             )]
         );
+        drop(host);
+        drop(actor);
+    }
+    /// The values behind every key of every extension, as a profile holds
+    /// them: whatever is asked of the source, it has.
+    fn every_value(sentinel: &'static str) -> crate::VarsSource {
+        Arc::new(move |_: &str, keys: &[String]| {
+            keys.iter()
+                .map(|key| (key.clone(), sentinel.to_owned()))
+                .collect()
+        })
+    }
+    fn needs_key(root: &Path, source: &str) {
+        let directory = root.join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(directory.join("index.ts"), source).unwrap();
+    }
+    fn stored(kernel: &KernelHandle, name: &str) -> Option<Value> {
+        let storage = crate::adapter::storage_of(kernel);
+        storage.as_object()?.iter().find_map(|(key, v)| {
+            if key.ends_with(&format!(".{name}")) {
+                Some(v.clone())
+            } else {
+                v.get(name).cloned()
+            }
+        })
+    }
+    /// An extension receives the values of the keys its own manifest
+    /// declares and can ask the host for nothing: another extension's key, a
+    /// key of its own it did not declare, the loader's records and the
+    /// host's entry points give it no value. The host decides by the
+    /// manifests it read from disk, not by what the realm says.
+    #[test]
+    fn one_extension_cannot_read_another_extensions_vars() {
+        const SECRET: &str = "sk-another-extensions-secret";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               let undeclared = null;
+               try { undeclared = runtime.engine('extension.vars',{id:'needs-key',keys:['UNDECLARED']}) } catch(e) { undeclared = 'refused' }
+               api.storage.set('own',{has:api.vars.has('API_KEY'),length:(api.vars.get('API_KEY')||'').length,keys:api.vars.keys(),undeclared});
+             }",
+        );
+        // Declares nothing; activates after `needs-key`.
+        extension(
+            &extensions,
+            "thief",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const tries = {};
+                   const attempt = (name, fn) => { try { tries[name] = fn() } catch(e) { tries[name] = 'refused' } };
+                   attempt('ask', () => runtime.engine('extension.vars',{id:'needs-key',keys:['API_KEY']}));
+                   attempt('token', () => runtime.engine('extension.vars',{token:''}));
+                   attempt('bare', () => runtime.engine('extension.vars',{}));
+                   attempt('records', () => JSON.stringify(api.host.pm.Kernel.loader.records()));
+                   attempt('list', () => JSON.stringify(api.extensions.list()));
+                   attempt('taker', () => typeof globalThis.__compatVars === 'function' ? String(globalThis.__compatVars()('needs-key')?.API_KEY) : 'gone');
+                   attempt('own', () => api.vars.keys());
+                   api.storage.set('loot', tries);
+                 }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.publication().settled || stored(&kernel, "loot").is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Its own declared key arrived, and only that.
+        let own = stored(&kernel, "own").unwrap();
+        assert_eq!(own["has"], true);
+        assert_eq!(own["length"], SECRET.len());
+        assert_eq!(own["keys"], json!(["API_KEY"]));
+        assert!(
+            !own["undeclared"].to_string().contains(SECRET),
+            "an undeclared key of its own: {own}"
+        );
+        let loot = stored(&kernel, "loot").unwrap();
+        assert!(
+            !loot.to_string().contains(SECRET),
+            "the other extension's value: {loot}"
+        );
+        assert_eq!(loot["own"], json!([]));
+        drop(host);
+        drop(actor);
+    }
+    /// A run with a secret value entered for an extension leaves it nowhere
+    /// but in that extension's `api.vars`: not in the load trace or anything
+    /// else the process prints, the published contributions and records,
+    /// toasts and requests, the kernel's registries and extension entries,
+    /// the project, or the compiled-extension cache on disk.
+    #[test]
+    fn a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches() {
+        const SECRET: &str = "sk-sentinel-0f1e2d3c4b5a69788796";
+        if std::env::var_os("PM_VARS_SENTINEL_RUN").is_none() {
+            // The run itself, in a process of its own with the load trace on,
+            // so everything it prints can be read back.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "host::tests::a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("PM_VARS_SENTINEL_RUN", "1")
+                .env("PM_NATIVE_MAIN_TRACE", "1")
+                .output()
+                .unwrap();
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "the run failed: {printed}");
+            assert!(
+                printed.contains("PM_EXT"),
+                "the load trace was on: {printed}"
+            );
+            assert!(!printed.contains(SECRET), "the value was printed");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Reads its value, says so without repeating it, then fails: the
+        // failure's text and toast are the host's.
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY') || '';
+               api.commands.register({id:'needs-key.got',label:'got '+value.length,run(){ throw new Error('command failed') }});
+               api.effects.register({id:'needs-key.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+             }",
+        );
+        extension(
+            &extensions,
+            "z-fails",
+            &[(
+                "index.ts",
+                "export default function(api){ throw new Error('activation failed') }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let label = |host: &ExtensionHost| {
+            host.contributions().and_then(|c| {
+                c["commands"]
+                    .as_array()?
+                    .iter()
+                    .find(|c| c["id"] == "needs-key.got")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        while !host.publication().settled || label(&host).is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(label(&host), Some(format!("got {}", SECRET.len())));
+        host.run_command("needs-key.got", json!([]));
+        thread::sleep(Duration::from_millis(300));
+        let published = kernel.published("window").unwrap();
+        let state = kernel.state();
+        let mut seen = vec![
+            format!("{:?}", host.publication()),
+            format!("{:?}", host.records()),
+            format!("{:?}", host.take_toasts()),
+            format!("{:?}", host.take_requests()),
+            format!("{:?}", host.surfaces()),
+            format!("{:?}", state.registries),
+            format!("{:?}", state.extensions),
+            pm_model::json::to_canonical_string(&published.snapshot.root().unwrap().to_value()),
+        ];
+        let mut folders = vec![root.path().to_owned()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    folders.push(entry.path());
+                } else {
+                    seen.push(
+                        String::from_utf8_lossy(&fs::read(entry.path()).unwrap()).into_owned(),
+                    );
+                }
+            }
+        }
+        assert!(seen.len() > 8, "the cache and extension folders were read");
+        for text in &seen {
+            assert!(
+                !text.contains(SECRET),
+                "the value was kept: {}",
+                &text[..text.len().min(300)]
+            );
+        }
         drop(host);
         drop(actor);
     }
