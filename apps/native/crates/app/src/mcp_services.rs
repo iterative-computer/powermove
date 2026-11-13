@@ -153,6 +153,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             tools.connect(),
         );
         drop(server);
+        let result = result.and_then(|()| tools.automation.lock().unwrap().close_headless());
         actor.shutdown();
         result.map_err(Into::into)
     })

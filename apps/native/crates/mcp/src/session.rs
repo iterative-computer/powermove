@@ -205,7 +205,7 @@ impl McpSession {
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
-                _ => host.open_project(args["projectId"].as_str().unwrap()),
+                _ => host.open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
             };
         }
         let session = self
@@ -1163,7 +1163,10 @@ impl McpSession {
         let id = id.ok_or_else(|| Error::invalid("projectId is required"))?;
         match operation {
             "open" => {
-                host.open_project(&id)?;
+                let opened = host.open_project(&id)?;
+                if opened["recoveryRequired"] == true {
+                    return Ok(opened);
+                }
             }
             "save" => host.save_library(&id)?,
             "rename" => {
