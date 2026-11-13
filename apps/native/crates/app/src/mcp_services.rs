@@ -128,12 +128,13 @@ impl pm_mcp::store::StoreRead for StoreHttp {
     }
 }
 pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
-    std::thread::spawn(move || -> anyhow::Result<()> {
+    crate::mcp_extensions::run(move |fonts| -> anyhow::Result<()> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(profile.join("journals")),
             backup_root: Some(profile.join("backups")),
             write_coordinator: Some(crate::file_coordination::system()),
             trash: Some(crate::file_coordination::trash()),
+            text: Some(crate::text_host::text_host(&fonts)),
             ..Default::default()
         });
         let host = crate::mcp::Host::new(actor.handle(), profile.clone());
@@ -163,12 +164,11 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         actor.shutdown();
         result.map_err(Into::into)
     })
-    .join()
-    .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
 }
 struct ProjectExtensions {
     project: String,
     host: Arc<pm_compat_runner::host::ExtensionHost>,
+    _rasters: crate::raster_overrides::Overrides,
 }
 /// Starts engine child jobs from the running executable. `activity` lets the
 /// viewer keep precedence over export bands, as it does for panel exports.
@@ -222,26 +222,49 @@ impl EngineJobs {
                     .published(&entry.project)
                     .is_some_and(|p| p.snapshot.doc_id == *doc)
             });
-            hosts
-                .entry(published.snapshot.doc_id)
-                .or_insert_with(|| ProjectExtensions {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                hosts.entry(published.snapshot.doc_id)
+            {
+                let fonts = crate::text_host::render_fonts();
+                let rasters = crate::raster_overrides::Overrides::headless(
+                    self.kernel.clone(),
+                    published.project.clone(),
+                    self.overrides.clone(),
+                    fonts
+                        .as_ref()
+                        .map(pm_render::text::host::RenderFonts::sibling),
+                )?;
+                let host = Arc::new(pm_compat_runner::host::ExtensionHost::start(
+                    pm_compat_runner::host::HostConfig {
+                        kernel: self.kernel.clone(),
+                        project: published.project.clone(),
+                        roots: crate::extensions::roots(&self.profile),
+                        cache: self.profile.join("extensions-build"),
+                        owner: None,
+                        text: fonts.map(|fonts| {
+                            Box::new(move || {
+                                Box::new(pm_recorder::TextEngine::new(
+                                    pm_text::host::BrokerResolver::new(
+                                        fonts.broker.clone(),
+                                        fonts.health.clone(),
+                                    ),
+                                )) as pm_compat_runner::CanvasText
+                            }) as _
+                        }),
+                        frames: None,
+                        rasters: Some(rasters.hooks()),
+                        wake: Arc::new(|| {}),
+                    },
+                ));
+                rasters.connect(host.raster_inbox());
+                crate::mcp_extensions::watch(&host);
+                entry.insert(ProjectExtensions {
                     project: published.project.clone(),
-                    host: Arc::new(pm_compat_runner::host::ExtensionHost::start(
-                        pm_compat_runner::host::HostConfig {
-                            kernel: self.kernel.clone(),
-                            project: published.project.clone(),
-                            roots: crate::extensions::roots(&self.profile),
-                            cache: self.profile.join("extensions-build"),
-                            owner: None,
-                            text: None,
-                            frames: None,
-                            rasters: None,
-                            wake: Arc::new(|| {}),
-                        },
-                    )),
-                })
-                .host
-                .clone()
+                    host,
+                    _rasters: rasters,
+                });
+            }
+            hosts[&published.snapshot.doc_id].host.clone()
         };
         let (generation, value) = host.wait_contributions(Duration::from_secs(60))?;
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {

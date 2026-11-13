@@ -164,6 +164,9 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
 
 /// Effects compile in the helper the app bundle carries beside its executable.
 fn glsl_compiler() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("POWERMOVE_GLSL_COMPILER") {
+        return path.into();
+    }
     let output = Command::new(env!("CARGO"))
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .args([
@@ -231,6 +234,95 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
     assert!(path.starts_with(profile.join("exports")));
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+}
+
+/// A raster wrapper is more than an effect definition: it can measure hidden
+/// DOM and rasterize detached text through the app's actual font registry.
+#[test]
+fn headless_raster_wrappers_have_base_text_and_real_dom_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let extension = profile.join("extensions/synthetic-raster");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("manifest.json"),
+        json!({"id":"synthetic-raster","name":"Synthetic raster","version":"1.0.0","apiVersion":3})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(extension.join("index.ts"), r#"
+        export default function activate(api: any) {
+          const base = api.services.get('raster');
+          const measure = document.createElement('div');
+          Object.assign(measure.style, {position:'fixed',visibility:'hidden',width:'37px',height:'11px'});
+          document.body.append(measure);
+          api.services.register('raster', (layer: any, scale: number, time: number) => {
+            if (layer.type !== 'text') return base(layer, scale, time);
+            const full = base(layer, scale, time);
+            const detached = base({...layer,id:'detached',d:{...layer.d,text:'I'}}, scale, time);
+            if (!full?.cv || !detached?.cv || full.w <= detached.w || detached.w <= 0)
+              throw Error('The base text renderer did not draw detached content');
+            const rect = measure.getBoundingClientRect();
+            if (rect.width !== 37 || rect.height !== 11) throw Error('Missing real DOM layout: '+JSON.stringify(rect));
+            const cv = document.createElement('canvas'); cv.width=64; cv.height=64;
+            const ctx = cv.getContext('2d'); ctx.fillStyle='#00ff00';
+            ctx.fillRect(0,0,rect.width,rect.height);
+            return {cv,w:64,h:64,anchorX:0,anchorY:0,key:'synthetic-measured'};
+          });
+        }
+    "#).unwrap();
+    let project = root.path().join("project.json");
+    std::fs::write(&project, json!({
+        "id":"synthetic","name":"Synthetic","compId":"root","w":320,"h":180,"fps":30,"dur":1,
+        "bg":"#000000","assets":{},"comps":{},"layers":[{
+            "id":"probe","type":"text","name":"Probe","from":0,"dur":1,"on":true,
+            "fx":[],"masks":[],"p":{
+                "position.x":{"v":160,"kf":[]},"position.y":{"v":90,"kf":[]},
+                "scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"opacity":{"v":100,"kf":[]}},
+            "d":{"text":"WWWW","font":"Helvetica","size":48,"weight":400,"align":"left","color":"#ffffff"}
+        }]
+    }).to_string()).unwrap();
+    let compiler = glsl_compiler();
+    let mut client = Client::with_env(
+        &profile,
+        Some(&project),
+        &[("POWERMOVE_GLSL_COMPILER", &compiler)],
+    );
+    client.rpc("initialize", json!({}));
+    client.tool("start_session", json!({"prompt":"Synthetic raster check"}));
+    for time in [0., 0.1] {
+        let reply = client.rpc(
+            "tools/call",
+            json!({"name":"render_frames","arguments":{"times":[time],"width":320}}),
+        );
+        assert_eq!(reply["isError"], false, "{reply}");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(reply["content"][1]["data"].as_str().unwrap())
+            .unwrap();
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::ALPHA);
+        let mut reader = decoder.read_info().unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut rgba).unwrap();
+        let green = rgba[..info.buffer_size()]
+            .chunks_exact(4)
+            .filter(|p| p[0] < 2 && p[1] > 253 && p[2] < 2 && p[3] > 253)
+            .count();
+        assert_eq!(
+            green,
+            37 * 11,
+            "The measured wrapper did not reach the rendered frame"
+        );
+    }
+    // Delivery uses a frozen realm and a different hidden page. The wrapper
+    // throws if either its fonts or its synchronous layout are unavailable.
+    let exported = client.tool("export_video", json!({"audio":false}));
+    assert!(
+        std::fs::metadata(exported["path"].as_str().unwrap())
+            .unwrap()
+            .len()
+            > 0
+    );
 }
 
 /// One second of tone, then one of silence.

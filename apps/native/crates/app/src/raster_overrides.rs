@@ -107,6 +107,22 @@ fn answer_of(answer: RasterAnswer) -> Reply {
 }
 
 impl Overrides {
+    /// A document without an editor still owns the same base raster service
+    /// and job wrapper registrations. It does not need a viewer renderer.
+    pub(crate) fn headless(
+        kernel: KernelHandle,
+        project: String,
+        windows: OverrideWindows,
+        fonts: Option<pm_render::text::host::RenderFonts>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::with_rasters(
+            Arc::default(),
+            Some(pm_engine_service::compat::LayerRasters::start(fonts)?),
+            kernel,
+            project,
+            windows,
+        ))
+    }
     pub(crate) fn new(
         engine: &EngineService,
         kernel: KernelHandle,
@@ -114,8 +130,24 @@ impl Overrides {
         windows: OverrideWindows,
     ) -> Self {
         let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
+        Self::with_rasters(
+            engine.compat(doc_id),
+            engine.layer_rasters(),
+            kernel,
+            project,
+            windows,
+        )
+    }
+    fn with_rasters(
+        store: Arc<CompatStore>,
+        rasters: Option<Arc<pm_engine_service::compat::LayerRasters>>,
+        kernel: KernelHandle,
+        project: String,
+        windows: OverrideWindows,
+    ) -> Self {
+        let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
         let jobs = JobOverrides {
-            store: engine.compat(doc_id),
+            store,
             doc_id,
             kernel,
             project,
@@ -124,7 +156,7 @@ impl Overrides {
         };
         windows.0.lock().unwrap().insert(doc_id, jobs.clone());
         Self {
-            rasters: engine.layer_rasters(),
+            rasters,
             jobs,
             windows,
         }

@@ -24,6 +24,11 @@ window still shows. A windowless host uses slot 0.
   Export panel. Exports land in `~/Powermove`, or `<profile>/exports` for an
   explicit `--profile`. Effects need `pm-glsl-compiler` beside the executable;
   `package.py --glsl-compiler` puts it there.
+  Windowless projects also own raster wrappers, base layer rasters and the
+  shared font registry. A hidden WebKit document answers extensions' DOM
+  measurements through the production applier, including frozen export realms;
+  no editor window is shown. This keeps text-replacing and caret effects active
+  in headless captures as well as shader-only effects.
 - `probe_media`, `sample_media_frames`, `media_contact_sheet` and
   `media_waveform` read originals through `pm-media`. Layer targets refuse until
   evaluated clip timing exists; pass `assetId`. The `informative` frame scan
@@ -338,7 +343,8 @@ transport playhead instead of keeping a separate time store.
 The frozen command vocabulary contains `add_captions` and `edit_captions`,
 whose complete legacy adapters are pending. `transform_layers` compiles to
 primitive edits in the kernel over the batch's selection and playhead; text
-geometry needs the app's fonts, so a headless kernel refuses it. Unsupported
+geometry uses the app's font broker, including in the windowless app host.
+The standalone kernel without a font host still refuses it. Unsupported
 variants return explicit unavailable errors before applying any batch. The frozen `availableOperations` vocabulary is not
 a claim that these variants work. Some engine-dependent layer/property operations
 can also be refused by kernel validation. Full legacy edit-command conformance
