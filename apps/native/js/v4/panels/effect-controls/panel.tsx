@@ -529,7 +529,19 @@ export function EffectControls(props: PanelProps) {
               style={{ background: t("colors.accent") }}
             />
           )}
-          {trailingAdd}
+          {/* The stack's one action stands on the panel's inset under the
+              last effect (it sat on the panel's edge, cut off by it). */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              paddingLeft: t("metrics.inset"),
+              paddingRight: t("metrics.inset"),
+              paddingBottom: t("metrics.inset"),
+            }}
+          >
+            {trailingAdd}
+          </div>
         </>
       )}
     </div>
