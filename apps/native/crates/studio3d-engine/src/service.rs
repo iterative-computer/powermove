@@ -176,7 +176,11 @@ impl StudioService {
         // A build without Open Image Denoise cleans these frames with the
         // engine's own guided filter (Quality preview already takes it below).
         #[cfg(not(feature = "oidn"))]
-        let denoise = if denoise == Denoise::Oidn { Denoise::Guided } else { denoise };
+        let denoise = if denoise == Denoise::Oidn {
+            Denoise::Guided
+        } else {
+            denoise
+        };
         if matches!(
             tier,
             Tier::Final { samples: 0, .. } | Tier::QualityRefine { samples: 0 }

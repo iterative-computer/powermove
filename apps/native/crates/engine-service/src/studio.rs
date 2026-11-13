@@ -5,6 +5,7 @@
 //! `attach` freezes a native kernel scene/resources source onto pm-render's
 //! typed Studio hook. Both the viewer worker and windowless export child use it.
 //! Unresolved imported/maps/screen resources fail explicitly; see studio.md.
+pub use pm_studio3d_engine::OIDN;
 pub use pm_studio3d_engine::extract::{
     MeshInstance, SceneInput, SceneRequest, SceneSource, TextureMaps, Transform, View,
 };
@@ -12,7 +13,6 @@ pub use pm_studio3d_engine::service::{
     Denoise, FastRenderer, FrameTimings, LayerTexture, RenderedScene, StudioService, Tier,
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress, RefineProgress, RefineStage};
-pub use pm_studio3d_engine::OIDN;
 /// Called on the engine worker; must not perform UI work or wait for the worker.
 pub type RefineObserver = std::sync::Arc<dyn Fn(&SceneRequest, RefineProgress) -> bool + Send + Sync>;
 
