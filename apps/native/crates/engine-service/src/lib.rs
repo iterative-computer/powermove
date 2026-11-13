@@ -56,6 +56,7 @@ use pm_protocol::{
     common::{Size, Ticks},
 };
 pub use policy::{Crop, Moment, Output, Quality, Stamp};
+pub use frame_inputs::draws_studio;
 pub use render::{FrameSpec, Scene, metal_device};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -2751,7 +2752,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     if !capture
                         && spec.scale > 1.
                         && r.full_for == Some(stamp)
-                        && !frame_inputs::draws_studio(&scene.doc, &scene.comp) =>
+                        && !shared.disk.draws_studio(&scene) =>
                 {
                     // What bands cost is learned per document state, as a
                     // fill learns it per job: once bands cost a whole frame,

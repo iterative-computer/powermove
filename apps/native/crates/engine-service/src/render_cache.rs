@@ -775,6 +775,26 @@ impl DiskFrames {
         Ok(())
     }
 
+    /// Whether the path-traced 3D renderer draws `scene`
+    /// ([`crate::frame_inputs::draws_studio`]), looked up once per scene
+    /// state: the frame loop asks again for every frame.
+    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
+        let at: SceneState = (
+            Arc::as_ptr(&scene.doc) as usize,
+            scene.doc.revision(),
+            scene.content,
+            scene.comp.clone(),
+        );
+        if let Some((known, studio)) = &self.inner.state.lock().unwrap().studio
+            && *known == at
+        {
+            return *studio;
+        }
+        let studio = crate::frame_inputs::draws_studio(&scene.doc, &scene.comp);
+        self.inner.state.lock().unwrap().studio = Some((at, studio));
+        studio
+    }
+
     /// The engine thread's current scene, drawn at `time`. A new
     /// composition state (scene, output tone, override wrappers, or, looked
     /// at every 2 s, a media file's stamp) takes a new fingerprint off this
@@ -795,23 +815,9 @@ impl DiskFrames {
         if state.cache.is_none() {
             return false;
         }
-        let at: SceneState = (
-            Arc::as_ptr(&scene.doc) as usize,
-            scene.doc.revision(),
-            scene.content,
-            scene.comp.clone(),
-        );
-        let studio = match &state.studio {
-            Some((known, studio)) if *known == at => *studio,
-            _ => {
-                // A walk of the document, once per state, outside the lock.
-                drop(state);
-                let studio = crate::frame_inputs::draws_studio(&scene.doc, &scene.comp);
-                state = self.inner.state.lock().unwrap();
-                state.studio = Some((at, studio));
-                studio
-            }
-        };
+        drop(state);
+        let studio = self.draws_studio(scene);
+        let mut state = self.inner.state.lock().unwrap();
         if studio {
             // Path-traced frames are never kept on disk: whatever was
             // rendered for an earlier state of this composition stops

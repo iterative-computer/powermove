@@ -447,44 +447,41 @@ impl<'a> Named<'a> {
     }
 }
 
-/// Whether `comp`, or a composition it names (transitively), has a layer the
-/// path-traced 3D renderer draws: a 3D object, or a layer in 3D with its
-/// extrusion on (what `pm_render`'s plan sends to it). Such a composition
-/// keeps no frames on disk (`crate::render_cache`): a path-traced frame also
-/// depends on its render quality, its model and environment files and a
-/// material source's own clock, none of which a frame's key carries.
-pub(crate) fn draws_studio(doc: &pm_model::Document, comp: &str) -> bool {
-    use pm_eval::node::{member, truthy};
+/// Whether `comp`, or a composition it nests (a precomp layer's, transitively),
+/// has a layer the path-traced 3D renderer draws: a 3D object, or a layer in
+/// 3D with its extrusion on (what `pm_render`'s plan sends to it). Such a
+/// composition keeps no frames on disk (`crate::render_cache`): a path-traced
+/// frame also depends on its render quality, its model and environment files
+/// and a material source's own clock, none of which a frame's key carries.
+/// A look at each layer's own fields, nothing more: it runs for every edit.
+pub fn draws_studio(doc: &pm_model::Document, comp: &str) -> bool {
+    use pm_eval::node::{is_str, member, truthy};
+    use pm_eval::parenting::Role3d;
     let Ok(resolved) = pm_eval::Comp::resolve(doc, comp) else {
         return false;
     };
-    let root = resolved.root();
-    let studio = |layer: &Node| {
-        pm_eval::parenting::Role3d::of(layer) == Some(pm_eval::parenting::Role3d::Object)
-            || (truthy(member(Some(layer), "threeD"))
-                && truthy(member(
-                    member(member(Some(layer), "d"), "extrusion"),
-                    "enabled",
-                )))
-    };
-    let mut named = Named::new(root);
-    let mut seen = BTreeSet::new();
+    let comps = resolved.root().get("comps");
+    let mut seen: Vec<&Node> = Vec::new();
     let mut stack = vec![resolved.node()];
     while let Some(node) = stack.pop() {
         let Some(NodeKind::Array(layers)) = node.get("layers").map(Node::kind) else {
             continue;
         };
-        if layers.iter().any(studio) {
-            return true;
-        }
-        let mut found = Vec::new();
-        layers.iter().for_each(|layer| strings(layer, &mut found));
-        for id in found {
-            let id = id.to_string_lossy();
-            if named.comp(&id).is_some()
-                && seen.insert(id.clone())
-                && let Some(nested) = root.get("comps").and_then(|c| c.get(&id))
+        for layer in layers.iter() {
+            let d = member(Some(layer), "d");
+            if Role3d::of(layer) == Some(Role3d::Object)
+                || (truthy(member(Some(layer), "threeD"))
+                    && truthy(member(member(d, "extrusion"), "enabled")))
             {
+                return true;
+            }
+            if is_str(member(Some(layer), "type"), "precomp")
+                && let Some(nested) = member(d, "comp")
+                    .and_then(string)
+                    .and_then(|id| comps?.get(&id))
+                && !seen.iter().any(|known| std::ptr::eq(*known, nested))
+            {
+                seen.push(nested);
                 stack.push(nested);
             }
         }
@@ -541,7 +538,7 @@ mod tests {
         assert!(studio(&extruded));
         // A nested composition's object makes its parent's frames 3D too.
         let mut nested = project(serde_json::json!([
-            {"id": "Lpre", "type": "comp", "from": 0, "dur": 4, "d": {"comp": "Cpre"}}
+            {"id": "Lpre", "type": "precomp", "from": 0, "dur": 4, "d": {"comp": "Cpre"}}
         ]));
         assert!(!studio(&nested));
         nested["comps"]["Cpre"]["layers"][0]["d"] =
