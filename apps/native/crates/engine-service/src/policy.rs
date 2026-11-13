@@ -101,12 +101,21 @@ pub struct CacheKey {
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
+    /// The view's output tone it was drawn for (a digest of it).
+    pub tone: u64,
+    /// The font registry generation it was drawn with.
+    pub fonts: Option<u64>,
+    /// The resources (contributed definitions) generation it was drawn with.
+    pub resources: u64,
 }
 impl CacheKey {
     pub fn same_content(self, other: Self) -> bool {
         self.content == other.content
             && self.revision == other.revision
             && self.inputs == other.inputs
+            && self.tone == other.tone
+            && self.fonts == other.fonts
+            && self.resources == other.resources
             && self.width == other.width
             && self.height == other.height
             && self.crop == other.crop

@@ -417,6 +417,13 @@ struct CachedFrame {
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
 }
+/// A frame key's digest of an output tone ([`crate::policy::CacheKey::tone`]).
+fn tone_id(tone: Option<pm_render::OutputTone>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    format!("{tone:?}").hash(&mut hash);
+    hash.finish()
+}
 pub fn metal_device(gpu: &Gpu) -> metal::Device {
     // HAL owns +1; to_owned retains a separate +1 for metal 0.33 and GPUI.
     unsafe {
@@ -1016,6 +1023,9 @@ impl Engine {
             sampling: spec.sampling(),
             finished: spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
+            tone: tone_id(self.output_tone),
+            fonts: self.font_generation,
+            resources: self.resources.generation,
         }
     }
     /// What a frame of `scene` reads besides its document, as observed: its
@@ -1023,7 +1033,9 @@ impl Engine {
     /// and the override wrappers answering. A frame kept in memory is the
     /// picture of one such state, as a frame on disk is: a file saved again
     /// by another app is another state, whose frames are drawn. (Fonts and
-    /// the output tone retire every kept frame when they change.)
+    /// the output tone retire every kept frame when they change, and are in
+    /// the key too: a picture finished off this thread after they moved
+    /// is never found under the new state.)
     fn observed_inputs(&mut self, scene: &Scene) -> u64 {
         use std::hash::{Hash, Hasher};
         let at = self.media_seen_at(scene);
@@ -1270,6 +1282,16 @@ impl Engine {
     /// ([`Self::observed_inputs`]), so a clip replaced on disk by one with
     /// another peak is tone-mapped with its own.
     fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
+        let view = self.hdr_view(scene);
+        let tone = view.and_then(|v| v.tone(self.mastering));
+        if tone != self.output_tone {
+            self.output_tone = tone;
+            self.clear_cache();
+        }
+        view
+    }
+    /// The HDR view of this content (kept for its state).
+    fn hdr_view(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
         let key = (
             scene.content,
             scene.doc.revision(),
@@ -1280,13 +1302,7 @@ impl Engine {
             let view = crate::color::HdrView::of(&scene.doc, &scene.comp, &scene.media);
             self.hdr = Some((key, view));
         }
-        let view = self.hdr.as_ref().and_then(|(_, view)| *view);
-        let tone = view.and_then(|v| v.tone(self.mastering));
-        if tone != self.output_tone {
-            self.output_tone = tone;
-            self.clear_cache();
-        }
-        view
+        self.hdr.as_ref().and_then(|(_, view)| *view)
     }
     /// A new tap analyzes the very next frame.
     pub fn scopes_changed(&mut self) {
@@ -1884,16 +1900,20 @@ impl Engine {
         Ok(Asked::Started)
     }
     /// The settled picture that finished since the last call, if one did.
-    /// One that is the exact picture of the media as they were last looked
-    /// at is kept for the frame of its key.
+    /// One that is the exact picture of the current state (the media as
+    /// they were last looked at, the view's tone, the fonts and the
+    /// contributed definitions now) is kept for the frame of its key; one
+    /// of a state that moved while it was drawn (after its last look, even
+    /// during its last GPU work) is not kept anywhere.
     pub(crate) fn take_settled(&mut self) -> Option<(crate::settle::Timing, Settled)> {
         use crate::settle::Outcome;
         let done = self.settler.as_ref()?.take()?;
+        let current = matches!(done.outcome, Outcome::Drawn { .. }) && self.is_current(&done);
         let end = match done.outcome {
             Outcome::Drawn { failures, exact } => {
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     Settled::Failed(anyhow!("The GPU refused this frame: {error}"))
-                } else if exact && self.reads_observed(&done.scene, &done.reads) {
+                } else if exact && current && self.reads_observed(&done.scene, &done.reads) {
                     self.settled = Some(CachedFrame {
                         key: done.key,
                         surface: done.surface,
@@ -1909,6 +1929,21 @@ impl Engine {
             Outcome::Failed(error) => Settled::Failed(error),
         };
         Some((done.timing, end))
+    }
+    /// Whether a finished settled picture is of the state now: the view's
+    /// tone as its mastering makes it now, the fonts the broker has now
+    /// (and the ones it was drawn with), the contributed definitions.
+    fn is_current(&mut self, done: &crate::settle::Settled) -> bool {
+        // A font activated while it was drawn is seen here, not only with
+        // the next frame: the picture never outlives the fonts it is of.
+        self.sync_fonts();
+        let tone = self
+            .hdr_view(&done.scene)
+            .and_then(|view| view.tone(self.mastering));
+        done.key.tone == tone_id(tone)
+            && done.key.fonts == self.font_generation
+            && done.fonts == done.key.fonts
+            && done.key.resources == self.resources.generation
     }
     /// A settled picture handed over that is not its viewer's picture any
     /// more: kept beside the drawn frames, for when the viewer is back at
@@ -2807,6 +2842,17 @@ mod viewer_output_tests {
     /// `n` white solids `w` px wide, every other `w` px from x = 0, one stop
     /// over white (2.0 encoded), on black, in a 64 × 36 composition.
     fn columns(n: usize, w: f64) -> Scene {
+        columns_in(n, w, "")
+    }
+    /// [`columns`] in an HDR project (1000-nit mastering peak).
+    fn hdr_columns() -> Scene {
+        columns_in(
+            1,
+            64.,
+            r#""color":{"mode":"hdr","masteringPeak":1000},"colorDepth":32,"#,
+        )
+    }
+    fn columns_in(n: usize, w: f64, color: &str) -> Scene {
         let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
         let layers = (0..n)
             .map(|i| {
@@ -2834,7 +2880,7 @@ mod viewer_output_tests {
             .collect::<Vec<_>>()
             .join(",");
         let project = format!(
-            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            r##"{{"id":"P","name":"P",{color}"compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
             "layers":[{layers}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
         );
         Scene {
@@ -3083,6 +3129,105 @@ mod viewer_output_tests {
             shown.iter().all(|c| (*c - 0.214).abs() < 0.03),
             "half white, half black: {shown:?}"
         );
+    }
+
+    /// A gate that holds a settled picture at its first submission until
+    /// told to go on: (gate, "it is submitting", "go on").
+    fn held_at_a_submission() -> (
+        pm_render::slices::Gate,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (at, submitting) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(Some((at, gone)));
+        let gate: pm_render::slices::Gate = Arc::new(move |expected: Duration| {
+            if !expected.is_zero()
+                && let Some((at, gone)) = held.lock().unwrap().take()
+            {
+                at.send(()).unwrap();
+                gone.recv().unwrap();
+            }
+            false
+        });
+        (gate, submitting, go)
+    }
+    fn settled_end(engine: &mut Engine) -> Settled {
+        loop {
+            if let Some((_, end)) = engine.take_settled() {
+                return end;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    /// A settled picture that finished under a state that is not current
+    /// any more (the view's tone changed, or a font was activated, while
+    /// its last GPU work ran) is neither shown nor kept: asked again, the
+    /// picture of the current state is drawn, never the old one served.
+    #[test]
+    fn a_settled_picture_of_an_old_tone_or_font_state_is_not_kept() {
+        let mut engine = Engine::new(Gpu::new("settle-stale-state-test").unwrap()).unwrap();
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_generation(1);
+        engine.set_fonts(pm_render::text::host::RenderFonts::new(broker.clone()));
+        let scene = hdr_columns();
+        let spec = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(64, 36))
+        };
+        let quiet: pm_render::slices::Gate = Arc::new(|_| false);
+        // The view's tone changes during its last submission.
+        engine.mastering = Mastering::Edr;
+        let (gate, submitting, go) = held_at_a_submission();
+        assert!(matches!(
+            engine.settle(&scene, spec, gate).unwrap(),
+            Asked::Started
+        ));
+        let edr = engine.output_tone;
+        submitting.recv().unwrap();
+        engine.mastering = Mastering::LinearP3;
+        engine.sync_tone(&scene);
+        assert_ne!(engine.output_tone, edr, "the SDR view has another tone");
+        go.send(()).unwrap();
+        let end = settled_end(&mut engine);
+        assert!(
+            matches!(end, Settled::Unkept),
+            "kept a picture of the old tone"
+        );
+        engine.shelve_settled();
+        assert!(matches!(
+            engine.settle(&scene, spec, quiet.clone()).unwrap(),
+            Asked::Started
+        ));
+        assert!(matches!(settled_end(&mut engine), Settled::Kept));
+        assert!(matches!(
+            engine.settle(&scene, spec, quiet.clone()).unwrap(),
+            Asked::Ready
+        ));
+        // A font is activated during its last submission.
+        let later = FrameSpec {
+            time: Ticks::new(pm_time::Rate::FPS_30.frame_start(3).unwrap()).unwrap(),
+            ..spec
+        };
+        let (gate, submitting, go) = held_at_a_submission();
+        assert!(matches!(
+            engine.settle(&scene, later, gate).unwrap(),
+            Asked::Started
+        ));
+        submitting.recv().unwrap();
+        broker.set_generation(2);
+        go.send(()).unwrap();
+        let end = settled_end(&mut engine);
+        assert!(
+            matches!(end, Settled::Unkept),
+            "kept a picture of the old fonts"
+        );
+        engine.shelve_settled();
+        assert!(matches!(
+            engine.settle(&scene, later, quiet.clone()).unwrap(),
+            Asked::Started
+        ));
+        assert!(matches!(settled_end(&mut engine), Settled::Kept));
     }
 }
 

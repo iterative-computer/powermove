@@ -131,6 +131,8 @@ pub(crate) struct Settled {
     pub scene: Scene,
     pub surface: Arc<ExportedSurface>,
     pub outcome: Outcome,
+    /// The font registry generation it was drawn with.
+    pub fonts: Option<u64>,
     /// Every media file version the frame looked at.
     pub reads: Vec<(
         std::path::PathBuf,
@@ -414,6 +416,7 @@ fn draw(
         scene: job.scene,
         surface: job.surface,
         outcome,
+        fonts: *fonts,
         reads,
         timing,
     }

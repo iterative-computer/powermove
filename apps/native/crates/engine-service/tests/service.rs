@@ -141,11 +141,21 @@ fn cache_key_includes_every_content_coordinate() {
         sampling: pm_render::sampling::Sampling::Final,
         finished: false,
         inputs: 5,
+        tone: 0,
+        fonts: Some(1),
+        resources: 1,
     };
     for other in [
         policy::CacheKey { content: 2, ..k },
         // A media file saved again by another app.
         policy::CacheKey { inputs: 6, ..k },
+        // The view's tone, the fonts or the contributed definitions moved.
+        policy::CacheKey { tone: 9, ..k },
+        policy::CacheKey {
+            fonts: Some(2),
+            ..k
+        },
+        policy::CacheKey { resources: 2, ..k },
         policy::CacheKey { revision: 4, ..k },
         policy::CacheKey { width: 101, ..k },
         policy::CacheKey { height: 101, ..k },
