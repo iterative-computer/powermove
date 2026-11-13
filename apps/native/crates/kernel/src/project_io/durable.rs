@@ -408,6 +408,11 @@ pub fn check_version(
     Ok(())
 }
 
+/// Test hook: whether a step's line fails to be written to a save's
+/// record ([`PublishHooks::record_fails`]).
+#[doc(hidden)]
+pub type StepFails = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Test hook: called with a file's path (on the thread that reads it) as
 /// that file is about to be read whole.
 #[doc(hidden)]
@@ -868,7 +873,7 @@ pub struct PublishHooks {
     pub after_withdrawn: Option<PublishHook>,
     /// While it answers true for a step's name, that step's line cannot be
     /// written to the save's record (a full or failing disk).
-    pub record_fails: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    pub record_fails: Option<StepFails>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
