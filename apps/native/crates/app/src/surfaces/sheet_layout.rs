@@ -304,6 +304,23 @@ pub mod native {
                 .push((field.clone().into_super().into_super(), size));
             self.fields.insert(id.into(), field);
         }
+        /// A text field for source text (an expression): most of its row,
+        /// in the fixed-width face.
+        pub fn source(&mut self, id: &str, label: &str, value: &str) {
+            self.text(id, label, value, false, true);
+            let width = (self.layout.card_width() * 0.7).floor();
+            if let Some(Item::Row(row)) = self.items.last_mut()
+                && let Some((_, size)) = row.trailing.last_mut()
+            {
+                size.width = width;
+            }
+            if let Some(field) = self.fields.get(id) {
+                field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(
+                    self.tokens.typography.body.into(),
+                    unsafe { NSFontWeightRegular },
+                )));
+            }
+        }
         pub fn number(&mut self, id: &str, label: &str, value: &str, unit: &str, enabled: bool) {
             let field = self.number_field(id, label, value, enabled);
             let size = self.field_size(&field, self.layout.number_width());

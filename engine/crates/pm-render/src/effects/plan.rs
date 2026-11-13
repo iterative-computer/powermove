@@ -69,6 +69,7 @@ pub struct Spatial {
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Owner {
+    pub valid: bool,
     pub uv: [f32; 9],
     pub size: [f64; 2],
     pub bounds: [f64; 4],
@@ -302,7 +303,7 @@ pub(crate) fn effect_steps_prefix<'d>(
     scale: (f64, f64),
     prefix: Option<usize>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
-    effect_steps_raster(scope, effects, layer, time, scale, prefix, None)
+    effect_steps_raster(scope, effects, layer, time, scale, prefix, None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -314,9 +315,11 @@ pub(crate) fn effect_steps_raster<'d>(
     scale: (f64, f64),
     prefix: Option<usize>,
     raster: Option<crate::composite::effects::SourceRaster>,
+    mut measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
+    let composition = scope.comp.id().to_string_lossy();
     for (fx_index, fx) in node::array_or_empty(node::member(Some(layer), "fx"))?
         .iter()
         .enumerate()
@@ -332,6 +335,13 @@ pub(crate) fn effect_steps_raster<'d>(
             continue;
         }
         let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        let mut refuse = |feature: Feature| {
+            if effects.bypass_missing {
+                effects.report_bypassed(composition.clone(), layer, &ty, &feature);
+            } else {
+                refused.get_or_insert(feature);
+            }
+        };
         // No provider is installed: the effect is skipped with its data kept,
         // when the kernel marked it missing or for viewer frames (After
         // Effects' missing-effect bypass). Exports refuse instead.
@@ -347,13 +357,13 @@ pub(crate) fn effect_steps_raster<'d>(
             // frames and named by `missing_effects`; exports refuse.
             Err(_) if effects.bypass_missing => continue,
             Err(message) => {
-                refused.get_or_insert(Feature::Definition(message));
+                refuse(Feature::Definition(message));
                 continue;
             }
         };
         let Some(def) = effects.get(DefinitionKind::Effect, &ty) else {
             if !effects.is_missing(DefinitionKind::Effect, &ty) {
-                refused.get_or_insert(Feature::Definition(format!("effect {ty}")));
+                refuse(Feature::Definition(format!("effect {ty}")));
             }
             continue;
         };
@@ -363,11 +373,17 @@ pub(crate) fn effect_steps_raster<'d>(
             // (`super::fallback`), else routed.
             Some(Status::NeedsFallback(_)) if effects.fallback.runner => {}
             Some(Status::NeedsFallback(_)) => {
-                refused.get_or_insert(Feature::ShaderFallback(ty.clone()));
+                refuse(Feature::ShaderFallback(ty.clone()));
                 continue;
             }
             // Refused programs render nothing today: skipped.
-            Some(Status::Refused(_)) | None => continue,
+            Some(Status::Refused(failure)) => {
+                if effects.bypass_missing {
+                    refuse(Feature::Definition(format!("effect {ty}: {failure}")));
+                }
+                continue;
+            }
+            None => continue,
         }
         if effects.watchdog.is_disabled(DefinitionKind::Effect, &ty) {
             continue;
@@ -386,26 +402,23 @@ pub(crate) fn effect_steps_raster<'d>(
         let mut step = effect_step(def, &fx_id, &values);
         step.density = [scale.0.abs(), scale.1.abs()];
         if raster.is_some() && super::versions::main_definition(&step.definition).is_none() {
-            return Ok(Err(Feature::Definition(
+            refuse(Feature::Definition(
                 "Effect has no source processing contract".into(),
-            )));
+            ));
+            continue;
         }
         if effects.versioned_builtins
             && def.glsl.as_ref().is_some_and(|g| {
                 g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
             })
         {
-            if node::truthy(node::member(Some(layer), "threeD")) {
-                refused.get_or_insert(Feature::Definition(format!(
-                    "effect {}: source/3D owner binding unavailable",
-                    step.definition
-                )));
-                continue;
-            }
-            match raster.map_or_else(|| owner(scope, layer, time, scale), |r| Ok(Ok(r.owner())))? {
+            match raster.map_or_else(
+                || owner(scope, layer, time, scale, &mut measure),
+                |r| Ok(Ok(r.owner())),
+            )? {
                 Ok(owner) => step.owner = Some(std::sync::Arc::new(owner)),
                 Err(f) => {
-                    refused.get_or_insert(f);
+                    refuse(f);
                     continue;
                 }
             }
@@ -426,7 +439,7 @@ pub(crate) fn effect_steps_raster<'d>(
             let inputs = match inputs {
                 Ok(v) => v,
                 Err(e) => {
-                    refused.get_or_insert(Feature::Definition(e));
+                    refuse(Feature::Definition(e));
                     continue;
                 }
             };
@@ -440,7 +453,7 @@ pub(crate) fn effect_steps_raster<'d>(
                             | (Some("asset"), pm_fx_defs::inputs::EffectInput::Asset(_))
                     );
                     if !valid {
-                        refused.get_or_insert(Feature::Definition(format!(
+                        refuse(Feature::Definition(format!(
                             "Effect reference kind does not match {}",
                             param.k
                         )));
@@ -458,11 +471,11 @@ pub(crate) fn effect_steps_raster<'d>(
                                     step.assets.push((param.k.clone(), asset.clone()))
                                 }
                                 Some(Err(e)) => {
-                                    refused.get_or_insert(Feature::EffectAsset(e.clone()));
+                                    refuse(Feature::EffectAsset(e.clone()));
                                     failed = true;
                                 }
                                 None => {
-                                    refused.get_or_insert(Feature::Definition(format!(
+                                    refuse(Feature::Definition(format!(
                                         "Effect asset not prepared: {id}"
                                     )));
                                     failed = true;
@@ -507,14 +520,12 @@ pub(crate) fn effect_steps_raster<'d>(
                             )? {
                                 Ok(asset) => step.assets.push((param.k.clone(), asset)),
                                 Err(e) => {
-                                    refused.get_or_insert(Feature::Definition(e));
+                                    refuse(Feature::Definition(e));
                                     failed = true;
                                 }
                             }
                         } else {
-                            refused.get_or_insert(Feature::Definition(
-                                "Missing Stroke path provider".into(),
-                            ));
+                            refuse(Feature::Definition("Missing Stroke path provider".into()));
                             failed = true;
                         }
                     }
@@ -540,15 +551,16 @@ pub(crate) fn effect_steps_raster<'d>(
             let h = (size.1 * scale.1.abs()).max(1.) as u32;
             let sampling = definition.metadata.get("sampling");
             let grid = definition.metadata.get("grid");
-            let kernel_scale = step
-                .owner
-                .as_ref()
-                .map_or([scale.0, scale.1], |o| o.pixel_scale);
-            let space_scale = if sampling
+            let layer_kernel = sampling
                 .and_then(|s| s.get("space"))
                 .and_then(|s| s.as_str())
-                == Some("layer")
-            {
+                == Some("layer");
+            let kernel_scale = if layer_kernel {
+                step.owner.as_ref().map_or(step.density, |o| o.pixel_scale)
+            } else {
+                step.density
+            };
+            let space_scale = if layer_kernel {
                 kernel_scale[0].hypot(kernel_scale[1])
             } else {
                 scale.0.abs().max(scale.1.abs())
@@ -573,9 +585,7 @@ pub(crate) fn effect_steps_raster<'d>(
                         value(sampling["radius"].as_str().unwrap()),
                         sampling["support"].as_f64().unwrap(),
                         sampling["maxRadius"].as_f64().unwrap(),
-                        step.owner
-                            .as_ref()
-                            .map_or([scale.0, scale.1], |o| o.pixel_scale),
+                        kernel_scale,
                         w,
                         h,
                     )
@@ -617,7 +627,7 @@ pub(crate) fn effect_steps_raster<'d>(
             let times = match times {
                 Ok(t) => t,
                 Err(e) => {
-                    refused.get_or_insert(Feature::Definition(e.to_string()));
+                    refuse(Feature::Definition(e.to_string()));
                     continue;
                 }
             };
@@ -729,89 +739,69 @@ fn padding_with(steps: &[EffectStep], support: u32) -> Padding {
     })
 }
 
+/// Electron's `effectLayerCoordinates`: GL.bounds, inverse projected plane,
+/// then the composition fallback (valid only for adjustment layers).
 pub(crate) fn owner<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    measure: &mut Option<&mut dyn pm_eval::text_geom::TextMeasure>,
 ) -> JsResult<Result<Owner, Feature>> {
-    let bounds = match scope.size_bounds(layer, time)? {
-        Some(bounds) => bounds,
-        // An adjustment layer has no content of its own: its effects work on
-        // the composition it covers, so that is the rectangle they read.
-        None if node::is_str(node::member(Some(layer), "type"), "adjustment") => {
-            let (w, h) = scope.comp_size();
-            pm_eval::space3d::Rect {
-                x0: 0.,
-                y0: 0.,
-                x1: w,
-                y1: h,
-            }
-        }
-        None => {
-            return Ok(Err(Feature::Definition(
-                "effect owner bounds unavailable".into(),
-            )));
-        }
-    };
-    let offset = scope.size_anchor_offset(layer, time)?;
+    let bounds = scope.bounds_with_measure(layer, time, measure, &mut pm_eval::bounds::NoHost)?;
     let world = scope.world_matrix(layer, time)?;
-    let scaled = [
-        world[0] * scale.0,
-        world[1] * scale.1,
-        world[2] * scale.0,
-        world[3] * scale.1,
-        world[4] * scale.0,
-        world[5] * scale.1,
-    ];
-    if scaled.iter().any(|v| !v.is_finite()) {
-        return Ok(Err(Feature::Definition(
-            "effect owner transform is non-finite".into(),
-        )));
+    let plane = scope.plane_matrix(layer, time, false)?;
+    let mut scaled = plane;
+    for i in 0..3 {
+        scaled[i * 3] *= scale.0;
+        scaled[i * 3 + 1] *= scale.1;
     }
-    let Some(inv) = pm_eval::transform::invert(&scaled) else {
-        return Ok(Err(Feature::Definition(
-            "effect owner transform is singular".into(),
-        )));
-    };
-    if inv.iter().any(|v| !v.is_finite()) {
-        return Ok(Err(Feature::Definition(
-            "effect owner inverse is non-finite".into(),
-        )));
+    if let (Some(b), Some(inv)) = (bounds, pm_eval::space3d::inverse_plane(&scaled))
+        && b.w > 0.
+        && b.h > 0.
+    {
+        let mut uv = [0.; 9];
+        for i in 0..3 {
+            let [x, y, w] = [inv[i * 3], inv[i * 3 + 1], inv[i * 3 + 2]];
+            uv[i * 3] = ((x - b.x0 * w) / b.w) as f32;
+            uv[i * 3 + 1] = ((y - b.y0 * w) / b.h) as f32;
+            uv[i * 3 + 2] = w as f32;
+        }
+        let owner = Owner {
+            valid: true,
+            uv,
+            size: [b.w, b.h],
+            bounds: [b.x0, b.y0, b.w, b.h],
+            pixel_scale: pm_fx_defs::spatial::kernel_scale(Some(world), [scale.0, scale.1]),
+        };
+        if owner
+            .uv
+            .iter()
+            .chain(&super::resources::from_uv(&owner))
+            .all(|v| v.is_finite())
+        {
+            return Ok(Ok(owner));
+        }
     }
-    let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
-    if w <= 0. || h <= 0. || ![w, h].iter().all(|v| v.is_finite()) {
-        return Ok(Err(Feature::Definition(
-            "effect owner bounds are empty".into(),
-        )));
-    }
-    let owner = Owner {
+    let (w, h) = scope.comp_size();
+    let size = [(w * scale.0).max(1.), (h * scale.1).max(1.)];
+    Ok(Ok(Owner {
+        valid: node::is_str(node::member(Some(layer), "type"), "adjustment"),
         uv: [
-            (inv[0] / w) as f32,
-            (inv[1] / h) as f32,
+            (1. / size[0]) as f32,
             0.,
-            (inv[2] / w) as f32,
-            (inv[3] / h) as f32,
             0.,
-            ((inv[4] - bounds.x0 + offset.x) / w) as f32,
-            ((inv[5] - bounds.y0 + offset.y) / h) as f32,
+            0.,
+            (1. / size[1]) as f32,
+            0.,
+            0.,
+            0.,
             1.,
         ],
-        size: [w, h],
-        bounds: [bounds.x0 - offset.x, bounds.y0 - offset.y, w, h],
+        size,
+        bounds: [0., 0., size[0], size[1]],
         pixel_scale: pm_fx_defs::spatial::kernel_scale(Some(world), [scale.0, scale.1]),
-    };
-    if owner
-        .uv
-        .iter()
-        .chain(&super::resources::from_uv(&owner))
-        .any(|v| !v.is_finite())
-    {
-        return Ok(Err(Feature::Definition(
-            "effect owner exceeds GPU coordinate precision".into(),
-        )));
-    }
-    Ok(Ok(owner))
+    }))
 }
 
 #[cfg(test)]
@@ -819,31 +809,231 @@ mod tests {
     use super::*;
 
     #[test]
-    fn effect_owner_bounds_refusal_depends_on_layer_geometry_only() {
-        // This refusal predates preview media sizing and cache eviction:
-        // size_bounds supports sized layers, not text/group/path geometry.
-        // No renderer, media, font, panel or GPU state participates here.
+    fn empty_group_and_adjustment_use_electrons_composition_fallback() {
         let root = pm_model::json::parse(
-            r#"{
-            "id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":1,
-            "comps":{},"layers":[
-                {"id":"text","type":"text","d":{"text":"T"}},
-                {"id":"group","type":"group","d":{}},
-                {"id":"solid","type":"solid","d":{"w":80,"h":40}}
-            ]
-        }"#,
+            &serde_json::json!({
+                "id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":1,"comps":{},
+                "layers":[fixture_layer("group","group",serde_json::json!({}),"blur",0.,0.),
+                    fixture_layer("grade","adjustment",serde_json::json!({}),"blur",0.,0.)]
+            })
+            .to_string(),
         )
         .unwrap();
         let doc = pm_model::Document::new(Some(pm_model::canonical::canonical_project(root)), 1);
         let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
         let mut ev = pm_eval::Evaluator::new();
         let mut scope = Scope::new(&mut ev, &comp, &comp);
-        let layers = comp.layers();
-        for layer in &layers[..2] {
-            assert!(matches!(owner(&mut scope, layer, 0., (1., 1.)).unwrap(),
-                Err(Feature::Definition(message)) if message == "effect owner bounds unavailable"));
+        for layer in scope.layers() {
+            let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.size, [160., 90.]);
+            assert_eq!(owner.bounds, [0., 0., 160., 90.]);
+            assert_eq!(owner.valid, crate::js::layer_type(layer) == "adjustment");
+            assert_eq!(owner.uv, [1. / 160., 0., 0., 0., 1. / 90., 0., 0., 0., 1.]);
         }
-        assert!(scope.size_bounds(&layers[2], 0.).unwrap().is_some());
+    }
+
+    fn fixture_layer(
+        id: &str,
+        ty: &str,
+        d: serde_json::Value,
+        effect: &str,
+        x: f64,
+        y: f64,
+    ) -> serde_json::Value {
+        let mut p = serde_json::Map::new();
+        for (key, value) in [
+            ("position.x", x),
+            ("position.y", y),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ] {
+            p.insert(
+                key.into(),
+                serde_json::json!({"v":value,"kf":[],"expr":null}),
+            );
+        }
+        serde_json::json!({"id":id,"type":ty,"on":true,"from":0,"dur":2,"p":p,"d":d,
+            "fx":[{"id":"f","type":effect,"version":2,"on":true,"p":{}}]})
+    }
+
+    struct MeasuredText;
+    impl pm_eval::text_geom::TextMeasure for MeasuredText {
+        fn measure_lines(
+            &mut self,
+            _: &pm_text::compat::TextContent,
+        ) -> Vec<pm_eval::text_geom::MeasuredLine> {
+            vec![pm_eval::text_geom::MeasuredLine {
+                text: "Test".into(),
+                width: 40.,
+                ink: [-2., -15., 39., 4.],
+                anchor_ink: [-2., -15., 39., 4.],
+            }]
+        }
+        fn plain_width(&mut self, _: &pm_text::compat::TextContent, _: &str) -> f64 {
+            40.
+        }
+        fn spaced_width(&mut self, _: &pm_text::compat::TextContent, _: &str) -> f64 {
+            40.
+        }
+        fn glyph_layout(
+            &mut self,
+            _: &pm_text::compat::TextContent,
+        ) -> pm_text::compat::GlyphLayout {
+            unreachable!("no animators")
+        }
+    }
+
+    #[test]
+    fn owner_reading_effects_use_electron_text_group_adjustment_and_path_rects() {
+        use serde_json::json;
+        let mut group = fixture_layer("group", "group", json!({}), "blur", 100., 50.);
+        group["fx"][0]["p"] = json!({"amount":{"v":8}});
+        let mut child = fixture_layer("child", "solid", json!({"w":80,"h":40}), "blur", 10., 20.);
+        child["group"] = json!("group");
+        child["fx"] = json!([]);
+        let mut other = child.clone();
+        other["id"] = json!("other");
+        other["d"] = json!({"w":10,"h":20});
+        other["p"]["position.x"]["v"] = json!(-20);
+        other["p"]["position.y"]["v"] = json!(60);
+        let mut hidden = child.clone();
+        hidden["id"] = json!("hidden");
+        hidden["on"] = json!(false);
+        hidden["d"] = json!({"w":999,"h":999});
+        let path = json!({"id":"rect","type":"path","p":{"x":0,"y":0,"rotation":0,"scaleX":100,"scaleY":100,"closed":true,"fillEnabled":true,"fillOpacity":100,"strokeWidth":4,"strokeOpacity":100,"trimStart":0,"trimEnd":100,"trimOffset":0,"copies":1,"repeatX":0,"repeatY":0,"repeatRotation":0},"vertices":[
+            {"id":"a","p":{"x":10,"y":20}},{"id":"b","p":{"x":50,"y":20}},{"id":"c","p":{"x":50,"y":60}},{"id":"d","p":{"x":10,"y":60}}]});
+        let layers = vec![
+            fixture_layer(
+                "text",
+                "text",
+                json!({"text":"Test","size":20,"leading":1,"align":"left"}),
+                "shadow",
+                100.,
+                50.,
+            ),
+            group,
+            child,
+            other,
+            hidden,
+            fixture_layer("adjustment", "adjustment", json!({}), "blur", 999., 999.),
+            fixture_layer("path", "shape", json!({"paths":[path]}), "blur", 100., 50.),
+        ];
+        let root=pm_model::json::parse(&json!({"id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":layers,"comps":{}}).to_string()).unwrap();
+        let doc = pm_model::Document::new(Some(root), 1);
+        let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+        let mut ev = pm_eval::Evaluator::new();
+        let mut scope = Scope::new(&mut ev, &comp, &comp);
+        let mut effects = Effects::new("owner-unit");
+        let mut defs = super::super::versions::builtin_snapshot();
+        defs.definitions.retain(|d| {
+            [
+                "shadow",
+                "blur",
+                "pm.history.main.shadow.2",
+                "pm.history.main.blur.2",
+            ]
+            .contains(&d.id.as_str())
+        });
+        assert!(effects.set_snapshot(&defs).unwrap().is_empty());
+        effects.versioned_builtins = true;
+        // Electron GL.bounds: text ink + selection margin (3 px here),
+        // active group member union, composition fallback, path vertices
+        // padded by strokeWidth + 4. These are deliberately not sizeBounds.
+        for (id, expected) in [
+            ("text", [-5., -1.6, 47., 25.]),
+            ("group", [-20., 20., 110., 60.]),
+            ("adjustment", [0., 0., 160., 90.]),
+            ("path", [2., 12., 56., 56.]),
+        ] {
+            let layer = scope
+                .layers()
+                .iter()
+                .find(|l| crate::js::layer_id(l) == id)
+                .unwrap();
+            let steps = effect_steps_raster(
+                &mut scope,
+                &effects,
+                layer,
+                0.,
+                (0.5, 0.5),
+                None,
+                None,
+                Some(&mut MeasuredText),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(steps.len(), 1, "{id}");
+            let owner = steps[0].owner.as_ref().unwrap();
+            assert!(owner.valid, "{id}");
+            for (a, b) in owner.bounds.into_iter().zip(expected) {
+                assert!((a - b).abs() < 1e-9, "{id}: {:?}", owner.bounds);
+            }
+            // A known composition point maps to its authored local fraction.
+            if id != "adjustment" {
+                let q = pm_eval::space3d::project_point(
+                    &owner.uv.map(f64::from),
+                    50. + expected[0] * 0.5,
+                    25. + expected[1] * 0.5,
+                );
+                assert!(q.0.abs() < 1e-6 && q.1.abs() < 1e-6, "{id}: {q:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn projected_owner_and_size_anchor_follow_electrons_gl_bounds() {
+        use serde_json::json;
+        let mut layer = fixture_layer(
+            "plane",
+            "shape",
+            json!({"w":80,"h":40,"stroke":6,"sizeAnchorBounds":{"x0":-80,"y0":-40,"x1":80,"y1":40}}),
+            "blur",
+            100.,
+            50.,
+        );
+        layer["threeD"] = json!(true);
+        layer["p"]["rotation.y"] = json!({"v":35});
+        let root=pm_model::json::parse(&json!({"id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":[layer],"comps":{}}).to_string()).unwrap();
+        let doc = pm_model::Document::new(Some(root), 1);
+        let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+        let mut ev = pm_eval::Evaluator::new();
+        let mut scope = Scope::new(&mut ev, &comp, &comp);
+        let layer = &scope.layers()[0];
+        let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None)
+            .unwrap()
+            .unwrap();
+        assert!(owner.valid);
+        assert!(
+            owner.uv[2].abs() + owner.uv[5].abs() > 0.,
+            "perspective must survive"
+        );
+        let bounds = scope
+            .bounds_with_measure(layer, 0., &mut None, &mut pm_eval::bounds::NoHost)
+            .unwrap()
+            .unwrap();
+        let plane = scope.plane_matrix(layer, 0., false).unwrap();
+        for (u, v) in [(0., 0.), (0.5, 0.5), (1., 1.)] {
+            let point = pm_eval::space3d::project_point(
+                &plane,
+                bounds.x0 + u * bounds.w,
+                bounds.y0 + v * bounds.h,
+            );
+            let actual = pm_eval::space3d::project_point(
+                &owner.uv.map(f64::from),
+                point.0 * 0.5,
+                point.1 * 0.5,
+            );
+            assert!(
+                (actual.0 - u).abs() < 1e-6 && (actual.1 - v).abs() < 1e-6,
+                "{actual:?}"
+            );
+        }
     }
 
     fn rgb(s: &str) -> [f64; 3] {

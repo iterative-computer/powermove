@@ -25,9 +25,11 @@ mod dialogs;
 mod entry;
 mod error_log;
 mod export_coordinator;
+mod expression_sheet;
 mod extension_authoring;
 mod extensions;
 mod figma_paste;
+mod file_coordination;
 mod first_run;
 mod generated_panel;
 mod gizmo;
@@ -63,6 +65,8 @@ mod panel_bridge;
 mod panel_capture_tests;
 mod panel_library;
 mod panels;
+#[cfg(test)]
+mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;
@@ -249,6 +253,8 @@ fn main() -> Result<()> {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
+            write_coordinator: Some(file_coordination::system()),
+            trash: Some(file_coordination::trash()),
             idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
             ..Default::default()
         });

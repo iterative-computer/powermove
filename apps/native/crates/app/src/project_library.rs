@@ -46,6 +46,9 @@ const ACCOUNT_MENU: [(&str, &str); 3] = [
 enum Menu {
     Sort,
     Account,
+    /// A card's "more" button: the actions of `menu_row`, as its
+    /// right-click menu lists them.
+    Row,
 }
 
 /// What Home needs from the editor window it is drawn in.
@@ -90,6 +93,8 @@ pub struct ProjectLibrary {
     /// The open menu's rows: which one the pointer or the keyboard has lit.
     pick: pm_shell::transient::Picker,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
+    /// The project whose "more" menu is open.
+    menu_row: Option<String>,
     /// Columns and card width at the last layout: when they change (a resize)
     /// cards are placed at once; otherwise (a sort, a search) they slide.
     grid: (usize, u32),
@@ -98,6 +103,13 @@ pub struct ProjectLibrary {
     /// v1's `projectsView`.
     pub layout: Layout,
     search: Option<Entity<pm_shell::text::TextField>>,
+    /// How much of the header is the system's glass (the owner is choosing).
+    glass: HeaderGlass,
+    /// New Project, a real glass button.
+    new_project: Option<Entity<NativeControl>>,
+    /// `HeaderGlass::All`: the search field and the view switch on glass.
+    glass_search: Option<Entity<NativeControl>>,
+    glass_view: Option<Entity<NativeControl>>,
     /// The project this window shows (its card reads Active).
     pub active: Option<String>,
     /// Cards per grid row at the last layout, for arrow keys.
@@ -171,10 +183,15 @@ impl ProjectLibrary {
             menu: None,
             pick: Default::default(),
             anchors: Rc::default(),
+            menu_row: None,
             grid: (0, 0),
             editor,
             layout,
             search: None,
+            glass: HeaderGlass::chosen(),
+            new_project: None,
+            glass_search: None,
+            glass_view: None,
             active: None,
             columns: 1,
             notice: None,
@@ -482,7 +499,9 @@ impl ProjectLibrary {
         }
         match event.keystroke.key.as_str() {
             "f" if event.keystroke.modifiers.platform => {
-                if let Some(field) = &self.search {
+                if let Some(field) = &self.glass_search {
+                    field.read(cx).focus();
+                } else if let Some(field) = &self.search {
                     field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
                 }
             }
@@ -562,6 +581,25 @@ impl ProjectLibrary {
         }
     }
 }
+/// Home's header in the variants shown to the owner. New Project is the
+/// system's glass button in each; `PM_NATIVE_HOME_GLASS` picks the others
+/// (`glyph`: the button shows its plus alone; `all`: the search field and
+/// the view switch stand on glass too). The rest of the header is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum HeaderGlass {
+    Label,
+    Glyph,
+    All,
+}
+impl HeaderGlass {
+    fn chosen() -> Self {
+        match std::env::var("PM_NATIVE_HOME_GLASS").as_deref() {
+            Ok("glyph") => Self::Glyph,
+            Ok("all") => Self::All,
+            _ => Self::Label,
+        }
+    }
+}
 const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
 /// Space either side of Home's sheet content: the title, the controls and
 /// the cards share this one inset.
@@ -580,6 +618,8 @@ const VIEW_CELL: (f32, f32) = (30., 24.);
 /// Cards are this wide when four or more fit, and never narrower than the
 /// least otherwise.
 const CARD: f32 = 240.;
+/// A card's round "more" button.
+const MORE: f32 = 24.;
 const CARD_LEAST: f32 = 160.;
 impl ProjectLibrary {
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
@@ -678,7 +718,29 @@ impl ProjectLibrary {
                 .iter()
                 .map(|(label, command)| Choice::new(*label, *command))
                 .collect(),
+            Menu::Row => self
+                .row_actions()
+                .into_iter()
+                .map(|action| Choice::new(action.label(), action.label()))
+                .collect(),
         }
+    }
+    /// What the open "more" menu offers: the row's right-click actions,
+    /// less Open for the project this window already shows.
+    fn row_actions(&self) -> Vec<MenuAction> {
+        let Some(row) = self
+            .menu_row
+            .as_ref()
+            .and_then(|id| self.controller.rows.iter().find(|r| &r.id == id))
+        else {
+            return vec![];
+        };
+        let here = self.active.as_deref() == Some(row.id.as_str());
+        context_menu(row)
+            .into_iter()
+            .flatten()
+            .filter(|action| !(here && matches!(action, MenuAction::Open)))
+            .collect()
     }
     /// Runs a row of the open menu and closes it.
     fn choose(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -691,6 +753,14 @@ impl ProjectLibrary {
             Some(Menu::Account) => {
                 if let Some((_, command)) = ACCOUNT_MENU.get(row) {
                     (self.sink)(Outbound::Command(command), cx);
+                }
+            }
+            Some(Menu::Row) => {
+                let action = self.row_actions().get(row).copied();
+                if let (Some(id), Some(action)) = (self.menu_row.take(), action) {
+                    let _ = self.controller.select(&id);
+                    let _ = self.controller.menu(&id, action);
+                    self.pump(cx);
                 }
             }
             None => {}
@@ -737,7 +807,7 @@ impl ProjectLibrary {
         // It grows out of its button: a few points of travel with the fade.
         let travel = (1. - shown) * t.space.sm;
         let (corner, at) = match menu {
-            Menu::Sort => (
+            Menu::Sort | Menu::Row => (
                 Anchor::TopRight,
                 point(anchor.right(), anchor.bottom() + px(t.space.xs - travel)),
             ),
@@ -1115,7 +1185,57 @@ impl ProjectLibrary {
                         .children(row.dimensions().map(|(w, h)| format!("{w} × {h}"))),
                 ),
             });
+        // Under the pointer: a round "more" button at the page's top
+        // trailing corner, on a scrim so it reads over any poster. It opens
+        // our menu with the row's actions; a right-click keeps the system's.
+        let open = self.menu == Some(Menu::Row) && self.menu_row.as_ref() == Some(&row.id);
+        let reveal = if open { 1. } else { over.clamp(0., 1.) };
+        let more = (reveal > 0.01).then(|| {
+            let id = row.id.clone();
+            let anchors = self.anchors.clone();
+            div()
+                .id(SharedString::from(format!("project-more-{}", row.id)))
+                .absolute()
+                .top(px(frame + t.space.md))
+                .right(px(frame + t.space.md))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(MORE))
+                .rounded_full()
+                .bg(rgba(if open { 0x000000a6 } else { 0x00000073 }))
+                .opacity(reveal)
+                .role(Role::Button)
+                .aria_label(format!("More actions for {}", row.name))
+                .tooltip(kit::tooltip(t, "More"))
+                .child(kit.symbol(
+                    "ellipsis",
+                    t.metrics.symbol_toolbar,
+                    Weight::Semibold,
+                    0xffffff,
+                ))
+                .child(
+                    canvas(
+                        move |bounds, _, _| {
+                            anchors.borrow_mut().insert(Menu::Row, bounds);
+                        },
+                        |_, _, _, _| (),
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    cx.stop_propagation();
+                    if v.menu == Some(Menu::Row) && v.menu_row.as_ref() != Some(&id) {
+                        v.menu = None;
+                    }
+                    v.menu_row = Some(id.clone());
+                    v.toggle_menu(Menu::Row, cx);
+                }))
+        });
         let poster = div()
+            .relative()
             .flex()
             .flex_none()
             .w(px(place.0))
@@ -1140,7 +1260,8 @@ impl ProjectLibrary {
                     inset: true,
                 }])
             })
-            .child(page);
+            .child(page)
+            .children(more);
         let card = div()
             .id(SharedString::from(format!("project-{}", row.id)))
             .debug_selector(|| format!("project-{}", row.id))
@@ -1247,6 +1368,8 @@ impl Render for ProjectLibrary {
                 );
                 field.set_placeholder("Search projects");
                 field.set_bare(true);
+                // Escape clears the search and leaves the field in one step.
+                field.set_escape_cancels(true);
                 field
             });
             cx.subscribe(&search, |v: &mut Self, _, event, cx| {
@@ -1372,6 +1495,80 @@ impl Render for ProjectLibrary {
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
         let tr = t.translucency;
+        if self.new_project.is_none() && pm_shell::text::available(window) {
+            let glass = self.glass;
+            let mut make = |kind, label: &str, value: Value, options: Vec<Value>, symbol| {
+                let tokens = t.clone();
+                cx.new(|cx| {
+                    NativeControl::new(
+                        ControlSpec {
+                            kind,
+                            label,
+                            identifier: "home.header",
+                            value: &value,
+                            options,
+                            disabled: false,
+                            default: false,
+                            destructive: false,
+                            inline: false,
+                            quiet: false,
+                            tint: None,
+                            symbol,
+                            glass: true,
+                            symbol_only: glass == HeaderGlass::Glyph,
+                        },
+                        &tokens,
+                        window,
+                        cx,
+                    )
+                })
+            };
+            let new_project = make(Kind::Push, "New Project", Value::Null, vec![], Some("plus"));
+            if glass == HeaderGlass::All {
+                let search = make(
+                    Kind::Search,
+                    "Search projects",
+                    json!(self.controller.query.text),
+                    vec![],
+                    Some("⌘F"),
+                );
+                let view = make(
+                    Kind::Segmented,
+                    "Project layout",
+                    json!(usize::from(self.layout == Layout::List)),
+                    vec![
+                        json!({"symbol": "square.grid.2x2", "label": "Grid view"}),
+                        json!({"symbol": "list.bullet", "label": "List view"}),
+                    ],
+                    None,
+                );
+                cx.subscribe(&search, |v: &mut Self, _, event: &Value, cx| {
+                    match (event.as_str(), event.get("key").and_then(Value::as_str)) {
+                        (Some(text), _) => v.set_text(text.to_owned(), cx),
+                        (_, Some("Escape")) => v.clear_search(cx),
+                        _ => {}
+                    }
+                })
+                .detach();
+                cx.subscribe(&view, |v: &mut Self, _, event: &Value, cx| {
+                    v.set_layout(
+                        if event.as_u64() == Some(1) {
+                            Layout::List
+                        } else {
+                            Layout::Grid
+                        },
+                        cx,
+                    );
+                })
+                .detach();
+                (self.glass_search, self.glass_view) = (Some(search), Some(view));
+            }
+            cx.subscribe(&new_project, |v: &mut Self, _, _: &Value, cx| {
+                (v.sink)(Outbound::Command("newProject"), cx)
+            })
+            .detach();
+            self.new_project = Some(new_project);
+        }
         let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
         let search_width = SEARCH_MAX.min(sheet - SEARCH_ROOM).max(CARD_LEAST);
         let search_key = kit::key("home-search");
@@ -1432,19 +1629,30 @@ impl Render for ProjectLibrary {
                             .child(section.title()),
                     ),
                 )
-                .child(search)
+                .child(match &self.glass_search {
+                    Some(field) => div()
+                        .flex_none()
+                        .w(px(search_width))
+                        .child(field.clone())
+                        .into_any_element(),
+                    None => search.into_any_element(),
+                })
                 .child(
                     side()
                         .justify_end()
-                        .gap(px(t.space.xs))
+                        .gap(px(t.space.sm))
                         .child(
                             Self::header_action(&kit, "home-open", "folder", "Open…", "Open… ⌘O")
                                 .on_click(cx.listener(|v, _, _, cx| {
                                     (v.sink)(Outbound::Command("open"), cx)
                                 })),
                         )
-                        .child(
-                            Self::header_action(
+                        // New Project is the header's one raised action:
+                        // the system's glass button. A window that cannot
+                        // host it (a test) keeps the quiet icon.
+                        .child(match &self.new_project {
+                            Some(button) => button.clone().into_any_element(),
+                            None => Self::header_action(
                                 &kit,
                                 "home-new",
                                 "plus",
@@ -1453,8 +1661,9 @@ impl Render for ProjectLibrary {
                             )
                             .on_click(cx.listener(|v, _, _, cx| {
                                 (v.sink)(Outbound::Command("newProject"), cx)
-                            })),
-                        ),
+                            }))
+                            .into_any_element(),
+                        }),
                 );
         let list = self.layout == Layout::List;
         let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
@@ -1572,7 +1781,10 @@ impl Render for ProjectLibrary {
                 ),
             )
             .child(div().flex_none().w(px(t.space.md)))
-            .child(view_switch);
+            .child(match &self.glass_view {
+                Some(switch) => switch.clone().into_any_element(),
+                None => view_switch.into_any_element(),
+            });
         let header = div()
             .flex()
             .flex_col()
@@ -1765,6 +1977,8 @@ impl Render for ProjectLibrary {
                                 quiet: false,
                                 tint,
                                 symbol: None,
+                                glass: false,
+                                symbol_only: false,
                             },
                             &tokens,
                             window,

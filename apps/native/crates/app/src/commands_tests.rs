@@ -35,7 +35,7 @@ fn undo(s: &mut Stage, cx: &mut TestAppContext) {
 }
 /// The first routed command a chord reaches; earlier bindings decline, as
 /// `blurField` does outside a text field.
-fn dispatch(chord: &str) -> (String, Vec<serde_json::Value>) {
+pub(crate) fn dispatch(chord: &str) -> (String, Vec<serde_json::Value>) {
     let mut resolver = Resolver::new();
     let mut effects = resolver.submit(Key {
         token: 1,
@@ -218,6 +218,7 @@ fn new_layer_chords_add_and_select_and_undo_removes(cx: &mut TestAppContext) {
         ("cmd+y", "solid"),
         ("cmd+shift+y", "shape"),
         ("cmd+alt+y", "adjustment"),
+        ("cmd+alt+shift+y", "null"),
     ] {
         press(&mut s, cx, chord);
         let id = selected(&s).pop().expect("the new layer is selected");
