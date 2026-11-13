@@ -229,6 +229,13 @@ impl Controller {
             // The status line says who it waits for; Cancel still cancels.
             let mut resources = resources;
             let mut shown = String::new();
+            if resources.pending {
+                // The destination is chosen: the panel shows the export as
+                // preparing, the phase whose Cancel it sends (while it chose
+                // the destination its Cancel was off, and a wait left in
+                // that phase could not be cancelled from the panel).
+                observe(&runtime, json!({"phase":"preparing"})).await;
+            }
             while resources.pending && !job.cancel.load(Ordering::Acquire) {
                 let text = crate::extensions::starts_once_loaded("Export", &resources);
                 let _ = this.update(cx, |v, cx| {
