@@ -257,6 +257,26 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 if id==0 || (!matches!(name,"chrome-set"|"bottle") && id>=scene.objects.len() as u32){p[3]=0;}
             }
             let flicker_roi=flicker_difference(&actual,&second,&roi,w as usize,h as usize);
+            // The reviewed chrome floor had visible grain outside the object
+            // ROI. Keep a fixed lower-left receiver ROI so an otherwise quiet
+            // background cannot dilute its noise or temporal boiling.
+            let floor_guide=(name=="chrome-set").then(|| {
+                let mut guide=reference.clone();
+                for (i,(pixel,&id)) in guide.chunks_exact_mut(4).zip(&ids).enumerate() {
+                    let x=i%w as usize;let y=i/w as usize;
+                    if id!=0 || x*100>=w as usize*35 || y*100<h as usize*65 {pixel[3]=0;}
+                }
+                guide
+            });
+            let floor_metrics=floor_guide.as_ref().map(|guide|metrics(&actual,guide,w as usize,h as usize));
+            let floor_flicker=floor_guide.as_ref().map(|guide|flicker_difference(&actual,&second,guide,w as usize,h as usize));
+            if let Some((rms,noise,bias,pixels))=floor_metrics {
+                println!("FLOOR_NOISE_GATE {}",serde_json::json!({"scene":name,"policy":quality,"roi":[0.,0.65,0.35,1.],"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"flicker":floor_flicker}));
+                if !(rms<0.02 && noise<0.006 && bias<0.012 && pixels>100)
+                    || floor_flicker.is_some_and(|(r,n)|!(r<0.006 && n>100)) {
+                    failures.push(format!("{name}/{quality} floor noise={floor_metrics:?} flicker={floor_flicker:?}"));
+                }
+            }
             println!("FLICKER_GATE {}",serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"seeds":[0,19],"whole":flicker,"object":flicker_roi,"smooth_difference_rms_limit":0.006}));
             if std::env::var_os("PM_STUDIO_NOISE_OUT").is_some() {
                 // Diagnose the source of boiling without changing the gate or

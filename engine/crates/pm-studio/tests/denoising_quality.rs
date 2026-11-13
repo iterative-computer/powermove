@@ -326,7 +326,7 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
     for hardware in [false,true] {
         r.hardware_rt=hardware;r.caustics_enabled=false;
         r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;
-        for (scene,object,minimum) in [(&mirror,1,32.),(&floor,0,16.)] {
+        for (scene,object,minimum) in [(&mirror,1,32.),(&floor,0,24.)] {
             r.set_scene(scene,&scene.prepare());
             r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
             r.trace(128,8,true,64);
@@ -335,6 +335,18 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
             assert!(visible.len()>100 && visible.iter().all(|&n|n>=minimum),"undersampled reflection/catcher: {visible:?}");
             assert!(visible.iter().any(|&n|n<128.),"quiet regions must still converge");
         }
+        // A real diffuse mesh behind glass also receives caustics. It must not
+        // stop on an apparently quiet first batch merely because it is not
+        // represented by the analytic shadow catcher.
+        let receiver = glass_detail();
+        r.caustics_enabled = true;
+        r.set_scene(&receiver, &receiver.prepare());
+        r.set_precomputed_caustics(true);
+        r.trace(128, 8, true, 64);
+        let counts = r.sample_counts();
+        let ids = r.first_hit_ids();
+        let matte: Vec<_> = counts.iter().zip(ids).filter_map(|(&n,id)|(id==2).then_some(n)).collect();
+        assert!(matte.len()>100 && matte.iter().all(|&n|n>=24.),"undersampled mesh caustic receiver: {matte:?}");
     }
 }
 
