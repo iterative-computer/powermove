@@ -87,8 +87,9 @@ export const ACTIONS: { action: string; agent: string[] }[] = [
   { action: "Add Curve", agent: ["apply_commands", "add_effect"] },
   { action: "Remove a tool", agent: ["apply_commands", "remove_effect"] },
   {
+    // Adds Apply Color LUT, or relinks the one whose file is missing.
     action: "Load LUT…",
-    agent: ["import_media", "apply_commands", "add_effect"],
+    agent: ["import_media", "apply_commands", "add_effect", "set_effect"],
   },
   {
     action: "Copy and paste a grade",

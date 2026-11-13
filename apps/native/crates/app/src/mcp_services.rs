@@ -1096,7 +1096,8 @@ impl EngineJobs {
         let path = &request.path;
         if request.replace.is_some() {
             return Err(Error::invalid(
-                "Relink a LUT by importing it and setting the effect's lut input with set_effect.",
+                "Relink a LUT by importing it, then set_effect on the existing effect with \
+                 patch {\"inputs\":{\"lut\":{\"kind\":\"asset\",\"assetId\":\"<new asset>\"}}}.",
             ));
         }
         let retained = crate::colour::retain_lut(&self.profile, path).map_err(Error::invalid)?;

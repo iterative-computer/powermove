@@ -40,7 +40,11 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
     if (editable) c.send(intent);
   };
   const tools = grade(p);
-  const wheels = tools.find((g) => g.header.definition === WHEELS);
+  // The first Color Wheels is the section's own; any further one (each grades
+  // the picture) follows as a tool of its own.
+  const [wheels, ...moreWheels] = tools.filter(
+    (g) => g.header.definition === WHEELS,
+  );
   const curves = tools.filter((g) => g.header.definition === CURVES);
   const luts = tools.filter((g) => g.header.definition === LUT);
   const others = tools.filter(
@@ -51,6 +55,13 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       (row) =>
         row && <Control key={row.id} row={row} locked={p.locked} model={c} />,
     );
+  const wheelRows = (g: GradeEffect) =>
+    WHEEL_SECTIONS.map((s) => (
+      <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
+        <Subheading title={s.title} />
+        {rows(s.keys.map((k) => parameter(g, k)))}
+      </div>
+    ));
   const add = (definition: string, label: string) => (
     <SectionAction
       id={`${PANEL_ID}:add:${definition}`}
@@ -103,14 +114,17 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               editable={editable}
               action={wheels ? undefined : add(WHEELS, "Add Color Wheels")}
             >
-              {wheels
-                ? WHEEL_SECTIONS.map((s) => (
-                    <div key={s.title} role="group" label={s.title}>
-                      <Subheading title={s.title} />
-                      {rows(s.keys.map((k) => parameter(wheels, k)))}
-                    </div>
-                  ))
-                : null}
+              {wheels ? wheelRows(wheels) : null}
+              {moreWheels.map((g) => (
+                <Tool
+                  key={g.header.id}
+                  tool={g}
+                  send={send}
+                  editable={editable}
+                >
+                  {wheelRows(g)}
+                </Tool>
+              ))}
             </Section>
             <Section
               title="Curves"
