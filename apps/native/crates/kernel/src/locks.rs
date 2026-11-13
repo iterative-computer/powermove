@@ -182,7 +182,11 @@ impl FileLock {
         // An older app may still write the stable inode. At equal timestamps
         // prefer it, so a fresh legacy owner cannot lose to our release record.
         let owner = match (legacy, atomic) {
-            (Some(a), Some(b)) => Some(if a.1 >= b.1 { a } else { b }),
+            (Some(a), Some(b)) => Some(if a.1 > b.1 || (a.1 == b.1 && a.0 != 0) {
+                a
+            } else {
+                b
+            }),
             (a, b) => a.or(b),
         };
         match owner {

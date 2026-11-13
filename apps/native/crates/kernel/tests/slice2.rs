@@ -5561,8 +5561,10 @@ fn an_empty_or_torn_lock_record_on_a_local_volume_does_not_refuse_the_open() {
     }
 }
 #[test]
-fn torn_local_lock_recovers_without_stealing_a_live_flock() {
-    let dir = common::TempDir::new("bad-lock");
+fn torn_record_lock_recovers_without_stealing_a_live_flock() {
+    // FileLock::acquire explicitly exercises record mode; lock_project's
+    // local-user flock has no owner JSON and is covered independently below.
+    let dir = common::TempDir::new("bad-record-lock");
     let path = dir.path("lock");
     for bytes in [b"broken".as_slice(), b"", b"{\"pid\":", b"\xff"] {
         fs::write(&path, bytes).unwrap();
@@ -5582,6 +5584,15 @@ fn fresh_legacy_owner_is_protected_when_heartbeats_share_a_millisecond() {
     let heartbeat = now_ms();
     fs::write(&path, format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
     fs::write(owner_record_path(&path), format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+}
+#[test]
+fn a_fresh_atomic_owner_is_protected_from_a_same_millisecond_legacy_release() {
+    let dir = common::TempDir::new("atomic-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
     assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
 }
 #[test]
