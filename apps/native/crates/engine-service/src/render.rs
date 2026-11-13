@@ -368,6 +368,9 @@ pub struct Engine {
     cache: VecDeque<CachedFrame>,
     /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
     media_seen: Vec<MediaSeen>,
+    /// How long a look at the media stands (a test holds it open).
+    #[cfg(test)]
+    pub(crate) media_look: Duration,
     offscreen: Option<metal::Texture>,
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
@@ -712,6 +715,20 @@ impl Engine {
         let memory_client = crate::memory::Registration::new(12, move |share, _| {
             pending.store(share, std::sync::atomic::Ordering::Release);
         });
+        // Tests share one translated-shader folder per process, as the app
+        // keeps one per profile: without one, every engine a test makes
+        // translates every built-in shader again (tens of seconds each in
+        // a debug build on a loaded machine).
+        #[cfg(test)]
+        let shader_cache = shader_cache.or_else(|| {
+            static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            Some(
+                SHARED
+                    .get_or_init(|| tempfile::tempdir().expect("a folder for translated shaders"))
+                    .path()
+                    .to_owned(),
+            )
+        });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.apply_media_lease(pm_media::decode::service::MediaLease {
             frame_cache: 24 << 20,
@@ -740,6 +757,8 @@ impl Engine {
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
             media_seen: Vec::new(),
+            #[cfg(test)]
+            media_look: crate::render_cache::MEDIA_RECHECK,
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
@@ -851,9 +870,11 @@ impl Engine {
     fn observed_inputs(&mut self, scene: &Scene) -> u64 {
         use std::hash::{Hash, Hasher};
         let at = self.media_seen_at(scene);
-        let fresh = at.is_some_and(|at| {
-            self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
-        });
+        #[cfg(test)]
+        let stands = self.media_look;
+        #[cfg(not(test))]
+        let stands = crate::render_cache::MEDIA_RECHECK;
+        let fresh = at.is_some_and(|at| self.media_seen[at].looked.elapsed() < stands);
         let media = if let (Some(at), true) = (at, fresh) {
             self.media_seen[at].identity()
         } else {

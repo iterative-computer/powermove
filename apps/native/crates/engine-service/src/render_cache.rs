@@ -3659,11 +3659,11 @@ mod tests {
         assert_ne!(stamps(&media, None), before);
     }
 
-    /// Within the two seconds between two looks at the media, a frame not
-    /// drawn before reads a file another app has just saved again: it is
-    /// shown, and not kept as a frame of the file as it was. When that file
-    /// comes back before the next look (same inode, length and modification
-    /// time), the frame is drawn from it again.
+    /// Between two looks at the media (two seconds apart; the test holds
+    /// the first look open), a frame not drawn before reads a file another
+    /// app has just saved again: it is shown, and not kept as a frame of
+    /// the file as it was. When that file comes back (same inode, length
+    /// and modification time), the frame is drawn from it again.
     #[test]
     fn a_frame_drawn_from_a_changed_file_is_not_kept_as_the_file_it_was() {
         use crate::render::{Engine, FrameSpec};
@@ -3673,6 +3673,7 @@ mod tests {
         let modified = std::fs::metadata(&still).unwrap().modified().unwrap();
         let scene = covered_by(&still);
         let mut engine = Engine::new(pm_gpu::Gpu::new("live-read-binding").unwrap()).unwrap();
+        engine.media_look = Duration::from_secs(3600);
         let spec = |seconds: f64| FrameSpec {
             exact: false,
             ..FrameSpec::exact(
