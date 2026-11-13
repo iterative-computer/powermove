@@ -3087,7 +3087,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         pass.mark("schedule");
         // A 3D scene's final picture is traced on this thread, as every 3D
         // picture is (`render::Engine::draws_studio`): its viewer is drawn
-        // again for it, with the stamp it shows.
+        // again for it under the stamp it shows (an export estimate holds
+        // that stamp).
         let ask = ask.filter(|ask| {
             if !shared.disk.draws_studio(&ask.scene) {
                 return true;
@@ -3095,8 +3096,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let (Some(v), Some(r)) = (state.views.get_mut(&ask.id), runtime.get_mut(&ask.id))
                 && v.stamp == ask.stamp
             {
-                v.stamp.sequence += 1;
-                bump_site(line!(), "");
                 v.dirty = true;
                 (r.full_owed, r.settle_at, r.full_for) = (None, None, Some(v.stamp));
             }
