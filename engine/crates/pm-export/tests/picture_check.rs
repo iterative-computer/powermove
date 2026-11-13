@@ -343,6 +343,10 @@ struct Case {
     tamper: Tamper,
     expected: &'static [&'static str],
     local: bool,
+    /// Within what quantisation at 0.1 Mb/s does to every frame of a
+    /// correct H.264 or HEVC Main10 file (up to five codes of each,
+    /// `hard_delivery.rs`): not certain there, so delivered.
+    quantisation: bool,
 }
 
 fn tampers() -> Vec<Case> {
@@ -352,30 +356,35 @@ fn tampers() -> Vec<Case> {
             tamper: level_shift,
             expected: &["luma is +", "from what was rendered in every frame"],
             local: false,
+            quantisation: true,
         },
         Case {
             what: "a range mistake",
             tamper: range_mistake,
             expected: &["luma's range is scaled by 0.86 in every frame"],
             local: false,
+            quantisation: false,
         },
         Case {
             what: "a picture one pixel to the right",
             tamper: one_pixel_shift,
             expected: &["displaced by (1, 0)"],
             local: false,
+            quantisation: false,
         },
         Case {
             what: "a flattened block",
             tamper: flattened_block,
             expected: &["frame 4 at (624, 352): a block lost its detail"],
             local: true,
+            quantisation: false,
         },
         Case {
             what: "a stale frame",
             tamper: stale_frame,
             expected: &["frame 2 shows the picture of frame 1"],
             local: false,
+            quantisation: false,
         },
         Case {
             what: "a swapped pair of frames",
@@ -385,18 +394,21 @@ fn tampers() -> Vec<Case> {
                 "frame 6 shows the picture of frame 5",
             ],
             local: false,
+            quantisation: false,
         },
         Case {
             what: "a garbage block",
             tamper: garbage_block,
             expected: &["frame 4 at (624, 352): a block holds a picture that was not rendered"],
             local: true,
+            quantisation: false,
         },
         Case {
             what: "a foreign block away from the sampled places",
             tamper: foreign_block,
             expected: &["frame 3 is not the picture that was rendered"],
             local: false,
+            quantisation: false,
         },
     ]
 }
@@ -404,10 +416,7 @@ fn tampers() -> Vec<Case> {
 /// The check's verdict on `problems`/`notes` for `case` in `format`.
 fn judged(format: Format, case: &Case, problems: &[String], notes: &[String]) -> Option<String> {
     let intra = matches!(format.codec, Codec::ProRes(_));
-    // Ten codes of 10 bits are within what quantisation at 0.1 Mb/s does to
-    // every frame of a correct H.264 or HEVC Main10 file (up to five codes
-    // of each, `hard_delivery.rs`): not certain, so delivered.
-    if case.tamper as usize == level_shift as usize && !intra {
+    if case.quantisation && !intra {
         return (!problems.is_empty()).then(|| {
             format!(
                 "{}: {} is within the codec's quantisation and was refused: {problems:?}",
