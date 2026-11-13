@@ -162,6 +162,5 @@ pub(crate) fn import(
             conflict(state, &format!("{id}/provenance"));
         }
     }
-    state.extensions_imported = true;
     publish(native, state)
 }

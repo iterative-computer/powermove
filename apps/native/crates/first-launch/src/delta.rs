@@ -248,11 +248,14 @@ pub fn delta_store(
     publish(&native, &state)?;
     writer.flush()?;
     drop(writer);
+    let repairing_extensions = !state.extensions_imported;
     crate::extension_import::import(&next, &pending, &native, &mut state)?;
-    if extensions_changed || !settings.is_empty() || state.extensions_imported {
+    if extensions_changed || !settings.is_empty() || repairing_extensions {
         hook(Event::Started(Step::Extensions))?;
         extensions(&native, settings)?;
     }
+    state.extensions_imported = true;
+    publish(&native, &state)?;
     Ok(DeltaPrepared::MediaPending)
 }
 

@@ -584,6 +584,7 @@ fn run_inner(
         hook(Event::Started(Step::Extensions))?;
         extension_import::import(&cp, &root, &native, &mut state)?;
         extensions(&native, Vec::new())?;
+        state.extensions_imported = true;
         finish(&native, &mut state, Step::Extensions, &mut hook)?;
     }
     if state.secrets != SecretStep::Complete || retry_current_secrets {

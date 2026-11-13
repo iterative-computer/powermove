@@ -1899,7 +1899,7 @@ mod tests {
     fn discovery_loads_a_migrated_effect_extension() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("electron");
-        let native = temp.path().join("native");
+        let native = pm_first_launch::beta_profile(temp.path());
         let extension = source.join("extensions/synthetic-effect");
         std::fs::create_dir_all(&extension).unwrap();
         std::fs::write(

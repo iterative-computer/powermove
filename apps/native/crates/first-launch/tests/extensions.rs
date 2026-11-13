@@ -81,6 +81,17 @@ fn old_migration_receipt_repairs_even_when_source_stamp_is_unchanged() {
         state.as_object_mut().unwrap().remove(key);
     }
     write(&path, &state);
+    assert!(
+        delta_if_changed(&config, |event| {
+            if event == pm_first_launch::Event::Started(pm_first_launch::Step::Extensions) {
+                anyhow::bail!("synthetic interrupted registration");
+            }
+            Ok(())
+        })
+        .is_err()
+    );
+    let interrupted: State = read(&path);
+    assert!(!interrupted.extensions_imported);
     assert!(matches!(
         delta_if_changed(&config, |_| Ok(())).unwrap(),
         DeltaPrepared::MediaPending
