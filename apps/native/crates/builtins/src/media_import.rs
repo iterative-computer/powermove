@@ -1052,6 +1052,8 @@ mod tests {
                 .copy_to(&manifest)
                 .unwrap();
             assert!(std::fs::metadata(&manifest).unwrap().len() < 4096);
+            // The Project panel reads it as ready media, not a failed video.
+            assert_eq!(crate::delivery::probe_media(&manifest, "video"), Ok(()));
 
             // A frame rendered into the hole later is picked up; one deleted
             // after import is missing, never another frame.
