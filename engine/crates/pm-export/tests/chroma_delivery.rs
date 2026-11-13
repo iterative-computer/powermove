@@ -1082,3 +1082,63 @@ fn untouched_422_footage_reaches_a_422_encoder_bit_exact() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What looking along a run of untouched footage costs: the plan of each
+/// frame of the run, once, at its first frame (no pixels, no decode).
+#[test]
+#[ignore = "measurement: run with --ignored to print the cost"]
+fn measure_the_look_along_untouched_footage() {
+    let dir = scratch("ahead");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    let mut doc = project(
+        W,
+        H,
+        8.0 / 24.0,
+        no_fill(),
+        vec![clip_layer("v", "clip", 0, 8)],
+    );
+    doc["fps"] = json!(24);
+    asset(&mut doc, "clip", "video", "mov", W, H, 8.0 / 24.0);
+    let mut media = MediaPaths::default();
+    media.insert("clip", source.clone());
+    let job = ExportJob {
+        document: Arc::new(load(&doc)),
+        composition: "Ptest-root".into(),
+        settings: settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::Hq,
+            },
+            8,
+        ),
+        media: Arc::new(media),
+        destination: PathBuf::from("/unused.mov"),
+        overwrite: Overwrite::Fail,
+        mode: None,
+        seed: 3,
+    };
+    let plan = plan_export(&job).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let frames = 4000u64;
+    let started = std::time::Instant::now();
+    let mut untouched = 0;
+    for n in 0..frames {
+        let footage = renderer
+            .footage(
+                &plan.document,
+                &job.composition,
+                plan.timeline.tick(n % 8),
+                &plan.request,
+                &*job.media,
+            )
+            .unwrap();
+        untouched += usize::from(footage.candidate.is_some());
+    }
+    let each = started.elapsed().as_secs_f64() * 1e6 / frames as f64;
+    eprintln!(
+        "MEASURE look along untouched footage: {each:.1} µs a frame ({:.2} s for an hour at 24 fps), {untouched} of {frames} candidates",
+        each * 86_400.0 / 1e6
+    );
+    assert_eq!(untouched as u64, frames);
+    let _ = std::fs::remove_dir_all(&dir);
+}

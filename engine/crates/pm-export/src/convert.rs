@@ -348,6 +348,119 @@ impl Chroma {
     }
 }
 
+/// One luma row of a frame as normalized Y′CbCr and alpha.
+struct YccRow {
+    /// The row this holds (`usize::MAX`: none yet).
+    y: usize,
+    luma: Vec<f64>,
+    chroma: Vec<[f64; 2]>,
+    alpha: Vec<f64>,
+}
+
+/// A conversion worker's scratch, made once and kept across its rows: the
+/// luma rows around the chroma row it is on (each converted once, whichever
+/// taps and planes read it; four consecutive rows never share a slot), the
+/// blocks' fit decisions for one row of blocks, and the chroma accumulator.
+struct RowCache {
+    rows: [YccRow; 4],
+    fits: Vec<bool>,
+    /// The luma row `fits` was decided on (`usize::MAX`: none yet).
+    fits_row: usize,
+    acc: Vec<[f64; 2]>,
+}
+
+impl RowCache {
+    fn new(w: usize) -> Self {
+        Self {
+            rows: std::array::from_fn(|_| YccRow {
+                y: usize::MAX,
+                luma: vec![0.0; w],
+                chroma: vec![[0.0; 2]; w],
+                alpha: vec![0.0; w],
+            }),
+            fits: vec![false; w / 2],
+            fits_row: usize::MAX,
+            acc: vec![[0.0; 2]; w / 2],
+        }
+    }
+}
+
+/// Decimates chroma into `cache.acc`: rows `base + k` for each tap of
+/// `down`, columns `2x + k` for each tap of `across`, clamped to the frame.
+fn decimate(
+    cache: &mut RowCache,
+    fill: &impl Fn(usize, &mut RowCache),
+    base: usize,
+    down: Taps,
+    across: Taps,
+    w: usize,
+    h: usize,
+) {
+    cache.acc.fill([0.0; 2]);
+    for &(k, wy) in down {
+        let y = (base as i64 + k).clamp(0, h as i64 - 1) as usize;
+        fill(y, cache);
+        let RowCache { rows, acc, .. } = cache;
+        let line = &rows[y & 3].chroma;
+        for (cx, o) in acc.iter_mut().enumerate() {
+            for &(dx, wx) in across {
+                let c = line[(2 * cx as i64 + dx).clamp(0, w as i64 - 1) as usize];
+                o[0] += wy * wx * c[0];
+                o[1] += wy * wx * c[1];
+            }
+        }
+    }
+}
+
+/// The planes of a 4:2:0 output in one pass over the frame: luma rows
+/// `2y` and `2y + 1`, interleaved CbCr row `y`, and alpha when asked for.
+#[allow(clippy::too_many_arguments)]
+fn planes_420<T: Send + Clone + Default>(
+    w: usize,
+    h: usize,
+    with_alpha: bool,
+    fill: &(impl Fn(usize, &mut RowCache) + Sync),
+    across: Taps,
+    down: Taps,
+    luma_code: impl Fn(f64, usize, usize) -> T + Sync,
+    chroma_code: impl Fn(f64, usize, usize, u32) -> T + Sync,
+) -> (Vec<T>, Vec<T>, Vec<u8>) {
+    let mut luma = vec![T::default(); w * h];
+    let mut cbcr = vec![T::default(); w * h / 2];
+    let (mut alpha, alpha_len) = if with_alpha {
+        (vec![0u8; w * h], 2 * w)
+    } else {
+        (Vec::new(), 0)
+    };
+    crate::par::planes_with(
+        (&mut luma, 2 * w),
+        (&mut cbcr, w),
+        (&mut alpha, alpha_len),
+        || RowCache::new(w),
+        |cache, cy, l, c, a| {
+            for r in 0..2 {
+                let y = 2 * cy + r;
+                fill(y, cache);
+                let row = &cache.rows[y & 3];
+                for (x, o) in l[r * w..(r + 1) * w].iter_mut().enumerate() {
+                    *o = luma_code(row.luma[x], x, y);
+                }
+                if with_alpha {
+                    for (x, o) in a[r * w..(r + 1) * w].iter_mut().enumerate() {
+                        *o = code(row.alpha[x] * 255.0, 0.0, 255.0) as u8;
+                    }
+                }
+            }
+            decimate(cache, fill, 2 * cy, down, across, w, h);
+            for (cx, v) in cache.acc.iter().enumerate() {
+                c[cx * 2] = chroma_code(v[0], cx, cy, 1);
+                c[cx * 2 + 1] = chroma_code(v[1], cx, cy, 2);
+            }
+        },
+    );
+    (luma, cbcr, alpha)
+}
+
 fn u16_plane(data: Vec<u16>, row_samples: usize, rows: usize) -> Plane {
     Plane {
         data: PlaneData::U16(data),
@@ -521,55 +634,90 @@ pub fn convert_tagged(
             false,
         )
     };
-    let fits = |x: usize, y: usize| {
-        let (x, y) = (
-            if horizontal { x - x % 2 } else { x },
-            if vertical { y - y % 2 } else { y },
-        );
-        let v = rgb_to_ycbcr(extended(x, y).0);
+    // Whether the stream can code a colour (extended RGB in the output
+    // encoding) as it is.
+    let fit_of = |c: [f64; 3]| {
+        let v = rgb_to_ycbcr(c);
         (luma[0]..=luma[1]).contains(&v[0])
             && (chroma[0]..=chroma[1]).contains(&v[1])
             && (chroma[0]..=chroma[1]).contains(&v[2])
     };
+    let delivered = |x: usize, y: usize| {
+        tagged_output_rgba(pixel(frame, x, y), params.working, params.alpha, tags, true)
+    };
+    // A pixel of an output that is not subsampled: it decides for itself.
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
         if tags.is_hdr() {
             crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
         } else {
-            let (c, a) = if fits(x, y) {
-                extended(x, y)
-            } else {
-                tagged_output_rgba(pixel(frame, x, y), params.working, params.alpha, tags, true)
-            };
+            let own = extended(x, y);
+            let (c, a) = if fit_of(own.0) { own } else { delivered(x, y) };
             (rgb_to_ycbcr(c), a)
         }
     };
-    // (Cb, Cr) of one chroma row: co-sited on the even column; for 4:2:0
-    // centred between rows 2y and 2y + 1 or on row 2y, as the output's
-    // chroma sits; taps clamped to the frame.
-    let chroma_row = |cy: usize, subsampled_rows: bool| -> Vec<[f64; 2]> {
-        let (taps, base): (&[(i64, f64)], i64) = if subsampled_rows {
-            (down, 2 * cy as i64)
-        } else {
-            (&[(0, 1.0)], cy as i64)
-        };
-        let step = if across.len() == 1 { 2 } else { 1 };
-        let mut line = vec![[0.0; 2]; w];
-        let mut out = vec![[0.0; 2]; w / 2];
-        for &(k, wy) in taps {
-            let y = (base + k).clamp(0, h as i64 - 1) as usize;
-            for x in (0..w).step_by(step) {
-                let v = ycc(x, y).0;
-                line[x] = [v[1], v[2]];
-            }
-            for (cx, o) in out.iter_mut().enumerate() {
-                for &(dx, wx) in across {
-                    let c = line[(2 * cx as i64 + dx).clamp(0, w as i64 - 1) as usize];
-                    o[0] += wy * wx * c[0];
-                    o[1] += wy * wx * c[1];
-                }
-            }
+    // One luma row of a subsampled output as normalized Y′CbCr, every pixel
+    // evaluated once: the values `ycc` gives, with each block's fit decided
+    // once (on its first pixel, on the row it is sited on) for the pixels
+    // sharing it.
+    let fill = |y: usize, cache: &mut RowCache| {
+        if cache.rows[y & 3].y == y {
+            return;
         }
-        out
+        let RowCache {
+            rows,
+            fits,
+            fits_row,
+            ..
+        } = cache;
+        let row = &mut rows[y & 3];
+        let mut put = |x: usize, (c, a): ([f64; 3], f64)| {
+            row.luma[x] = c[0];
+            row.chroma[x] = [c[1], c[2]];
+            row.alpha[x] = a;
+        };
+        if tags.is_hdr() {
+            for x in 0..w {
+                put(
+                    x,
+                    crate::hdr::output_ycbcra(
+                        pixel(frame, x, y),
+                        params.working,
+                        params.alpha,
+                        tags,
+                    ),
+                );
+            }
+        } else {
+            // The row the blocks of this row are sited on.
+            let sited = if vertical { y - y % 2 } else { y };
+            if sited != y && *fits_row != sited {
+                for (cx, fit) in fits.iter_mut().enumerate() {
+                    *fit = fit_of(extended(2 * cx, sited).0);
+                }
+                *fits_row = sited;
+            }
+            for (cx, fit) in fits.iter_mut().enumerate() {
+                let (x0, x1) = (2 * cx, 2 * cx + 1);
+                let first = if sited == y {
+                    let own = extended(x0, y);
+                    *fit = fit_of(own.0);
+                    if *fit { own } else { delivered(x0, y) }
+                } else if *fit {
+                    extended(x0, y)
+                } else {
+                    delivered(x0, y)
+                };
+                let second = if *fit {
+                    extended(x1, y)
+                } else {
+                    delivered(x1, y)
+                };
+                put(x0, (rgb_to_ycbcr(first.0), first.1));
+                put(x1, (rgb_to_ycbcr(second.0), second.1));
+            }
+            *fits_row = sited;
+        }
+        row.y = y;
     };
     // Quantizers at the output depth (dither in the output domain, then round
     // half to even and clip to the codable range).
@@ -577,48 +725,27 @@ pub fn convert_tagged(
     let chroma8 = |c: f64, x: usize, y: usize, ch: u32| {
         code(c * 224.0 + 128.0 + d(x, y, ch), 1.0, 254.0) as u8
     };
-    let alpha8 = |a: f64| code(a * 255.0, 0.0, 255.0) as u8;
     let luma10 =
         |v: f64, x: usize, y: usize| (code(v * 876.0 + 64.0 + d(x, y, 0), 4.0, 1019.0) as u16) << 6;
     let chroma10 = |c: f64, x: usize, y: usize, ch: u32| {
         (code(c * 896.0 + 512.0 + d(x, y, ch), 4.0, 1019.0) as u16) << 6
     };
-    let luma_plane8 = || {
-        let mut luma = vec![0u8; w * h];
-        crate::par::rows(&mut luma, w, |y, row| {
-            for (x, o) in row.iter_mut().enumerate() {
-                *o = luma8(ycc(x, y).0[0], x, y);
-            }
-        });
-        u8_plane(luma, w, h)
-    };
-    let alpha_plane8 = || {
-        let mut alpha = vec![0u8; w * h];
-        crate::par::rows(&mut alpha, w, |y, row| {
-            for (x, o) in row.iter_mut().enumerate() {
-                *o = alpha8(ycc(x, y).1);
-            }
-        });
-        u8_plane(alpha, w, h)
-    };
-    // Interleaved CbCr (`420v`, `v0a8`).
-    let cbcr_plane8 = || {
-        let mut chroma = vec![0u8; w * h / 2];
-        crate::par::rows(&mut chroma, w, |cy, row| {
-            for (cx, [cb, cr]) in chroma_row(cy, true).into_iter().enumerate() {
-                row[cx * 2] = chroma8(cb, cx, cy, 1);
-                row[cx * 2 + 1] = chroma8(cr, cx, cy, 2);
-            }
-        });
-        u8_plane(chroma, w, h / 2)
-    };
-    // Planar Cb and Cr (`yuv420p`): one chroma pass, split.
-    let chroma_planes8 = || {
-        let PlaneData::U8(cbcr) = cbcr_plane8().data else {
-            unreachable!("8-bit chroma")
-        };
-        let (cb, cr): (Vec<u8>, Vec<u8>) = cbcr.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
-        [u8_plane(cb, w / 2, h / 2), u8_plane(cr, w / 2, h / 2)]
+    // 8-bit 4:2:0: luma, interleaved CbCr (`420v`, `v0a8`) or planar Cb and
+    // Cr (`yuv420p`), and alpha.
+    let planes8 = |with_alpha: bool, planar: bool| {
+        let (luma, cbcr, alpha) = planes_420(w, h, with_alpha, &fill, across, down, luma8, chroma8);
+        let mut planes = vec![u8_plane(luma, w, h)];
+        if planar {
+            let (cb, cr): (Vec<u8>, Vec<u8>) = cbcr.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
+            planes.push(u8_plane(cb, w / 2, h / 2));
+            planes.push(u8_plane(cr, w / 2, h / 2));
+        } else {
+            planes.push(u8_plane(cbcr, w, h / 2));
+        }
+        if with_alpha {
+            planes.push(u8_plane(alpha, w, h));
+        }
+        planes
     };
     let planes = match format {
         InputFormat::Y416 => {
@@ -639,51 +766,42 @@ pub fn convert_tagged(
         }
         InputFormat::V216 => {
             let mut out = vec![0u16; w * h * 2];
-            crate::par::rows(&mut out, w * 2, |y, row| {
-                for (t, [cb, cr]) in chroma_row(y, false).into_iter().enumerate() {
-                    let (x0, x1) = (2 * t, 2 * t + 1);
-                    let o = &mut row[t * 4..t * 4 + 4];
-                    o[0] = code(cb * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
-                    o[1] = code(
-                        ycc(x0, y).0[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0),
-                        256.0,
-                        65216.0,
-                    ) as u16;
-                    o[2] = code(cr * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
-                    o[3] = code(
-                        ycc(x1, y).0[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0),
-                        256.0,
-                        65216.0,
-                    ) as u16;
-                }
-            });
+            crate::par::rows_with(
+                &mut out,
+                w * 2,
+                || RowCache::new(w),
+                |cache, y, row| {
+                    decimate(cache, &fill, y, &[(0, 1.0)], across, w, h);
+                    let line = &cache.rows[y & 3];
+                    for (t, [cb, cr]) in cache.acc.iter().copied().enumerate() {
+                        let (x0, x1) = (2 * t, 2 * t + 1);
+                        let o = &mut row[t * 4..t * 4 + 4];
+                        o[0] =
+                            code(cb * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
+                        o[1] = code(
+                            line.luma[x0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0),
+                            256.0,
+                            65216.0,
+                        ) as u16;
+                        o[2] =
+                            code(cr * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
+                        o[3] = code(
+                            line.luma[x1] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0),
+                            256.0,
+                            65216.0,
+                        ) as u16;
+                    }
+                },
+            );
             vec![u16_plane(out, w * 2, h)]
         }
-        InputFormat::V420 => vec![luma_plane8(), cbcr_plane8()],
-        InputFormat::V0a8 => vec![luma_plane8(), cbcr_plane8(), alpha_plane8()],
-        InputFormat::I420 => {
-            let [cb, cr] = chroma_planes8();
-            vec![luma_plane8(), cb, cr]
-        }
-        InputFormat::I420a => {
-            let [cb, cr] = chroma_planes8();
-            vec![luma_plane8(), cb, cr, alpha_plane8()]
-        }
+        InputFormat::V420 => planes8(false, false),
+        InputFormat::V0a8 => planes8(true, false),
+        InputFormat::I420 => planes8(false, true),
+        InputFormat::I420a => planes8(true, true),
         InputFormat::X420 => {
-            let mut luma = vec![0u16; w * h];
-            crate::par::rows(&mut luma, w, |y, row| {
-                for (x, o) in row.iter_mut().enumerate() {
-                    *o = luma10(ycc(x, y).0[0], x, y);
-                }
-            });
-            let mut chroma = vec![0u16; w * h / 2];
-            crate::par::rows(&mut chroma, w, |cy, row| {
-                for (cx, [cb, cr]) in chroma_row(cy, true).into_iter().enumerate() {
-                    row[cx * 2] = chroma10(cb, cx, cy, 1);
-                    row[cx * 2 + 1] = chroma10(cr, cx, cy, 2);
-                }
-            });
-            vec![u16_plane(luma, w, h), u16_plane(chroma, w, h / 2)]
+            let (luma, cbcr, _) = planes_420(w, h, false, &fill, across, down, luma10, chroma10);
+            vec![u16_plane(luma, w, h), u16_plane(cbcr, w, h / 2)]
         }
         InputFormat::Rgba8 | InputFormat::Rgba16 => {
             // Full-range RGB in the output encoding, straight alpha (PNG), never

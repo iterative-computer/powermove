@@ -101,6 +101,26 @@ required-features = ["engine"]
 name = "videotoolbox"
 required-features = ["engine"]
 
+[[test]]
+name = "chroma_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "dither_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "av_length"
+required-features = ["engine"]
+
+[[test]]
+name = "transfer_tags"
+required-features = ["engine"]
+
+[[test]]
+name = "audio_onset"
+required-features = ["engine"]
+
 [[example]]
 name = "throughput"
 required-features = ["engine"]
