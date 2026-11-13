@@ -36,7 +36,22 @@ pub fn tools() -> &'static Vec<Value> {
     catalog()["tools"].as_array().unwrap()
 }
 pub fn spec(name: &str) -> Option<&'static Value> {
-    tools().iter().find(|t| t["name"] == name)
+    tools()
+        .iter()
+        .chain(native_tools())
+        .find(|t| t["name"] == name)
+}
+/// What a session lists: the pinned main catalog, then the native tools.
+pub fn served_tools() -> Vec<Value> {
+    tools().iter().chain(native_tools()).cloned().collect()
+}
+/// Tools the native app serves beside the pinned main catalog (which they
+/// are not part of): the window's commands, by id.
+pub fn native_tools() -> &'static Vec<Value> {
+    static NATIVE: OnceLock<Vec<Value>> = OnceLock::new();
+    NATIVE.get_or_init(|| {
+        serde_json::from_str(include_str!("../fixtures/native-tools.json")).expect("native tools")
+    })
 }
 pub fn permits(subset: &str, name: &str) -> bool {
     catalog()[subset]
@@ -49,6 +64,7 @@ pub fn permits(subset: &str, name: &str) -> bool {
 pub fn names() -> Vec<String> {
     tools()
         .iter()
+        .chain(native_tools())
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect()
 }

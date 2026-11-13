@@ -282,6 +282,9 @@ impl Controller {
             for (name, args) in run {
                 self.host.borrow().send_command(&name, args);
             }
+            if shown && std::mem::take(&mut self.workspace_after_open) {
+                self.host.borrow().send_command("bringWorkspace", vec![]);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -462,6 +465,9 @@ impl Controller {
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
         self.sync_keymap();
+        if crate::first_run::take_workspace_request() {
+            self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {

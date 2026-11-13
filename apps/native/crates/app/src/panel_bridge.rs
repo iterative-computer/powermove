@@ -320,6 +320,45 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 .await
         }
         "get_panel_layout" => target.settled(cx, |_, editor, _, cx| Ok(live_layout(editor, cx))),
+        // Every command a person has, by id (agent_commands).
+        "list_commands" => target.with(cx, |c, _, _, cx| {
+            let c = c.read(cx);
+            Ok(crate::agent_commands::list(
+                &c.unavailable_commands(),
+                &c.checked_commands(cx),
+                args["query"].as_str().unwrap_or_default(),
+            ))
+        }),
+        "run_command" => {
+            let command = args["command"].as_str().unwrap_or_default().to_owned();
+            let run_args = args["args"].as_array().cloned().unwrap_or_default();
+            let revision = target.with(cx, |c, editor, window, cx| {
+                crate::agent_commands::check(&command, &c.read(cx).unavailable_commands())
+                    .map_err(Error::invalid)?;
+                let revision = c.read(cx).published.as_ref().map(|p| p.revision());
+                // As its menu row or palette row runs it: through the shell.
+                editor.update(cx, |e, cx| {
+                    e.command(
+                        pm_shell::Command {
+                            name: command.clone(),
+                            args: run_args,
+                            token: None,
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                Ok(revision)
+            })?;
+            settle(call, &target, cx).await?;
+            target.with(cx, |c, _, _, cx| {
+                let c = c.read(cx);
+                let now = c.published.as_ref().map(|p| p.revision());
+                Ok(json!({"command": command, "ran": true, "projectChanged": now != revision,
+                    "time": c.time(), "checked": crate::agent_commands::is_checked(&command, &c.checked_commands(cx)),
+                    "message": c.message}))
+            })
+        }
         "get_workspace_state" => target.settled(cx, |c, editor, window, cx| {
             Ok(workspace(windows, c, editor, window, cx))
         }),
