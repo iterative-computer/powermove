@@ -1403,6 +1403,7 @@ pub fn disabled(
         chosen && selected.iter().all(|l| !l.effectively_locked),
     );
     set("ungroupLayers", has("group"));
+    set("interpretFootage", has("video") || has("image"));
     set("releasePrecomp", has("precomp"));
     set("toggleContinuousRaster", has("precomp"));
     for name in ["splitTextWords", "splitTextCharacters", "splitTextLines"] {
@@ -1502,6 +1503,7 @@ const DOCUMENT: &[&str] = &[
     "timeline.revealAll",
     "newComposition",
     "compositionSettings",
+    "interpretFootage",
 ];
 
 /// A command that acts on the project: asked for while one is still

@@ -1083,6 +1083,7 @@ fn exec_time_unsupported_media_leaves_the_target_untouched() {
     std::fs::write(&still, tga(160, 90)).unwrap();
     let mut bad = MapResolver {
         paths: resolver.paths.clone(),
+        ..Default::default()
     };
     bad.paths.insert("still".into(), still);
     let err = r

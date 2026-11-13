@@ -90,6 +90,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
+| `metrics.label_column` | Most an inspector row's label takes before its value | 120 | 120 | 120 | 120 |
 | `metrics.layer_column` | Timeline layer list column width | 320 | 320 | 320 | 320 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
@@ -140,7 +141,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.toolbar_title_width` | Document title slot width | 160 | 160 | 160 | 160 |
 | `metrics.track_row` | Timeline layer row | 30 | 30 | 30 | 30 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
-| `metrics.value_column` | Inspector value column width shared by every row | 128 | 128 | 128 | 128 |
+| `metrics.value_column` | Least width of an inspector row's value column | 128 | 128 | 128 | 128 |
 | `metrics.viewer_3d_collapse` | Viewer width below which the 3D toolbar becomes one pull-down | 560 | 560 | 560 | 560 |
 | `metrics.viewer_3d_labels` | Minimum viewer width for labels in the 3D toolbar | 860 | 860 | 860 | 860 |
 | `metrics.welcome_height` | Welcome window height | 640 | 640 | 640 | 640 |

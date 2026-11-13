@@ -161,7 +161,7 @@ fn applying_a_cube_reaches_rendered_pixels_through_the_kernel() {
     let retained = retain_lut(dir.path(), &source).unwrap();
     assert_ne!(retained, source);
     std::fs::remove_file(&source).unwrap();
-    let commands = lut_commands(&p, "solid", "grade", "Invert.cube", &retained).unwrap();
+    let commands = lut_commands(&p, "solid", "grade", "Invert.cube", &retained, &none()).unwrap();
     k.call_blocking("test", transact(&p, "Apply LUT", commands))
         .unwrap();
     let p = published(&k);
@@ -248,7 +248,7 @@ fn a_cube_fills_the_effects_browsers_empty_lut_effect() {
         .unwrap();
     let p = published(&k);
     let path = dir.path().join("Grade.cube");
-    let commands = lut_commands(&p, "solid", "grade", "Grade.cube", &path).unwrap();
+    let commands = lut_commands(&p, "solid", "grade", "Grade.cube", &path, &none()).unwrap();
     k.call_blocking("test", transact(&p, "Apply LUT", commands))
         .unwrap();
     let p = published(&k);
@@ -263,6 +263,59 @@ fn a_cube_fills_the_effects_browsers_empty_lut_effect() {
     assert_eq!(effects.len(), 1, "the empty effect takes the file");
     let asset = effects[0].get("inputs").unwrap().get("lut").unwrap();
     assert_eq!(asset.get("assetId").unwrap().as_str(), Some("grade"));
+    actor.shutdown();
+}
+
+fn none() -> std::collections::BTreeSet<String> {
+    Default::default()
+}
+
+/// The layer's `fx`, as saved.
+fn effects_of(k: &KernelHandle, layer: &str) -> Vec<serde_json::Value> {
+    let p = published(k);
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, layer).unwrap();
+    let effects = pm_kernel::model::layer_at(root, &at)
+        .unwrap()
+        .get("fx")
+        .unwrap()
+        .to_value();
+    serde_json::from_str(&pm_model::json::to_canonical_string(&effects)).unwrap()
+}
+
+#[test]
+fn applying_a_lut_relinks_the_one_whose_file_is_missing() {
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let apply = |asset: &str, name: &str, missing: &std::collections::BTreeSet<String>| {
+        let p = published(&k);
+        let path = dir.path().join(name);
+        let commands = lut_commands(&p, "solid", asset, name, &path, missing).unwrap();
+        k.call_blocking("test", transact(&p, "Apply LUT", commands))
+            .unwrap();
+    };
+    apply("first", "Look.cube", &none());
+    // The file went away: the next LUT takes the same effect, and its format
+    // follows the new file.
+    apply("second", "Look.3dl", &["first".to_owned()].into());
+    let effects = effects_of(&k, "solid");
+    assert_eq!(effects.len(), 1, "the relink adds no second effect");
+    assert_eq!(effects[0]["inputs"]["lut"]["assetId"], "second");
+    let p = published(&k);
+    let format = p.snapshot.root().unwrap().get("assets").unwrap();
+    assert_eq!(
+        format
+            .get("second")
+            .unwrap()
+            .get("format")
+            .unwrap()
+            .to_value()
+            .as_str(),
+        Some("3dl")
+    );
+    // A LUT that still reads is left alone: another one stacks.
+    apply("third", "Other.cube", &none());
+    assert_eq!(effects_of(&k, "solid").len(), 2);
     actor.shutdown();
 }
 

@@ -19,6 +19,17 @@ use std::{
 };
 
 type Task = Retained<ProtocolObject<dyn WKURLSchemeTask>>;
+
+/// How the app begins a sheet: `(parent, sheet, begin)`, where `begin` makes
+/// the AppKit call; returns whether it began now. The app holds a sheet back
+/// while it is inactive (a sheet orders its parent window front).
+pub type SheetGate = fn(&NSWindow, &NSWindow, Box<dyn FnOnce()>) -> bool;
+static SHEET_GATE: std::sync::OnceLock<SheetGate> = std::sync::OnceLock::new();
+/// Sets the [`SheetGate`] every extension sheet goes through (once per app;
+/// without one, a sheet begins at once).
+pub fn set_sheet_gate(gate: SheetGate) {
+    let _ = SHEET_GATE.set(gate);
+}
 #[derive(Default)]
 pub struct StoreDataStores {
     stores: BTreeMap<String, Retained<WKWebsiteDataStore>>,
@@ -374,7 +385,14 @@ impl Bridge {
         // A page with no window (headless tests) keeps the sheet unshown; its
         // body and actions still work.
         if let Some(parent) = parent {
-            parent.beginSheet_completionHandler(&window, None);
+            let (on, sheet) = (parent.clone(), window.clone());
+            let begin = Box::new(move || on.beginSheet_completionHandler(&sheet, None));
+            match SHEET_GATE.get() {
+                Some(gate) => {
+                    gate(&parent, &window, begin);
+                }
+                None => begin(),
+            }
         }
         Some(child)
     }

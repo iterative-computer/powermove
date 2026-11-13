@@ -225,6 +225,67 @@ fn main() {
             Err(e) => failures.push(format!("{name}: text_raster refused: {e}")),
         }
     }
+    // An effect that reads its layer's rectangle (Levels) grades a text
+    // layer: the ink takes the colour a plain layer of that colour takes.
+    {
+        use pm_protocol::common::{Size, Ticks};
+        let levels = pm_fx_defs::catalog::main_catalog()
+            .current("levels")
+            .expect("levels");
+        let mut p: serde_json::Map<String, Value> = levels
+            .defaults()
+            .into_iter()
+            .map(|(key, value)| (key, ch(value)))
+            .collect();
+        p.insert("gamma".into(), ch(json!(1.25)));
+        p.insert("outBlack".into(), ch(json!(0.04)));
+        let fx = json!([{"id":"grade","type":"levels","on":true,"p":p,"inputs":{},
+            "version": levels.metadata.get("version").cloned().unwrap_or(json!(1))}]);
+        let mut ink = |d: Value, ty: &str, graded: bool| {
+            let mut l = layer("l", ty, d, 128.0, 64.0, 1.0);
+            if graded {
+                l["fx"] = fx.clone();
+            }
+            let v = project(256, 128, 1.0, no_fill(), vec![l]);
+            let mut doc =
+                pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+            doc.set_saving_app_version(Some("1.3.0".into()));
+            r.set_main_effects_for_document(&doc).unwrap();
+            let frame = r
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    Ticks::ZERO,
+                    &pm_render::RenderRequest::sized(Size::new(256, 128), Precision::Float32),
+                    &pm_render::MapResolver::default(),
+                )
+                .expect("the frame draws");
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let pixels = r.read_rgba(&frame).unwrap();
+            // The most covered pixel: solid ink inside a heavy stem.
+            pixels
+                .chunks_exact(4)
+                .max_by(|a, b| a[3].total_cmp(&b[3]))
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .unwrap()
+        };
+        let heavy = json!({"text": "HHH", "font": "SF Pro Display", "weight": 900, "size": 96,
+            "color": "#996633", "align": "center"});
+        let plain = ink(heavy.clone(), "text", false);
+        let text = ink(heavy, "text", true);
+        let solid = ink(json!({"w":64,"h":64,"color":"#996633"}), "solid", true);
+        if plain[3] < 0.999 || (0..3).all(|c| (text[c] - plain[c]).abs() < 1e-3) {
+            failures.push(format!(
+                "Levels on text: ungraded {plain:?}, graded {text:?}: the grade changes solid ink"
+            ));
+        }
+        if (0..4).any(|c| (text[c] - solid[c]).abs() > 1e-4) {
+            failures.push(format!(
+                "Levels on text: ink {text:?}, a plain layer of that colour {solid:?}"
+            ));
+        }
+        println!("{:<72} drawn", "Levels on a text layer");
+    }
     for f in &failures {
         println!("FAILED {f}");
     }

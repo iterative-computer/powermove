@@ -11643,22 +11643,19 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "colors.text",
           },
           "fontSize": {
-            "token": "typography.title",
+            "token": "typography.label",
           },
           "fontWeight": {
             "token": "typography.semibold_weight",
           },
+          "height": {
+            "token": "metrics.row",
+          },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.row",
           },
           "minWidth": {
             "token": "metrics.hit",
-          },
-          "paddingBottom": {
-            "token": "metrics.gap",
-          },
-          "paddingTop": {
-            "token": "metrics.inset",
           },
         },
       },
