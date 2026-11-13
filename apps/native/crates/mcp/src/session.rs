@@ -799,14 +799,16 @@ impl McpSession {
                 } else {
                     None
                 };
+                let scene_assets = if name == "edit_3d" && pm_scene3d::geometry::needs_geometry(args) {
+                    Some(host.scene_geometry(&id)?)
+                } else { None };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         host.playhead(&id),
-                        host.scene3d_assets
-                            .as_deref()
+                        scene_assets.as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
                 } else if strips.is_none() && video.is_none() {
