@@ -10,6 +10,18 @@
 //! most is ever on the GPU. The commands and their order are the frame's
 //! own: its pixels are those of the frame submitted whole.
 //!
+//! What this guarantees: OPPORTUNITIES to give way, at every slice point,
+//! not a bound on how long the GPU is held. A unit (one layer's draws, one
+//! effect pass) is never split: a slice of one unit takes what that unit
+//! takes (26.8 ms has been measured for one effect pass of a real project,
+//! more than three refreshes at 120 Hz). The budget only decides how many
+//! units share a slice. The gate is asked with the slice's expected cost,
+//! uncapped, so a unit known to be slow waits for a moment it fits (right
+//! after a playing frame is submitted) as long as the gate holds it; the
+//! gate's own bound decides when it goes anyway. Not sliced at all: the
+//! vector cache's own submissions while a layer's shapes or SVG are
+//! prepared, and everything after a slice has run away ([`RUNAWAY`]).
+//!
 //! `gate` is asked at every slice point and before each submission, with
 //! what the submission is expected to cost: it may wait (for a moment the
 //! GPU is free of interactive work) and says whether to stop. Once it says
@@ -173,7 +185,9 @@ impl Slices {
         });
         let asked = Instant::now();
         // A stopped frame still asks: what is left of it waits its turn too.
-        self.report.stopped |= (self.gate)(expected.min(self.budget).max(Duration::from_micros(1)));
+        // What it is expected to cost, uncapped: a unit known to be slow is
+        // asked for at its cost, never at the budget's.
+        self.report.stopped |= (self.gate)(expected.max(Duration::from_micros(1)));
         self.report.held += asked.elapsed();
         self.report
             .first_submission
@@ -265,6 +279,27 @@ mod tests {
 
     fn slices(budget_ms: u64) -> Slices {
         Slices::new(Duration::from_millis(budget_ms), Arc::new(|_| false))
+    }
+
+    /// A unit that took longer than a slice's budget is asked for at what
+    /// it took, not at the budget: its gate can hold it for a moment it
+    /// fits.
+    #[test]
+    fn a_slow_unit_is_asked_for_at_its_cost() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let mut s = Slices::new(
+            Duration::from_millis(6),
+            Arc::new(move |expected| {
+                seen.lock().unwrap().push(expected);
+                false
+            }),
+        );
+        s.learn(Class::Effect, 1, Duration::from_micros(26_800));
+        s.note(Class::Effect);
+        s.admit();
+        let last = *asked.lock().unwrap().last().unwrap();
+        assert!(last >= Duration::from_micros(26_800), "asked at {last:?}");
     }
 
     /// A slice holds one class of units, as many as the last slices showed

@@ -145,13 +145,14 @@ pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
 /// (`FrameSpec::final_picture`, drawn by `crate::settle`): a click through
 /// the timeline or a held arrow key never starts one.
 pub const SETTLE_IDLE_SECONDS: f64 = 0.3;
-/// The GPU time one slice of a settled picture may take: what a picture
-/// someone waits for can find ahead of it on the GPU. About a preview frame
-/// of a light composition, a small share of one of a heavy one.
+/// The GPU time a slice of a settled picture is sized to: how many units
+/// (layers, effect passes) share a slice. Not a bound: a single unit takes
+/// what it takes (see `pm_render::slices`).
 pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
 /// The longest a slice waits for the worker's pictures (a viewer being
-/// drawn, a playing viewer's next frame): past it the slice goes, so a
-/// paused viewer settles in bounded time while another plays or is dragged.
+/// drawn, a playing viewer's next frame) at one slice point: past it the
+/// slice goes, so another viewer playing or being dragged never keeps a
+/// paused one from settling (it may then delay one of the playing frames).
 pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
 /// Auto's adaptive resolution, which applies only while the playhead is

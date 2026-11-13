@@ -9,10 +9,15 @@
 //! - decoding, planning and encoding never hold the worker;
 //! - its GPU work is submitted in time slices (`pm_render::slices`), one on
 //!   the GPU at a time, each admitted by a gate: a picture someone waits
-//!   for goes first, and a playing viewer's frames are left their room
-//!   ([`Traffic`]). A slice waits for them at most
-//!   [`policy::SETTLE_HOLD_SECONDS`], so a paused viewer settles in bounded
-//!   time whatever another viewer does;
+//!   for goes first, and a playing viewer's next frame is left its room
+//!   ([`Traffic`]): a slice that would still run when that frame is
+//!   submitted waits for it. Each wait lasts [`policy::SETTLE_HOLD_SECONDS`]
+//!   at most, so another viewer playing never keeps a paused one from
+//!   settling. What this does NOT give is a bound on the delay a playing
+//!   viewer can meet: a slice point is a chance to give way, a unit of
+//!   work (one layer, one effect pass) is never split, and one that takes
+//!   longer than the room between two playing frames, or that its wait
+//!   bound lets go, delays the next playing frame by what it takes;
 //! - it gives way as soon as its viewer asks for anything newer, at the
 //!   next layer;
 //! - its picture is handed to the worker, which shows it only for the
