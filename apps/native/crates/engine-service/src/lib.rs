@@ -3382,12 +3382,22 @@ mod worker_tests {
         assert_eq!(status.no_drawable, 0);
         let pixels = status.frame.unwrap().pixels.unwrap();
         assert_eq!(pixels.len(), 200 * 100);
-        // Settled: no frame keeps being asked for.
-        std::thread::sleep(Duration::from_millis(300));
+        // Settled: no frame keeps being asked for. (Its settled picture
+        // comes once the viewer has rested; nothing after that.)
         let completed = || v.status().frame.and_then(|f| f.completion_host_seconds);
-        let settled = completed();
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(completed(), settled, "a paused viewer stays idle");
+        let quiet = Duration::from_secs_f64(policy::SETTLE_IDLE_SECONDS + 0.5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let before = completed();
+            std::thread::sleep(quiet);
+            if completed() == before {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a paused viewer keeps drawing"
+            );
+        }
         assert_eq!(v.status().no_drawable, 0);
     }
 

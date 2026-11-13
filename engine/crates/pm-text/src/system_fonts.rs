@@ -36,11 +36,19 @@ static LISTINGS: AtomicU64 = AtomicU64::new(0);
 /// A registry read the font file at `path` when it was `version` (it keeps
 /// those bytes until the installed fonts change).
 pub fn note_read(path: &Path, version: FileVersion) {
+    let path = one_spelling(path.to_owned());
     let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
-    match read.iter_mut().find(|(p, _)| p == path) {
+    match read.iter_mut().find(|(p, _)| *p == path) {
         Some(known) => known.1 = version,
-        None => read.push((path.to_owned(), version)),
+        None => read.push((path, version)),
     }
+}
+
+/// CoreText names one file by more than one path (a font registered from
+/// `/private/tmp/…` comes back as `/tmp/…` from its face): the lists and
+/// the files read are compared by the file's resolved path.
+fn one_spelling(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The font files read so far, with the version each was read at.
@@ -137,7 +145,11 @@ pub fn available_files() -> Vec<PathBuf> {
         use objc2_core_foundation::CFURL;
         let urls = unsafe { objc2_core_text::CTFontManagerCopyAvailableFontURLs() };
         let urls: &objc2_core_foundation::CFArray<CFURL> = unsafe { urls.cast_unchecked() };
-        let mut files: Vec<PathBuf> = urls.iter().filter_map(|url| url.to_file_path()).collect();
+        let mut files: Vec<PathBuf> = urls
+            .iter()
+            .filter_map(|url| url.to_file_path())
+            .map(one_spelling)
+            .collect();
         files.sort();
         files.dedup();
         files

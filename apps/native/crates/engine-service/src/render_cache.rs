@@ -1092,6 +1092,7 @@ impl DiskFrames {
             frames.iter().map(|(n, f)| (*n, f.key.clone())).collect();
         let (source, size, rate) = (frames_now.source.clone(), frames_now.size, frames_now.rate);
         let media = frames_now.identity.media.clone();
+        let answering = frames_now.identity.overrides;
         let (cache, content_named) = (state.cache.clone(), state.content_named.clone());
         let serial = state.fill.serial + 1;
         state.fill = Fill {
@@ -1130,9 +1131,10 @@ impl DiskFrames {
             budget_us,
             frame_ticks: rate.frame_start(1).unwrap_or(0),
             probe_scale,
-            media,
+            media: media.clone(),
             content_named,
         };
+        let unbound = (media, answering);
         let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill, reserve)
             .and_then(|request| {
@@ -1151,7 +1153,7 @@ impl DiskFrames {
         let weak = Arc::downgrade(&self.inner);
         let thread = std::thread::Builder::new()
             .name("pm-render-fill".into())
-            .spawn(move || run_fill(weak, serial, storage, cache, order, started))
+            .spawn(move || run_fill(weak, serial, storage, cache, unbound, order, started))
             .map_err(|e| e.to_string())?;
         *running = Some(Running {
             job,
@@ -1843,16 +1845,24 @@ fn pm_kernel_free_id() -> pm_protocol::common::JobId {
 
 /// The fill thread: follows the child and lands what it reports: costs and
 /// refusals by key, stored frames while their storage is current and their
-/// key is the frame's, progress while the fill is the current one. A stored
-/// frame whose report is not taken (the state has moved on: an edit, a
-/// media file saved again, another folder) is removed from `cache`, the
-/// store it was written to: nothing the cache does not vouch for stays on
-/// disk under a key.
+/// key is the frame's, progress while the fill is the current one.
+///
+/// A stored frame whose report is not taken (the state has moved on) stays
+/// on disk only where the child itself held the frame to its key: the
+/// document and definitions it was sent, the fonts its fence held, the
+/// media files it read. What the child cannot hold is `unbound`, the
+/// state's media as a whole and the override wrappers answering it (their
+/// answers come from the app as it is now): when either is another in the
+/// state the cache has moved on to, or that state is gone, the frame is
+/// removed from `cache`, the store it was written to. (A frame rendered
+/// while an edit or a font change was in the way stays: it is its key's
+/// picture, found again when that state comes back.)
 fn run_fill(
     inner: Weak<Inner>,
     serial: u64,
     storage: u64,
     cache: Option<Arc<RenderCache>>,
+    unbound: (Vec<Stamp>, Option<u64>),
     order: Vec<(i64, RenderKey)>,
     started: Result<crate::jobs::ExportHandle, String>,
 ) {
@@ -1887,7 +1897,10 @@ fn run_fill(
                         taken = true;
                     }
                 }
-                if report.stored && !taken {
+                let held = state.frames.as_ref().is_some_and(|f| {
+                    f.identity.media == unbound.0 && f.identity.overrides == unbound.1
+                });
+                if report.stored && !taken && !held {
                     not_taken.push(key);
                 }
                 if report.refused {
@@ -1909,10 +1922,12 @@ fn run_fill(
                         && error.as_deref() != Some(LIMIT_FULL)
                     {
                         Some(BACKGROUND_LOW_DISK.to_owned())
-                    } else if state.fill.background && error.as_deref() == Some(MEDIA_CHANGED) {
-                        // Background rendering goes on by itself.
-                        None
                     } else {
+                        // A fill that met a changed file keeps its reason:
+                        // the state is taken again at once (below), and
+                        // rendering starts over for the new one; were the
+                        // files found unchanged after all, the same fill is
+                        // not started again and again.
                         error
                     };
                     state.fill.error = error;
@@ -3590,22 +3605,12 @@ mod tests {
     }
 
     /// A frame a fill stored for a state the cache has moved on from (its
-    /// report is not taken) does not stay on disk under that state's key.
+    /// report is not taken): it stays on disk when the child itself held it
+    /// to its key (an edit meanwhile: the frame is the old state's picture,
+    /// found again on undo), and is removed when what moved is something
+    /// the child cannot hold, here the override wrappers answering it.
     #[test]
-    fn a_frame_whose_report_is_not_taken_is_removed() {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = DiskFrames::default();
-        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
-            .unwrap();
-        disk.observe(&scene(), &[], None, None, None, 1, Ticks::ZERO);
-        ready(&disk);
-        let (cache, keys) = keys_of(&disk, 1., 1.1);
-        // The viewer is busy: the child waits at its first submission.
-        let activity = crate::jobs::Activity::default();
-        activity.set(true);
-        disk.start_fill(1., 1.1, &job_binary(), activity.clone(), |_| {})
-            .unwrap();
-        // Meanwhile an edit: another state, other keys.
+    fn a_frame_whose_report_is_not_taken_stays_only_where_the_child_held_it() {
         let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
         let edited = scene_with(
             serde_json::json!({
@@ -3617,16 +3622,37 @@ mod tests {
             }),
             None,
         );
-        assert!(disk.observe(&edited, &[], None, None, None, 1, Ticks::ZERO));
-        ready(&disk);
-        assert_ne!(keys_of(&disk, 1., 1.1).1, keys, "the edit moved the keys");
-        activity.set(false);
-        settle(&disk, |b| !b.running);
-        assert_eq!(
-            stored(&cache, &keys),
-            0,
-            "frames whose reports were not taken are left on disk"
-        );
+        // The state the cache moves on to while the child waits, and how
+        // many of the frames stored for the state before stay.
+        for (moved_on, overrides, stay) in [(edited, None, true), (scene(), Some(7), false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let disk = DiskFrames::default();
+            disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+                .unwrap();
+            disk.observe(&scene(), &[], None, None, None, 1, Ticks::ZERO);
+            ready(&disk);
+            let (cache, keys) = keys_of(&disk, 1., 1.1);
+            // The viewer is busy: the child waits at its first submission.
+            let activity = crate::jobs::Activity::default();
+            activity.set(true);
+            disk.start_fill(1., 1.1, &job_binary(), activity.clone(), |_| {})
+                .unwrap();
+            assert!(disk.observe(&moved_on, &[], overrides, None, None, 1, Ticks::ZERO));
+            ready(&disk);
+            assert_ne!(keys_of(&disk, 1., 1.1).1, keys, "the state moved on");
+            activity.set(false);
+            settle(&disk, |b| !b.running);
+            assert_eq!(
+                stored(&cache, &keys),
+                if stay { keys.len() } else { 0 },
+                "after {}",
+                if stay {
+                    "an edit"
+                } else {
+                    "other override wrappers"
+                }
+            );
+        }
     }
 
     /// A same-length rewrite of a media file with its modification time put
@@ -3687,15 +3713,27 @@ mod tests {
                 },
             )
         };
+        // The picture once the still has landed (a preview's still is
+        // decoded beside the frame, which stands in for it meanwhile).
         let mut shown = |spec: FrameSpec| {
-            let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
-            let sub = engine
-                .frame(&scene, spec, None, &Default::default(), true, trace)
-                .unwrap()
-                .unwrap();
-            sub.commit();
-            sub.complete().unwrap();
-            sub.pixels()
+            let start = Instant::now();
+            loop {
+                let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
+                let sub = engine
+                    .frame(&scene, spec, None, &Default::default(), true, trace)
+                    .unwrap()
+                    .unwrap();
+                sub.commit();
+                sub.complete().unwrap();
+                if !sub.stand_ins {
+                    return sub.pixels();
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(60),
+                    "the still never landed"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
         };
         let dark = shown(spec(1.));
         grey_still(&still, 220);
@@ -3708,8 +3746,33 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
+        let again = shown(spec(2.));
+        // The same frame from an engine that never saw the file change.
+        let mut fresh = Engine::new(pm_gpu::Gpu::new("live-read-fresh").unwrap()).unwrap();
+        let mut expected = None;
+        let start = Instant::now();
+        while expected.is_none() {
+            let sub = fresh
+                .frame(
+                    &scene,
+                    spec(2.),
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            expected = (!sub.stand_ins).then(|| sub.pixels());
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "the still never landed"
+            );
+        }
         assert_eq!(
-            apart(&shown(spec(2.)), &dark),
+            apart(&again, &expected.unwrap()),
             0.,
             "a frame drawn from the changed file was kept as a frame of the file as it was"
         );
