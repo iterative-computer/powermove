@@ -4691,9 +4691,65 @@ mod tests {
             "now in the realm, drop from the list: {gained:?}"
         );
     }
-    /// The raw members a real extension used to cut a layer out of a clip:
-    /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
-    /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
+    /// What an extension changes inside `PM.Edit.mutate` stays in its own
+    /// project afterwards: the realm is told its edit landed, so the layer it
+    /// just added is still there when it looks, and its next change does not
+    /// write the project back without it (the layer used to be deleted by
+    /// the extension's next write to the layer list).
+    #[test]
+    fn a_layer_added_inside_an_edit_stays_in_the_realms_project() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "edits",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   const seen=[];
+                   api.commands.register({id:'edits.add',label:'Add',run(id){
+                     const done=PM.Edit.mutate('Add',()=>{PM.proj.name='Edited '+id;PM.proj.layers.push(layer(id))});
+                     seen.push({ok:done.ok,layers:PM.proj.layers.map(l=>l.id),name:PM.proj.name});
+                     api.storage.set('seen',seen)}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["first", "second", "third"] {
+            fixture.host.run_command("edits.add", json!([id]));
+            fixture.until("the edit lands", |_| ids(&fixture).contains(&id.to_owned()));
+        }
+        fixture.until("the realm reported", |_| {
+            stored(&fixture.kernel, "seen")
+                .is_some_and(|s| s.as_array().is_some_and(|s| s.len() == 3))
+        });
+        assert_eq!(
+            ids(&fixture),
+            ["first", "second", "third"],
+            "every layer is kept"
+        );
+        assert_eq!(
+            stored(&fixture.kernel, "seen").unwrap(),
+            json!([
+                {"ok":true,"layers":["first"],"name":"Edited first"},
+                {"ok":true,"layers":["first","second"],"name":"Edited second"},
+                {"ok":true,"layers":["first","second","third"],"name":"Edited third"},
+            ]),
+            "the realm sees its own edits"
+        );
+    }
     /// Raw `PM.addLayer` called on its own (a command, a panel callback: no
     /// edit open) is one step of the project's history: Undo takes the layer
     /// out and Redo puts it back. Called inside an edit it belongs to that
@@ -4715,17 +4771,26 @@ mod tests {
             )],
         );
         let fixture = Fixture::start(root);
-        fixture.until("activation", |host| host.publication().settled && host.is_ready());
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
         let first = |fixture: &Fixture| {
             let published = fixture.kernel.published("window").unwrap();
-            published.snapshot.layers(None).first().map(|l| l.id.clone())
+            published
+                .snapshot
+                .layers(None)
+                .first()
+                .map(|l| l.id.clone())
         };
         let history = |call: HistoryCall| {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let ack = fixture
                     .kernel
-                    .call_blocking("window", Request::new(pm_kernel::Caller::native(), call.clone()))
+                    .call_blocking(
+                        "window",
+                        Request::new(pm_kernel::Caller::native(), call.clone()),
+                    )
                     .unwrap();
                 if matches!(ack.reply, Reply::Bool(true)) {
                     return;
@@ -4737,20 +4802,39 @@ mod tests {
         let before = first(&fixture);
         let name = fixture.name();
         fixture.host.run_command("raw-pm.alone", json!([]));
-        fixture.until("the layer is added", |_| first(&fixture).as_deref() == Some("alone"));
+        fixture.until("the layer is added", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
         history(HistoryCall::Undo);
-        assert_eq!(first(&fixture), before, "Undo takes the layer out");
+        fixture.until("Undo takes the layer out", |_| first(&fixture) == before);
         history(HistoryCall::Redo);
-        assert_eq!(first(&fixture).as_deref(), Some("alone"), "Redo puts it back");
+        fixture.until("Redo puts it back", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
         // Inside an edit: one entry with the edit's other change.
         fixture.host.run_command("raw-pm.both", json!([]));
         fixture.until("the edit lands", |_| {
             first(&fixture).as_deref() == Some("in-edit") && fixture.name() == "Both"
         });
+        let published = fixture.kernel.published("window").unwrap();
+        let all: Vec<String> = published
+            .snapshot
+            .layers(None)
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert!(
+            all.contains(&"alone".to_owned()),
+            "the earlier layer is kept: {all:?}"
+        );
         history(HistoryCall::Undo);
-        assert_eq!(first(&fixture).as_deref(), Some("alone"));
-        assert_eq!(fixture.name(), name, "one Undo for the whole edit");
+        fixture.until("one Undo for the whole edit", |_| {
+            first(&fixture).as_deref() == Some("alone") && fixture.name() == name
+        });
     }
+    /// The raw members a real extension used to cut a layer out of a clip:
+    /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
+    /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
     #[test]
     fn media_store_reads_an_assets_file_and_add_layer_inserts_a_layer() {
         let root = tempfile::tempdir().unwrap();
