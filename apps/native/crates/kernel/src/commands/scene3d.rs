@@ -81,6 +81,7 @@ impl Scene3dCommand {
                     .to_value();
                 let mut expected=import_metadata(asset_id,receipt);
                 if current.get("native3dBounds").is_none(){expected.as_object_mut().unwrap().remove("native3dBounds");}
+                if current.get("native3dMaterials").is_none(){expected.as_object_mut().unwrap().remove("native3dMaterials");}
                 if current != pm_scene3d::to_model(&expected) {
                     return Err(invalid("3D import source changed; recover again"));
                 }
@@ -1028,7 +1029,7 @@ fn original_ids(id: &str, receipt: &pm_scene3d::import::archive::Receipt) -> Vec
 fn import_metadata(id: &str, receipt: &pm_scene3d::import::archive::Receipt) -> serde_json::Value {
     let b = receipt.primary();
     let sources=receipt.originals().iter().zip(original_ids(id,receipt)).map(|(b,source_id)|serde_json::json!({"id":source_id,"name":b.name(),"mime":b.mime(),"size":b.length(),"sha256":b.hash()})).collect::<Vec<_>>();
-    serde_json::json!({"id":id,"name":b.name(),"kind":"model","format":b.name().rsplit('.').next().unwrap_or(""),"size":b.length(),"persisted":true,"revision":b.hash(),"native3dSources":sources,"native3dBounds":{"version":1,"bounds":pm_scene3d::geometry::bounds_json(receipt.bounds())}})
+    serde_json::json!({"id":id,"name":b.name(),"kind":"model","format":b.name().rsplit('.').next().unwrap_or(""),"size":b.length(),"persisted":true,"revision":b.hash(),"native3dSources":sources,"native3dBounds":{"version":1,"bounds":pm_scene3d::geometry::bounds_json(receipt.bounds())},"native3dMaterials":pm_scene3d::import::material_slots_json(&receipt.model())})
 }
 pub(crate) fn import_media(command: &crate::Command) -> Vec<crate::project_io::MediaEntry> {
     let (asset_id, receipt) = match command {

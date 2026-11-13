@@ -35,6 +35,7 @@ test("UI -> v4 host data -> Rust model -> actual kernel ack -> publication", asy
   let state!: ViewerSnapshot;
   let pending = Promise.resolve();
   const actions = {
+    command() {},
     open() {},
     drive(element: string, argument?: any) {
       pending = service.drive(element, argument).then(() => {});

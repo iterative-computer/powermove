@@ -69,13 +69,14 @@ describe("timeline: accepted six-op trees (provisional placeholders, not visual 
 test("one track-area focus stop, non-focusable rows, conditional graph menu and tabs", async () => {
   const { root, commits } = recorder();
   await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  // v1's order: the tab row (tabs, then Layers / Tracks), then the head over
+  // the layer column (play, time, graph switch), then the tracks.
   expect(focusIds(root, replay(commits).at(-1).focusOrder)).toEqual([
-    "timeline:play",
-    "timeline:time",
     "timeline:tab:launch",
     "P0-0:Layers",
-    "P0-1:DopeSheet",
-    "timeline:snap",
+    "timeline:play",
+    "timeline:time",
+    "timeline:graph",
     "timeline:tracks",
   ]);
   await root.render(
@@ -104,7 +105,6 @@ test("header actions preserve model enums, snap intent and composition identity"
   for (const id of [
     "timeline:play",
     "timeline:time",
-    "timeline:snap",
     "timeline:tab:end",
     "timeline:tab-close:launch",
   ])
@@ -116,10 +116,47 @@ test("header actions preserve model enums, snap intent and composition identity"
   expect(actions).toEqual([
     { type: "play" },
     { type: "timeEdit" },
-    { type: "snap" },
     { type: "tab", id: "end", close: false },
     { type: "tab", id: "launch", close: true },
     { type: "mode", mode: "Tracks" },
+  ]);
+  await root.dispose();
+});
+
+test("v1 head: one graph switch, its options while shown, snapping only in Tracks", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  const send = (a: Intent) => actions.push(a);
+  // The switch returns to the graph view last shown: start from Graph.
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "Graph" }} send={send} />,
+  );
+  await root.render(<TimelinePanel frame={frame()} send={send} />);
+  // Layers mode, dope sheet: no options, no snapping (v1 hides the magnet).
+  expect(byId(root, "timeline:graph-options")).toBeUndefined();
+  expect(byId(root, "timeline:snap")).toBeUndefined();
+  expect(byId(root, "timeline:view")).toBeUndefined();
+  await drive(root, "timeline:graph");
+  // Shown: the switch is lit and turns it off; the options appear.
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "Combined" }} send={send} />,
+  );
+  expect(byId(root, "timeline:graph-options")).toBeDefined();
+  await drive(root, "timeline:graph");
+  // Off again, it comes back to the view last shown (layer bars kept).
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "DopeSheet" }} send={send} />,
+  );
+  await drive(root, "timeline:graph");
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), mode: "Tracks" }} send={send} />,
+  );
+  await drive(root, "timeline:snap");
+  expect(actions).toEqual([
+    { type: "view", view: "Graph" },
+    { type: "view", view: "DopeSheet" },
+    { type: "view", view: "Combined" },
+    { type: "snap" },
   ]);
   await root.dispose();
 });

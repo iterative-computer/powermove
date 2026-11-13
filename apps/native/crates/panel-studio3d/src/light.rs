@@ -77,15 +77,34 @@ fn current(p: &Published, time: f64) -> Result<Option<(Value, Snapshot, Kind)>> 
     };
     Ok(Some((l.clone(), state, kind)))
 }
+/// Imported models a light can be aimed at, in layer order.
+fn models(p: &Published) -> Result<Vec<Value>> {
+    let Some(root) = p.snapshot.root() else {
+        return Ok(vec![]);
+    };
+    let Some(comp) = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref()) else {
+        return Ok(vec![]);
+    };
+    let comp = from_model(&comp.to_value())?;
+    Ok(comp["layers"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|l| pm_scene3d::part_material::is_model(l))
+        .map(|l| json!({"v":l["id"],"label":l["name"]}))
+        .collect())
+}
 pub(crate) fn projection(p: &Published, time: f64, settings: &Settings) -> Result<Value> {
+    let models = models(p)?;
     let Some((l, s, kind)) = current(p, time)? else {
         return Ok(
-            json!({"settings":settings,"hint":"Select a light to aim it, or Add one.","rows":[]}),
+            json!({"settings":settings,"hint":"Select a light to aim it, or Add one.","rows":[],"models":models}),
         );
     };
     if settings.add {
         return Ok(
-            json!({"settings":settings,"hint":format!("Click a model to add a {} there.",pm_scene3d::presentation::light_name(match settings.kind {"spot"=>Kind::Spot,"point"=>Kind::Point,"sun"=>Kind::Sun,_=>Kind::Area})),"rows":[]}),
+            json!({"settings":settings,"hint":format!("Click a model to add a {} there.",pm_scene3d::presentation::light_name(match settings.kind {"spot"=>Kind::Spot,"point"=>Kind::Point,"sun"=>Kind::Sun,_=>Kind::Area})),"rows":[],"models":models}),
         );
     }
     let mut rows = vec![
@@ -100,8 +119,14 @@ pub(crate) fn projection(p: &Published, time: f64, settings: &Settings) -> Resul
     if kind == Kind::Spot {
         rows.push(json!({"id":"spread","label":"Spread","value":s.angle,"min":1,"max":89,"log":false,"tooltip":"How wide the spotlight’s beam is."}));
     }
+    if let Some(k) = l["d"]["data"]["light"]["p"]["color"]
+        .as_str()
+        .and_then(light_tool::kelvin_of)
+    {
+        rows.push(json!({"id":"temperature","label":"Temperature","value":k,"min":1800,"max":12000,"log":false,"unit":"K","tooltip":"Warm (low) to cool (high) light colour."}));
+    }
     Ok(
-        json!({"settings":settings,"name":l["name"],"kind":pm_scene3d::presentation::light_name(kind),"locked":l["lock"]==true,"rows":rows}),
+        json!({"settings":settings,"name":l["name"],"kind":pm_scene3d::presentation::light_name(kind),"locked":l["lock"]==true,"rows":rows,"models":models}),
     )
 }
 pub(crate) fn adjustment(p: &Published, time: f64, id: &str, arg: Value) -> Result<Value> {

@@ -19,6 +19,7 @@ pub mod memory_admission;
 pub mod pro_edit;
 pub mod registration;
 pub mod registration_cli;
+mod recovery;
 pub mod scene3d;
 pub mod services;
 pub mod session;

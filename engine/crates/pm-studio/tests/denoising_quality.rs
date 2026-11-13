@@ -337,3 +337,73 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
         }
     }
 }
+
+#[test]
+fn a_far_clipped_catcher_miss_never_shades_an_invalid_surface_at_the_horizon() {
+    let mut scene=glass_detail();scene.world=World::default();
+    scene.objects=vec![Object{mesh:mesh::sphere(v3(0.,70.,0.),30.,24,48),material:1}];
+    scene.shadow_catcher=true;scene.backdrop=Vec3::splat(0.9);
+    scene.environment=(Vec3::splat(0.08),Vec3::splat(0.08));
+    scene.camera=Camera::lens(v3(170.,140.,420.),v3(0.,70.,0.),60.,0.);
+    let (w,h)=(256u32,144u32);let mut renderer=Renderer::new(w,h).unwrap();
+    for hardware in [false,true] {for far in [600.,10000.] {
+        renderer.hardware_rt=hardware;renderer.set_scene(&scene,&scene.prepare());
+        renderer.set_clip_planes(Some(0.01),Some(far));renderer.caustics_enabled=false;
+        renderer.trace(16,8,true,0);let pixels=renderer.finish(0).0;
+        let minimum=(0..h/3).flat_map(|y|(0..w/5).map(move|x|((y*w+x)*4) as usize))
+            .map(|i|pixels[i].min(pixels[i+1]).min(pixels[i+2])).min().unwrap();
+        eprintln!("CATCHER_HORIZON hardware={hardware} far={far} min={minimum}");
+        assert!(minimum>=220,"far-clipped empty backdrop turned dark: hardware={hardware} far={far} min={minimum}");
+    }}
+}
+
+#[test]
+fn a_front_facing_polygon_never_goes_black_when_its_smooth_normal_faces_away() {
+    // A low camera sees a terrain ridge's front polygon while its averaged
+    // vertex normal can point behind the view. Rejecting that BSDF creates
+    // black triangles along the hilltop, even under a uniform white sky.
+    let mut scene=glass_detail();
+    let mut ridge=Mesh::default();
+    ridge.positions=vec![v3(-4.,-2.,8./3.),v3(4.,-2.,8./3.),v3(4.,2.,-8./3.),v3(-4.,2.,-8./3.)];
+    ridge.uvs=vec![[0.,0.],[1.,0.],[1.,1.],[0.,1.]];
+    ridge.indices=vec![[0,1,2],[0,2,3]];
+    scene.materials=vec![Material::dielectric(Vec3::splat(0.7),1.)];
+    scene.camera=Camera::lens(v3(0.,0.,5.),Vec3::ZERO,50.,0.);
+    let mut renderer=Renderer::new(48,48).unwrap();
+    for hardware in [false,true] {
+        renderer.hardware_rt=hardware;
+        for normal in [v3(0.,0.8,0.6),v3(0.,0.95,-0.3).normalize()] {
+            ridge.normals=vec![normal;4];
+            scene.objects=vec![Object{mesh:ridge.clone(),material:0}];
+            renderer.set_scene(&scene,&scene.prepare());renderer.caustics_enabled=false;
+            renderer.trace(32,8,true,0);let pixels=renderer.finish(0).0;
+            let center=&pixels[(24*48+24)*4..(24*48+24)*4+4];
+            eprintln!("RIDGE_NORMAL hardware={hardware} normal={normal:?} center={center:?}");
+            assert!(center[..3].iter().all(|&v|v>120),"a visible front polygon lost all environment light: {center:?}");
+        }
+    }
+}
+
+
+#[test]
+fn adaptive_matte_caustic_receivers_preserve_reference_policy_and_sample_ceiling() {
+    let mut scene=glass_detail();
+    scene.lights.push(pm_studio::scene::Softbox::aimed(Vec3::ZERO,-30.,45.,6.,3.,3.,Vec3::splat(4.)));
+    let mut r=Renderer::new(64,48).unwrap();
+    for hardware in [false,true] {
+        r.hardware_rt=hardware;r.caustics_enabled=true;
+        r.set_scene(&scene,&scene.prepare());r.set_precomputed_caustics(true);
+        r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;
+        r.trace(128,8,true,64);
+        let counts=r.sample_counts();let ids=r.first_hit_ids();
+        let matte:Vec<_>=counts.iter().zip(ids).filter_map(|(&n,id)|(id==2).then_some(n)).collect();
+        assert!(matte.len()>100 && matte.iter().all(|&n|n>=24.),"undersampled finite caustic receiver: {matte:?}");
+        assert!(matte.iter().any(|&n|n<128.),"quiet receivers must still converge");
+        r.sampling_policy=Default::default();r.trace(128,8,true,64);
+        let counts=r.sample_counts();let ids=r.first_hit_ids();
+        assert!(counts.iter().zip(ids).any(|(&n,id)|id==2 && n<24.),"legacy/reference policy changed");
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;r.trace(16,8,true,64);
+        assert!(r.sample_counts().iter().all(|&n|n<=16.),"explicit sample ceiling must remain authoritative");
+    }
+}

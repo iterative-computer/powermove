@@ -24,7 +24,7 @@ struct Params {
     a: vec4<u32>,
     // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
-    // chroma plane width, height; quantize to f16; convert primaries.
+    // chroma plane width, height; flags (1: f16 storage, 2: legacy RGBA8 input); convert primaries.
     c: vec4<u32>,
     // chroma origin on the luma grid (xy).
     origin: vec4<f32>,
@@ -173,7 +173,11 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 // sub-blacks survive linearisation and any primaries conversion for every
 // reading; only 8-bit storage or display clips them. PQ and HLG are defined
 // on 0..1, so their signal is clipped.
-fn to_working(c: vec3<f32>) -> vec3<f32> {
+fn to_working(input: vec3<f32>) -> vec3<f32> {
+    var c = input;
+    if ((P.c.z & 2u) != 0u) {
+        c = floor(clamp(c, vec3f(0.0), vec3f(1.0)) * 255.0 + 0.5) / 255.0;
+    }
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
         return c;
@@ -324,7 +328,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         w = mix(mix(working(decoded(a)), working(decoded(b)), t.x),
                 mix(working(decoded(c)), working(decoded(d)), t.x), t.y);
     }
-    if (P.c.z == 1u) {
+    if ((P.c.z & 1u) != 0u) {
         w = vec4<f32>(quantizeToF16(w.r), quantizeToF16(w.g), quantizeToF16(w.b), quantizeToF16(w.a));
     }
     textureStore(out, xy, w);

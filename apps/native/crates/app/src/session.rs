@@ -104,6 +104,9 @@ pub struct Controller {
     pub guides: bool,
     /// What the viewer shows of the picture (display only).
     pub channels: pm_engine_service::Channels,
+    /// The imported-model part a viewer double-click focused, `(layer,
+    /// material slot, request number)`; Properties reveals that slot.
+    pub part_focus: Option<(String, u64, u64)>,
     /// View ▸ Show Rulers and Show Grid.
     pub rulers: bool,
     pub grid: bool,
@@ -732,6 +735,7 @@ impl Controller {
             safe_areas: false,
             guides: false,
             channels: Default::default(),
+            part_focus: None,
             rulers: false,
             grid: false,
             skimming: Default::default(),
@@ -2098,8 +2102,14 @@ impl Controller {
     ) {
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
-        let alert = documents::open_error(name, open_failure(error), exists).notice();
-        self.errors.borrow_mut().push("Project", &alert.message);
+        let failure = open_failure(error);
+        let alert = documents::open_error(name, failure, exists).notice();
+        // Where the file that replaced the choice is: the kernel's words.
+        let logged = match failure {
+            documents::OpenFailure::ChoiceReplaced => format!("{} ({error})", alert.message),
+            _ => alert.message.clone(),
+        };
+        self.errors.borrow_mut().push("Project", &logged);
         self.message = String::new();
         let rx = alert.sheet(&self.host.borrow().window);
         cx.spawn(async move |_, _| {
@@ -3344,6 +3354,12 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         KernelFailure::Journal(_) => return OpenFailure::Journal,
         // An open never faults a project; a stopped one only refuses edits.
         KernelFailure::Faulted(_) => Unavailable,
+        KernelFailure::Storage(text) if text.contains(pm_kernel::error::STILL_COPYING) => {
+            return OpenFailure::StillCopying;
+        }
+        KernelFailure::Storage(text) if text.contains(pm_kernel::error::CHOICE_REPLACED) => {
+            return OpenFailure::ChoiceReplaced;
+        }
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {
@@ -3589,6 +3605,18 @@ mod open_failure_tests {
             (
                 KernelFailure::Storage("unexpected end of input".into()),
                 "couldn’t be read",
+            ),
+            (
+                KernelFailure::Storage(format!(
+                    "{}, so it was not opened.",
+                    pm_kernel::error::CHOICE_REPLACED
+                )),
+                "wasn’t opened",
+            ),
+            // The start of a copy still arriving is not called damaged.
+            (
+                KernelFailure::Storage(pm_kernel::error::STILL_COPYING.into()),
+                "still being copied",
             ),
         ] {
             let alert =

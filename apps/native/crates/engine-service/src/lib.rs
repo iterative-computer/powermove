@@ -457,6 +457,8 @@ struct View {
     surface_queries: VecDeque<surface::Pending>,
     export_estimate: Option<export_estimate::Pending>,
     export_estimate_stamp: Option<Stamp>,
+    export_estimate_cancel: Arc<std::sync::atomic::AtomicU64>,
+    export_estimate_cache: Option<(Stamp,u64,ExportEstimate)>,
     refine_progress_stamp: Option<Stamp>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
@@ -726,6 +728,7 @@ impl Viewer {
     /// input wins: the next revision's frame is the first to show it.
     pub fn input_event(&self, input: f64) {
         if let Some(v) = self.shared.state.lock().unwrap().views.get_mut(&self.id) {
+            export_estimate::cancel(v,"export estimate cancelled by input");
             v.pending_input.get_or_insert(input);
         }
     }
@@ -1507,6 +1510,8 @@ impl EngineService {
                 surface_queries: VecDeque::new(),
                 export_estimate: None,
                 export_estimate_stamp: None,
+                export_estimate_cancel: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                export_estimate_cache: None,
                 refine_progress_stamp: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
@@ -3120,7 +3125,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if work.is_none() && flights.is_empty()
             && !runtime.values().any(|r| r.transport.running())
             && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty())
-            && state.views.values().any(|v| v.export_estimate.is_some())
+            && state.views.values().any(|v| v.export_estimate.as_ref().is_some_and(export_estimate::Pending::runnable))
         {
             drop(state);
             export_estimate::run_one(&mut engine, &shared);

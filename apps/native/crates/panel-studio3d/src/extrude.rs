@@ -307,6 +307,57 @@ pub(crate) fn commands(
     }
 }
 
+/// `part.<slot>.<key>` and `part.<slot>.map.color` from Properties on the
+/// selected imported model: one per-part material edit (one Undo), through
+/// the same edit_3d operations agents use.
+pub(crate) fn part_commands(
+    p: &Published,
+    time: f64,
+    control: &str,
+    arg: Value,
+) -> Result<(String, Vec<Command>)> {
+    let [layer] = p.selection.layers() else {
+        return Err(invalid("Choose one model"));
+    };
+    let (index, rest) = control
+        .split_once('.')
+        .ok_or_else(|| invalid("Unknown part control"))?;
+    let index: u64 = index.parse().map_err(|_| invalid("Unknown part"))?;
+    if let Some(slot) = rest.strip_prefix("map.") {
+        if slot != "color" {
+            return Err(invalid("Unknown part map"));
+        }
+        return Ok((
+            "Part Color Map".into(),
+            vec![apply(
+                p,
+                time,
+                json!({"operation":"set_material_map","target":layer,"materialIndex":index,"slot":"color","map":source_record(&arg)}),
+            )],
+        ));
+    }
+    let label = match rest {
+        "color" => "Color",
+        "metallic" => "Metalness",
+        "roughness" => "Roughness",
+        "clearcoat" => "Clearcoat",
+        "transmission" => "Transmission",
+        "ior" => "IOR",
+        "emissionColor" => "Emission",
+        "emissionIntensity" => "Emission Strength",
+        "iridescence" => "Iridescence",
+        _ => return Err(invalid("Unknown part material property")),
+    };
+    Ok((
+        format!("Part {label}"),
+        vec![apply(
+            p,
+            time,
+            json!({"operation":"set_material_properties","target":layer,"materialIndex":index,"patch":{rest: arg}}),
+        )],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

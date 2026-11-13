@@ -56,10 +56,10 @@ pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     local_time, temporary_sibling,
 };
-pub(crate) use durable::{Host, folder_sync_now, remove_abandoned_temps};
+pub(crate) use durable::{Host, folder_sync_now, lstat_file, remove_abandoned_temps};
 pub use durable::{
-    PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, Stray, Strays, TrashHook,
-    WriteCoordinator,
+    PublishHook, PublishHooks, ReadHook, SharedWriteCoordinator, StepHook, Stray, Strays,
+    TrashHook, WholeReads, WriteCoordinator, watch_whole_reads,
 };
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
@@ -392,6 +392,7 @@ fn hash_project_file(
     size: u64,
     media: &[&MediaRecord],
 ) -> Result<String, ProjectIoError> {
+    durable::reading_whole(path);
     let bad = || {
         ProjectIoError::Container(pm_model::container::ContainerError::Invalid(
             "The project media checksum does not match.",
@@ -485,6 +486,11 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         ));
     }
     let before = durable::stat_of(&meta);
+    // The start of a copy (a sync client's, another computer's save) is
+    // not a damaged project: it is refused as one still arriving.
+    if durable::file_head_held_back(&file) {
+        return Err(ProjectIoError::StillCopying);
+    }
     // Index and document checksums are always verified by the reader; media
     // checksums are verified below, in the single hashing pass.
     let container = read_container(
@@ -521,6 +527,62 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
     from_container(container, Some(path.to_owned()), Some(version))
 }
 
+/// Legacy files predate native colour management. Keep their preview intent
+/// on each asset so saving to PMV4 does not lose it, and native imports keep
+/// their tagged/HDR reading. Explicit Interpret Footage fields still win.
+fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
+    let has_3d = |comp: &Value| {
+        comp.get("layers")
+            .and_then(Value::as_array)
+            .is_some_and(|layers| {
+                layers.iter().any(|layer| {
+                    layer
+                        .get("d")
+                        .and_then(|d| d.get("definition"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("powermove.3d."))
+                })
+            })
+    };
+    if legacy_container
+        && (has_3d(project)
+            || project
+                .get("comps")
+                .and_then(Value::as_object)
+                .is_some_and(|comps| comps.values().any(has_3d)))
+        && project.get("render3d").is_none()
+        && let Some(root) = project.as_object_mut()
+    {
+        root.insert("render3d", Value::from("electron"));
+    }
+    let Some(assets) = project
+        .as_object_mut()
+        .and_then(|p| p.get_mut("assets"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for (_, asset) in assets.iter_mut() {
+        let Some(asset) = asset.as_object_mut() else {
+            continue;
+        };
+        if asset.get("kind").and_then(Value::as_str) == Some("video")
+            && !asset.contains_key("videoColor")
+            // New native imports write timing:2. Older Electron PMV4 files
+            // have the same container version as native, so the asset's own
+            // legacy timing provenance identifies their preview reading.
+            && (legacy_container
+                || !asset.contains_key("timing")
+                    && asset
+                        .get("interpret")
+                        .and_then(Value::as_object)
+                        .is_none_or(|p| p.is_empty()))
+        {
+            asset.insert("videoColor", Value::from("electron"));
+        }
+    }
+}
+
 /// Splits, validates and canonicalizes a decoded container (shared by
 /// [`open_project`] and tests that build files in memory).
 pub(crate) fn from_container(
@@ -538,6 +600,7 @@ pub(crate) fn from_container(
         other => (Map::new(), other, false),
     };
     validate_stored_project(&project)?;
+    adopt_electron_rendering(&mut project, format != ContainerFormat::Pmv4);
     crate::asset_order::adopt(&mut project, container.asset_order);
     if let Some(metadata) = container.legacy_metadata {
         let key = "nativePmv3Metadata";

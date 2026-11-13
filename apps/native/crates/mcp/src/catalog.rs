@@ -22,6 +22,13 @@ pub fn catalog() -> &'static Value {
                 .expect("existing 3D tool");
             *tool = replacement.clone();
         }
+        let projects: Value = serde_json::from_str(include_str!("../fixtures/project-native-catalog.json"))
+            .expect("native project catalog");
+        for replacement in projects["tools"].as_array().unwrap() {
+            let tool = value["tools"].as_array_mut().unwrap().iter_mut()
+                .find(|t| t["name"] == replacement["name"]).expect("existing project tool");
+            *tool = replacement.clone();
+        }
         value
     })
 }

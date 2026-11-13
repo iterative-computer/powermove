@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   PopUpButton,
@@ -321,18 +321,43 @@ export function ViewerPanel({
   ) : null;
   // 3d-studio.md §6: the Light panel, top-leading over the stage while Light
   // is the tool. Values are the model's; a pull is one Undo ("Light Size").
-  const light = m.studio?.tool === "light" ? m.studio.light : undefined;
+  // 3d-studio.md §6 motion: the panel springs in when Light is chosen and
+  // out when it isn't. The host animates any node marked `pmKit.presence`;
+  // the panel stays, marked closing, for the exit (motion.exit, 0.12 s) and a
+  // frame's grace, then goes.
+  const liveLight = m.studio?.tool === "light" ? m.studio.light : undefined;
+  const lastLight = useRef<typeof liveLight>(undefined);
+  if (liveLight) lastLight.current = liveLight;
+  const [, rerender] = useState(0);
+  useEffect(() => {
+    if (liveLight || !lastLight.current) return;
+    const timer = setTimeout(() => {
+      lastLight.current = undefined;
+      rerender((n) => n + 1);
+    }, 160);
+    return () => clearTimeout(timer);
+  }, [!!liveLight]);
+  const light = liveLight ?? lastLight.current;
+  const lightClosing = !liveLight;
   const kinds = [
     { v: "area", label: "Softbox" },
     { v: "spot", label: "Spotlight" },
     { v: "point", label: "Bulb" },
     { v: "sun", label: "Sun" },
   ];
+  const lightPresets = [
+    { v: "rim_left", label: "Rim Strip Left" },
+    { v: "rim_right", label: "Rim Strip Right" },
+    { v: "top", label: "Top Softbox" },
+    { v: "edge_card", label: "Edge Highlight Card" },
+    { v: "strip", label: "Strip Light" },
+  ];
   const lightPanel = light ? (
     <div
       id="viewer.studio.lightPanel"
       role="group"
       label="Light Tool"
+      metadata={{ pmKit: { presence: true, closing: lightClosing } }}
       style={{
         position: "absolute",
         left: token("metrics.gap"),
@@ -379,6 +404,37 @@ export function ViewerPanel({
           onChange={(event) => actions.drive("viewer.studio.lightKind", event.value)}
         />
       </div>
+      {/* Round 7: one-click looks for product edges, placed for the model as
+          the camera sees it; Aim At turns the chosen light onto a model. */}
+      <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap") }}>
+        <PopUpButton
+          id="viewer.studio.light.preset"
+          data-pm-variant="inline"
+          binding="viewer.studio.light.preset"
+          title={"Presets\nAdd a light placed for the selected model and camera."}
+          label="Light Presets"
+          display="Presets"
+          value={null}
+          style={popupStyle}
+          options={lightPresets}
+          onChange={(event) => actions.drive("viewer.studio.light.preset", event.value)}
+        />
+        {!light.hint && (light.models?.length ?? 0) > 0 ? (
+          <PopUpButton
+            id="viewer.studio.light.aimAt"
+            data-pm-variant="inline"
+            binding="viewer.studio.light.aimAt"
+            title={"Aim At\nTurn this light to face a model."}
+            label="Aim At"
+            display="Aim At"
+            value={null}
+            disabled={light.locked}
+            style={popupStyle}
+            options={light.models ?? []}
+            onChange={(event) => actions.drive("viewer.studio.light.aimAt", event.value)}
+          />
+        ) : null}
+      </div>
       {light.hint ? (
         <text style={{ color: token("colors.muted"), fontSize: token("typography.body") }}>
           {light.hint}
@@ -416,7 +472,7 @@ export function ViewerPanel({
                   min={row.min}
                   max={row.max}
                   log={row.log}
-                  unit={row.id === "spread" ? "°" : ""}
+                  unit={row.unit ?? (row.id === "spread" ? "°" : "")}
                   disabled={light.locked}
                   onChange={(e) => actions.drive(`viewer.studio.light.${row.id}`, Number(e.value))}
                 />
@@ -424,7 +480,7 @@ export function ViewerPanel({
                   style={{ color: token("colors.text"), fontSize: token("typography.body"), fontVariantNumeric: "tabular-nums", textAlign: "right", width: token("metrics.toolbar") }}
                 >
                   {reading(row.value)}
-                  {row.id === "spread" ? "°" : ""}
+                  {row.unit ?? (row.id === "spread" ? "°" : "")}
                 </text>
               </div>
             </div>
@@ -592,6 +648,8 @@ export function ViewerPanel({
                   Back to Composition
                 </ToolbarItem>
               </>
+            ) : studio ? (
+              studio
             ) : (
               transport && (
                 <>

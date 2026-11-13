@@ -100,3 +100,6 @@ harness = false
 # Runs on the main thread (the CoreText font registry).
 name = "text_colors"
 harness = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["canvas2d"] }

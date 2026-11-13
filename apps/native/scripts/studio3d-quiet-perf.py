@@ -16,6 +16,16 @@ def allowed():
         raise RuntimeError('Need at least 5 GB before a measurement')
 
 
+def evidence_directory(path):
+    # /tmp/pm-shots is a symlink after reboot; resolve against its persistent
+    # home so evidence stays outside the public checkout in either spelling.
+    out = path.expanduser().resolve()
+    root = (pathlib.Path.home() / 'Developer/pm-shots').resolve()
+    if not out.is_relative_to(root):
+        raise RuntimeError('Evidence belongs under ~/Developer/pm-shots')
+    return out
+
+
 def analyze(rows, start, end, input_start, input_end):
     rows = [r for r in rows if r.get('gpu_ok') and not r.get('stale') and (r.get('display') or 0) > 0]
     displayed = sorted(set(r['display'] for r in rows if start <= r['display'] <= end))
@@ -52,9 +62,7 @@ def main():
     if args.seconds < 1 or args.input_seconds < 1:
         parser.error('measurement durations must be positive')
     allowed()
-    out = args.out.resolve()
-    if not str(out).startswith('/private/tmp/pm-shots/') and not str(out).startswith('/tmp/pm-shots/'):
-        raise RuntimeError('Evidence output must be under /tmp/pm-shots')
+    out = evidence_directory(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise RuntimeError('Use a fresh empty output directory')

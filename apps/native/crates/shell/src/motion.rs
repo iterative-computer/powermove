@@ -112,6 +112,9 @@ pub struct Motion<K> {
     pub glides: Rc<RefCell<HashMap<K, Glide>>>,
     /// Single animated numbers (a switch knob, a disclosure, a sheet's height).
     pub values: Rc<RefCell<HashMap<K, Animated<1>>>>,
+    /// Surfaces that spring in when they appear and out before they go
+    /// (a floating panel): 0 hidden … 1 shown.
+    presences: HashMap<K, Animated<1>>,
     clock: Clock,
 }
 impl<K> Default for Motion<K> {
@@ -120,15 +123,36 @@ impl<K> Default for Motion<K> {
             hovers: Hovers::default(),
             glides: Rc::default(),
             values: Rc::default(),
+            presences: HashMap::new(),
             clock: Clock::default(),
         }
     }
 }
 impl<K: Copy + Eq + Hash> Motion<K> {
+    /// How present `key` is (0–1): a surface seen for the first time starts
+    /// at 0 and springs in (`Preset::Enter`); one marked `shown: false`
+    /// springs out (`Preset::Exit`) while its owner keeps it on screen.
+    pub fn presence(&mut self, key: K, shown: bool, t: &Tokens) -> f32 {
+        let target = if shown { 1. } else { 0. };
+        let a = self
+            .presences
+            .entry(key)
+            .or_insert_with(|| Animated::unit(0.));
+        if a.target[0] != target {
+            a.to(
+                target,
+                t.spring(if shown { Preset::Enter } else { Preset::Exit }),
+            );
+        }
+        a.get().clamp(0., 1.)
+    }
     /// Step everything to now; ask for another frame only while moving.
     pub fn frame(&mut self, window: &mut Window) {
         let dt = self.clock.tick(Instant::now());
         let mut moving = self.hovers.step(dt);
+        for presence in self.presences.values_mut() {
+            moving |= presence.step(dt);
+        }
         for glide in self.glides.borrow_mut().values_mut() {
             moving |= glide.step(dt);
         }
@@ -164,4 +188,34 @@ pub fn animate(
         value.to(target, spring);
     }
     value.get()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn settle(m: &mut Motion<u32>, seconds: f32) {
+        let mut t = 0.;
+        while t < seconds {
+            for p in m.presences.values_mut() {
+                p.step(1. / 120.);
+            }
+            t += 1. / 120.;
+        }
+    }
+    #[test]
+    fn a_surface_springs_in_when_it_appears_and_out_while_closing() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let mut m = Motion::<u32>::default();
+        // First seen: starts hidden, then springs in.
+        assert_eq!(m.presence(7, true, &t), 0.);
+        settle(&mut m, 0.05);
+        let partway = m.presence(7, true, &t);
+        assert!(partway > 0. && partway < 1., "{partway}");
+        settle(&mut m, 1.);
+        assert!(m.presence(7, true, &t) > 0.99);
+        // Marked closing: it springs out (faster than it came in).
+        m.presence(7, false, &t);
+        settle(&mut m, 0.4);
+        assert!(m.presence(7, false, &t) < 0.01);
+    }
 }

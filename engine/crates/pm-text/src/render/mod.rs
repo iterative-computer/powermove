@@ -8,7 +8,10 @@ pub mod bitmap;
 pub mod color;
 pub mod color4;
 pub mod colr;
-#[cfg(all(target_os = "macos", feature = "coretext-reference"))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "coretext-reference", feature = "canvas2d")
+))]
 pub mod coretext;
 #[cfg(feature = "render")]
 pub mod cpu;
@@ -81,3 +84,8 @@ pub fn text_raster<R: FontResolver>(
     }
     scene
 }
+
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+pub(crate) mod canvas2d;
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+mod mask_tables;

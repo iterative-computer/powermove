@@ -54,6 +54,8 @@ pub enum ProbeIssue {
 /// What the source pass needs to know about a source.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceColor {
+    /// Legacy WebGL video uploads are RGBA8 even in a float composition.
+    pub unorm8: bool,
     pub transfer: Transfer,
     pub primaries: Primaries,
     pub matrix: MatrixCoefficients,
@@ -289,6 +291,7 @@ fn still_reading(
     if si.colorsync {
         return Ok(InterpretedStill {
             color: SourceColor {
+                unorm8: false,
                 transfer: Transfer::Linear,
                 primaries: Primaries::Bt709,
                 matrix,
@@ -315,6 +318,7 @@ fn still_reading(
     let profile = color.icc_class.is_some();
     Ok(InterpretedStill {
         color: SourceColor {
+            unorm8: false,
             transfer: r.transfer.value,
             primaries: r.primaries.value,
             matrix,
@@ -804,8 +808,15 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let file = pm_media::probe::color::frame_reading(&v.color, sequence);
+    let file = if interp.electron_color {
+        pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
+    } else {
+        pm_media::probe::color::frame_reading(&v.color, sequence)
+    };
     let mut desc = reading.color;
+    if interp.transfer.is_none() {
+        desc.transfer = file.transfer;
+    }
     if interp.matrix.is_none() {
         desc.matrix = file.matrix;
     }
@@ -814,6 +825,12 @@ fn video_color(
     }
     let desc = override_color.unwrap_or(desc);
     SourceColor {
+        unorm8: interp.electron_color
+            && interp.primaries.is_none()
+            && interp.transfer.is_none()
+            && interp.matrix.is_none()
+            && desc.primaries == Primaries::Bt709
+            && desc.transfer == Transfer::DisplayE,
         transfer: desc.transfer,
         primaries: desc.primaries,
         matrix: desc.matrix,
@@ -935,7 +952,7 @@ fn source_uniform(
         c: [
             0,
             0,
-            u32::from(precision == Precision::Float16),
+            u32::from(precision == Precision::Float16) | (u32::from(color.unorm8) << 1),
             u32::from(convert_primaries),
         ],
         matte,
@@ -1076,7 +1093,7 @@ fn convert_format_scaled(
     if format != working_format(Precision::Float16) {
         // Only half-float storage rounds through f16; any other format
         // stores the f32 conversion directly.
-        uniform.c[2] = 0;
+        uniform.c[2] &= !1;
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),

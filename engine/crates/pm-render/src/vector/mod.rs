@@ -258,6 +258,92 @@ pub fn plan_shape<'d>(
     }))
 }
 
+/// A legacy Canvas2D source, retaining its local pixel grid and ceil-rounded
+/// canvas extent before the compositor applies the layer transform.
+pub(crate) struct LegacyRaster {
+    pub source: VectorSource,
+    pub w: f64,
+    pub h: f64,
+    pub ax: f64,
+    pub ay: f64,
+}
+
+pub(crate) fn legacy_raster<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    d: &pm_eval::Content,
+    time: f64,
+    scale: f64,
+) -> JsResult<Option<LegacyRaster>> {
+    let has_paths = pm_eval::node::array(pm_eval::node::member(
+        pm_eval::node::member(Some(layer), "d"),
+        "paths",
+    ))
+    .is_some_and(|p| !p.is_empty());
+    let (scene, w, h, ax, ay, width, height) = if has_paths {
+        let (_, colors, paths) = paths(scope, layer, time)?;
+        let raster = paths.raster(scale);
+        let matrix = paths.layer_to_pixels(&raster).as_coeffs();
+        (
+            paths_scene(&paths, &colors, &matrix),
+            paths.bounds.w,
+            paths.bounds.h,
+            raster.anchor_x,
+            raster.anchor_y,
+            raster.width,
+            raster.height,
+        )
+    } else {
+        let (content, colors) = shape_content(d);
+        let raster = pm_vector::shape::ShapeRaster::new(&content, scale);
+        let Ok(geometry) = shape_geometry(&content) else {
+            return Ok(None);
+        };
+        let mut scene = CoverageScene::default();
+        scene.push_shape(
+            &geometry,
+            raster.shape_to_pixels(),
+            &colors.color,
+            &colors.stroke_color,
+        );
+        (
+            scene,
+            raster.w,
+            raster.h,
+            raster.w / 2.0,
+            raster.h / 2.0,
+            raster.width,
+            raster.height,
+        )
+    };
+    if ![w, h, width, height]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+    {
+        return Ok(None);
+    }
+    let Some(ink) = scene.pixel_bounds(PixelRect::new(0, 0, width as u32, height as u32)) else {
+        return Ok(None);
+    };
+    // The compositor samples the canvas with LINEAR filtering. Retain one
+    // transparent texel around its ink so the cropped quad has the same
+    // filter footprint as the original canvas. A tight one-row ink crop
+    // can otherwise become a subpixel quad that covers no pixel centers.
+    let x0 = (ink.x - 1).max(0);
+    let y0 = (ink.y - 1).max(0);
+    let x1 = (ink.x as u32 + ink.width + 1).min(width as u32);
+    let y1 = (ink.y as u32 + ink.height + 1).min(height as u32);
+    let rect = PixelRect::new(x0, y0, x1 - x0 as u32, y1 - y0 as u32);
+    let (sx, sy) = (w / width, h / height);
+    Ok(Some(LegacyRaster {
+        source: VectorSource::Scene { scene, rect },
+        w: f64::from(rect.width) * sx,
+        h: f64::from(rect.height) * sy,
+        ax: ax - f64::from(rect.x) * sx,
+        ay: ay - f64::from(rect.y) * sy,
+    }))
+}
+
 /// A shape's fill and stroke: shape space (origin at the box's top-left
 /// corner) centered on the layer origin, then `world`. `None` when the
 /// content draws nothing (a negative radius makes today's raster throw).
