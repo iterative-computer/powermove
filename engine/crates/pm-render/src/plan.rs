@@ -2273,7 +2273,11 @@ fn sequence_frame<'d>(
     let missing = crate::media::stamp(&path).is_none();
     let other_size =
         crate::media::still_size(&path).filter(|&(w, h)| (w as f64, h as f64) != (sw, sh));
-    if missing || other_size.is_some() || crate::media::still_unreadable(&path) {
+    if missing
+        || other_size.is_some()
+        || crate::media::still_unreadable(&path)
+        || crate::media::decode_failed(&path)
+    {
         let file = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());

@@ -121,7 +121,35 @@ pub struct CacheFill {
     /// Probes draw at this share of the composition's size: the viewer's.
     #[serde(default = "whole_size")]
     pub probe_scale: f64,
+    /// The image sequences the keys were made at: each manifest and its
+    /// member generation (`crate::sequence_watch`). A frame is stored only
+    /// while its files are still those ([`sequences_unchanged`]).
+    #[serde(default)]
+    pub sequences: Vec<(PathBuf, u64)>,
 }
+
+/// The sequences (manifest, member generation) a state's keys were made at.
+fn keyed_sequences(media: &[Stamp]) -> Vec<(PathBuf, u64)> {
+    media
+        .iter()
+        .filter(|(path, ..)| path.ends_with("members"))
+        .filter_map(|(path, _, generation, _)| {
+            Some((path.parent()?.to_owned(), u64::try_from(*generation).ok()?))
+        })
+        .collect()
+}
+
+/// Whether every sequence a fill's keys were made at still has those
+/// files: a frame read from files written since is not stored under them.
+pub fn sequences_unchanged(sequences: &[(PathBuf, u64)]) -> bool {
+    sequences.iter().all(|(manifest, generation)| {
+        pm_media::image::sequence::Manifest::read(manifest)
+            .ok()
+            .flatten()
+            .is_some_and(|m| crate::sequence_watch::generation(&m) == *generation)
+    })
+}
+
 fn whole_size() -> f64 {
     1.
 }
@@ -1076,6 +1104,7 @@ impl DiskFrames {
         }
         let order: Vec<(i64, FrameId)> = frames.iter().map(|(n, f)| (*n, f.key.graph)).collect();
         let (source, size, rate) = (frames_now.source.clone(), frames_now.size, frames_now.rate);
+        let sequences = keyed_sequences(&frames_now.identity.media);
         let serial = state.fill.serial + 1;
         state.fill = Fill {
             serial,
@@ -1113,6 +1142,7 @@ impl DiskFrames {
             budget_us,
             frame_ticks: rate.frame_start(1).unwrap_or(0),
             probe_scale,
+            sequences,
         };
         let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill, reserve)
@@ -2997,6 +3027,15 @@ mod tests {
         let disk = open();
         let first = fingerprint(&disk);
         assert_eq!(fingerprint(&open()), first, "reopened, nothing changed");
+        // What a fill of this state carries: its frames are stored only
+        // while the files are those its keys were made at.
+        let keyed = || {
+            let state = disk.inner.state.lock().unwrap();
+            keyed_sequences(&state.frames.as_ref().unwrap().identity.media)
+        };
+        let filled = keyed();
+        assert_eq!(filled.len(), 1);
+        assert!(sequences_unchanged(&filled));
         let mut seen = vec![first];
         let mut changed = |what: &str, change: &dyn Fn()| {
             change();
@@ -3028,6 +3067,10 @@ mod tests {
         changed("the hole at 3 filled", &|| {
             std::fs::write(frame(3), [3u8; 64]).unwrap()
         });
+        // A fill keyed before these writes stores none of its frames now;
+        // one keyed now stores them.
+        assert!(!sequences_unchanged(&filled));
+        assert!(sequences_unchanged(&keyed()));
     }
 
     /// A playing frame gets its frame from disk on the first ask, waiting
@@ -3586,6 +3629,7 @@ mod tests {
                 budget_us: None,
                 frame_ticks: 0,
                 probe_scale: 1.,
+                sequences: vec![],
             }
         };
         let source = Source {

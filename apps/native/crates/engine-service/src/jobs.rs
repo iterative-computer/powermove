@@ -1485,6 +1485,10 @@ fn fill_cache(
         path
     });
     let store = |frame: &crate::render_cache::CacheFrame, bytes: &[u8]| -> Result<()> {
+        // Read from files written since its key was made: not that key's.
+        if !crate::render_cache::sequences_unchanged(&fill.sequences) {
+            return Ok(());
+        }
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }

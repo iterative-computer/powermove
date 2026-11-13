@@ -143,7 +143,7 @@ impl Drop for StampFrame {
     }
 }
 
-fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
+pub(crate) fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
     pm_perf::bump(pm_perf::Counter::FileStats);
     let m = std::fs::metadata(path).ok()?;
     let modified = m
@@ -393,6 +393,41 @@ pub(crate) fn still_unreadable(path: &Path) -> bool {
         known_still_facts(path),
         Some(Err(ProbeIssue::Unreadable(_)))
     )
+}
+
+/// Files whose read failed at a stamp (the decode failed, or the file kept
+/// changing while it was read): an image sequence shows that frame's card
+/// until the file changes again.
+static DECODE_FAILED: OnceLock<Mutex<HashMap<PathBuf, (u64, u128)>>> = OnceLock::new();
+
+/// Notes that reading `path` as it is now failed.
+pub(crate) fn note_decode_failed(path: &Path) {
+    if let Some(now) = stat_stamp(path) {
+        let mut failed = DECODE_FAILED.get_or_init(Mutex::default).lock().unwrap();
+        if failed.len() >= 4096 {
+            failed.clear();
+        }
+        failed.insert(path.to_path_buf(), now);
+    }
+}
+
+/// Whether reading `path` at its stamp failed ([`note_decode_failed`]).
+pub(crate) fn decode_failed(path: &Path) -> bool {
+    let Some(now) = stamp(path) else {
+        return false;
+    };
+    DECODE_FAILED
+        .get()
+        .is_some_and(|failed| failed.lock().unwrap().get(path) == Some(&now))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs while a sequence's file is read (a test's concurrent writer).
+    pub(crate) static DURING_READ: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Fails the next still decodes (a decode failing after good facts).
+    pub(crate) static FAIL_DECODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The pixel size of the still at `path` at its stamp, once it was read.
@@ -1235,6 +1270,8 @@ pub struct MediaCache {
     look_ahead: bool,
     /// Sequence files found unreadable as they were drawn ([`MediaCache::landed`]).
     unreadable: u64,
+    /// Consecutive reads of each sequence file that it changed during.
+    unstable: HashMap<PathBuf, u32>,
     background: Option<prewarm::BackgroundPrepare>,
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
@@ -1322,6 +1359,7 @@ impl MediaCache {
             idle_media: false,
             look_ahead: false,
             unreadable: 0,
+            unstable: HashMap::new(),
             background: None,
             scrub: false,
             playback: None,
@@ -1412,6 +1450,10 @@ impl MediaCache {
             return Ok(t.clone());
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        #[cfg(test)]
+        if FAIL_DECODE.with(|f| f.get()) {
+            return Err(MediaFailure::Failed(format!("{}: test decode failure", path.display())));
+        }
         let ask = stills::StillAsk {
             edge,
             interpreted: interpret.is_some(),
@@ -2191,6 +2233,29 @@ impl MediaCache {
     /// whenever a sequence's file is found unreadable as it is drawn.
     pub fn landed(&self) -> u64 {
         self.viewer.landed() + self.unreadable
+    }
+
+    /// Forgets everything read of `path` (it changed while it was read):
+    /// its converted textures and its facts at any stamp.
+    pub(crate) fn forget_still(&mut self, path: &Path) {
+        self.images.retain(|key, _| key.path != path);
+        self.image_seen.retain(|key, _| key.path != path);
+        if let Some(facts) = STILL_FACTS.get() {
+            facts.lock().unwrap().retain(|(p, _, _), _| p != path);
+        }
+        self.recount();
+    }
+
+    /// Notes a read of sequence file `path` that it changed during (`true`)
+    /// or not; answers how many such reads came in a row.
+    pub(crate) fn unstable_read(&mut self, path: &Path, changed: bool) -> u32 {
+        if !changed {
+            self.unstable.remove(path);
+            return 0;
+        }
+        let n = self.unstable.entry(path.to_path_buf()).or_default();
+        *n += 1;
+        *n
     }
 
     /// A sequence's file was found unreadable as it was drawn: the frame is
