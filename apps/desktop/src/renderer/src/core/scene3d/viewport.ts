@@ -43,6 +43,10 @@ export function setViewportMode(PM:any,mode:ViewMode):void {
   if(mode!=='camera'&&mode!=='editor')throw new Error('Unknown 3D view');
   const entry=state(PM);if(mode==='editor'&&!entry.camera)initialize(PM,entry);entry.mode=mode;changed(PM);
 }
+/** Start Free View again from the current rendered shot without editing it. */
+export function resetViewport(PM:any):void {
+  const entry=state(PM);initialize(PM,entry);entry.mode='editor';changed(PM);
+}
 export function applyViewportPose(PM:any,pose:ViewPose):void {
   const entry=state(PM);if(!entry.camera||entry.mode==='camera')initialize(PM,entry);
   entry.mode='editor';entry.target.copy(pose.target);

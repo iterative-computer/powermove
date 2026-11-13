@@ -114,6 +114,7 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
       else if((node as THREE.DirectionalLight).target)(node as THREE.DirectionalLight).target.position.copy(target);
     }
     runtime.scene.updateMatrixWorld(true);
+    runtime.syncEnvironmentShadows();
     compositionCache.set(runtime,{comp,time,revision,assets:PM.proj.assets,references});
   }
   runtime.resizeCamera(comp.w,comp.h);

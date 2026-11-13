@@ -1,4 +1,6 @@
 import { defaultEnvironmentTexture } from './environment-map';
+import { EnvironmentShadows } from './environment-shadows';
+import { SceneReflections } from './scene-reflections';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
@@ -64,6 +66,8 @@ function disposeTree(object: THREE.Object3D): void {
 /** Owns the shared graph used for output, ray picking and the editor viewport. */
 export class SceneRuntime {
   readonly scene = new THREE.Scene();
+  private environmentShadows = new EnvironmentShadows(this.scene);
+  private reflections = new SceneReflections();
   camera: THREE.PerspectiveCamera|THREE.OrthographicCamera = new THREE.PerspectiveCamera();
   readonly objects = new Map<string,THREE.Object3D>();
   private renderer: THREE.WebGLRenderer|null = null;
@@ -345,12 +349,20 @@ export class SceneRuntime {
     }
     if(map && !this.scene.environment)this.warnings.push('Environment image is missing or still loading');
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
+    this.syncEnvironmentShadows();
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
     for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
     for(const key of this.materialSources.keys())if(!this.usedTextures.has(key))this.materialSources.delete(key);
     for(const key of this.materialBindings.keys())if(!this.usedBindings.has(key))this.materialBindings.delete(key);
     this.compositionFrames.clear();
+  }
+
+  /** Composition layers apply native parent/anchor matrices after scene sync. */
+  syncEnvironmentShadows():void {
+    const light=this.raw?.lights.find((node:any)=>node.id===this.environmentLightId);
+    this.environmentShadows.sync(this.scene.environment,this.scene.environmentRotation,
+      this.raw?.environment.shadows!==false && (!light || light.castShadow) && this.scene.environmentIntensity>0);
   }
 
   private syncExtrusion(sample:ExtrusionMeshSample):void {
@@ -462,6 +474,8 @@ export class SceneRuntime {
     const e=this.raw?.environment;
     this.renderer.toneMappingExposure=e?this.evaluation(e.p.exposure,'environment.exposure'):1;
     this.renderer.shadowMap.enabled=e?.shadows!==false;
+    this.environmentShadows.preparePass(depthIds?[...depthIds].sort().join(','):'all');
+    this.reflections.update(this.renderer,this.scene,this.objects,camera,this.revision,width,height,depthIds);
     this.renderer.setClearColor(0,0);
     if(!objectId){outputDepth=null;this.renderer.render(this.scene,camera);}
     else {
@@ -579,6 +593,8 @@ export class SceneRuntime {
     const mixer=this.mixers.get(id)?.mixer;if(mixer){mixer.stopAllAction();mixer.uncacheRoot(object);}this.mixers.delete(id);
   }
   dispose():void {
+    this.reflections.dispose();
+    this.environmentShadows.dispose();
     this.scene.environment=null;this.defaultEnvironment?.dispose();this.defaultEnvironment=null;
     for(const [id,object] of this.objects)this.remove(id,object);
     for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();this.materialBindings.clear();this.compositionFrames.clear();this.materialSources.clear();

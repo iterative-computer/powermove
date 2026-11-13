@@ -58,5 +58,35 @@ test('Pen edits protect nested locked groups and work after unlocking with one U
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(fixture.paths);
   expect(await page.evaluate(() => (window as any).PM.hist.list().length)).toBe(history);
   expect(await page.evaluate(() => (window as any).PM.sel.layers)).toEqual(['pen-shape']);
+  // Viewer replacements can provide whole-path selection through this service.
+  // The built-in viewer must retain those gestures when the replacement is removed.
+  await page.evaluate(() => {
+    const PM=(window as any).PM,layer=PM.L('pen-shape'),first=layer.d.paths[0];
+    first.p.closed.v=true;
+    const second=structuredClone(first);second.id='second-path';second.p.x.v=130;
+    layer.d.paths.push(second);
+    let selected:string[]=[];
+    PM.Kernel.api('path-selection-test').services.register('pathSelection',{
+      get:()=>selected,set:(_id:string,ids:string[])=>{selected=ids;}
+    });
+    PM.hist.clear();PM.touch();PM.invalidate();
+  });
+  for(const x of [240,370]){
+    const p=await point(x,120);
+    await page.keyboard.down('Shift');await page.mouse.click(p.x,p.y);await page.keyboard.up('Shift');
+  }
+  expect(await page.evaluate(()=>(window as any).PM.Kernel.services.get('pathSelection').get('pen-shape'))).toEqual(['pen-path','second-path']);
+  const beforeMove=await page.evaluate(()=>JSON.stringify((window as any).PM.L('pen-shape').d.paths));
+  const from=await point(240,120),to=await point(260,130);
+  await page.mouse.move(from.x,from.y);await page.mouse.down();
+  await page.mouse.move(to.x,to.y,{steps:4});await page.mouse.up();
+  const positions=await page.evaluate(()=>{
+    const PM=(window as any).PM;return PM.L('pen-shape').d.paths.map((path:any)=>[path.p.x.v,path.p.y.v]);
+  });
+  expect(positions[0][0]).toBeCloseTo(20);expect(positions[0][1]).toBeCloseTo(10);
+  expect(positions[1][0]).toBeCloseTo(150);expect(positions[1][1]).toBeCloseTo(10);
+  expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(1);
+  await page.evaluate(()=>(window as any).PM.hist.undo());
+  expect(await page.evaluate(()=>JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(beforeMove);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

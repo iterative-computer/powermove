@@ -45,9 +45,13 @@ export function drawEditablePaths(api:PowermoveAPI,c:CanvasRenderingContext2D,sc
     const m=api.anim.mul(api.anim.worldMatrix(layer,time),targetTransform(api,layer,target,time));
     const value=pathValues(api,layer,target.path,time,target.prefix);
     const point=(x:number,y:number):[number,number]=>[m[0]*x+m[2]*y+m[4],m[1]*x+m[3]*y+m[5]];
+    const chosen=api.services.get<{get(id:string):string[]}>('pathSelection')?.get(layer.id) ?? [];
+    const selected=chosen.includes(target.path.id);
     c.save();c.strokeStyle='#70b7ff';c.fillStyle='#152c46';c.lineWidth=1/scale;
+    c.globalAlpha=chosen.length && !selected ? .25 : 1;
+    c.lineWidth=(selected?2:1)/scale;
     c.save();c.transform(...m);tracePath(c,value);c.restore();c.stroke();
-    for(const vertex of value.vertices){const p=point(vertex.x,vertex.y);for(const side of ['in','out']){const h=point(vertex.x+vertex[side+'X'],vertex.y+vertex[side+'Y']);c.beginPath();c.moveTo(p[0],p[1]);c.lineTo(h[0],h[1]);c.stroke();c.beginPath();c.arc(h[0],h[1],3/scale,0,Math.PI*2);c.fill();c.stroke();}c.fillRect(p[0]-4/scale,p[1]-4/scale,8/scale,8/scale);c.strokeRect(p[0]-4/scale,p[1]-4/scale,8/scale,8/scale);}
+    if(!chosen.length || selected)for(const vertex of value.vertices){const p=point(vertex.x,vertex.y);for(const side of ['in','out']){const h=point(vertex.x+vertex[side+'X'],vertex.y+vertex[side+'Y']);c.beginPath();c.moveTo(p[0],p[1]);c.lineTo(h[0],h[1]);c.stroke();c.beginPath();c.arc(h[0],h[1],3/scale,0,Math.PI*2);c.fill();c.stroke();}c.fillRect(p[0]-4/scale,p[1]-4/scale,8/scale,8/scale);c.strokeRect(p[0]-4/scale,p[1]-4/scale,8/scale,8/scale);}
     c.restore();
   }
 }
@@ -63,7 +67,51 @@ export function startPathEdit(api:PowermoveAPI,state:PathEditingState,event:any,
     const value=pathValues(api,layer,target.path,time,target.prefix),radius=8/scale/Math.max(.01,Math.hypot(matrix[0],matrix[1]));
     value.vertices.forEach((vertex:any,index:number)=>{for(const side of ['in','out','point']){const x=vertex.x+(side==='point'?0:vertex[side+'X']),y=vertex.y+(side==='point'?0:vertex[side+'Y']);if(Math.hypot(p.x-x,p.y-y)<radius)hit={...target,matrix,p,vertex:target.path.vertices[index],values:vertex,side,index};}});
   }
-  if(hit && (event.detail>1 || (hit.index===0 && hit.side==='point' && hit.path.vertices.length>=3 && state.activePath===hit.path.id && !event.altKey && !event.metaKey && !event.ctrlKey))){api.edit.mutate('Close path',()=>{hit.path.p.closed.v=true;state.activePath=null;},{origin:'canvas'});api.transport.invalidate();state.requestOverlay?.();return;}
+
+  const pathSelection=api.services.get<{get(id:string):string[];set(id:string,ids:string[]):void}>('pathSelection');
+  // Shift selects whole paths, before the pen's vertex insertion/deletion rules.
+  let bodyHit:any=null;
+  const hitContext=pathSelection && targets.some(target=>target.prefix.startsWith('g.'))
+    ? document.createElement('canvas').getContext('2d') : null;
+  if(hitContext)for(const target of targets){
+    if(!target.prefix.startsWith('g.'))continue;
+    const matrix=api.anim.mul(api.anim.worldMatrix(layer,time),targetTransform(api,layer,target,time));
+    const p=inverse(matrix,world);if(!p)continue;
+    const value=pathValues(api,layer,target.path,time,target.prefix);
+    hitContext.beginPath();tracePath(hitContext,value);
+    hitContext.lineWidth=12/scale/Math.max(.01,Math.hypot(matrix[0],matrix[1]));
+    if((value.closed&&hitContext.isPointInPath(p.x,p.y))||hitContext.isPointInStroke(p.x,p.y))bodyHit={...target,matrix,p};
+  }
+  const picked=hit??bodyHit;
+  if(event.shiftKey&&pathSelection){
+    if(picked?.prefix.startsWith('g.')){
+      const ids=pathSelection.get(layer.id),id=picked.path.id;
+      pathSelection.set(layer.id,ids.includes(id)?ids.filter(item=>item!==id):[...ids,id]);
+    }
+    event.preventDefault();state.requestOverlay?.();return;
+  }
+  // A body drag moves all chosen paths; vertices retain normal pen editing.
+  if(!hit&&bodyHit&&pathSelection){
+    let ids=pathSelection.get(layer.id);
+    if(!ids.includes(bodyHit.path.id)){ids=[bodyHit.path.id];pathSelection.set(layer.id,ids);}
+    const roots=targets.filter(target=>ids.includes(target.path.id)&&!hasChosenParent(target.path,targets,ids));
+    const starts=roots.map(target=>{
+      const parent=targets.find(other=>other.path.id===target.path.parent);
+      const matrix=parent?api.anim.mul(api.anim.worldMatrix(layer!,time),targetTransform(api,layer,parent,time)):api.anim.worldMatrix(layer!,time);
+      return {target,matrix,point:inverse(matrix,world),value:pathValues(api,layer!,target.path,time,target.prefix)};
+    });
+    let editing=false;
+    beginDrag(event,{cursor:'move',move:(_dx:any,_dy:any,e:any)=>{
+      if(!editing){api.edit.begin('Move selected paths',{origin:'canvas'});editing=true;}
+      for(const start of starts){const p=inverse(start.matrix,pointer(e));if(!p||!start.point)continue;
+        for(const key of ['x','y'] as const)api.edit.dispatch({type:'set_property',target:layer!.id,path:start.target.prefix+'.'+key,value:start.value[key]+p[key]-start.point[key],time,preserveHandEdits:false});
+      }
+      state.requestOverlay?.();
+    },up:()=>{if(editing)api.edit.commit();api.transport.invalidate();state.requestOverlay?.();api.services.get<{refresh():void}>('inspector')?.refresh();},cancel:()=>{if(editing)api.edit.cancel();api.transport.invalidate();state.requestOverlay?.();}});
+    return;
+  }
+
+  if(hit && (event.detail>1 || (hit.index===0 && hit.side==='point' && hit.path.vertices.length>=3 && state.activePath===hit.path.id && !api.anim.evP(layer,hit.path.p.closed,time,hit.prefix+'.closed') && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey))){api.edit.mutate('Close path',()=>{hit.path.p.closed.v=true;state.activePath=null;},{origin:'canvas'});api.transport.invalidate();state.requestOverlay?.();return;}
   if(hit && (event.metaKey||event.ctrlKey)){api.edit.mutate('Delete path vertex',()=>hit.path.vertices.splice(hit.index,1),{origin:'canvas'});api.transport.invalidate();state.requestOverlay?.();return;}
   const content=layer.d as any,originalPaths=content.paths===undefined?undefined:structuredClone(content.paths);
   const originalMasks=structuredClone(layer.masks),originalActivePath=state.activePath;
@@ -87,4 +135,10 @@ export function startPathEdit(api:PowermoveAPI,state:PathEditingState,event:any,
     if(hit.side==='point'&&!e.altKey){write('x',hit.values.x+dx);write('y',hit.values.y+dy);}else{const side=hit.side==='in'?'in':'out';write(side+'X',hit.values[side+'X']+dx);write(side+'Y',hit.values[side+'Y']+dy);if(!e.altKey){const other=side==='in'?'out':'in';write(other+'X',-hit.values[side+'X']-dx);write(other+'Y',-hit.values[side+'Y']-dy);}}
     api.anim.touch();api.transport.invalidate('render');state.requestOverlay?.();
   },up:()=>{api.history.commit();api.transport.invalidate();state.requestOverlay?.();api.services.get<{refresh():void}>('inspector')?.refresh();},cancel});
+}
+
+function hasChosenParent(path:VectorPath,targets:any[],ids:string[]):boolean {
+  const seen=new Set<string>();let parent=path.parent;
+  while(parent&&!seen.has(parent)){if(ids.includes(parent))return true;seen.add(parent);parent=targets.find(target=>target.path.id===parent)?.path.parent??null;}
+  return false;
 }

@@ -13,7 +13,7 @@
     value,
     onChange,
     label
-  }: { options: SegmentOption[]; value: string; onChange: (id: string) => void; label?: string } = $props();
+  }: { options: SegmentOption[]; value: string; onChange: (id: string, event?: MouseEvent) => void; label?: string } = $props();
 
   let track: HTMLDivElement | undefined = $state();
 
@@ -49,7 +49,7 @@
       aria-selected={option.id === value}
       tabindex={option.id === value ? 0 : -1}
       title={option.title}
-      onclick={() => onChange(option.id)}
+      onclick={(event) => onChange(option.id, event)}
       onkeydown={(event) => onKey(event, index)}
     >{option.label}</button>
   {/each}
