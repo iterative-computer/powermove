@@ -761,6 +761,18 @@ impl Popout {
             backdrop: Some(backdrop),
         })
     }
+    /// Takes an embedded pane off screen until it is placed again.
+    pub fn hide(&self) {
+        if let Some(backdrop) = &self.backdrop
+            && !backdrop.isHidden()
+        {
+            backdrop.setHidden(true);
+        }
+        // Its menu is a subview: it goes with it.
+        if !self.view.isHidden() {
+            self.view.setHidden(true);
+        }
+    }
     /// Places an embedded pane: `[x, y, w, h]` in content points, top-left
     /// origin, as the shell lays out the viewer.
     pub fn place(&self, rect: [f64; 4], tile: [f64; 4]) {

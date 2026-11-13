@@ -1284,6 +1284,8 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
+            // Home covers the viewer: its extra 3D views have no place.
+            h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
             h.keyboard_control_focus.set(true);
             h.publish_menu_state(&self.menu_state(cx));

@@ -284,6 +284,9 @@ impl Controller {
                     ],
                     [tile.x as f64, tile.y as f64, tile.w as f64, tile.h as f64],
                 );
+            } else {
+                // No tile (Home is over the editor): nothing of it shows.
+                pane.popout.hide();
             }
             if pane.document.as_deref() != Some(document.as_str()) {
                 // A new document or composition: a new viewer for it.
