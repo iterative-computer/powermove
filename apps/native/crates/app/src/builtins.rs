@@ -409,7 +409,7 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -443,6 +443,7 @@ impl Controller {
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
+        self.sync_keymap();
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {

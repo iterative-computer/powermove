@@ -87,6 +87,7 @@ mod session;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
+mod shortcuts;
 mod shuttle;
 mod skimming;
 mod smoke;

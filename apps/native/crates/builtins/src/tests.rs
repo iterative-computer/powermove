@@ -3948,3 +3948,83 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
         assert!(platform.is_empty());
     }
 }
+
+/// Settings › Shortcuts: the app's page reaches the publication with its
+/// preset row, and every action on it goes to the app, which owns the keymap.
+#[test]
+fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"shortcuts":{"preset":"after-effects","changed":false,"stamp":1,
+        "presets":[{"v":"after-effects","label":"After Effects"},{"v":"premiere-pro","label":"Premiere Pro"}],
+        "rows":[{"id":"rippleTrimIn","menu":"Layer","label":"Ripple Trim In Point to Playhead",
+            "keys":["⌥⇧["],"chords":["alt+shift+["],"changed":false,"fixed":false,"recording":false}],
+        "conflicts":[]}});
+    let publication = backend.settings_snapshot().unwrap();
+    assert_eq!(publication["shortcuts"]["rows"][0]["id"], "rippleTrimIn");
+    let row = |id: &str| {
+        publication["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {id} row"))
+    };
+    assert_eq!(row("shortcuts.preset")["control"], "choice");
+    assert_eq!(row("shortcuts.preset")["value"], "after-effects");
+    assert!(row("shortcuts.preset")["binding"].is_string());
+    assert_eq!(
+        row("shortcuts.resetAll")["disabled"],
+        true,
+        "nothing to reset"
+    );
+    let revision = publication["revision"].clone();
+    for (action, op) in [
+        (
+            json!({"type":"write","id":"shortcuts.preset","value":"premiere-pro"}),
+            "preset",
+        ),
+        (
+            json!({"type":"row","id":"shortcuts.import","action":"shortcuts.import"}),
+            "import",
+        ),
+        (
+            json!({"type":"row","id":"shortcuts.export","action":"shortcuts.export"}),
+            "export",
+        ),
+        (
+            json!({"type":"shortcut","op":"record","id":"rippleTrimIn"}),
+            "record",
+        ),
+    ] {
+        backend.native.platform.clear();
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":action}),
+            )
+            .unwrap_or_else(|e| panic!("{action}: {e}"));
+        let sent = backend
+            .native
+            .platform
+            .iter()
+            .find(|(kind, r)| kind == "command" && r["name"] == "shortcuts")
+            .map(|(_, r)| r["args"][0]["op"].clone());
+        assert_eq!(sent, Some(json!(op)), "{action}");
+    }
+    // A preset the page does not offer is refused here.
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":{"type":"write","id":"shortcuts.preset","value":"avid"}}),
+            )
+            .is_err()
+    );
+}

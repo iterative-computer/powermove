@@ -466,6 +466,45 @@ impl Backend {
                 None => !destructive(action["action"].as_str().unwrap_or_default()),
             })
     }
+    /// Settings › Shortcuts' own rows: the preset, Reset All, Import… and
+    /// Export… (the command list is the publication's `shortcuts`).
+    pub(crate) fn shortcut_rows(&mut self) -> Result<Vec<Value>, String> {
+        let page = self.native.facts["shortcuts"].clone();
+        if page.is_null() {
+            return Ok(vec![]);
+        }
+        let fields = self.fields(&json!(["shortcuts.preset"]))?;
+        let action = |id: &str, label: &str, button: &str, detail: &str| {
+            json!({"id":id,"section":"shortcuts","group":"Keys","label":label,"control":"action",
+                "action":id,"actionLabel":button,"detail":detail})
+        };
+        let mut reset = action(
+            "shortcuts.resetAll",
+            "Your Changes",
+            "Reset All",
+            "Go back to the preset's keys for every command.",
+        );
+        reset["disabled"] = json!(page["changed"] != true);
+        Ok(vec![
+            json!({"id":"shortcuts.preset","section":"shortcuts","group":"Keys","label":"Keys From",
+                "control":"choice","value":page["preset"],"options":page["presets"],
+                "binding":fields["shortcuts.preset"],"disabled":false,
+                "detail":"Start from the keys of the editor you know; your own changes stay on top."}),
+            reset,
+            action(
+                "shortcuts.import",
+                "Import Shortcuts",
+                "Import…",
+                "Use keys saved on another Mac, or written by an extension or your agent.",
+            ),
+            action(
+                "shortcuts.export",
+                "Export Shortcuts",
+                "Export…",
+                "Save the keys as a file to share or keep.",
+            ),
+        ])
+    }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
         self.sync()?;
         let action = &args["action"];
@@ -474,7 +513,33 @@ impl Backend {
         {
             return Err("Settings changed; retry from the latest publication".into());
         }
+        let shortcuts = |op: &str, value: &Value| json!({"name": "shortcuts", "args": [{"op": op, "value": value}]});
         match action["type"].as_str() {
+            Some("write") if action["id"] == "shortcuts.preset" => {
+                let options = &self.native.facts["shortcuts"]["presets"];
+                if !options
+                    .as_array()
+                    .is_some_and(|o| o.iter().any(|o| o["v"] == action["value"]))
+                {
+                    return Err("Invalid setting value".into());
+                }
+                self.native
+                    .platform
+                    .push(("command".into(), shortcuts("preset", &action["value"])));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            Some("row")
+                if matches!(
+                    action["action"].as_str(),
+                    Some("shortcuts.resetAll" | "shortcuts.import" | "shortcuts.export")
+                ) =>
+            {
+                let op = &action["action"].as_str().unwrap_or_default()["shortcuts.".len()..];
+                self.native
+                    .platform
+                    .push(("command".into(), shortcuts(op, &Value::Null)));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write")
                 if action["id"]
                     .as_str()
@@ -718,6 +783,15 @@ impl Backend {
                 self.native
                     .platform
                     .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            // Settings › Shortcuts: the app owns the keymap, its key recording
+            // and its file panels.
+            Some("shortcut") => {
+                self.native.platform.push((
+                    "command".into(),
+                    json!({"name": "shortcuts", "args": [action]}),
+                ));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
             // The After Effects workspace comes over with the agent, in its panel.
