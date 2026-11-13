@@ -115,7 +115,7 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
         let init=client.rpc("initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}));
         assert_eq!(init["serverInfo"]["name"], "powermove");
         let tools = client.rpc("tools/list", json!({}));
-        assert_eq!(tools["tools"], json!(pm_mcp::catalog::tools()));
+        assert_eq!(tools["tools"], json!(pm_mcp::catalog::served_tools()));
         client.tool(
             "start_session",
             json!({"prompt":"Synthetic corpus transport test"}),

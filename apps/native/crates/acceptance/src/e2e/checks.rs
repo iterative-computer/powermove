@@ -876,8 +876,13 @@ fn surface_unknown_ids() -> Check {
 }
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
-    assert_eq!(f.session.tools(), json!(pm_mcp::catalog::tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 68);
+    assert_eq!(f.session.tools(), json!(pm_mcp::catalog::served_tools()));
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 70);
+    assert_eq!(
+        pm_mcp::catalog::tools().len(),
+        68,
+        "the pinned main catalog"
+    );
     assert_eq!(
         pm_mcp::catalog::legacy_catalog()["tools"]
             .as_array()
