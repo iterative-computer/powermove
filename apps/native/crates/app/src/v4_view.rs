@@ -372,7 +372,15 @@ impl SurfaceView {
                 self.mount_control(kind, view, node, lease, window, cx);
                 // A native control is a Tab stop too: the panel draws its
                 // focus ring and forwards its keys (Full Keyboard Access).
-                if !view.disabled && view.tab_index.is_none_or(|t| t >= 0) {
+                // A search field and a segmented control take no forwarded
+                // keys (`NativeControl::key`), so Tab passes them.
+                if !view.disabled
+                    && view.tab_index.is_none_or(|t| t >= 0)
+                    && !matches!(
+                        kind,
+                        crate::v4_control::Kind::Search | crate::v4_control::Kind::Segmented
+                    )
+                {
                     self.focus.entry(id).or_insert_with(|| cx.focus_handle());
                 }
                 continue;
