@@ -5,10 +5,15 @@
 //! isn't active. A pop-up or floating level is global across applications: a
 //! window at it floats over every other app, and an app that was never active
 //! never deactivates, so it stayed there.
+//!
+//! Sheets follow the same rule ([`sheet`]): AppKit's `beginSheet` orders the
+//! parent window front, so an inactive app's window rose above every other
+//! app's but the front one, and macOS then activated the app as soon as the
+//! front app left.
 use objc2::{MainThreadMarker, rc::Weak};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDidBecomeActiveNotification, NSNormalWindowLevel, NSWindow,
-    NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSApplication, NSApplicationDidBecomeActiveNotification, NSNormalWindowLevel,
+    NSRequestUserAttentionType, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 use std::{cell::RefCell, ptr::NonNull};
@@ -51,6 +56,8 @@ thread_local! {
     /// Child windows asked to show while the app was inactive (`key`: make it
     /// key too), and the observer that shows them once the app is active.
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
+    /// Sheets asked for while the app was inactive ([`sheet`]).
+    static SHEETS: RefCell<Vec<HeldSheet>> = const { RefCell::new(Vec::new()) };
     static OBSERVER: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
         const { RefCell::new(None) };
 }
@@ -76,6 +83,11 @@ pub fn show(window: &NSWindow, key: bool) {
             key,
         })
     });
+    observe_activation();
+}
+
+/// Calls [`show_pending`] whenever the app becomes active.
+fn observe_activation() {
     OBSERVER.with(|o| {
         if o.borrow().is_some() {
             return;
@@ -91,6 +103,103 @@ pub fn show(window: &NSWindow, key: bool) {
         };
         *o.borrow_mut() = Some(token);
     });
+}
+
+/// A sheet waiting for its app to become active: the window it goes on, the
+/// sheet's own window, and the call that begins it.
+struct HeldSheet {
+    parent: Weak<NSWindow>,
+    sheet: Weak<NSWindow>,
+    begin: Box<dyn FnOnce()>,
+}
+
+/// Begins a sheet only while its app is active; `begin` makes the AppKit
+/// call (`beginSheet`, an alert's or a save panel's
+/// `beginSheetModalForWindow`) that puts `sheet` on `parent`.
+///
+/// `beginSheet` orders its parent window front. An inactive app's window
+/// ordered front lands right under the other app's front window, and macOS
+/// activates the app as soon as that app leaves the front. So a sheet asked
+/// for while the app is inactive waits, attached to nothing and with no
+/// window moved, and begins when the person brings the app forward; the
+/// Dock icon bounces once to say a question waits. If its parent closed
+/// meanwhile, or the sheet window went away, `begin` is dropped: whatever
+/// waits on the sheet's answer sees it cancelled. Returns whether it began
+/// now.
+pub fn sheet(parent: &NSWindow, sheet: &NSWindow, begin: impl FnOnce() + 'static) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if app.isActive() {
+        begin();
+        return true;
+    }
+    forget_sheet(sheet);
+    SHEETS.with(|s| {
+        s.borrow_mut().push(HeldSheet {
+            parent: Weak::from(parent),
+            sheet: Weak::from(sheet),
+            begin: Box::new(begin),
+        })
+    });
+    app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    observe_activation();
+    #[cfg(debug_assertions)]
+    eprintln!("powermove: a sheet waits for the app to become active");
+    false
+}
+
+/// Whether a sheet waits for the app to become active before it goes on
+/// `parent` (a view that shows one sheet at a time asks this as well as
+/// `attachedSheet`).
+pub fn sheet_pending(parent: &NSWindow) -> bool {
+    SHEETS.with(|s| {
+        s.borrow()
+            .iter()
+            .any(|h| h.parent.load().is_some_and(|p| std::ptr::eq(&*p, parent)))
+    })
+}
+
+/// Drops a waiting sheet (its owner closed or dismissed it before it began);
+/// dropping its `begin` cancels whatever waits on its answer.
+pub fn forget_sheet(sheet: &NSWindow) {
+    let dropped: Vec<HeldSheet> = SHEETS.with(|s| {
+        let mut s = s.borrow_mut();
+        let (gone, kept) = std::mem::take(&mut *s)
+            .into_iter()
+            .partition(|h| h.sheet.load().is_none_or(|w| std::ptr::eq(&*w, sheet)));
+        *s = kept;
+        gone
+    });
+    // Dropped outside the borrow: a dropped answer may run code that asks
+    // for another sheet.
+    drop(dropped);
+}
+
+/// Begins the sheets that waited for the app to become active, oldest first.
+/// One whose parent closed or hid is dropped; one whose parent is in the
+/// Dock waits on.
+fn begin_held_sheets() {
+    let held = SHEETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let mut still = Vec::new();
+    for entry in held {
+        let (Some(parent), Some(_)) = (entry.parent.load(), entry.sheet.load()) else {
+            continue;
+        };
+        if parent.isVisible() {
+            (entry.begin)();
+        } else if parent.isMiniaturized() {
+            still.push(entry);
+        }
+    }
+    if !still.is_empty() {
+        SHEETS.with(|s| {
+            let mut s = s.borrow_mut();
+            still.append(&mut s);
+            *s = still;
+        });
+    }
 }
 
 /// A development build launched for a review (`PM_NATIVE_REVIEW_OPEN`)
@@ -128,7 +237,8 @@ pub fn forget(window: &NSWindow) {
     });
 }
 
-/// The app became active: the child windows that waited show now.
+/// The app became active: the child windows and then the sheets that waited
+/// show now.
 pub fn show_pending() {
     let waiting = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
     for entry in waiting {
@@ -143,6 +253,7 @@ pub fn show_pending() {
             order_front(&window, entry.key);
         }
     }
+    begin_held_sheets();
 }
 
 /// Shows any of the app's windows the way a Mac app may while another app is

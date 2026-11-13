@@ -706,7 +706,12 @@ pub mod native {
             }
         }
         pub fn present(&self, owner: &NSWindow, first: Option<&str>) {
-            owner.beginSheet_completionHandler(&self.window, None);
+            // Only while the app is active (a sheet orders its window
+            // front); the first field takes the keyboard either way.
+            let (on, sheet) = (objc2::Message::retain(owner), self.window.clone());
+            gpui_macos::child_window::sheet(owner, &self.window, move || {
+                on.beginSheet_completionHandler(&sheet, None);
+            });
             if let Some(field) = first.and_then(|id| self.fields.get(id)) {
                 self.window.makeFirstResponder(Some(field));
                 unsafe { field.selectText(None) };
