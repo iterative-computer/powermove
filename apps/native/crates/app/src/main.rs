@@ -50,6 +50,7 @@ mod layer_commands;
 mod library_surface;
 mod lifecycle;
 mod mcp;
+mod mcp_extensions;
 mod mcp_services;
 mod media;
 mod media_import;

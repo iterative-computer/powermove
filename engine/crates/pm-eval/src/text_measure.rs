@@ -256,7 +256,40 @@ impl<R: FontResolver> CompatMeasure<R> {
             return *b;
         }
         let info = self.compat.resolver().face(face);
-        let computed = outline_box(info.data.as_slice(), info.index, glyph, coords);
+        let computed = if info.synthetic_bold || info.synthetic_italic {
+            // SkFont::getPath retains synthesized styles when it switches to
+            // the canonical 64px strike. Canvas measures that styled path,
+            // including fake-bold's 2px stroke, rather than the raw font box.
+            // Omitting it also moves layers with saved fontAnchorBounds.
+            use pm_text::render::outline::{
+                Coords, FaceRef, GlyphStyle, Outlines, SYNTHETIC_ITALIC_SKEW,
+            };
+            let bold = if info.synthetic_bold { 1. } else { 0. };
+            Outlines::default()
+                .get(
+                    FaceRef::of(info),
+                    Coords::User(coords),
+                    glyph,
+                    GlyphStyle {
+                        size: 64.,
+                        synthetic_bold: (bold, bold),
+                        smooth: (0., 0.),
+                        skew: if info.synthetic_italic {
+                            SYNTHETIC_ITALIC_SKEW
+                        } else {
+                            0.
+                        },
+                        expand_tolerance: 1e-4,
+                    },
+                )
+                .map(|outline| {
+                    let b = outline.path.control_box();
+                    // The box cache uses y-up coordinates and an em divisor.
+                    ([b.x0 as f32, -b.y1 as f32, b.x1 as f32, -b.y0 as f32], 64.)
+                })
+        } else {
+            outline_box(info.data.as_slice(), info.index, glyph, coords)
+        };
         self.boxes.insert(key, computed);
         computed
     }
@@ -437,6 +470,43 @@ fn outline_box(data: &[u8], index: u32, glyph: u32, coords: &[(u32, f32)]) -> Gl
         )
         .ok()?;
     pen.any.then_some((pen.b, upem))
+}
+
+#[cfg(test)]
+mod synthesized_metrics_tests {
+    use super::*;
+    #[test]
+    fn legacy_ink_measures_the_synthesized_canonical_path() {
+        let mut fonts = test_fonts::Fonts::new();
+        let bytes = pm_text::font::FontBytes::new(test_fonts::font(400, 600, 500));
+        let regular = fonts.add("Regular", 400, "regular", bytes.clone(), 0);
+        let italic = fonts.add("Oblique", 400, "oblique", bytes.clone(), 0);
+        let bold = fonts.add("Synthesized", 400, "synthesized", bytes, 0);
+        fonts.faces[bold as usize].synthetic_bold = true;
+        fonts.faces[italic as usize].synthetic_italic = true;
+        let mut measure = CompatMeasure::new(fonts);
+        let (plain, _) = measure.glyph_box(regular, 3, &[]).unwrap();
+        let (styled, em) = measure.glyph_box(bold, 3, &[]).unwrap();
+        assert_eq!(plain, [50., 0., 550., 700.]);
+        assert_eq!(em, 64.);
+        // Independent rectangular glyph: a canonical 2px centered stroke
+        // adds 1px per side. The shape advance remains the font's advance.
+        // Skrifa's scaled TrueType outline uses a 26.6 grid: allow at most
+        // half one grid step, plus the stroke expansion tolerance.
+        for (actual, expected) in styled.into_iter().zip([2.2, -1., 36.2, 45.8]) {
+            assert!(
+                (actual - expected).abs() < 1. / 128. + 1e-4,
+                "{actual} != {expected}"
+            );
+        }
+        let (slanted, em) = measure.glyph_box(italic, 3, &[]).unwrap();
+        assert_eq!(em, 64.);
+        // x' = x - y/4 in y-down coordinates: the top right corner moves
+        // right by 44.8/4, while the baseline's left corner stays put.
+        for (actual, expected) in slanted.into_iter().zip([3.2, 0., 46.4, 44.8]) {
+            assert!((actual - expected).abs() < 1. / 128. + 1e-4);
+        }
+    }
 }
 
 /// `gfx::RectF`: origin and size in `float`. Edges are recomputed

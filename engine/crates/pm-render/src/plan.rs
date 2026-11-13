@@ -1261,17 +1261,13 @@ pub(crate) fn layer_draw<'d>(
         } => {
             let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
                 .map(|p| plane_at_origin(p, b.origin));
-            // Raster layers use one sampler regardless of compatibility.
-            // Text/vector canvas raster removal belongs to their coverage
-            // renderers; level-2 plane rasters and text on a perspective
-            // plane (its layer-space raster, `crate::space25d::local`) use
-            // this sampler too.
+            // Electron projects legacy canvas sources through the same
+            // bilinear sampler in 2D and 3D. Native level-2 planes retain
+            // their output-density resampler.
             let sampling = (matches!(
                 ty.as_str(),
                 "image" | "video" | "precomp" | "shader" | "extension"
-            ) || (plane.is_some()
-                && (crate::sampling::is_level2(layer)
-                    || matches!(ty.as_str(), "text" | "captions"))))
+            ) || (plane.is_some() && crate::sampling::is_level2(layer)))
             .then_some(b.sampling);
             Draw {
                 layer: id.clone(),
@@ -1594,6 +1590,22 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
+            if !crate::vector::level2(layer) {
+                let world = vector_world(scope, b, layer, time, scale)?;
+                let density = crate::text::continuous_raster_scale(&world);
+                return Ok(
+                    crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
+                        Quad::Texture {
+                            source: Source::Vector(Box::new(q.source)),
+                            w: q.w,
+                            h: q.h,
+                            ax: q.ax,
+                            ay: q.ay,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }
+                    }),
+                );
+            }
             if scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
@@ -2422,46 +2434,7 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
-    if scope.is_3d_layer(layer)? {
-        // A plane with no perspective is an affine output transform. Cover
-        // level 1 outlines directly under that exact plane matrix: painting
-        // a local bitmap and sampling it through an in-plane rotation would
-        // change hundreds of edge pixels even though the glyph geometry is
-        // identical. True perspective still uses the local raster sampler.
-        if !level2
-            && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
-                .map(|p| plane_at_origin(p, b.origin))
-            && plane[2] == 0.0
-            && plane[5] == 0.0
-            && plane[8] > 0.0
-            && plane.iter().all(|v| v.is_finite())
-        {
-            let inv_w = 1.0 / plane[8];
-            let m = kurbo::Affine::new([
-                plane[0] * inv_w,
-                plane[1] * inv_w,
-                plane[3] * inv_w,
-                plane[4] * inv_w,
-                plane[6] * inv_w,
-                plane[7] * inv_w,
-            ]);
-            let plan = if ty == "text" {
-                text.text_layer_level1_device(scope, layer, time, m, target)?
-            } else {
-                text.captions_layer_level1_device(scope, layer, time, m, target)?
-            };
-            for what in text.take_unsupported() {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
-            }
-            return Ok(plan.map(|p| {
-                let [x0, y0, x1, y1] = p.crop.map(f64::from);
-                Quad::Device {
-                    source: Source::Text(Box::new(p)),
-                    rect: [x0, y0, x1 - x0, y1 - y0],
-                }
-            }));
-        }
+    if level2 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
     }
     if level2 {
@@ -2486,22 +2459,27 @@ fn text_quad<'d>(
             }
         }));
     }
-    let m = kurbo::Affine::new(world);
-    let plan = if ty == "text" {
-        text.text_layer_level1_device(scope, layer, time, m, target)?
+    // In 2D and 3D, Canvas2D first paints a layer-local bitmap at the compositor's
+    // quarter-step density, then WebGL samples it through the world matrix.
+    // Rasterizing after that matrix changes glyph phase, smoothing size and
+    // edge filtering, even for a fractional translation with no rotation.
+    let density = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, density)?
     } else {
-        text.captions_layer_level1_device(scope, layer, time, m, target)?
+        text.captions_layer(scope, layer, time, density)?
     };
     for what in text.take_unsupported() {
         b.unsupported
             .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
     }
-    Ok(plan.map(|p| {
-        let [x0, y0, x1, y1] = p.crop.map(f64::from);
-        Quad::Device {
-            source: Source::Text(Box::new(p)),
-            rect: [x0, y0, x1 - x0, y1 - y0],
-        }
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
     }))
 }
 

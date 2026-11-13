@@ -230,6 +230,7 @@ fn main() {
         r
     };
     level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
+    legacy_flat_plane_keeps_canvas(&mut gpu, &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
     half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
     unchanged_text_is_uploaded_once_across_viewer_frames(&mut fresh(), &mut failures);
@@ -667,10 +668,10 @@ fn linear_overlap_and_colr_source(renderer: &mut pm_render::Renderer, failures: 
 /// project's linear working domain; a second display decode changes them by
 /// far more than one code value.
 #[cfg(target_os = "macos")]
-/// A still level 1 text layer's device plan is made once and reused while
-/// its content, world matrix, and target stay; an edit (a new document
-/// whose node may sit at the same address) or a move makes a new one, the
-/// same plan a renderer that never saw the old one makes.
+/// A level 1 source texture is reused until its content/density changes.
+/// Fractional layer movement changes the compositor transform, not Canvas
+/// glyph placement or coverage. A fresh renderer must produce the same pixels;
+/// keys include renderer-local font identities.
 fn level1_plans_are_reused_until_their_inputs_change(
     renderer: &mut pm_render::Renderer,
     fresh: &mut pm_render::Renderer,
@@ -712,18 +713,47 @@ fn level1_plans_are_reused_until_their_inputs_change(
             })
             .expect("a text draw")
     };
+    // The reused renderer above uses Area; keep its independent witness
+    // on the same coverage implementation before comparing exact pixels.
+    fresh
+        .text_gpu()
+        .set_coverage(pm_render::text::gpu::Coverage::Area);
     let one = doc("One", 80.0);
     let first = text_of(renderer, &one, 0.0);
     let later = text_of(renderer, &one, 1.0);
     if !std::sync::Arc::ptr_eq(&first.scene, &later.scene) {
         failures.push("a still text layer was laid out again".into());
     }
-    for (name, edited) in [("edited", doc("Two", 80.0)), ("moved", doc("One", 64.0))] {
+    for (name, edited) in [("edited", doc("Two", 80.0)), ("moved", doc("One", 64.125))] {
         let made = text_of(renderer, &edited, 0.0);
-        let expected = text_of(fresh, &edited, 0.0);
-        if made.key != expected.key || made.key == first.key {
+        let pixels = |r: &mut pm_render::Renderer| {
+            let frame = r
+                .render(
+                    &edited,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            r.read_rgba(&frame).unwrap()
+        };
+        let actual = pixels(renderer);
+        let expected = pixels(fresh);
+        let max_cv = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
+            .fold(0.0f64, f64::max);
+        // Allow atlas-coordinate roundoff, well below one output code value.
+        if max_cv > 0.01
+            || (name == "edited" && made.key == first.key)
+            || (name == "moved" && made.key != first.key)
+        {
             failures.push(format!(
-                "{name}: text kept a plan its inputs no longer make"
+                "{name}: stale text plan; fresh render differs by {max_cv:.6} CV; key unchanged {}",
+                made.key == first.key
             ));
         }
     }
@@ -784,20 +814,42 @@ fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut
             continue;
         };
         layers += 1;
-        assert_eq!((text.scene.width, text.scene.height), (128, 96));
         let layer = support::text_reference::render_in_working(&text.scene, working);
         assert_eq!(layer.unreferenced, 0);
-        for (i, src) in layer.rgba.chunks_exact(4).enumerate() {
-            if src[3] > 0.5 {
-                overlap[i] += 1;
+        // Independently sample the local glyph canvas through its quad.
+        // The source may be ink-cropped and no longer shares the frame grid.
+        let inverse = kurbo::Affine::new(draw.matrix).inverse();
+        let [x0, y0, x1, y1] = text.crop.map(|v| v as usize);
+        let tap = |x: isize, y: isize, c: usize| {
+            let x = (x + x0 as isize).clamp(x0 as isize, x1 as isize - 1) as usize;
+            let y = (y + y0 as isize).clamp(y0 as isize, y1 as isize - 1) as usize;
+            layer.rgba[(y * text.scene.width as usize + x) * 4 + c]
+        };
+        for y in 0..96 {
+            for x in 0..128 {
+                let q = inverse * kurbo::Point::new(x as f64 + 0.5, y as f64 + 0.5);
+                if !(0.0..=1.0).contains(&q.x) || !(0.0..=1.0).contains(&q.y) {
+                    continue;
+                }
+                let (sx, sy) = (q.x * (x1 - x0) as f64 - 0.5, q.y * (y1 - y0) as f64 - 0.5);
+                let (ix, iy) = (sx.floor() as isize, sy.floor() as isize);
+                let (fx, fy) = (sx - sx.floor(), sy - sy.floor());
+                let src = std::array::from_fn(|c| {
+                    (tap(ix, iy, c) * (1.0 - fx) + tap(ix + 1, iy, c) * fx) * (1.0 - fy)
+                        + (tap(ix, iy + 1, c) * (1.0 - fx) + tap(ix + 1, iy + 1, c) * fx) * fy
+                });
+                let i = y * 128 + x;
+                if src[3] > 0.5 {
+                    overlap[i] += 1;
+                }
+                let dst = &mut ideal[i * 4..][..4];
+                let result = blend(
+                    Blend::Normal,
+                    scale(src, *alpha),
+                    [dst[0], dst[1], dst[2], dst[3]],
+                );
+                dst.copy_from_slice(&result);
             }
-            let dst = &mut ideal[i * 4..][..4];
-            let result = blend(
-                Blend::Normal,
-                scale([src[0], src[1], src[2], src[3]], *alpha),
-                [dst[0], dst[1], dst[2], dst[3]],
-            );
-            dst.copy_from_slice(&result);
         }
     }
     assert_eq!(layers, 2, "both text layers use Source::Text");
@@ -878,3 +930,61 @@ fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
+
+/// The legacy compositor rasterizes text before projecting its quad,
+/// including a plane with no perspective. Check the actual default masks
+/// and sampling at fractional phases, both rotated and axis aligned.
+#[cfg(target_os = "macos")]
+fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use serde_json::json;
+    use support::doc::*;
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Smoothed);
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(320, 180),
+        pm_protocol::color::Precision::Float32,
+    );
+    for rotation in [0.0, 17.0] {
+        let mut l = layer(
+            "text",
+            "text",
+            json!({"text":"Canvas glyphs", "font":"Arial", "size":32, "weight":600, "color":"#E0D0C0", "align":"left"}),
+            80.125,
+            100.375,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!(123));
+        set(&mut l, "scale.y", json!(123));
+        set(&mut l, "rotation", json!(rotation));
+        let mut pixels = vec![];
+        for three_d in [false, true] {
+            l["threeD"] = json!(three_d);
+            let doc = load(&project(320, 180, 2.0, no_fill(), vec![l.clone()]));
+            let frame = renderer
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            pixels.push(renderer.read_rgba(&frame).unwrap());
+        }
+        let max = pixels[0]
+            .iter()
+            .zip(&pixels[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        if max >= 1.0 / 255.0 {
+            failures.push(format!(
+                "legacy text flat plane at {rotation} degrees changes canvas edge by {max}"
+            ));
+        }
+    }
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Exact);
+}

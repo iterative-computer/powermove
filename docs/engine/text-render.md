@@ -1,8 +1,9 @@
 # Text rendering
 
-Text uses one raster pipeline at both compatibility levels: exact outline
-coverage in output pixels, followed by ordered float paint. Compatibility
-selects layout, not raster quality. The font registry and layout contract
+Native text uses exact outline coverage in output pixels followed by ordered
+float paint. Legacy text retains Canvas2D's source pixel grid, mask coverage
+and texture filtering so an imported project keeps its authored appearance.
+The font registry and layout contract
 are described in [text.md](text.md).
 
 ## Authored layout
@@ -14,12 +15,11 @@ seeds are unchanged. Range typography and animator poses still come from
 `pm-eval`. Level 2 uses the shared Parley frame for layout, carets, bounds,
 picks and painting.
 
-The painter takes each run's exact layout positions through the layer's
-world matrix. It does not snap glyph origins, relax strike sizes, or choose
-a raster-density bucket. Production layers use `Quad::Device`; transforms
-therefore affect outline coverage directly at the requested output size.
-The compatibility raster service still paints the requested layer canvas
-and density, preserving its geometry and crop contract.
+Level 1 paints into the authored layer canvas at the compositor's continuous
+quarter-step density, including its ceil-rounded dimensions and anchor, then
+samples that texture through the world transform. Fractional output movement
+therefore does not change the glyph strike or baseline phase. Level 2 uses
+`Quad::Device`: transforms affect its outlines at the requested output size.
 
 Layout is an exact gate independent of pixels. Raster improvements must
 never be accepted as a reason for changing an advance or line break.
@@ -55,6 +55,29 @@ its default; an animated glyph starts with black; caption fill restores
 the box fill, or black without a box. Invalid `hexToRgba` output follows
 the same rejection rule. Unsupported styles report a text failure rather
 than silently substituting a color.
+
+## Legacy Canvas masks
+
+On macOS, smoothed, axis-aligned level 1 fills below the large-strike boundary
+use CoreGraphics' black-on-white RGB glyph mask with subpixel quantization
+disabled, at Skia's quarter-pixel horizontal phase and whole-pixel baseline.
+The inverted pixel luminance passes through the measured Skia mask-gamma
+table selected by the paint's canonical luminance bucket. A fitted dilation
+and exponent cannot reproduce that hinting and discrete preblend.
+`pm-text/render/canvas2d.rs` shares font instancing with the CoreText reference
+and retains an 8 MiB mask cache. Its immutable fonts move with their owning
+render thread; bitmap contexts stay within one call.
+
+Synthesized bold uses its stroked outline's geometric A8 coverage and the
+same mask preblend, matching Skia's path-generated strikes. CoreGraphics font
+dilation does not apply to that path. Its cache also keys the source scale,
+since fake-bold width is computed before the device transform.
+Legacy typography metrics also measure synthesized bold and italic on the
+canonical 64px path, so recorded font anchors compare the same styled bounds.
+
+Color glyphs, strokes, large or transformed glyph strikes
+retain their existing painters. `TextWeight::Exact` and level 2 retain exact
+outline coverage. Layout and font choice are unchanged.
 
 ## Outlines and coverage
 
@@ -101,25 +124,21 @@ every frame. A singular transform is resolved after it, as before. Glyphs the
 8 MiB GPU edge cache misses upload together, in 32 KB chunks through a reused
 scratch, one texture per chunk.
 
-**TEXT-RASTER-1:** exact outline coverage replaces the previous CoreText
-smoothing fit, CoreGraphics masks, Skia preblend tables and distance-field
-band. It does not alter font selection, layout or synthetic-bold amount.
+**TEXT-RASTER-1:** exact outline coverage remains the native and explicit
+Exact painter. Legacy macOS fills use the Canvas masks described above to
+preserve authored pixels. Neither path changes font selection or layout.
+Legacy text and captions retain the same local canvas density and bilinear
+sampling on 2D layers and 3D planes. Native level-2 planes retain their
+perspective-density raster and output resampler.
 
-**TEXT-SMOOTH-1 (2026-11-11, the owner's bar: text looks as it always
-has):** frames draw text with today's weight by default, on top of exact
-coverage (`pm_text::render::smoothing`, `TextWeight::Smoothed`): level 1
-text and captions as Canvas2D drew them on macOS, level 2 as CoreText with
-font smoothing. Glyph fills grow by a per-size outline dilation (round
-joins) with the ink moved up by its vertical part, coverage goes through
-`1 − (1 − c)^e` (one exponent for white paint, one for black, mixed by the
-paint's luma) in the paint pass, and Canvas2D places axis-aligned glyphs on
-Skia's quarter-pixel grid. Stroke passes, bitmap and COLR glyphs are not
-smoothed. `TextWeight::Exact` keeps plain coverage; the raster gates below
-judge that mode against their independent reference, and `text_weight`
-judges the default against today's measured stems
-(`tools/visual-parity/text-weight-probe.mjs`): mean 0.096 px from today
-where exact coverage is 0.479 px. Extensions' canvas text (`pm-recorder`)
-draws with the same Canvas2D weight under the same gate.
+**TEXT-SMOOTH-1:** frames draw with the authored platform weight by default
+(`TextWeight::Smoothed`): legacy macOS fills use the Canvas masks above;
+level 2 uses its CoreText smoothing fit. Unsupported Canvas mask cases retain
+outline dilation and the fitted paint-luminance coverage curve. Strokes,
+bitmap and COLR glyphs retain their painters. `TextWeight::Exact` keeps plain
+coverage; raster gates judge that mode against an independent reference,
+and `text_weight` judges the default against the measured Canvas stems in
+`tools/visual-parity/text-weight-probe.mjs`.
 
 ## Paint and blend domain
 

@@ -1,10 +1,10 @@
 //! Text and captions (plan sections 10 and 12, amendments 10 and 19).
 //! Design notes: `docs/engine/text-render.md`.
 //!
-//! Production text and captions paint exact glyph outlines in device space.
-//! Level 1 keeps its Blink-compatible layout; level 2 keeps its Parley
-//! layout. Both use exact float area coverage, float paint, and working-domain image
-//! filtering. The ordered scene retains only its ink crop. A 2.5D layer
+//! Level 1 text and captions retain their Blink-compatible layout, Canvas
+//! glyph masks and local source pixel grid. Level 2 keeps its Parley layout
+//! and exact device-space coverage. Both retain ordered paint and working-domain
+//! image filtering. The ordered scene retains only its ink crop. A 2.5D layer
 //! instead paints at its plane density and projects through that plane.
 //! The explicit raster API still paints into its requested canvas.
 //!
@@ -819,9 +819,9 @@ impl TextContext {
         };
         let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
         let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
-        let scene = self.text_scene_level1(scope, layer, time, Affine::scale(density), target)?;
+        let world = Affine::scale(density) * Affine::translate((raster.anchor_x, raster.anchor_y));
         Ok(self
-            .finish(scene)
+            .text_layer_level1_device(scope, layer, time, world, target)?
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
     }
 

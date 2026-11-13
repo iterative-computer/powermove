@@ -68,6 +68,8 @@ pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
 pub struct Bitmaps {
     map: HashMap<Key, Option<Arc<BitmapGlyph>>>,
     pub(crate) colr: super::colr::Cache,
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    pub(crate) canvas: super::canvas2d::CanvasMasks,
 }
 
 impl Bitmaps {
@@ -78,6 +80,8 @@ impl Bitmaps {
     pub fn clear(&mut self) {
         self.map.clear();
         self.colr.clear();
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        self.canvas.clear();
     }
 
     /// The color bitmap of `glyph` for a run at `requested` device px,

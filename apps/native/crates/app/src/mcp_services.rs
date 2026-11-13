@@ -172,12 +172,13 @@ impl pm_mcp::store::StoreRead for StoreHttp {
     }
 }
 pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
-    std::thread::spawn(move || -> anyhow::Result<()> {
+    crate::mcp_extensions::run(move |fonts| -> anyhow::Result<()> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(profile.join("journals")),
             backup_root: Some(profile.join("backups")),
             write_coordinator: Some(crate::file_coordination::system()),
             trash: Some(crate::file_coordination::trash()),
+            text: Some(crate::text_host::text_host(&fonts)),
             ..Default::default()
         });
         let host = crate::mcp::Host::new(actor.handle(), profile.clone());
@@ -217,8 +218,6 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         actor.shutdown();
         result.map_err(Into::into)
     })
-    .join()
-    .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
 }
 struct ProjectExtensions {
     project: String,
@@ -314,6 +313,7 @@ impl EngineJobs {
                     },
                 ));
                 overrides.connect(host.raster_inbox());
+                crate::mcp_extensions::watch(&host);
                 ProjectExtensions {
                     project: published.project.clone(),
                     host,
