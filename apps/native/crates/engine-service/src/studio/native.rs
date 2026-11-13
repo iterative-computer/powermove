@@ -12,11 +12,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+type MapPixels = HashMap<(String, bool), Arc<Vec<u8>>>;
+
 pub struct DocumentSource {
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
     meshes: Mutex<HashMap<String, Arc<Mesh>>>,
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
+    map_pixels: Mutex<MapPixels>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
 }
 fn val(v: &Value) -> &Value {
@@ -49,6 +52,7 @@ impl DocumentSource {
             media,
             meshes: Mutex::default(),
             resources: Mutex::default(),
+            map_pixels: Mutex::default(),
             resolved: Mutex::default(),
         }
     }
@@ -130,6 +134,94 @@ impl DocumentSource {
         resources.insert(id.into(), resource.clone());
         Ok(resource)
     }
+    fn image_map(&self, id: &str, flip_y: bool) -> Result<Arc<Vec<u8>>, String> {
+        let mut cache = self
+            .map_pixels
+            .lock()
+            .map_err(|_| "Studio map cache poisoned")?;
+        let key = (id.to_owned(), flip_y);
+        if let Some(pixels) = cache.get(&key) {
+            return Ok(pixels.clone());
+        }
+        let path = self
+            .media
+            .paths
+            .get(id)
+            .ok_or_else(|| format!("Studio material image {id} is unavailable"))?;
+        let pixels = Arc::new(
+            pm_scene3d::render::material_texture(path, flip_y).map_err(|e| e.to_string())?,
+        );
+        if cache.len() >= 8 {
+            cache.clear();
+        }
+        cache.insert(key, pixels.clone());
+        Ok(pixels)
+    }
+
+    fn material_maps(
+        &self,
+        maps: &Value,
+        flip_y: bool,
+        gpu: &mut GpuMaterial,
+        layers: &mut Vec<Vec<u8>>,
+        indices: &mut HashMap<(String, usize), usize>,
+    ) -> Result<(), String> {
+        for (slot, field) in [(0, "color"), (1, "emissive"), (3, "normal")] {
+            let Some(value) = maps.get(field).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let id = value
+                .as_str()
+                .ok_or("Studio material composition/layer maps require a resolved source")?;
+            let key = (format!("asset:{id}:{flip_y}"), 0);
+            let index = if let Some(index) = indices.get(&key) {
+                *index
+            } else {
+                if layers.len() >= 256 {
+                    return Err("Studio map array exceeds 256 layers".into());
+                }
+                let index = layers.len();
+                layers.push(self.image_map(id, flip_y)?.as_ref().clone());
+                indices.insert(key, index);
+                index
+            };
+            gpu.maps[slot] = index as f32;
+        }
+        let channels = [("ao", 0), ("roughness", 1), ("metalness", 2)];
+        if channels
+            .iter()
+            .any(|(name, _)| maps.get(*name).is_some_and(|v| !v.is_null()))
+        {
+            let key = (format!("orm:{flip_y}:{maps}"), 0);
+            let index = if let Some(index) = indices.get(&key) {
+                *index
+            } else {
+                if layers.len() >= 256 {
+                    return Err("Studio map array exceeds 256 layers".into());
+                }
+                let mut pixels = vec![255; 1024 * 1024 * 4];
+                for (name, channel) in channels {
+                    let Some(value) = maps.get(name).filter(|v| !v.is_null()) else {
+                        continue;
+                    };
+                    let id = value
+                        .as_str()
+                        .ok_or("Studio data map must name an image asset")?;
+                    let image = self.image_map(id, flip_y)?;
+                    for (out, source) in pixels.chunks_exact_mut(4).zip(image.chunks_exact(4)) {
+                        out[channel] = source[channel];
+                    }
+                }
+                let index = layers.len();
+                layers.push(pixels);
+                indices.insert(key, index);
+                index
+            };
+            gpu.maps[2] = index as f32;
+        }
+        Ok(())
+    }
+
     fn mesh(&self, source: &Value) -> Result<Arc<Mesh>, String> {
         let key = serde_json::to_string(source).map_err(|e| e.to_string())?;
         self.cached_mesh(key, || {
@@ -306,15 +398,12 @@ impl SceneSource for DocumentSource {
             if val(&object["p"]["visible"]) == false {
                 continue;
             }
-            if object["material"]["maps"]
-                .as_object()
-                .is_some_and(|m| m.values().any(|v| !v.is_null()))
-                || !object["slots"].as_array().is_none_or(Vec::is_empty)
+            if !object["slots"].as_array().is_none_or(Vec::is_empty)
                 || object["material"]
                     .get("screen")
                     .is_some_and(|v| !v.is_null())
             {
-                return Err("Studio material maps/slots/screens require resolved resources".into());
+                return Err("Studio material slots/screens require resolved resources".into());
             }
             let p = &object["material"]["p"];
             let m = Material {
@@ -395,6 +484,13 @@ impl SceneSource for DocumentSource {
                             }
                         }
                     }
+                    self.material_maps(
+                        &object["material"]["maps"],
+                        false,
+                        &mut gpu,
+                        &mut map_layers,
+                        &mut map_indices,
+                    )?;
                     materials.push(gpu);
                     let mesh = self.cached_mesh(
                         format!("asset:{}", pm_scene3d::render::geometry_key(&part.geometry)),
@@ -414,6 +510,13 @@ impl SceneSource for DocumentSource {
                 scene.materials.push(m);
                 let mut gpu = m.gpu();
                 gpu.extra[2] = n(p, "opacity", 1.);
+                self.material_maps(
+                    &object["material"]["maps"],
+                    false,
+                    &mut gpu,
+                    &mut map_layers,
+                    &mut map_indices,
+                )?;
                 materials.push(gpu);
                 instances.push(MeshInstance {
                     layer: id.into(),

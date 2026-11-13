@@ -26,6 +26,14 @@ pub fn attach(
     doc: std::sync::Arc<pm_model::Document>,
     media: &pm_export::render::MediaPaths,
 ) {
+    // Legacy Electron scenes were authored in Three.js' rasterizer with
+    // ACES Filmic. Attaching the native path tracer would change lighting,
+    // materials and the tone curve (Studio uses PBR Neutral), even in a
+    // headless snapshot. Preserve the authored renderer across native saves.
+    if pm_eval::node::is_str(pm_eval::node::member(doc.root(), "render3d"), "electron") {
+        renderer.set_studio_source(None, Default::default());
+        return;
+    }
     let revision = doc.revision();
     renderer.set_studio_source(
         Some(std::sync::Arc::new(DocumentSource::new(doc, media.clone()))),

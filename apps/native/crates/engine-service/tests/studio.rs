@@ -714,3 +714,149 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
         );
     });
 }
+
+#[test]
+fn studio_asset_maps_load_deduplicate_and_draw_in_windowless_frames() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.bin");
+    std::fs::write(
+        &path,
+        [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2,
+            8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 23, 73, 68, 65, 84, 120, 156, 99, 252, 207,
+            192, 240, 159, 129, 129, 129, 129, 145, 129, 225, 63, 152, 1, 0, 42, 3, 3, 255, 7, 53,
+            54, 238, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ],
+    )
+    .unwrap();
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let object = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap();
+    object["d"]["data"]["object"]["source"] =
+        json!({"primitive":"plane","parameters":{"width":2,"height":2}});
+    object["d"]["data"]["object"]["material"] = json!({"p":{"color":"#FFFFFF","roughness":1,"metalness":0,"emissive":"#FFFFFF","emissiveIntensity":1},"maps":{"color":"image","emissive":"image"},"doubleSided":true});
+    project["assets"]["image"] = json!({"id":"image","kind":"image","format":"png","w":2,"h":2});
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("image", path);
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+    let maps = input.maps.unwrap();
+    assert_eq!(
+        maps.layers.len(),
+        1,
+        "the two colour slots share the same image"
+    );
+    let m = &input.materials.unwrap()[0];
+    assert_eq!(m.maps[0], m.maps[1]);
+    assert_eq!(
+        &maps.layers[0][..4],
+        &[255, 0, 0, 255],
+        "native mesh UVs already orient image rows"
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0.05 && p[0] > p[2] * 5.0)
+            .count()
+            > 100
+    );
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[2] > 0.05 && p[2] > p[0] * 5.0)
+            .count()
+            > 100
+    );
+    let missing = studio::DocumentSource::new(doc.clone(), Default::default());
+    assert!(
+        missing
+            .scene(&studio::SceneRequest {
+                composition: "test".into(),
+                revision: doc.revision(),
+                ticks: 0,
+                width: 64,
+                height: 64
+            })
+            .err()
+            .unwrap()
+            .contains("image is unavailable")
+    );
+}
+
+#[test]
+fn imported_electron_scene_keeps_raster_materials_and_native_scene_keeps_tracing() {
+    use pm_render::plan::{Content, Source};
+    let mut renderer = Renderer::headless().unwrap();
+    let native = document(true, 100.);
+    studio::attach(&mut renderer, native.clone(), &Default::default());
+    let planned = |renderer: &mut Renderer, doc: &pm_model::Document| {
+        let (plan, failures) = renderer
+            .plan(
+                doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        plan.draws
+            .iter()
+            .filter_map(|draw| match &draw.content {
+                Content::Texture {
+                    source: Source::Object3d(plan),
+                    ..
+                } => Some(matches!(
+                    plan.kind,
+                    pm_render::scene3d::Render3d::Studio { .. }
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(planned(&mut renderer, &native).iter().all(|studio| *studio));
+    let mut value = native.to_value().unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("render3d", pm_model::Value::from("electron"));
+    let legacy = Arc::new(pm_model::Document::new(Some(value), native.revision()));
+    studio::attach(&mut renderer, legacy.clone(), &Default::default());
+    let flags = planned(&mut renderer, &legacy);
+    assert!(!flags.is_empty());
+    assert!(flags.iter().all(|studio| !*studio));
+}

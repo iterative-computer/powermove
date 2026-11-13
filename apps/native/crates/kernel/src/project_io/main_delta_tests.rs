@@ -676,3 +676,117 @@ fn archived_ranges_are_checksum_verified_and_never_overlap_the_document() {
             .is_err()
     );
 }
+
+#[test]
+fn electron_video_colour_intent_survives_native_save_and_leaves_native_assets_alone() {
+    let project = pm_model::json::parse(r##"{"id":"P","compId":"C","w":64,"h":64,"fps":30,"dur":1,"layers":[],"assets":{"clip":{"id":"clip","kind":"video"},"image":{"id":"image","kind":"image"},"managed":{"id":"managed","kind":"video","videoColor":"native"}}}"##).unwrap();
+    let make = |format, project| pm_model::container::Container {
+        format,
+        document: project,
+        asset_order: None,
+        media: vec![],
+        archived_media: vec![],
+        index: None,
+        legacy_metadata: None,
+    };
+    let legacy = from_container(make(ContainerFormat::Pmv3, project.clone()), None, None).unwrap();
+    let legacy_value = legacy.document.to_value().unwrap();
+    let assets = legacy_value.get("assets").unwrap();
+    assert_eq!(
+        assets
+            .get("clip")
+            .unwrap()
+            .get("videoColor")
+            .and_then(Value::as_str),
+        Some("electron")
+    );
+    assert_eq!(
+        assets
+            .get("managed")
+            .unwrap()
+            .get("videoColor")
+            .and_then(Value::as_str),
+        Some("native")
+    );
+    assert!(assets.get("image").unwrap().get("videoColor").is_none());
+    let dir = Scratch::new();
+    let mut store = DocumentStore::open(legacy);
+    let saved = save(&mut store, &dir.path("legacy.pmv"), SaveOptions::default());
+    let reopened = open_project(&dir.path("legacy.pmv"), OpenOptions::default()).unwrap();
+    assert_eq!(
+        reopened.document.to_value().unwrap().get("assets"),
+        Some(assets)
+    );
+    assert!(
+        saved
+            .get("proj")
+            .unwrap()
+            .get("assets")
+            .unwrap()
+            .get("clip")
+            .unwrap()
+            .get("videoColor")
+            .is_some()
+    );
+    let mut native_project = project.clone();
+    native_project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("assets")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .get_mut("clip")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("timing", Value::from(2));
+    let native = from_container(
+        make(ContainerFormat::Pmv4, native_project.clone()),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        native.document.to_value().unwrap().get("assets"),
+        native_project.get("assets")
+    );
+    let electron_pmv4 = from_container(make(ContainerFormat::Pmv4, project), None, None).unwrap();
+    assert_eq!(
+        electron_pmv4
+            .document
+            .to_value()
+            .unwrap()
+            .get("assets")
+            .unwrap()
+            .get("clip")
+            .unwrap()
+            .get("videoColor")
+            .and_then(Value::as_str),
+        Some("electron")
+    );
+}
+
+#[test]
+fn legacy_3d_selects_the_electron_renderer_and_native_projects_keep_studio() {
+    let mut project = fixture().get("proj").unwrap().clone();
+    project.as_object_mut().unwrap().insert(
+        "layers",
+        parse(r#"[{"id":"model","type":"extension","d":{"definition":"powermove.3d.object"}}]"#)
+            .unwrap(),
+    );
+    adopt_electron_rendering(&mut project, true);
+    assert_eq!(
+        project.get("render3d").and_then(Value::as_str),
+        Some("electron")
+    );
+    project
+        .as_object_mut()
+        .unwrap()
+        .insert("render3d", Value::from("studio"));
+    adopt_electron_rendering(&mut project, true);
+    assert_eq!(
+        project.get("render3d").and_then(Value::as_str),
+        Some("studio")
+    );
+}

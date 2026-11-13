@@ -5,6 +5,29 @@ use gltf::{ObjectKind, math, pose};
 pub use pm_geom3d::{Geometry, gltf};
 use std::{collections::HashMap, sync::Arc};
 
+/// A legacy image material uses the same 1024² RGBA8 array as imported
+/// Studio maps. Generated geometry uses Three.js' default flipped image UVs;
+/// imported glTF geometry keeps the image's original row order.
+pub fn material_texture(path: &std::path::Path, flip_y: bool) -> Result<Vec<u8>> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| Error(format!("Material image: {e}")))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 << 20);
+    reader.limits(limits);
+    let source = reader
+        .decode()
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .into_rgba8();
+    let mut image =
+        image::imageops::resize(&source, 1024, 1024, image::imageops::FilterType::Triangle);
+    if flip_y {
+        image::imageops::flip_vertical_in_place(&mut image);
+    }
+    Ok(image.into_raw())
+}
+
 pub struct Part {
     pub geometry: Arc<Geometry>,
     pub world: [f64; 16],

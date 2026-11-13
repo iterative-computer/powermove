@@ -72,6 +72,32 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
     desc
 }
 
+/// Electron's legacy Canvas video path. An invalid/partial frame colour
+/// space falls back to Rec.601 in Chromium's PaintCanvasVideoRenderer,
+/// independently of dimensions (crbug.com/41380578). This is opt-in per
+/// imported asset; the native video table above is deliberately unchanged.
+///
+/// Electron's `proxyColorArgs` preserves non-HDR BT.2020 camera R′G′B′ code
+/// values and relabels them Rec.709 before grading. Keep the input YUV matrix
+/// (decode those values first); suppress only the gamut/transfer conversion.
+pub fn electron_frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
+    let mut desc = frame_reading(color, sequence);
+    if color.tagged.matrix.is_none() && desc.matrix != MatrixCoefficients::Identity {
+        desc.matrix = MatrixCoefficients::Bt601;
+    }
+    if !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
+        && (desc.primaries == Primaries::Bt2020
+            || matches!(
+                desc.matrix,
+                MatrixCoefficients::Bt2020Ncl | MatrixCoefficients::Bt2020Cl
+            ))
+    {
+        desc.primaries = Primaries::Bt709;
+        desc.transfer = Transfer::DisplayE;
+    }
+    desc
+}
+
 /// SMPTE ST 2086 mastering display, chromaticities as (x, y).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -626,6 +652,56 @@ mod interpret_tests {
                 );
                 assert_eq!(frame_reading(&c, true).primaries, Primaries::Bt709);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod electron_tests {
+    use super::*;
+
+    fn color(tags: [i32; 3]) -> ColorInfo {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
+        let input = crate::ff::Input::open(&path).unwrap();
+        let mut info = input.codec_info(input.best_video().unwrap());
+        (info.width, info.height) = (1280, 720);
+        info.color_primaries = tags[0] as _;
+        info.color_trc = tags[1] as _;
+        info.color_space = tags[2] as _;
+        interpret(&info, None, &SideData::default(), None)
+    }
+
+    #[test]
+    fn partial_legacy_video_uses_canvas_601_without_changing_native_hd() {
+        let c = color([1, 13, 2]);
+        assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
+        assert_eq!(
+            electron_frame_reading(&c, false).matrix,
+            MatrixCoefficients::Bt601
+        );
+        let tagged = color([1, 13, 1]);
+        assert_eq!(
+            electron_frame_reading(&tagged, false).matrix,
+            MatrixCoefficients::Bt709
+        );
+    }
+
+    #[test]
+    fn legacy_log_preserves_camera_codes_but_hdr_and_native_keep_their_tags() {
+        let c = color([9, 1, 9]);
+        let native = frame_reading(&c, false);
+        assert_eq!(native.primaries, Primaries::Bt2020);
+        let legacy = electron_frame_reading(&c, false);
+        assert_eq!(legacy.primaries, Primaries::Bt709);
+        assert_eq!(legacy.transfer, Transfer::DisplayE);
+        assert_eq!(legacy.matrix, MatrixCoefficients::Bt2020Ncl);
+        for transfer in [16, 18] {
+            let hdr = color([9, transfer, 9]);
+            assert_eq!(
+                electron_frame_reading(&hdr, false),
+                frame_reading(&hdr, false)
+            );
         }
     }
 }
