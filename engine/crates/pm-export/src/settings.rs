@@ -679,6 +679,10 @@ impl ExportSpec {
             if audio.codec == AudioCodec::Opus && audio.sample_rate != OPUS_SAMPLE_RATE {
                 return invalid("Opus audio is mixed at 48 kHz");
             }
+            // The AAC LC encoder takes no rate above 48 kHz.
+            if audio.codec == AudioCodec::Aac && audio.sample_rate > 48_000 {
+                return invalid("AAC audio is at most 48 kHz");
+            }
         }
         if let Some(tc) = &self.timecode {
             // AVAssetWriter refuses a timecode track in MPEG-4 (measured on macOS 27).
