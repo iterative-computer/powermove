@@ -2094,6 +2094,80 @@ fn root_level_project_has_a_timeline_composition_and_tab() {
     assert_eq!(frame["window"]["total"], 1);
 }
 
+/// View ▸ Timeline in Tracks, Hide Shy Layers, the graph and the reveal keys
+/// change the timeline's saved view from outside its panel. The panel's
+/// project subscription moves with that view, so its header and rows follow.
+#[test]
+fn the_timeline_panel_hears_of_a_view_change_made_outside_it() {
+    use pm_kernel::state::{StateOp, StateTransaction};
+    use pm_surface::host_data::KernelData;
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"view-film","name":"View Film","compId":"c","w":32,"h":18,"fps":30,"dur":2,"assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Box","from":0,"dur":2,"on":true,"shy":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]},{"id":"b","type":"shape","name":"Bar","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]}]}"##).unwrap();
+    kernel
+        .open("view-film", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "view-timeline".into(),
+        generation: 1,
+        project: "view-film".into(),
+    };
+    let backend = Arc::new(Mutex::new(
+        data::Backend::new(kernel.clone(), identity.clone(), "timeline", false).unwrap(),
+    ));
+    let mut service = data::Data(backend.clone());
+    let subscribed = |service: &mut data::Data| {
+        service
+            .query(&identity, &pm_surface::host_api::Query::Project, None, None)
+            .unwrap()
+    };
+    let frame = |backend: &Arc<Mutex<data::Backend>>| {
+        backend
+            .lock()
+            .unwrap()
+            .timeline_frame(&json!({"first":0,"visible":20}))
+            .unwrap()
+    };
+    let before = subscribed(&mut service);
+    assert_eq!(frame(&backend)["mode"], "Layers");
+    assert_eq!(frame(&backend)["window"]["total"], 2);
+    assert_eq!(frame(&backend)["shyLayers"], true);
+    // What the tracks' own model saves when a command changes the view.
+    let save = |key: &str, value: pm_model::Value| {
+        let state = kernel.state();
+        let mut ui = state.ui.get("view-film").cloned().unwrap_or_default();
+        let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+        timeline.insert(key, value);
+        ui.timeline = pm_model::Value::Object(timeline);
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: Some(state.revision),
+                ops: vec![StateOp::Ui {
+                    project: "view-film".into(),
+                    next: ui,
+                }],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    // Hide Shy Layers: the shy layer's row goes; the layer stays in the project.
+    save("hideShy", pm_model::Value::Bool(true));
+    let hidden = subscribed(&mut service);
+    assert_eq!(hidden.revision, before.revision, "no document edit");
+    assert_ne!(hidden.value, before.value, "the subscription moved");
+    let shown = frame(&backend);
+    assert_eq!(shown["hideShy"], true);
+    assert_eq!(shown["window"]["total"], 1);
+    assert_eq!(shown["window"]["rows"][0]["layer"], "b");
+    // Timeline in Tracks: the header's mode follows.
+    save("mode", pm_model::Value::from("tracks"));
+    assert_ne!(subscribed(&mut service).value, hidden.value);
+    assert_eq!(frame(&backend)["mode"], "Tracks");
+}
+
 /// A viewer pane shorter than two insets still publishes (fit edge to edge),
 /// and a 32 × 18 composition fits a real pane.
 #[test]
