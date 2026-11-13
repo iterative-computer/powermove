@@ -955,3 +955,129 @@ fn the_new_editing_rows_are_in_the_menus_with_their_keys() {
         assert_eq!(item.chord, format!("alt+shift+{property}"));
     }
 }
+
+#[test]
+fn the_palette_lists_commands_with_arguments_and_commands_outside_the_menus() {
+    let rows = pm_shell::menu::palette_rows();
+    let find = |label: &str| {
+        rows.iter()
+            .find(|(_, _, l)| l == label)
+            .unwrap_or_else(|| panic!("no palette row {label}"))
+            .clone()
+    };
+    // A row with arguments carries them to the command it sends.
+    for (label, menu, command, args) in [
+        ("Forward 10 Frames", "Timeline", "stepFrames", json!([10])),
+        ("Back 10 Frames", "Timeline", "stepFrames", json!([-10])),
+        (
+            "Nudge Keyframes Later",
+            "Timeline",
+            "nudgeKeyframes",
+            json!([1]),
+        ),
+        (
+            "Move Ten Frames Earlier",
+            "Layer",
+            "nudgeLayerTime",
+            json!([-10]),
+        ),
+        ("Align Left", "Layer", "alignLayers", json!(["left"])),
+        (
+            "Distribute Vertically",
+            "Layer",
+            "distributeLayers",
+            json!(["vertical"]),
+        ),
+    ] {
+        let (category, row, _) = find(label);
+        assert_eq!(category, menu, "{label}");
+        let (name, sent) = pm_shell::menu::split_palette_command(&row);
+        assert_eq!(
+            (name, serde_json::Value::from(sent)),
+            (command, args),
+            "{label}"
+        );
+    }
+    // The viewer's toggles and Skimming have no row in the shell's menus.
+    for (label, command) in [
+        ("Show Safe Areas", "viewer.safeAreas"),
+        ("Show Guides", "viewer.guides"),
+        ("Popout Viewer", "viewer.popout"),
+        ("Toggle Proxies", "viewer.toggleProxies"),
+        ("Skimming", "toggleSkimming"),
+        ("Audio Skimming", "toggleAudioSkimming"),
+    ] {
+        let (category, row, _) = find(label);
+        assert_eq!((category, row.as_str()), ("View", command));
+        if let Some(action) = crate::viewer2::command_action(command) {
+            let _ = action;
+        } else {
+            assert!(
+                command.starts_with("toggle"),
+                "{command} has no viewer action"
+            );
+        }
+    }
+    // Safe areas and guides have After Effects' keys.
+    let keys = pm_shell::keyboard::shipped();
+    let chord = |command: &str| {
+        keys.iter()
+            .find(|b| b.command == command)
+            .map(|b| b.chord.as_str())
+    };
+    assert_eq!(chord("viewer.safeAreas"), Some("'"));
+    assert_eq!(chord("viewer.guides"), Some("cmd+;"));
+    // No row is listed twice.
+    let mut commands: Vec<&String> = rows.iter().map(|(_, c, _)| c).collect();
+    let all = commands.len();
+    commands.sort();
+    commands.dedup();
+    assert_eq!(commands.len(), all);
+}
+
+#[test]
+fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
+    let at = |id: &str, x: f64| {
+        let mut layer = shape(id);
+        layer["p"]["position.x"]["v"] = json!(x);
+        layer
+    };
+    let desk = Desk::new(project(vec![at("a", 100.), at("b", 150.), at("c", 500.)]));
+    let before = desk.document();
+    let x = |desk: &Desk, id: &str| evaluate(&desk.published(), id, "position.x", 0.);
+    desk.select(&["a", "b", "c"]);
+    // Equal gaps: the outer two stay and the middle one goes halfway.
+    desk.run("distributeLayers", &[json!("horizontal")], 0.);
+    assert_eq!(
+        (x(&desk, "a"), x(&desk, "b"), x(&desk, "c")),
+        (100., 300., 500.)
+    );
+    assert_eq!(
+        desk.published().history.undo_label.as_deref(),
+        Some("Distribute Layers")
+    );
+    desk.undo();
+    assert_eq!(desk.document(), before);
+    // Fewer than three layers: nothing to distribute, and the row is off.
+    desk.select(&["a", "b"]);
+    let published = desk.published();
+    assert!(command_plan("distributeLayers", &[json!("horizontal")], &published, 0.).is_none());
+    let off =
+        crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default());
+    assert!(off.contains("distributeLayers") && !off.contains("alignLayers"));
+    // Align: the selection's box meets the composition's edge, each layer
+    // moving by the same amount.
+    desk.run("alignLayers", &[json!("left")], 0.);
+    let (a, b) = (x(&desk, "a"), x(&desk, "b"));
+    assert!(a < 100., "moved left: {a}");
+    assert_eq!(b - a, 50., "the pair keeps its spacing");
+    assert_eq!(
+        desk.published().history.undo_label.as_deref(),
+        Some("Align Layers")
+    );
+    desk.run("alignLayers", &[json!("right")], 0.);
+    assert!(x(&desk, "b") > 150.);
+    desk.undo();
+    desk.undo();
+    assert_eq!(desk.document(), before);
+}

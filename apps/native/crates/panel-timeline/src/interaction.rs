@@ -421,6 +421,25 @@ impl TimelineModel {
                 ..Plan::default()
             },
             "timeline.addMarker" => self.add_marker(time)?,
+            // Toggle Hold Keyframe (After Effects): hold every selected key,
+            // or release them when all of them hold.
+            "timeline.toggleHold" => {
+                if keys.is_empty() {
+                    return Ok(Plan::default());
+                }
+                let hold = !self.all_held(&keys);
+                edit(
+                    KeyframeCommand::SetHold {
+                        key_ids: keys,
+                        hold,
+                    }
+                    .into(),
+                )
+            }
+            "timeline.toggleSnapping" => {
+                self.track_snap_disabled = !self.track_snap_disabled;
+                Plan::default()
+            }
             "timeline.removeMarker" => {
                 if let Some(marker) = self.index.marker_at(time) {
                     let id = marker
@@ -609,6 +628,18 @@ impl TimelineModel {
                 paths.push(path.clone());
             }
         }
+    }
+    /// Every one of these keys holds its value to the next key: the legacy
+    /// `hold` flag, or the outgoing interpolation the kernel writes now.
+    fn all_held(&self, keys: &[String]) -> bool {
+        keys.iter().all(|id| {
+            self.index.key(id).is_some_and(|(_, _, k)| {
+                crate::snapshot::boolean(k.stored.get("hold"))
+                    || k.stored
+                        .get("outInterp")
+                        .is_some_and(|n| n.to_value().as_str() == Some("hold"))
+            })
+        })
     }
     pub fn add_marker(&self, time: f64) -> Result<Plan, ModelError> {
         finite(time)?;
@@ -1739,11 +1770,7 @@ impl TimelineModel {
             }
             "keys.delete" => edit(KeyframeCommand::Delete { key_ids: keys }.into()),
             "keys.hold" => {
-                let hold = !keys.iter().all(|id| {
-                    self.index
-                        .key(id)
-                        .is_some_and(|(_, _, k)| crate::snapshot::boolean(k.stored.get("hold")))
-                });
+                let hold = !self.all_held(&keys);
                 edit(
                     KeyframeCommand::SetHold {
                         key_ids: keys,

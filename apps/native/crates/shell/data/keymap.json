@@ -2252,5 +2252,95 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.addMarker",
+    "chord": "*",
+    "command": "timeline.addMarker",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.addMarker.shift",
+    "chord": "shift+8",
+    "command": "timeline.addMarker",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.addMarker.ctrl",
+    "chord": "ctrl+8",
+    "command": "timeline.addMarker",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.timelineZoomIn",
+    "chord": "=",
+    "command": "timeline.zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.timelineZoomOut",
+    "chord": "-",
+    "command": "timeline.zoomOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.timelineFit",
+    "chord": "\\",
+    "command": "timeline.fit",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.toggleHold",
+    "chord": "cmd+alt+h",
+    "command": "timeline.toggleHold",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.safeAreas",
+    "chord": "'",
+    "command": "viewer.safeAreas",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.guides",
+    "chord": "cmd+;",
+    "command": "viewer.guides",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

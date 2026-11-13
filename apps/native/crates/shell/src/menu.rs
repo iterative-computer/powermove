@@ -269,6 +269,12 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 r_args("Nudge Keyframes Earlier", "nudgeKeyframes", json!([-1])),
                 r_args("Nudge Keyframes Later", "nudgeKeyframes", json!([1])),
+                r("Add Marker", "timeline.addMarker"),
+                sep(),
+                r("Zoom In Timeline", "timeline.zoomIn"),
+                r("Zoom Out Timeline", "timeline.zoomOut"),
+                r("Fit Timeline", "timeline.fit"),
+                sep(),
                 r("Add Keyframe", "timeline.addKeyframe"),
                 r("Add or Remove Position Keyframe", "timeline.keyProperty:p"),
                 r("Add or Remove Scale Keyframe", "timeline.keyProperty:s"),
@@ -278,6 +284,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                     "Add or Remove Anchor Point Keyframe",
                     "timeline.keyProperty:a",
                 ),
+                r("Toggle Hold Keyframe", "timeline.toggleHold"),
                 r("Easy Ease", "easyEase"),
                 r("Easy Ease In", "easyEaseIn"),
                 r("Easy Ease Out", "easyEaseOut"),
@@ -286,7 +293,13 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Reveal All Animated Properties", "timeline.revealAll"),
             ],
         ),
-        ("Playback", vec![k("Loop Playback", "toggleLoop", "")]),
+        (
+            "Playback",
+            vec![
+                k("Loop Playback", "toggleLoop", ""),
+                k("Reset Work Area", "resetWorkArea", ""),
+            ],
+        ),
         (
             "View",
             vec![
@@ -296,6 +309,11 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("fitComposition"),
                 m("toggleLayerControls"),
                 Item::command("Composition Flowchart", "composition.flowchart", ""),
+                sep(),
+                k("Timeline in Tracks", "timeline.toggleMode", ""),
+                k("Snapping", "timeline.toggleSnapping", ""),
+                k("Value Graph", "graph.value", ""),
+                k("Speed Graph", "graph.speed", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
                 sep(),
@@ -342,6 +360,73 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
         ),
         ("Help", vec![Item::command("Powermove Help", "help", "")]),
     ]
+}
+/// Commands with no row in these menus (the viewer's part of the View menu
+/// is built beside them; align and distribute are buttons in Properties):
+/// the palette lists them under the menu named, with their keys.
+pub fn extras() -> Vec<(&'static str, Item)> {
+    let keymap = crate::keyboard::shipped();
+    let view =
+        |label: &str, command: &str| ("View", Item::registered(&keymap, label, command, json!([])));
+    let layer = |label: &str, command: &str, how: &str| {
+        (
+            "Layer",
+            Item::registered(&keymap, label, command, json!([how])),
+        )
+    };
+    vec![
+        view("Show Safe Areas", "viewer.safeAreas"),
+        view("Show Guides", "viewer.guides"),
+        view("Popout Viewer", "viewer.popout"),
+        view("Toggle Proxies", "viewer.toggleProxies"),
+        view("Skimming", "toggleSkimming"),
+        view("Audio Skimming", "toggleAudioSkimming"),
+        view("Render Selection", "viewer.renderSelection"),
+        view("Keep Rendered", "viewer.keepRendered"),
+        view("Delete Rendered Frames", "viewer.deleteRendered"),
+        view("Apply LUT…", "viewer.applyLut"),
+        layer("Align Left", "alignLayers", "left"),
+        layer("Align Horizontal Centres", "alignLayers", "hcenter"),
+        layer("Align Right", "alignLayers", "right"),
+        layer("Align Top", "alignLayers", "top"),
+        layer("Align Vertical Centres", "alignLayers", "vcenter"),
+        layer("Align Bottom", "alignLayers", "bottom"),
+        layer("Distribute Horizontally", "distributeLayers", "horizontal"),
+        layer("Distribute Vertically", "distributeLayers", "vertical"),
+    ]
+}
+/// The palette's static rows: menu name, command (`palette_command`), label.
+/// Every menu command (display-only menus and tools included), rows with
+/// arguments, and `extras`.
+pub fn palette_rows() -> Vec<(&'static str, String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    menus()
+        .into_iter()
+        .flat_map(|(title, items)| items.into_iter().map(move |i| (title, i)))
+        .chain(tools().into_iter().map(|i| ("Tools", i)))
+        .chain(extras())
+        .filter(|(_, i)| {
+            !i.command.is_empty() && i.role.is_none() && !SUBMENUS.contains(&i.command.as_str())
+        })
+        .map(|(title, i)| (title, palette_command(&i.command, &i.args), i.label))
+        .filter(|(_, command, _)| seen.insert(command.clone()))
+        .collect()
+}
+/// A palette row's command: its name, with its arguments after a unit
+/// separator when it has any (`stepFrames\u{1f}[10]`).
+pub fn palette_command(command: &str, args: &[serde_json::Value]) -> String {
+    if args.is_empty() {
+        command.to_owned()
+    } else {
+        format!("{command}\u{1f}{}", serde_json::Value::from(args.to_vec()))
+    }
+}
+/// The name and arguments of a palette row's command.
+pub fn split_palette_command(command: &str) -> (&str, Vec<serde_json::Value>) {
+    match command.split_once('\u{1f}') {
+        Some((name, args)) => (name, serde_json::from_str(args).unwrap_or_default()),
+        None => (command, vec![]),
+    }
 }
 /// AppKit's keyEquivalent uses the unmodified key and a separate modifier mask.
 /// Accepts Electron accelerators (`Command+Shift+H`) and W1 chords (`cmd+shift+h`).

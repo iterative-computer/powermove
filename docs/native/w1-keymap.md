@@ -375,3 +375,5 @@ Rows after the frozen table, in `apps/native/crates/shell/data/keymap.json` (ids
 | alt+shift+p, s, r, t, a | timeline.keyProperty:p … a | [] | 90 | no | Adds a keyframe on Position, Scale, Rotation, Opacity or Anchor Point at the playhead, or removes it when every axis has one there. Declines with no layer selected (alt+shift+s is then Audio Skimming). |
 
 Pointer: Option-drag on a clip (timeline) or a layer (viewer) leaves it and moves a copy. In Tracks mode Slide is Option-Shift-drag.
+
+More native rows (same file): `*`, `shift+8`, `ctrl+8` → `timeline.addMarker`; `=` / `-` → `timeline.zoomIn` / `timeline.zoomOut` (repeat); `\` → `timeline.fit`; `cmd+alt+h` → `timeline.toggleHold` (priority 90: with no keyframe selected it stays Hide Others); `'` → `viewer.safeAreas`; `cmd+;` → `viewer.guides`.

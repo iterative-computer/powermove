@@ -1927,42 +1927,34 @@ pub struct Host {
     /// Home's sidebar material, under the GPUI view while Home shows.
     sidebar: RefCell<Option<Retained<NSView>>>,
 }
-/// Static palette rows: every menu command (including display-only menus and
-/// tools) plus workspace presets. Dynamic rows are added when it opens.
+/// Static palette rows: every menu command (including display-only menus,
+/// tools, rows with arguments and the commands that have no menu row here)
+/// plus workspace presets. Dynamic rows are added when it opens.
 fn base_choices() -> Vec<Choice> {
-    let mut seen = std::collections::HashSet::new();
-    menu::menus()
+    menu::palette_rows()
         .into_iter()
-        .flat_map(|(title, items)| items.into_iter().map(move |i| (title, i)))
-        .chain(menu::tools().into_iter().map(|i| ("Tools", i)))
-        .filter(|(_, i)| {
-            !i.command.is_empty()
-                && i.role.is_none()
-                && i.args.is_empty()
-                && !menu::SUBMENUS.contains(&i.command.as_str())
-        })
-        .filter(|(_, i)| seen.insert(i.command.clone()))
         // A row is listed under the menu it lives in.
-        .map(|(title, i)| Choice::new(i.label, i.command).within(title))
+        .map(|(title, command, label)| Choice::new(label, command).within(title))
         .collect()
 }
-/// command → shortcut glyphs, preferring menu accelerators, then the first
-/// non-Control W1 chord (the Control aliases are the same command).
+/// Palette command → shortcut glyphs, preferring menu accelerators, then the
+/// first non-Control W1 chord (the Control aliases are the same command).
 fn shortcut_glyphs() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for i in menu::menus()
         .into_iter()
         .flat_map(|(_, i)| i)
         .chain(menu::tools())
+        .chain(menu::extras().into_iter().map(|(_, i)| i))
     {
-        if !i.chord.is_empty() && i.args.is_empty() {
-            map.entry(i.command.clone())
+        if !i.chord.is_empty() {
+            map.entry(menu::palette_command(&i.command, &i.args))
                 .or_insert_with(|| menu::glyphs(&i.chord));
         }
     }
     for b in crate::keyboard::shipped() {
-        if b.args.is_empty() && !b.chord.starts_with("ctrl+") {
-            map.entry(b.command.clone())
+        if !b.chord.starts_with("ctrl+") {
+            map.entry(menu::palette_command(&b.command, &b.args))
                 .or_insert_with(|| menu::glyphs(&b.chord));
         }
     }
@@ -3504,7 +3496,11 @@ impl Host {
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
-        choices.retain(|c| !state.disabled.contains(&c.command));
+        choices.retain(|c| {
+            !state
+                .disabled
+                .contains(menu::split_palette_command(&c.command).0)
+        });
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
             if open && !crate::layout::closable(id) {
@@ -3880,7 +3876,8 @@ define_class!(
                 let mut p = p.borrow_mut();
                 let index = sender.tag() as usize;
                 if let Some(c) = p.model.choices.get(index) {
-                    let _ = p.sender.try_send(Command { name: c.command.clone(), args: vec![], token: None });
+                    let (name, args) = menu::split_palette_command(&c.command);
+                    let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
                 p.hide();
             }

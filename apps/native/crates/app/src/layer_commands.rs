@@ -10,7 +10,7 @@ use pm_kernel::commands::precompose::{can_leave_attributes, next_name};
 use pm_kernel::commands::properties::SetProperty;
 use pm_kernel::commands::text::{SplitMode, TextCommand};
 use pm_kernel::commands::timing::TimingCommand;
-use pm_kernel::commands::transform::TransformCommand;
+use pm_kernel::commands::transform::{AlignMode, Spread, TransformCommand};
 use pm_kernel::model::{LayerInfo, list_layers};
 use pm_kernel::{Command, CompCommand, LayerCommand, PropertyCommand, Published, new_id};
 use pm_model::{Map, Value};
@@ -224,6 +224,16 @@ fn timeline_owned(name: &str) -> bool {
             | "prevVisibleEvent"
             | "nextVisibleEvent"
             | "timeline.addKeyframe"
+            | "timeline.addMarker"
+            | "timeline.toggleHold"
+            | "timeline.toggleSnapping"
+            | "timeline.toggleMode"
+            | "timeline.zoomIn"
+            | "timeline.zoomOut"
+            | "timeline.fit"
+            | "resetWorkArea"
+            | "graph.value"
+            | "graph.speed"
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
         || name.starts_with("timeline.keyProperty:")
@@ -528,9 +538,11 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 38] = [
+pub const PLANNED: [&str; 40] = [
     "rippleDelete",
     "nudgeLayerTime",
+    "alignLayers",
+    "distributeLayers",
     "newSolid",
     "newShape",
     "newAdjustment",
@@ -974,6 +986,53 @@ pub fn command_plan(
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
         "rippleDelete" => ripple_delete(&layers, &selected),
+        // The Properties alignment strip, for the palette and agents: the
+        // selection's box meets the composition's edge or centre.
+        "alignLayers" => {
+            let mode = match args.first().and_then(serde_json::Value::as_str)? {
+                "left" => AlignMode::Left,
+                "hcenter" => AlignMode::HorizontalCenter,
+                "right" => AlignMode::Right,
+                "top" => AlignMode::Top,
+                "vcenter" => AlignMode::VerticalCenter,
+                "bottom" => AlignMode::Bottom,
+                _ => return None,
+            };
+            any.then(|| {
+                plain(
+                    "Align Layers",
+                    vec![
+                        TransformCommand::Align {
+                            layer_ids: selected,
+                            mode,
+                            time,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // Equal gaps between three or more layers; the outermost stay.
+        "distributeLayers" => {
+            let spread = match args.first().and_then(serde_json::Value::as_str)? {
+                "horizontal" => Spread::HorizontalSpace,
+                "vertical" => Spread::VerticalSpace,
+                _ => return None,
+            };
+            (selected.len() >= 3).then(|| {
+                plain(
+                    "Distribute Layers",
+                    vec![
+                        TransformCommand::Distribute {
+                            layer_ids: selected,
+                            spread,
+                            time,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
         // Option-Page Up / Page Down (After Effects): the selected layers
         // move in time by whole frames.
         "nudgeLayerTime" => {
@@ -1346,10 +1405,13 @@ pub fn disabled(
         set(name, editable);
     }
     set("rippleDelete", editable);
+    set("alignLayers", editable);
+    set("distributeLayers", editable && selected.len() >= 3);
     set(
         "nudgeLayerTime",
         selected.iter().any(|l| !l.effectively_locked),
     );
+    set("timeline.toggleHold", keys);
     for name in ["timeline.addKeyframe", "timeline.keyProperty:p"] {
         set(name, selected.iter().any(|l| !l.effectively_locked));
     }
@@ -1367,9 +1429,11 @@ pub fn disabled(
     off
 }
 /// Rows that act on the selected layers.
-const SELECTION: [&str; 18] = [
+const SELECTION: [&str; 20] = [
     "rippleDelete",
     "nudgeLayerTime",
+    "alignLayers",
+    "distributeLayers",
     "split",
     "trimIn",
     "trimOut",
@@ -1388,7 +1452,17 @@ const SELECTION: [&str; 18] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 19] = [
+const DOCUMENT: [&str; 29] = [
+    "timeline.addMarker",
+    "timeline.toggleHold",
+    "timeline.toggleSnapping",
+    "timeline.toggleMode",
+    "timeline.zoomIn",
+    "timeline.zoomOut",
+    "timeline.fit",
+    "resetWorkArea",
+    "graph.value",
+    "graph.speed",
     "importSequence",
     "delete",
     "copyLayers",

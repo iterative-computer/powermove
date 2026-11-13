@@ -316,6 +316,15 @@ impl pm_shell::integration::Integration for Bridge {
         if v.playback.looping {
             on.insert("toggleLoop".to_owned());
         }
+        if let Some(timeline) = &v.builtins.timeline {
+            let (tracks, snapping) = timeline.read(cx).toggles();
+            if tracks {
+                on.insert("timeline.toggleMode".to_owned());
+            }
+            if snapping {
+                on.insert("timeline.toggleSnapping".to_owned());
+            }
+        }
         on
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
@@ -2442,6 +2451,17 @@ impl Controller {
                 {
                     return false;
                 }
+                // Option-Command-H holds keyframes when some are selected;
+                // otherwise it is the system's Hide Others.
+                if cmd.name == "timeline.toggleHold"
+                    && cmd.token.is_some()
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.keys().is_empty())
+                {
+                    return false;
+                }
                 let time = self.time();
                 timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
                 return true;
@@ -2455,6 +2475,23 @@ impl Controller {
                     return false;
                 };
                 return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+            }
+            // The viewer's View-menu actions, for the palette and for keys.
+            "viewer.safeAreas"
+            | "viewer.guides"
+            | "viewer.popout"
+            | "viewer.toggleProxies"
+            | "viewer.renderSelection"
+            | "viewer.keepRendered"
+            | "viewer.deleteRendered"
+            | "viewer.applyLut" => {
+                let Some(action) = crate::viewer2::command_action(&cmd.name) else {
+                    return false;
+                };
+                if self.viewer.is_none() {
+                    return false;
+                }
+                self.viewer_action(action, cx);
             }
             "toggleSkimming" => self.toggle_skimming(cx),
             "toggleAudioSkimming" => self.toggle_audio_skimming(cx),

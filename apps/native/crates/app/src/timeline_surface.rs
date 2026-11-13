@@ -422,6 +422,23 @@ impl TimelineSurface {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
+        // The time scale is this surface's own view, not the model's.
+        match id {
+            "timeline.zoomIn" | "timeline.zoomOut" => {
+                let factor = if id.ends_with("In") { 1.5 } else { 1. / 1.5 };
+                // About the playhead when it is in view, else the middle.
+                let width = f32::from(self.bounds.size.width) as f64;
+                let at = self.view.layer_column + (time - self.view.scroll_time) * self.view.pps;
+                let x = if at > self.view.layer_column && at < width {
+                    at
+                } else {
+                    (self.view.layer_column + width) / 2.
+                };
+                return self.zoom_at(x, factor, cx);
+            }
+            "timeline.fit" => return self.fit_time(cx),
+            _ => {}
+        }
         self.queue.push_back(Job::Command {
             id: id.into(),
             time,
@@ -429,6 +446,13 @@ impl TimelineSurface {
             shift,
         });
         self.pump(cx);
+    }
+    /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
+    pub fn toggles(&self) -> (bool, bool) {
+        (
+            self.model.mode == TimelineMode::Tracks,
+            !self.model.track_snap_disabled,
+        )
     }
     /// The keyframe clipboard payload, or nothing with no keys selected.
     pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {

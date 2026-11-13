@@ -148,6 +148,8 @@ fn every_keymap_and_menu_command_has_an_owner(_: &mut TestAppContext) {
                 .map(|i| i.command),
         );
     }
+    // Palette rows that have no row in these menus.
+    names.extend(pm_shell::menu::extras().into_iter().map(|(_, i)| i.command));
     names.retain(|n| !n.is_empty());
     assert!(match_arm(r#""a" | "zoomIn" => {}"#, "zoomIn"));
     assert!(!match_arm(r#"let label = "zoomIn";"#, "zoomIn"));
@@ -456,6 +458,143 @@ fn a_property_key_chord_falls_through_to_its_other_meaning() {
         effects = resolver.resolve(1, false);
     }
     assert_eq!(offered, ["timeline.keyProperty:s", "toggleAudioSkimming"]);
+}
+/// The timeline's own keys: a marker at the playhead, the time scale, the
+/// work area back to the whole composition, and the menu toggles.
+#[gpui::test]
+fn timeline_keys_add_a_marker_zoom_and_fit_and_the_menu_toggles_report_their_state(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 2);
+    let markers = |s: &Stage| -> Vec<f64> {
+        let p = published(&s.rig.kernel);
+        let root = p.snapshot.root().unwrap();
+        let open = pm_kernel::model::open_comp_id(root);
+        let composition = pm_kernel::model::comp_node(root, open.as_deref())
+            .unwrap()
+            .to_value();
+        composition
+            .get("markers")
+            .and_then(Value::as_array)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|m| m.get("t").and_then(Value::as_f64))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // The numeric keypad's * (After Effects), Shift-8 and Control-8.
+    for chord in ["*", "shift+8", "ctrl+8"] {
+        assert_eq!(dispatch(chord).0, "timeline.addMarker", "{chord}");
+    }
+    *s.recorder.time.borrow_mut() = 2.;
+    press(&mut s, cx, "*");
+    assert_eq!(markers(&s), [2.]);
+    press(&mut s, cx, "*");
+    assert_eq!(markers(&s), [2.], "one marker a frame");
+    undo(&mut s, cx);
+    assert!(markers(&s).is_empty());
+    // = and - zoom the time scale (After Effects); \ fits the composition.
+    let pps = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.pps());
+    press(&mut s, cx, "\\");
+    let fitted = pps(&s);
+    press(&mut s, cx, "=");
+    let closer = pps(&s);
+    assert!(closer > fitted, "{closer} > {fitted}");
+    press(&mut s, cx, "-");
+    press(&mut s, cx, "-");
+    assert!(pps(&s) < fitted);
+    press(&mut s, cx, "\\");
+    assert!(
+        (pps(&s) - fitted).abs() < 1e-6,
+        "{} fits at {fitted}",
+        pps(&s)
+    );
+    // Reset Work Area (Playback menu).
+    *s.recorder.time.borrow_mut() = 2.;
+    press(&mut s, cx, "b");
+    run(&mut s, cx, "resetWorkArea", &[]);
+    press(&mut s, cx, "shift+home");
+    assert_eq!(*s.recorder.time.borrow(), 0.);
+    // View > Timeline in Tracks and Snapping carry their state.
+    let toggles = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.toggles());
+    assert_eq!(toggles(&s), (false, true));
+    run(&mut s, cx, "timeline.toggleMode", &[]);
+    run(&mut s, cx, "timeline.toggleSnapping", &[]);
+    assert_eq!(toggles(&s), (true, false));
+    run(&mut s, cx, "timeline.toggleMode", &[]);
+    run(&mut s, cx, "timeline.toggleSnapping", &[]);
+    assert_eq!(toggles(&s), (false, true));
+    // Every new row is in a menu, the keyed ones with their keys.
+    let menus = pm_shell::menu::menus();
+    let row = |menu: &str, command: &str| {
+        let (_, items) = menus.iter().find(|(title, _)| *title == menu).unwrap();
+        items
+            .iter()
+            .find(|i| i.command == command)
+            .unwrap_or_else(|| panic!("{menu} has no {command}"))
+            .chord
+            .clone()
+    };
+    assert_eq!(row("Timeline", "timeline.addMarker"), "*");
+    assert_eq!(row("Timeline", "timeline.zoomIn"), "=");
+    assert_eq!(row("Timeline", "timeline.zoomOut"), "-");
+    assert_eq!(row("Timeline", "timeline.fit"), "\\");
+    assert_eq!(row("Timeline", "timeline.toggleHold"), "cmd+alt+h");
+    assert_eq!(row("Playback", "resetWorkArea"), "");
+    for command in [
+        "timeline.toggleMode",
+        "timeline.toggleSnapping",
+        "graph.value",
+        "graph.speed",
+    ] {
+        assert_eq!(row("View", command), "");
+    }
+}
+/// Option-Command-H (After Effects) holds the selected keyframes and lets
+/// them go again.
+#[gpui::test]
+fn the_hold_key_toggles_hold_on_the_selected_keyframes(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, KEYABLE.into());
+    select(&mut s, cx, &["l0"]);
+    *s.recorder.time.borrow_mut() = 3.;
+    press(&mut s, cx, "alt+shift+t");
+    *s.recorder.time.borrow_mut() = 5.;
+    press(&mut s, cx, "alt+shift+t");
+    let holds = |s: &Stage| -> Vec<bool> {
+        let p = published(&s.rig.kernel);
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, "l0").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+        layer
+            .get("p")
+            .and_then(|p| p.get("opacity"))
+            .and_then(|c| c.get("kf"))
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|k| k.get("outInterp").and_then(Value::as_str) == Some("hold"))
+            .collect()
+    };
+    let ids: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .channel("l0", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| k.id.clone())
+            .collect()
+    });
+    call(&s.rig.kernel, SelectionCall::Keys(ids));
+    delivered(&mut s, cx);
+    assert_eq!(dispatch("cmd+alt+h").0, "timeline.toggleHold");
+    press(&mut s, cx, "cmd+alt+h");
+    assert_eq!(holds(&s), [true, true]);
+    press(&mut s, cx, "cmd+alt+h");
+    assert_eq!(holds(&s), [false, false]);
+    undo(&mut s, cx);
+    assert_eq!(holds(&s), [true, true], "one Undo step");
 }
 #[gpui::test]
 fn layer_paste_plans_a_copy_at_the_playhead_and_undo_removes_it(cx: &mut TestAppContext) {
