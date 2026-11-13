@@ -395,6 +395,8 @@ pub struct Engine {
     scopes: Option<crate::scopes::Tap>,
     /// The disk render cache playback reads (`crate::render_cache`).
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
+    /// The disk cache's media generation the cached pictures are of.
+    media_generation: u64,
     last_frame: Instant,
     idle_released: bool,
     /// Playing frames in a row that gave way to the disk reader.
@@ -802,6 +804,7 @@ impl Engine {
             scope_frames: None,
             scopes: None,
             disk: None,
+            media_generation: 0,
             last_frame: Instant::now(),
             idle_released: false,
             disk_late: 0,
@@ -1125,6 +1128,14 @@ impl Engine {
             scale: spec.scale.to_bits(),
             sampling: spec.sampling(),
         };
+        // A media file changed on disk (a sequence's frame rendered again)
+        // retires every cached picture: they are of the earlier files.
+        if let Some(generation) = self.disk.as_ref().map(|d| d.media_generation())
+            && generation != self.media_generation
+        {
+            self.media_generation = generation;
+            self.cache.clear();
+        }
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
         self.cache
@@ -2939,6 +2950,139 @@ mod frame_cache_tests {
         let (from, drawn) = shown(&mut engine, next);
         assert_eq!(from, 1, "the upload is of the still as it was");
         assert_ne!(drawn, rendered);
+    }
+    /// An image sequence read in place, its frames rendered again on disk
+    /// (the everyday case: a 3D app writes them again) while the project is
+    /// open: the next frames show the new files, never a picture the viewer
+    /// cached or a frame the render cache holds of the earlier files; a
+    /// frame removed shows its Media Offline card.
+    #[test]
+    fn a_sequence_rendered_again_shows_its_new_files() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("renders");
+        std::fs::create_dir(&folder).unwrap();
+        let frame = |n: u32| folder.join(format!("shot.{n:04}.bmp"));
+        // A 16×16 grey BMP of level `v`, written as a renderer does (a new
+        // file renamed over the old).
+        let render = |n: u32, v: u8| {
+            let (w, h) = (16u32, 16u32);
+            let mut b = Vec::new();
+            b.extend_from_slice(b"BM");
+            b.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+            b.extend_from_slice(&[0; 4]);
+            b.extend_from_slice(&54u32.to_le_bytes());
+            b.extend_from_slice(&40u32.to_le_bytes());
+            b.extend_from_slice(&(w as i32).to_le_bytes());
+            b.extend_from_slice(&(h as i32).to_le_bytes());
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&24u16.to_le_bytes());
+            b.extend_from_slice(&[0; 24]);
+            b.extend(std::iter::repeat_n(v, (w * h * 3) as usize));
+            let staged = folder.join("staged.tmp");
+            std::fs::write(&staged, b).unwrap();
+            std::fs::rename(staged, frame(n)).unwrap();
+        };
+        for n in 1..=3 {
+            render(n, 40 * n as u8);
+        }
+        let manifest = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: folder.clone(),
+            prefix: "shot.".into(),
+            suffix: ".bmp".into(),
+            padding: 4,
+            first: 1,
+            last: 3,
+            rate: [30, 1],
+        };
+        let retained = dir.path().join("retained");
+        std::fs::write(&retained, manifest.to_bytes()).unwrap();
+        let project = r##"{"id":"P","name":"P","compId":"C","compName":"C","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{"id":"s","type":"video","name":"shot","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{"position.x":{"v":8,"kf":[],"expr":null},"position.y":{"v":8,"kf":[],"expr":null},"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},
+              "fx":[],"masks":[],"d":{"asset":"clip","fit":"stretch","w":16,"h":16}}],
+            "comps":{},"assets":{"clip":{"id":"clip","type":"video","name":"shot","w":16,"h":16,"dur":0.1,
+              "fps":30,"imageSequence":{"fps":30,"frames":3,"first":1,"last":3}}},
+            "markers":[],"work":[0,1],"params":{}}"##;
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_string(), retained)].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        };
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let mut engine = Engine::new(Gpu::new("sequence-rendered-again").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        let output = Output {
+            width: 16,
+            height: 16,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let at = |n: i64| Ticks::new(n * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+        let spec = |moment, n| FrameSpec {
+            moment,
+            exact: false,
+            ..FrameSpec::exact(at(n), output)
+        };
+        // The picture's centre, as 8-bit grey.
+        let grey = |engine: &mut Engine, moment, n| {
+            let pixels = drawn(engine, &scene, spec(moment, n));
+            (pixels[8 * 16 + 8][0] * 255.0).round() as i64
+        };
+        // sRGB codes 40 and 80 read back through the viewer's surface.
+        let first = grey(&mut engine, Moment::Paused, 0);
+        assert!(first > 0, "file 1 is drawn");
+        // Frame 2 of the composition is on disk (as a fill writes it).
+        disk.test_put(1, 0.25);
+        let from_disk = grey(&mut engine, Moment::Playing, 1);
+
+        render(1, 200);
+        render(2, 220);
+        disk.test_recheck_media();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, at(0)));
+        disk.test_ready();
+        let again = grey(&mut engine, Moment::Paused, 0);
+        assert!(again > first + 50, "the viewer's cached picture of the old file: {again}");
+        let playing = grey(&mut engine, Moment::Playing, 1);
+        assert_ne!(playing, from_disk, "the render cache's frame of the old file");
+        assert!(playing > again, "file 2 as rendered again: {playing}");
+
+        let before = grey(&mut engine, Moment::Paused, 2);
+        std::fs::remove_file(frame(3)).unwrap();
+        disk.test_recheck_media();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, at(2)));
+        let sub = loop {
+            let sub = engine
+                .frame(&scene, spec(Moment::Paused, 2), None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            if !sub.stand_ins {
+                break sub;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_ne!(
+            (sub.pixels()[8 * 16 + 8][0] * 255.0).round() as i64,
+            before,
+            "file 3 removed: its card, not its last picture"
+        );
     }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take

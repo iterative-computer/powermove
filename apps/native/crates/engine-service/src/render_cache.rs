@@ -438,6 +438,10 @@ struct State {
     frames: Option<Frames>,
     known: Known,
     media_checked: Option<Instant>,
+    /// Rises whenever an observation finds a media file's stamp changed
+    /// (a sequence's frames included): pictures cached above the renderer
+    /// of the earlier files are not shown ([`DiskFrames::media_generation`]).
+    media_generation: u64,
     indexed: Option<Instant>,
     fill: Fill,
     revision: u64,
@@ -796,12 +800,14 @@ impl DiskFrames {
         let media = stamps(&scene.media, content_named.as_deref());
         let mut state = self.inner.state.lock().unwrap();
         state.media_checked = Some(Instant::now());
-        if unchanged
-            && state
-                .frames
-                .as_ref()
-                .is_some_and(|f| f.identity.media == media)
-        {
+        let media_changed = state
+            .frames
+            .as_ref()
+            .is_some_and(|f| f.identity.media != media);
+        if media_changed {
+            state.media_generation += 1;
+        }
+        if unchanged && !media_changed {
             return false;
         }
         let Some((size, rate, count)) = composition(scene) else {
@@ -1585,6 +1591,12 @@ impl DiskFrames {
         self.reindex(true).unwrap();
         time
     }
+    /// Rises whenever an observation finds a media file's stamp changed:
+    /// a viewer's cached pictures of the earlier files are retired.
+    pub(crate) fn media_generation(&self) -> u64 {
+        self.inner.state.lock().unwrap().media_generation
+    }
+
     /// Media stamps are looked at again at the next observation.
     pub(crate) fn test_recheck_media(&self) {
         self.inner.state.lock().unwrap().media_checked = None;
@@ -2479,12 +2491,41 @@ fn stamp(path: &Path, content_named: Option<&Path>) -> Stamp {
     )
 }
 
+/// Each media file's stamp; an image sequence read in place adds each of
+/// its numbered files' (a missing number stamped empty), since its frames
+/// draw from them and not from the manifest its asset retains.
 fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -> Vec<Stamp> {
-    media
-        .paths
-        .values()
-        .map(|p| stamp(p, content_named))
-        .collect()
+    let mut out = Vec::with_capacity(media.paths.len());
+    for path in media.paths.values() {
+        let own = stamp(path, content_named);
+        let sequence = sequence_of(&own);
+        out.push(own);
+        if let Some(sequence) = sequence {
+            out.extend((sequence.first..=sequence.last).map(|n| stamp(&sequence.file(n), None)));
+        }
+    }
+    out
+}
+
+/// The image sequence a media file is the manifest of, read once per stamp.
+fn sequence_of(stamp: &Stamp) -> Option<Arc<pm_media::image::sequence::Manifest>> {
+    type Read = HashMap<Stamp, Option<Arc<pm_media::image::sequence::Manifest>>>;
+    static READ: OnceLock<Mutex<Read>> = OnceLock::new();
+    let read = READ.get_or_init(Mutex::default);
+    if let Some(known) = read.lock().unwrap().get(stamp) {
+        return known.clone();
+    }
+    let sequence = pm_media::image::sequence::Manifest::read(&stamp.0)
+        .ok()
+        .flatten()
+        .map(Arc::new);
+    let mut read = read.lock().unwrap();
+    // Media files of earlier states are not looked at again.
+    if read.len() > 4096 {
+        read.clear();
+    }
+    read.insert(stamp.clone(), sequence.clone());
+    sequence
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
@@ -2905,6 +2946,88 @@ mod tests {
         let file = linked.path().join("clip.mp4");
         let (before, after) = fingerprint_after_touch(&file, Some(objects.path()));
         assert_ne!(before, after, "a linked file");
+    }
+
+    /// An image sequence read in place draws from its numbered files, not
+    /// from the small manifest its asset retains: a frame rendered again
+    /// (same length, other bytes), a frame removed and a hole filled each
+    /// give the composition another fingerprint, at its next observation
+    /// and when the project opens again; files left alone keep its frames.
+    #[test]
+    fn a_sequence_frame_rendered_again_removed_or_filled_is_observed() {
+        let objects = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let frame = |n: i64| folder.path().join(format!("shot.{n:04}.png"));
+        for n in [1, 2, 4] {
+            std::fs::write(frame(n), [n as u8; 64]).unwrap();
+        }
+        let manifest = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: folder.path().to_owned(),
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 1,
+            last: 4,
+            rate: [24, 1],
+        };
+        let retained = objects.path().join("0a1b2c");
+        std::fs::write(&retained, manifest.to_bytes()).unwrap();
+        let scene = Scene {
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_owned(), retained)].into(),
+                ..Default::default()
+            }),
+            ..scene()
+        };
+        let frames = tempfile::tempdir().unwrap();
+        let at = Ticks::new(0).unwrap();
+        let fingerprint = |disk: &DiskFrames| {
+            disk.observe(&scene, &[], None, None, None, 1, at);
+            ready(disk);
+            let state = disk.inner.state.lock().unwrap();
+            state.frames.as_ref().unwrap().fingerprint.unwrap()
+        };
+        // Each open is a new cache over the same folder of rendered frames.
+        let open = || {
+            let disk = DiskFrames::default();
+            disk.set_content_named(Some(objects.path().to_owned()));
+            disk.set_storage(Some((frames.path().join("frames"), 1 << 30)))
+                .unwrap();
+            disk
+        };
+        let disk = open();
+        let first = fingerprint(&disk);
+        assert_eq!(fingerprint(&open()), first, "reopened, nothing changed");
+        let mut seen = vec![first];
+        let mut changed = |what: &str, change: &dyn Fn()| {
+            change();
+            // Same second, same length: only the bytes (and inode) differ.
+            disk.test_recheck_media();
+            let now = fingerprint(&disk);
+            assert!(!seen.contains(&now), "{what}: an earlier state's frames");
+            assert_eq!(fingerprint(&open()), now, "{what}: reopened");
+            seen.push(now);
+        };
+        changed("frame 2 rendered again", &|| {
+            let replacement = folder.path().join("render.tmp");
+            std::fs::write(&replacement, [9u8; 64]).unwrap();
+            std::fs::rename(&replacement, frame(2)).unwrap();
+        });
+        changed("frame 4 overwritten in place", &|| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(frame(4))
+                .unwrap();
+            file.write_all(&[7u8; 64]).unwrap();
+            file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+                .unwrap();
+        });
+        changed("frame 1 removed", &|| std::fs::remove_file(frame(1)).unwrap());
+        changed("the hole at 3 filled", &|| {
+            std::fs::write(frame(3), [3u8; 64]).unwrap()
+        });
     }
 
     /// A playing frame gets its frame from disk on the first ask, waiting
