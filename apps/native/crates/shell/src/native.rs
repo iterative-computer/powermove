@@ -93,6 +93,8 @@ pub struct MenuState {
     pub tool: String,
     /// Commands that cannot run now: menu rows dim, the palette omits them.
     pub disabled: std::collections::BTreeSet<String>,
+    /// Toggles that are on: their menu rows carry a checkmark.
+    pub checked: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
 /// (a key palette/field-menu child panel is not an editor window), else the
@@ -579,7 +581,8 @@ define_class!(
                         if state.inspector { "Hide Inspector" } else { "Show Inspector" })),
                     n if n.starts_with("tool") => item.setState(if *n == state.tool {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
-                    _ => {}
+                    n => item.setState(if state.checked.contains(n) {
+                        NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
                 !state.disabled.contains(name)
             } else {
@@ -1883,6 +1886,10 @@ pub struct Host {
     monitor: Option<Retained<AnyObject>>,
     resolver: Resolver,
     events: HashMap<u64, Retained<NSEvent>>,
+    /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
+    releases: Rc<RefCell<HashMap<u16, Command>>>,
+    /// Pending keys that came up before their command was answered.
+    up_early: std::collections::HashSet<u64>,
     next_token: u64,
     sender: async_channel::Sender<Command>,
     pub tokens: Tokens,
@@ -2075,6 +2082,8 @@ impl Host {
             monitor: None,
             resolver: Resolver::new(),
             events: HashMap::new(),
+            releases: Default::default(),
+            up_early: Default::default(),
             next_token: 0,
             sender: tx,
             tokens: t,
@@ -2146,6 +2155,21 @@ impl Host {
                             }
                         }
                         return event.as_ptr();
+                    }
+                    if e.r#type() == NSEventType::KeyUp {
+                        let mut h = host.borrow_mut();
+                        let owed = h.releases.borrow_mut().remove(&e.keyCode());
+                        if let Some(command) = owed {
+                            let _ = h.sender.try_send(command);
+                        }
+                        // A tap can be over before its command is answered.
+                        let pending: Vec<u64> = h
+                            .events
+                            .iter()
+                            .filter(|(_, down)| down.keyCode() == e.keyCode())
+                            .map(|(token, _)| *token)
+                            .collect();
+                        h.up_early.extend(pending);
                     }
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
@@ -2383,6 +2407,30 @@ impl Host {
                     Some(&host.borrow().window),
                     None,
                     &shown,
+                )
+        };
+        host.borrow_mut().window_observers.push(observer);
+        // A key held while the window stops being key never comes up here.
+        let released = {
+            let (releases, sender) = {
+                let host = host.borrow();
+                (host.releases.clone(), host.sender.clone())
+            };
+            block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    for (_, command) in releases.borrow_mut().drain() {
+                        let _ = sender.try_send(command);
+                    }
+                },
+            )
+        };
+        let observer = unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter()
+                .addObserverForName_object_queue_usingBlock(
+                    Some(NSWindowDidResignKeyNotification),
+                    Some(&host.borrow().window),
+                    None,
+                    &released,
                 )
         };
         host.borrow_mut().window_observers.push(observer);
@@ -3586,6 +3634,25 @@ impl Host {
             .beginSheet_completionHandler(&window, Some(&handler));
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
+    }
+    /// Sends `name` once when the key that sent the pending `token` comes up
+    /// (or the window stops being key). False: the token has no key event.
+    pub fn on_release(&self, token: u64, name: &str, args: Vec<serde_json::Value>) -> bool {
+        let Some(event) = self.events.get(&token) else {
+            return false;
+        };
+        if self.up_early.contains(&token) {
+            return false;
+        }
+        self.releases.borrow_mut().insert(
+            event.keyCode(),
+            Command {
+                name: name.into(),
+                args,
+                token: None,
+            },
+        );
+        true
     }
     /// Queues a command for this window's editor, as a menu item would.
     pub fn send_command(&self, name: &str, args: Vec<serde_json::Value>) {
@@ -5101,6 +5168,7 @@ pub fn install_menus() {
         submenu.setAutoenablesItems(
             title == "Edit"
                 || title == "Composition"
+                || title == "Playback"
                 || menu::DISPLAY_ONLY.contains(&title)
                 || title == "View",
         );

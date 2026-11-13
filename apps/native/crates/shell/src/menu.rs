@@ -237,6 +237,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Timeline",
             vec![
                 r("Play/Pause", "play"),
+                r("Shuttle Reverse", "shuttleBackward"),
+                r("Shuttle Stop", "shuttleStop"),
+                r("Shuttle Forward", "shuttleForward"),
                 sep(),
                 r("Go to Start", "gotoStart"),
                 r("Go to End", "gotoEnd"),
@@ -266,6 +269,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Reveal All Animated Properties", "timeline.revealAll"),
             ],
         ),
+        ("Playback", vec![k("Loop Playback", "toggleLoop", "")]),
         (
             "View",
             vec![

@@ -358,3 +358,14 @@ and the timeline property-reveal model, respectively.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Native K196 | &#96; | maximizePanel | [] | 100 | no | no | no |
 | Native K197 | m | toggleLayerStrips | [] | 90 | no | no | no |
+
+## Native additions for editors' hands
+
+Rows after the frozen table, in `apps/native/crates/shell/data/keymap.json` (ids `native.*`). A row at priority 90 is tried before the shipped meaning of its key and declines when it has nothing to do.
+
+| Chord | Command | Args | Priority | Repeat | Notes |
+| --- | --- | --- | --- | --- | --- |
+| j | shuttleBackward | [] | 90 | yes | While playing: reverse, then 2×, 4×, 8×. Stopped: declines to `prevVisibleEvent`. |
+| k | shuttleStop | [] | 90 | no | While playing: stop. Held, J and L step one frame and run at ¼ speed while they stay down. Stopped: declines to `nextVisibleEvent`. |
+| l | shuttleForward | [] | 90 | yes | While playing: 2×, 4×, 8×. Stopped: declines to the audio-levels reveal. |
+| ctrl+j | shuttleBackward | [true] | 90 | no | `true` starts from a stop. Menu rows and the palette also start from a stop. |

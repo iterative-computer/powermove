@@ -440,13 +440,20 @@ struct View {
 static BUMPS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 fn bump_site(line: u32, kind: &str) {
     if trace::enabled() {
-        *BUMPS.lock().unwrap().entry(format!("{line}{kind}")).or_default() += 1;
+        *BUMPS
+            .lock()
+            .unwrap()
+            .entry(format!("{line}{kind}"))
+            .or_default() += 1;
     }
 }
 fn command_kind(cmd: Option<&TransportCommand>) -> &'static str {
     match cmd {
         Some(TransportCommand::Pause) => ":pause",
-        Some(TransportCommand::Seek { mode: pm_protocol::clock::SeekMode::Scrub, .. }) => ":seek-scrub",
+        Some(TransportCommand::Seek {
+            mode: pm_protocol::clock::SeekMode::Scrub,
+            ..
+        }) => ":seek-scrub",
         Some(TransportCommand::Seek { .. }) => ":seek-other",
         Some(TransportCommand::Play { .. }) => ":play",
         Some(_) => ":other",
@@ -888,6 +895,16 @@ impl Viewer {
             v.dirty = true;
             Ok(())
         })
+    }
+    /// Whether a run is asked for or in progress, including the moment a
+    /// new run waits for the audio clock (when the clock itself reads
+    /// stopped).
+    pub fn running(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
     }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;

@@ -2082,5 +2082,47 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.shuttleBackward",
+    "chord": "j",
+    "command": "shuttleBackward",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.shuttleStop",
+    "chord": "k",
+    "command": "shuttleStop",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.shuttleForward",
+    "chord": "l",
+    "command": "shuttleForward",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.shuttleBackward.start",
+    "chord": "ctrl+j",
+    "command": "shuttleBackward",
+    "args": [
+      true
+    ],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]
