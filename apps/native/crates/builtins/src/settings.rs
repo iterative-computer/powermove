@@ -441,6 +441,20 @@ impl Backend {
     /// publication no longer remembered is refused. Writes keep the strict
     /// revision check.
     fn row_still_offers(&mut self, seen: Option<u64>, action: &Value) -> Result<bool, String> {
+        // The preset is chosen from a fixed list: the choice stands whatever
+        // the page showed when it was made (its value is checked after).
+        if action["type"] == "write" && action["id"] == "shortcuts.preset" {
+            return Ok(!self.native.facts["shortcuts"].is_null());
+        }
+        // A Shortcuts row acts on a command, not on what the page showed:
+        // it still applies while the command is listed and changeable.
+        if action["type"] == "shortcut" {
+            let latest = self.settings_snapshot()?;
+            return Ok(latest["shortcuts"]["rows"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["id"] == action["id"] && row["fixed"] != true)
+            }));
+        }
         if action["type"] != "row" {
             return Ok(false);
         }

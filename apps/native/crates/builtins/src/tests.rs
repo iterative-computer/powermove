@@ -4018,6 +4018,31 @@ fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app()
             .map(|(_, r)| r["args"][0]["op"].clone());
         assert_eq!(sent, Some(json!(op)), "{action}");
     }
+    // A click from an older publication still changes a listed command.
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":0,"action":{"type":"shortcut","op":"record","id":"rippleTrimIn"}}),
+        )
+        .expect("a stale click on a listed command applies");
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":0,"action":{"type":"shortcut","op":"record","id":"save"}}),
+            )
+            .is_err(),
+        "a command the page does not list is refused"
+    );
+    // So does a preset chosen on an older publication.
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":0,"action":{"type":"write","id":"shortcuts.preset","value":"premiere-pro"}}),
+        )
+        .expect("a stale preset choice applies");
     // A preset the page does not offer is refused here.
     assert!(
         backend
