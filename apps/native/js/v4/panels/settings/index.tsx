@@ -608,6 +608,103 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
     </>
   );
 }
+/** Settings › Shortcuts: every command with its keys, grouped by its menu;
+ * Change… takes the next key pressed (Escape cancels), and keys two
+ * commands share are listed with the order they are tried in. */
+function Shortcuts({ model }: { model: SettingsModel }) {
+  const page = model.publication.shortcuts;
+  if (!page) return null;
+  const query = model.query.trim();
+  const rows = page.rows.filter(
+    (row) => !query || model.matches.rows.has(`shortcut.${row.id}`),
+  );
+  const menus = [...new Set(rows.map((row) => row.menu))];
+  const shared = new Map(
+    page.conflicts.flatMap((c) => c.labels.map((label) => [label, c])),
+  );
+  const act = (op: "record" | "reset" | "clear", id: string) => {
+    void model.perform({ type: "shortcut", op, id });
+  };
+  const disabled = (id: string) => !model.services || model.pending.has(id);
+  return (
+    <>
+      {menus.map((menu) => (
+        <UI.FormGroup key={menu} title={menu}>
+          {rows
+            .filter((row) => row.menu === menu)
+            .map((row) => {
+              const clash = shared.get(row.label);
+              const keys = row.keys.length ? row.keys.join("  ") : "No key";
+              const detail = row.recording
+                ? "Press the new key. Escape keeps the old one."
+                : row.fixed
+                  ? `${keys} · The menu bar's key.`
+                  : clash
+                    ? `${keys} · ${clash.keys} also: ${clash.labels
+                        .filter((label) => label !== row.label)
+                        .join(", ")}`
+                    : keys;
+              return (
+                <div
+                  key={row.id}
+                  id={`settings.shortcut.${row.id}`}
+                  role="group"
+                  label={row.label}
+                  style={rowStyle}
+                >
+                  <RowCopy title={row.label} detail={detail} />
+                  {!row.fixed && (
+                    <div style={trailing}>
+                      {row.changed && (
+                        <Button
+                          key="reset"
+                          label="Reset"
+                          disabled={disabled(row.id)}
+                          onClick={() => act("reset", row.id)}
+                        />
+                      )}
+                      {row.keys.length > 0 && !row.recording && (
+                        <Button
+                          key="clear"
+                          label="Remove"
+                          disabled={disabled(row.id)}
+                          onClick={() => act("clear", row.id)}
+                        />
+                      )}
+                      <Button
+                        key={row.recording ? "listening" : "change"}
+                        label={row.recording ? "Cancel" : "Change…"}
+                        disabled={disabled(row.id)}
+                        onClick={() => act("record", row.id)}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </UI.FormGroup>
+      ))}
+      {!query && page.conflicts.length > 0 && (
+        <UI.FormGroup title="Shared Keys">
+          {page.conflicts.map((clash) => (
+            <div
+              key={clash.chord}
+              id={`settings.shared.${clash.chord}`}
+              role="group"
+              label={clash.keys}
+              style={rowStyle}
+            >
+              <RowCopy
+                title={clash.keys}
+                detail={`Tried in this order: ${clash.labels.join(", then ")}.`}
+              />
+            </div>
+          ))}
+        </UI.FormGroup>
+      )}
+    </>
+  );
+}
 function SectionContent({
   section,
   model,
@@ -683,6 +780,7 @@ function SectionContent({
       {section === "extensions" && (
         <Extensions model={model} bindings={bindings} />
       )}
+      {section === "shortcuts" && <Shortcuts model={model} />}
     </div>
   );
 }

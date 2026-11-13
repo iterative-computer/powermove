@@ -45,8 +45,30 @@ export interface MemoryNote {
   updatedAt?: number;
   resolved: boolean;
 }
+/** Settings › Shortcuts, built by the app from the keymap it uses. */
+export interface ShortcutRow {
+  id: string;
+  menu: string;
+  label: string;
+  /** As glyphs (⌥⇧[) and as the table writes them (alt+shift+[). */
+  keys: string[];
+  chords: string[];
+  changed: boolean;
+  /** The menu bar owns its key (Save, Undo). */
+  fixed: boolean;
+  /** Its next key is being taken. */
+  recording: boolean;
+}
+export interface Shortcuts {
+  preset: string;
+  rows: ShortcutRow[];
+  /** One key, several commands, in the order the key tries them. */
+  conflicts: { keys: string; chord: string; labels: string[] }[];
+  changed: boolean;
+}
 export interface Publication {
   revision: number;
+  shortcuts?: Shortcuts;
   project?: { id: string; name: string };
   multiWindow: boolean;
   memory?: { enabled: boolean; entries: readonly MemoryNote[] };
@@ -57,6 +79,7 @@ export interface Publication {
 }
 export type Action =
   | { type: "row"; id: string; action: string }
+  | { type: "shortcut"; op: "record" | "reset" | "clear"; id: string }
   | { type: "write"; id: string; value: Json }
   | { type: "extension.enabled"; id: string; enabled: boolean }
   | { type: "extension.archive"; id: string }
@@ -376,6 +399,35 @@ export class SettingsModel {
         matches.count++;
       }
     }
+    // A shortcut is found by its command, its menu, or its key written as
+    // glyphs (⌥⇧S) or words (option shift s, opt-shift-s, alt+shift+s).
+    const words = query.replace(/[+-]/g, " ");
+    for (const row of this.publication.shortcuts?.rows ?? []) {
+      const text = [
+        row.label,
+        row.menu,
+        ...row.keys,
+        ...row.chords.map((c) =>
+          c
+            .replace(/\bcmd\b/, "cmd command")
+            .replace(/\bctrl\b/, "ctrl control")
+            .replace(/\balt\b/, "alt opt option")
+            .replace(/\+/g, " "),
+        ),
+      ]
+        .join(" ")
+        .toLocaleLowerCase();
+      const own = text.split(/\s+/);
+      if (
+        !query ||
+        text.includes(query) ||
+        words.split(/\s+/).every((word) => !word || own.includes(word))
+      ) {
+        matches.rows.add(`shortcut.${row.id}`);
+        matches.sections.add("shortcuts");
+        matches.count++;
+      }
+    }
     for (const model of this.publication.speech)
       if (
         !query ||
@@ -527,6 +579,12 @@ export class SettingsModel {
       };
       if (!item || item.state !== states[action.action]) return false;
       if (action.action === "use" && item.inUse) return false;
+    }
+    if (action.type === "shortcut") {
+      const row = this.publication.shortcuts?.rows.find(
+        (r) => r.id === action.id,
+      );
+      if (!row || row.fixed) return false;
     }
     if (action.type === "row") {
       const row = this.rows.find((r) => r.id === id);

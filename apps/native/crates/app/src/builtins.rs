@@ -49,6 +49,8 @@ pub struct Host {
     /// MCP panel tools).
     pub window_sizes: BTreeMap<String, (f32, f32)>,
     opening_windows: BTreeSet<String>,
+    /// The Settings page the next show asks for (Keyboard Shortcuts…).
+    pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
@@ -413,7 +415,7 @@ impl Controller {
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
             "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -447,6 +449,7 @@ impl Controller {
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
+        self.sync_keymap();
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {
@@ -803,6 +806,18 @@ impl Controller {
         if let Some(existing) = self.builtins.windows.get(id).copied()
             && existing.update(cx, |_, w, _| w.activate()).is_ok()
         {
+            if id == "settings"
+                && let Some(page) = self.builtins.settings_page.take()
+                && let Some(runtime) = self.builtins.runtime.clone()
+            {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Ok(ticket) = runtime.show_section("settings", &page) {
+                            let _ = ticket.await;
+                        }
+                    })
+                    .detach();
+            }
             return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
@@ -852,12 +867,19 @@ impl Controller {
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
         let facts = self.facts(cx);
+        let page = (id == "settings")
+            .then(|| self.builtins.settings_page.take())
+            .flatten();
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
             cx.background_executor()
                 .spawn(async move { told.update_facts(facts) })
                 .await;
-            if let Ok(ticket) = runtime.show(&id) {
+            let shown = match &page {
+                Some(page) => runtime.show_section(&id, page),
+                None => runtime.show(&id),
+            };
+            if let Ok(ticket) = shown {
                 let _ = ticket.await;
             }
             let current = this

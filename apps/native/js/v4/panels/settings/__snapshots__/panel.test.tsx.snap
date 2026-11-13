@@ -12,6 +12,8 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -102,6 +104,8 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -192,6 +196,8 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts" selected
@@ -314,6 +320,8 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -404,6 +412,8 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -494,6 +504,8 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -584,6 +596,8 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -674,6 +688,8 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -764,6 +780,8 @@ exports[`no-search-results: six-op tree snapshot passes the real Rust wire and k
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -792,6 +810,8 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -882,6 +902,8 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -972,6 +994,8 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
             text "App"
           div list-item listitem settings.nav.general label="General" selected
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1062,6 +1086,8 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1423,6 +1449,8 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1572,6 +1600,8 @@ exports[`transcription available wire/AX state 1`] = `
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1616,6 +1646,8 @@ exports[`transcription downloading wire/AX state 1`] = `
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1662,6 +1694,8 @@ exports[`transcription installed wire/AX state 1`] = `
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1708,6 +1742,8 @@ exports[`transcription error wire/AX state 1`] = `
             text "App"
           div list-item listitem settings.nav.general label="General"
             text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
           div list-item listitem settings.nav.accounts label="Accounts"
@@ -1740,4 +1776,96 @@ exports[`transcription error wire/AX state 1`] = `
                   button push-button label="Retry"
                     text "Retry"
 Focus: ["settings.search","settings.sections","Retry"]"
+`;
+
+exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      div
+        input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div group label="App"
+          text
+            text "App"
+          div list-item listitem settings.nav.general label="General"
+            text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts" selected
+            text "Shortcuts"
+          div list-item listitem settings.nav.media label="Media"
+            text "Media"
+          div list-item listitem settings.nav.accounts label="Accounts"
+            text "Accounts"
+          div list-item listitem settings.nav.transcription label="Transcription"
+            text "Transcription"
+          div list-item listitem settings.nav.extensions label="Extensions"
+            text "Extensions"
+    div
+      scroll group settings.detail label="Shortcuts"
+        div group settings.section.shortcuts label="Shortcuts"
+          div
+            text heading
+              text "Shortcuts"
+            text
+              text "Keys for every command. Start from After Effects, Premiere Pro, Final Cut Pro or DaVinci Resolve, then change any of them."
+          div group label="Layer"
+            text heading
+              text "Layer"
+            div form-group group label="Layer"
+              div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
+                div
+                  text
+                    text "Ripple Trim In Point to Playhead"
+                  text
+                    text "Q"
+                div
+                  button push-button label="Reset"
+                    text "Reset"
+                  button push-button label="Remove"
+                    text "Remove"
+                  button push-button label="Change…"
+                    text "Change…"
+              div group settings.shortcut.extendEdit label="Extend Edit to Playhead"
+                div
+                  text
+                    text "Extend Edit to Playhead"
+                  text
+                    text "Press the new key. Escape keeps the old one."
+                div
+                  button push-button label="Cancel"
+                    text "Cancel"
+          div group label="File"
+            text heading
+              text "File"
+            div form-group group label="File"
+              div group settings.shortcut.save label="Save"
+                div
+                  text
+                    text "Save"
+                  text
+                    text "⌘S · The menu bar's key."
+          div group label="Playback"
+            text heading
+              text "Playback"
+            div form-group group label="Playback"
+              div group settings.shortcut.prevEdge label="Previous Edge"
+                div
+                  text
+                    text "Previous Edge"
+                  text
+                    text "No key"
+                div
+                  button push-button label="Change…"
+                    text "Change…"
+          div group label="Shared Keys"
+            text heading
+              text "Shared Keys"
+            div form-group group label="Shared Keys"
+              div group settings.shared.alt+shift+s label="⌥⇧S"
+                div
+                  text
+                    text "⌥⇧S"
+                  text
+                    text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
+Focus: ["settings.search","settings.sections","Reset","Remove","Change…","Cancel","Change…"]"
 `;

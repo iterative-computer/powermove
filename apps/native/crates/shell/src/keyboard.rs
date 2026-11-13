@@ -108,8 +108,12 @@ fn matches(binding: &Binding, key: &Key) -> bool {
 }
 impl Resolver {
     pub fn new() -> Self {
+        Self::with(shipped())
+    }
+    /// A resolver over `bindings` (the shell gives it the keymap in use).
+    pub fn with(bindings: Vec<Binding>) -> Self {
         Self {
-            bindings: shipped(),
+            bindings,
             ..Default::default()
         }
     }
@@ -291,6 +295,14 @@ pub fn physical_fallback(key: String, code: u16, shift: bool) -> String {
             33 => Some("["),
             30 => Some("]"),
             44 => Some("/"),
+            // Shift-comma, period, backslash, semicolon and quote name
+            // their keys (cmd+shift+, Project Settings, alt+shift+. Slide):
+            // AppKit hands over "<", ">", "|", ":" and "\"" otherwise.
+            43 => Some(","),
+            47 => Some("."),
+            42 => Some("\\"),
+            41 => Some(";"),
+            39 => Some("'"),
             _ => None,
         };
         if let Some(k) = fallback {
