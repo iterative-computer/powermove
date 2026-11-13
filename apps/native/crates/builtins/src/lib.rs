@@ -1396,6 +1396,12 @@ impl Builtins {
             run
         ))
     }
+    /// Brings Settings forward on one of its pages (`shortcuts`).
+    pub fn show_section(&self, panel: &str, section: &str) -> Result<Ticket<Evaluation>> {
+        let section = serde_json::to_string(section).unwrap_or_default();
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.show({section})"))
+    }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
     }

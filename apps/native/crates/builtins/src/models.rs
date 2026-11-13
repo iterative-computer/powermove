@@ -661,7 +661,10 @@ impl Backend {
         let speech = crate::speech::status();
         let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
-            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default()});
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
+            // Settings › Shortcuts, built by the app from the keymap it uses.
+            "shortcuts":self.native.facts["shortcuts"]});
+        let shortcut_rows = self.shortcut_rows()?;
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(speech_rows.iter().cloned());
         }
@@ -697,6 +700,10 @@ impl Backend {
             }).collect::<Vec<_>>();
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
+        }
+        // Settings › Shortcuts shows with or without a project.
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(shortcut_rows);
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();
