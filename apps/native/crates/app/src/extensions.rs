@@ -346,14 +346,11 @@ fn pinned(
     current: &ResourceSnapshot,
     publication: &pm_compat_runner::host::Publication,
 ) -> Option<ResourceSnapshot> {
-    let definitions: Vec<pm_protocol::definitions::DefinitionSnapshot> = publication
+    let definitions = publication
         .contributions
         .as_deref()
-        .and_then(|value| value["definitions"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
-        .collect();
+        .map(definitions)
+        .unwrap_or_default();
     let pending = !publication.settled;
     let loading = if pending {
         publication.loading.clone()
@@ -385,6 +382,30 @@ fn builtin_effects() -> &'static BTreeSet<String> {
             .collect()
     });
     &BUILTIN
+}
+/// The values entered for extensions' declared `vars` in `profile`, for a
+/// window's host and a pageless one alike: sealed ones only from this
+/// build's own Keychain service, read off the main thread.
+pub(crate) fn vars_source(profile: &std::path::Path) -> pm_compat_runner::VarsSource {
+    let profile = profile.to_owned();
+    let service = crate::extension_vars::own_service();
+    Arc::new(move |id: &str, keys: &[String]| {
+        let items = |service: &str, account: &str| {
+            crate::cloud::keychain::read(service, account)
+                .ok()
+                .flatten()
+        };
+        crate::extension_vars::values(&profile, id, keys, &service, &items)
+    })
+}
+/// Window viewers and headless jobs decode the same realm snapshot.
+pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    value["definitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| serde_json::from_value(d.clone()).ok())
+        .collect()
 }
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
@@ -483,18 +504,7 @@ impl Controller {
             wake: Arc::new(move || {
                 let _ = wake_tx.try_send(());
             }),
-            vars: Some({
-                let profile = self.profile.clone();
-                let service = crate::extension_vars::own_service();
-                Arc::new(move |id: &str, keys: &[String]| {
-                    let items = |service: &str, account: &str| {
-                        crate::cloud::keychain::read(service, account)
-                            .ok()
-                            .flatten()
-                    };
-                    crate::extension_vars::values(&profile, id, keys, &service, &items)
-                })
-            }),
+            vars: Some(vars_source(&self.profile)),
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;

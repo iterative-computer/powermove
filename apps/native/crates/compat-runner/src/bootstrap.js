@@ -1336,7 +1336,10 @@ globalThis.__compat = {
     this.loader
       .update(this.trusted(records), ids, reason)
       .catch((error) => this.reportFailure(error))
-      .finally(() => this.publishContributions());
+      .finally(() => {
+        this.publishContributions();
+        runtime.engine("extensions.ready", {});
+      });
     // Published now, not a microtask later: the host must not see the old
     // contributions as settled once it has asked for the update.
     this.publishContributions();

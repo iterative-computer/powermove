@@ -152,7 +152,10 @@ pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
     // Reborrow its Objective-C object as the generated objc2 class to keep
     // selector encodings and the autoresizing mask type checked here.
     let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
-    layer_object.setAllowsNextDrawableTimeout(false);
+    // Powermove: the layer is asked for a drawable off the main thread
+    // (`DrawableSource`) or inside AppKit's own synchronous paints; with the
+    // timeout a full pool gives up after a second instead of waiting for ever.
+    layer_object.setAllowsNextDrawableTimeout(true);
     layer_object.setNeedsDisplayOnBoundsChange(true);
     layer_object.setAutoresizingMask(
         CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
@@ -288,11 +291,119 @@ pub struct MetalRenderer {
     headless_render_target: Option<metal::Texture>,
     /// When the last scene was encoded (`release_idle_targets`).
     last_draw: Option<std::time::Instant>,
+    /// `PM_GPUI_PRESENT_TRACE`: how long the last draw waited for its drawable.
+    pub acquire_seconds: f64,
 }
 
 /// A link holds at most this many drawables of a previous size after a
 /// resize (its frame latency); past that, draw into what it gives.
 const STALE_UPDATES: u8 = 3;
+
+/// What a CAMetalDisplayLink's update offers a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkDrawable {
+    /// A drawable of the layer's size (or no link: the layer is asked).
+    Ready,
+    /// None, or one of the size before a resize: the next update's may fit.
+    Wait,
+    /// Several in a row had another size: the link is not catching up.
+    Stale,
+}
+
+/// Drawables taken from a layer off the main thread, for frames that must
+/// present with a Core Animation transaction (a `CAMetalDisplayLink`'s
+/// drawables are shown at the link's time, not the transaction's).
+/// `nextDrawable` waits while the layer's three drawables are in use; that
+/// wait happens on this source's thread, and the main thread only ever
+/// takes one that has already arrived.
+///
+/// The layer must not be asked while a `CAMetalDisplayLink` owns it (Core
+/// Animation raises): ask only after the link is invalidated, and make a new
+/// link only once [`DrawableSource::idle`].
+pub struct DrawableSource {
+    requests: std::sync::mpsc::Sender<()>,
+    arrivals: std::sync::mpsc::Receiver<Option<metal::MetalDrawable>>,
+    asked: bool,
+    held: Option<metal::MetalDrawable>,
+}
+impl DrawableSource {
+    pub fn new(layer: metal::MetalLayer) -> Self {
+        let (requests, asked) = std::sync::mpsc::channel::<()>();
+        let (arrived, arrivals) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("gpui-drawable".into())
+            .spawn(move || {
+                // The frame it serves is on the screen's clock.
+                unsafe extern "C" {
+                    fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
+                }
+                const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+                unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+                for () in asked {
+                    let drawable = objc2::rc::autoreleasepool(|_| {
+                        layer.next_drawable().map(|drawable| drawable.to_owned())
+                    });
+                    if arrived.send(drawable).is_err() {
+                        break;
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            log::error!("no thread for drawables: {error}");
+        }
+        Self {
+            requests,
+            arrivals,
+            asked: false,
+            held: None,
+        }
+    }
+    fn collect(&mut self) {
+        if self.asked
+            && let Ok(drawable) = self.arrivals.try_recv()
+        {
+            self.asked = false;
+            // `None`: the layer gave none within its timeout.
+            self.held = drawable;
+        }
+    }
+    /// Asks the layer for a drawable unless one is held or on its way.
+    pub fn request(&mut self) {
+        self.collect();
+        if self.held.is_none() && !self.asked {
+            self.asked = self.requests.send(()).is_ok();
+        }
+    }
+    /// A drawable of this size if one has arrived; never waits. One of
+    /// another size goes back to the layer and a new one is asked for.
+    pub fn take(&mut self, size: (u64, u64)) -> Option<metal::MetalDrawable> {
+        self.collect();
+        let drawable = self.held.take().filter(|drawable| {
+            let texture = drawable.texture();
+            (texture.width(), texture.height()) == size
+        });
+        if drawable.is_none() {
+            self.request();
+        }
+        drawable
+    }
+    /// Nothing is on its way from the layer.
+    pub fn idle(&mut self) -> bool {
+        self.collect();
+        !self.asked
+    }
+    /// Gives a held drawable back to the layer, unshown.
+    pub fn release(&mut self) {
+        self.collect();
+        self.held = None;
+    }
+    /// The layer's size changed: what is held is of the old size, so one of
+    /// the new size is asked for now and is there when the frame is drawn.
+    pub fn resized(&mut self) {
+        self.release();
+        self.request();
+    }
+}
 
 impl MetalRenderer {
     /// Creates a new MetalRenderer with a CAMetalLayer for window-based rendering.
@@ -554,6 +665,7 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             headless_render_target: None,
             last_draw: None,
+            acquire_seconds: 0.,
         }
     }
 
@@ -737,30 +849,58 @@ impl MetalRenderer {
         self.display_link_bound = bound;
     }
 
-    /// Whether `draw` would reach a drawable of the layer's size. False
-    /// outside a link's update while a link owns the layer, and for the
-    /// update or two after a resize whose drawable still has the previous
-    /// size: a scene laid out for the new size drawn into it shows stretched
-    /// and cut. The caller then leaves this frame, hosted views included,
-    /// to the next update or to AppKit's display of the resized view.
-    pub fn drawable_ready(&mut self) -> bool {
-        let Some(layer) = &self.layer else {
-            return false;
-        };
-        let Some(drawable) = &self.display_link_drawable else {
-            return !self.display_link_bound;
-        };
-        let size = layer.drawable_size();
-        let texture = drawable.texture();
-        let stale = texture.width() != size.width.ceil() as u64
-            || texture.height() != size.height.ceil() as u64;
-        if stale && self.stale_updates < STALE_UPDATES {
-            self.stale_updates += 1;
-            self.display_link_drawable = None;
-            return false;
+    /// Whether a CAMetalDisplayLink currently owns this layer.
+    pub fn display_link_bound(&self) -> bool {
+        self.display_link_bound
+    }
+
+    /// The layer's drawable size in device pixels.
+    pub fn drawable_size(&self) -> (u64, u64) {
+        self.layer.as_ref().map_or((0, 0), |layer| {
+            let size = layer.drawable_size();
+            (size.width.ceil() as u64, size.height.ceil() as u64)
+        })
+    }
+
+    /// Whether the supplied drawable has the layer's size.
+    fn supplied_fits(&self) -> bool {
+        self.display_link_drawable.as_ref().is_none_or(|drawable| {
+            let texture = drawable.texture();
+            (texture.width(), texture.height()) == self.drawable_size()
+        })
+    }
+
+    /// What `draw` would reach. A scene is never drawn into a drawable of
+    /// another size (it shows stretched and cut): the update or two after a
+    /// resize whose drawable still has the previous size are passed over
+    /// (`Wait`: the caller leaves the frame, hosted views included, to the
+    /// next update), and after [`STALE_UPDATES`] of them in a row the answer
+    /// is `Stale`, for the caller to take drawables from the layer instead.
+    /// Without a link's drawable while a link owns the layer there is
+    /// nothing to draw into (`Wait`); without a link the layer is asked.
+    pub fn drawable_ready(&mut self) -> LinkDrawable {
+        if self.layer.is_none() {
+            return LinkDrawable::Wait;
         }
-        self.stale_updates = 0;
-        true
+        if self.display_link_drawable.is_none() {
+            return if self.display_link_bound {
+                LinkDrawable::Wait
+            } else {
+                LinkDrawable::Ready
+            };
+        }
+        if self.supplied_fits() {
+            self.stale_updates = 0;
+            return LinkDrawable::Ready;
+        }
+        self.display_link_drawable = None;
+        self.stale_updates = self.stale_updates.saturating_add(1);
+        if self.stale_updates > STALE_UPDATES {
+            self.stale_updates = 0;
+            LinkDrawable::Stale
+        } else {
+            LinkDrawable::Wait
+        }
     }
 
     /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
@@ -783,13 +923,20 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        // Never into a drawable of another size, whoever supplied it.
+        if !self.supplied_fits() {
+            self.display_link_drawable = None;
+            return false;
+        }
         let supplied = self.display_link_drawable.take();
         if supplied.is_none() && self.display_link_bound {
             return false;
         }
+        let asked = present_trace().then(std::time::Instant::now);
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
             supplied.as_deref().or_else(|| layer.next_drawable())
         }) {
+            self.acquire_seconds = asked.map_or(0., |at| at.elapsed().as_secs_f64());
             drawable
         } else {
             log::error!(
@@ -3211,6 +3358,14 @@ mod tests {
 }
 
 // Powermove opt-in CPU diagnostics; no timing/log work in ordinary draws.
+/// `PM_GPUI_PRESENT_TRACE=1`: one stderr line per window draw (which path it
+/// took, whether hosted views moved, the time on the main thread and the
+/// part of it spent waiting for a drawable). Off: no clock reads.
+pub fn present_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PM_GPUI_PRESENT_TRACE").as_deref() == Ok("1"))
+}
+
 fn measure_native<R>(label: &str, f: impl FnOnce() -> R) -> R {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ENABLED.get_or_init(|| std::env::var("ZED_MEASUREMENTS").as_deref() == Ok("1")) {
