@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 
 use pm_export::convert::WorkingFrame;
-use pm_export::verify::{ACTIVITY_TOLERANCE, pixel_tolerance};
+use pm_export::verify::{
+    self, ACTIVITY_TOLERANCE, bias_tolerance, frame_tolerance, level_tolerance, pixel_tolerance,
+};
 use pm_export::*;
 use pm_time::Rate;
 
@@ -155,19 +157,36 @@ fn every_format_delivers_noise_and_grain() {
             match job.finish() {
                 Ok(delivered) => {
                     let base = pixel_tolerance(codec);
-                    let (mut worst, mut ratio, mut spread) = (0.0f64, 0.0f64, 0.0f64);
-                    for p in &delivered.report.pixels {
-                        worst = worst.max(p.error_cv);
-                        spread = spread.max(p.spread_cv);
-                        if p.spread_cv > 0.5 {
-                            ratio = ratio.max((p.error_cv - base).max(0.0) / p.spread_cv);
-                        }
-                    }
+                    let report = &delivered.report;
+                    let worst = report.max_pixel_error_cv();
+                    let fold = |f: fn(&verify::PixelCheck) -> f64| {
+                        report.pixels.iter().map(f).fold(0.0, f64::max)
+                    };
+                    let (activity, excess) = (fold(|p| p.activity_cv), fold(|p| p.excess));
+                    let least = |f: fn(&verify::PixelCheck) -> Option<f64>| {
+                        report
+                            .pixels
+                            .iter()
+                            .filter_map(f)
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    let picture = report.picture;
                     eprintln!(
-                        "MEASURE {what}: delivered, {:.0} Mb/s; block means within {worst:.2} codes (flat tolerance {base}), block spread up to {spread:.0} codes; beyond the flat tolerance by {ratio:.3} of the spread at most (allowed {ACTIVITY_TOLERANCE})",
-                        delivered.report.bytes as f64 * 8.0 * 25.0 / FRAMES as f64 / 1e6
+                        "MEASURE {what}: delivered, {:.0} Mb/s; block means within {worst:.2} codes (flat tolerance {base}), block activity up to {activity:.0} codes, beyond the flat tolerance by {excess:.3} of the block's activity at most (allowed {ACTIVITY_TOLERANCE}); least correlation {:.3}, least luma detail kept {:.2}, registration {:?}; every frame ({}): means within {:+.2} codes (allowed {}), shared by all {:+.2} (allowed {}), grid within {:.2} codes (allowed {}), one cell {:.2}",
+                        report.bytes as f64 * 8.0 * 25.0 / FRAMES as f64 / 1e6,
+                        least(|p| p.correlation),
+                        least(|p| p.detail),
+                        picture.registration,
+                        picture.frames_checked,
+                        picture.frame_bias_cv,
+                        bias_tolerance(codec),
+                        picture.level_cv,
+                        level_tolerance(codec),
+                        picture.frame_distance_cv,
+                        frame_tolerance(codec),
+                        picture.frame_cell_cv,
                     );
-                    // A flat picture has no spread to lean on.
+                    // A flat picture has no activity to lean on.
                     if amount == 0.0 && worst > base {
                         problems.push(format!("{what}: {worst:.2} codes on flat picture"));
                     }

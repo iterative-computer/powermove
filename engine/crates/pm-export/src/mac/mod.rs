@@ -14,8 +14,7 @@ use crate::convert::EncoderInput;
 use crate::mp4box::Movie;
 use crate::pipeline::Sink;
 use crate::settings::{ExportSpec, Overwrite};
-use crate::timescale::VideoTiming;
-use crate::verify::{self, BlockSample, Expected};
+use crate::verify::{self, Evidence, Expected};
 use std::sync::atomic::AtomicBool;
 
 /// The production sink: VideoToolbox → AVAssetWriter → verify → move into place.
@@ -27,9 +26,7 @@ pub struct VideoToolboxSink {
     pool: pixbuf::Pool,
     output: AtomicOutput,
     spec: ExportSpec,
-    timing: VideoTiming,
-    sampled: Vec<u64>,
-    blocks: Vec<BlockSample>,
+    evidence: Evidence,
     /// Alpha exports: samples re-described with depth 32 (see `alpha`).
     alpha: Option<alpha::AlphaDescriptions>,
 }
@@ -60,13 +57,11 @@ impl VideoToolboxSink {
         )?;
         Ok(Self {
             spec: spec.clone(),
-            timing,
             pool: pixbuf::Pool::new(spec.input_format(), spec.width, spec.height)?,
             encoder: vt::Encoder::new(spec, timing)?,
             writer: Some(writer),
             output,
-            sampled: verify::sampled_frames(spec.frames),
-            blocks: vec![],
+            evidence: Evidence::default(),
             // ProRes describes opaque frames without alpha (see `alpha`); HEVC
             // with alpha is its own codec type and describes its alpha layer.
             alpha: (spec.alpha != crate::settings::AlphaOutput::None
@@ -106,20 +101,13 @@ impl VideoToolboxSink {
         {
             crate::mp4box::add_channel_layout(&temp, audio.channels)?;
         }
-        let movie = Movie::read(&temp)?;
-        let format = self.spec.input_format();
-        let decoded = self
-            .sampled
-            .iter()
-            .map(|&f| reader::decode_frame(&temp, f, self.timing, format).map(|d| (f, d)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let expected = Expected::new(
+        let mut report = verify_file(
+            &temp,
             &self.spec,
-            self.timing,
+            std::mem::take(&mut self.evidence),
             audio_frames,
-            std::mem::take(&mut self.blocks),
-        );
-        let mut report = verify::check(&expected, &movie, &decoded)?;
+            cancel,
+        )?;
         report.hardware_encoder = self.encoder.hardware;
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
@@ -127,13 +115,54 @@ impl VideoToolboxSink {
     }
 }
 
+/// Holds a written QuickTime-family file to what the export asked for and
+/// to the `evidence` of the frames its encoder was handed: the container,
+/// the tags, the sound, the timecode, and every frame's picture.
+pub fn verify_file(
+    path: &std::path::Path,
+    spec: &ExportSpec,
+    evidence: Evidence,
+    audio_frames: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<verify::VerifyReport, Error> {
+    let (report, problems) = examine_file(path, spec, evidence, audio_frames, cancel)?;
+    if problems.is_empty() {
+        Ok(report)
+    } else {
+        Err(Error::Verify(problems.join("; ")))
+    }
+}
+
+/// [`verify_file`], with what was measured and every problem found.
+pub fn examine_file(
+    path: &std::path::Path,
+    spec: &ExportSpec,
+    evidence: Evidence,
+    audio_frames: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<(verify::VerifyReport, Vec<String>), Error> {
+    let timing = spec.timing()?;
+    let movie = Movie::read(path)?;
+    let mut decoded = verify::Decoded::default();
+    let format = spec.input_format();
+    reader::decode_frames(path, timing, format, spec.frames, &mut |index, frame| {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        // Only the sampled frames are copied out of the decoder's buffer.
+        let signature = frame.signature(format)?;
+        decoded.add_with(index, spec.frames, signature, || frame.read(format))
+    })?;
+    decoded.complete = true;
+    let expected = Expected::new(spec, timing, audio_frames, evidence);
+    verify::examine(&expected, &movie, &decoded)
+}
+
 impl Sink for VideoToolboxSink {
     type Output = Delivered;
 
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
-        if self.sampled.contains(&index) {
-            self.blocks.extend(verify::block_means(input, index));
-        }
+        self.evidence.add(index, self.spec.frames, input);
         let buffer = self.pool.buffer()?;
         buffer.write(input)?;
         buffer.tag(

@@ -25,6 +25,7 @@ pub mod atomic;
 pub mod chroma_policy;
 pub mod convert;
 pub mod dither;
+pub mod evidence;
 #[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod gpu_time;
 pub mod hdr;

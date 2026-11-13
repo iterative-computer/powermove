@@ -108,3 +108,56 @@ pub fn decode_frame(
         "frame {index} is missing from the file"
     )))
 }
+
+/// Decodes every frame of the file to `format`, in presentation order, and
+/// hands each decoded buffer to `each` with its index. A frame that is not
+/// at its exact time, or a frame beyond `frames`, fails.
+pub fn decode_frames(
+    path: &Path,
+    timing: VideoTiming,
+    format: InputFormat,
+    frames: u64,
+    each: &mut dyn FnMut(u64, &PixelBuffer) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let (asset, track) = video_track(path)?;
+    let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
+        .map_err(|e| Error::Verify(format!("AVAssetReader: {}", e.localizedDescription())))?;
+    let settings = pixbuf::output_attributes(format.code());
+    let output = cf::objc_try("AVAssetReaderTrackOutput", || unsafe {
+        let output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
+            &track,
+            Some(&settings),
+        );
+        output.setAlwaysCopiesSampleData(false);
+        reader.addOutput(&output);
+        output
+    })
+    .map_err(|e| Error::Verify(e.to_string()))?;
+    if !unsafe { reader.startReading() } {
+        return Err(Error::Verify("cannot read the file's frames".into()));
+    }
+    let mut index = 0u64;
+    while let Some(sb) = unsafe { output.copyNextSampleBuffer() } {
+        let sb: &CMSampleBuffer = &sb;
+        let Some(image) = (unsafe { sb.image_buffer() }) else {
+            continue;
+        };
+        let pts = unsafe { sb.presentation_time_stamp() };
+        let (value, scale) = (pts.value as i128, pts.timescale as i128);
+        let want = timing.pts(index) as i128;
+        if index >= frames || value * timing.timescale as i128 != want * scale {
+            unsafe { reader.cancelReading() };
+            return Err(Error::Verify(format!(
+                "decoded frame {index} of {frames} is at {value}/{scale}, expected {want}/{}",
+                timing.timescale
+            )));
+        }
+        let pb = unsafe { PixelBuffer::retain(std::ptr::NonNull::from(&*image)) };
+        if let Err(e) = each(index, &pb) {
+            unsafe { reader.cancelReading() };
+            return Err(e);
+        }
+        index += 1;
+    }
+    Ok(())
+}

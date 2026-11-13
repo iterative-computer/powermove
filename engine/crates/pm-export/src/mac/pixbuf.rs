@@ -259,6 +259,86 @@ impl PixelBuffer {
         })
     }
 
+    /// The frame's signature, read in place: what
+    /// [`crate::evidence::frame_signature`] gives for [`PixelBuffer::read`].
+    pub fn signature(&self, format: InputFormat) -> Result<crate::evidence::FrameSignature, Error> {
+        use InputFormat as F;
+        if !matches!(format, F::Y416 | F::V216 | F::V420 | F::X420) {
+            return Ok(crate::evidence::frame_signature(&self.read(format)?));
+        }
+        if self.format() != format.code() {
+            return Err(Error::Verify(format!(
+                "decoder delivered '{}', asked for '{}'",
+                cf::fourcc_str(self.format()),
+                cf::fourcc_str(format.code())
+            )));
+        }
+        let (w, h) = (self.width(), self.height());
+        let layout = plane_layout(format, w as u32, h as u32);
+        let planar = layout.len() > 1;
+        self.with_lock(true, |pb| {
+            let mut planes = vec![];
+            for (i, &(samples, rows, wide)) in layout.iter().enumerate() {
+                let (base, bpr, got_rows) = Self::geometry(pb, planar, i);
+                let row_bytes = if wide { samples * 2 } else { samples };
+                if base.is_null() || bpr < row_bytes || got_rows != rows {
+                    return Err(Error::Verify(format!(
+                        "decoded plane {i} has an unexpected layout"
+                    )));
+                }
+                planes.push((base as *const u8, bpr));
+            }
+            // Sample `i` of row `row` of plane `p` (indices stay inside the
+            // rows checked above: x < w, y < h).
+            let u8_at = |p: usize, row: usize, i: usize| {
+                let (base, bpr): (*const u8, usize) = planes[p];
+                unsafe { *base.add(row * bpr + i) }
+            };
+            let u16_at = |p: usize, row: usize, i: usize| {
+                u16::from_le_bytes([u8_at(p, row, 2 * i), u8_at(p, row, 2 * i + 1)])
+            };
+            Ok(crate::evidence::signature(w, h, |x, y| match format {
+                F::Y416 => {
+                    let i = x * 4;
+                    [
+                        (f64::from(u16_at(0, y, i + 1)) - 4096.0) / 56064.0,
+                        (f64::from(u16_at(0, y, i + 2)) - 32768.0) / 57344.0,
+                        (f64::from(u16_at(0, y, i + 3)) - 32768.0) / 57344.0,
+                        f64::from(u16_at(0, y, i)) / 65535.0,
+                    ]
+                }
+                F::V216 => {
+                    let i = (x & !1) * 2;
+                    let luma = u16_at(0, y, if x.is_multiple_of(2) { i + 1 } else { i + 3 });
+                    [
+                        (f64::from(luma) - 4096.0) / 56064.0,
+                        (f64::from(u16_at(0, y, i)) - 32768.0) / 57344.0,
+                        (f64::from(u16_at(0, y, i + 2)) - 32768.0) / 57344.0,
+                        1.0,
+                    ]
+                }
+                F::V420 => {
+                    let ci = (x / 2) * 2;
+                    [
+                        (f64::from(u8_at(0, y, x)) - 16.0) / 219.0,
+                        (f64::from(u8_at(1, y / 2, ci)) - 128.0) / 224.0,
+                        (f64::from(u8_at(1, y / 2, ci + 1)) - 128.0) / 224.0,
+                        1.0,
+                    ]
+                }
+                _ => {
+                    let ci = (x / 2) * 2;
+                    [
+                        (f64::from(u16_at(0, y, x) >> 6) - 64.0) / 876.0,
+                        (f64::from(u16_at(1, y / 2, ci) >> 6) - 512.0) / 896.0,
+                        (f64::from(u16_at(1, y / 2, ci + 1) >> 6) - 512.0) / 896.0,
+                        1.0,
+                    ]
+                }
+            }))
+        })
+    }
+
     /// The bytes of a packed (single-plane) buffer, rows tightly packed (for
     /// example `BGRA` from a decoder, in tests and measurements).
     pub fn bytes(&self) -> Result<Vec<u8>, Error> {

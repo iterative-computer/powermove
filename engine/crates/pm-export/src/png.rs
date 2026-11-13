@@ -361,7 +361,10 @@ impl Sink for PngSink {
                             expected: b.mean,
                             decoded: b.mean,
                             error_cv: 0.0,
-                            spread_cv: 0.0,
+                            activity_cv: 0.0,
+                            excess: 0.0,
+                            correlation: None,
+                            detail: None,
                         }),
                 );
             }
@@ -384,6 +387,7 @@ impl Sink for PngSink {
             audio: None,
             timecode: None,
             pixels,
+            picture: Default::default(),
             hardware_encoder: None,
             bytes,
             mix: None,

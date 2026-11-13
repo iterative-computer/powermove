@@ -3,106 +3,20 @@
 //! audio samples, alpha, timecode, and sampled pixel values, and compared with what
 //! the export asked for and what the encoder was handed. Any mismatch fails the export.
 //!
-//! Pixels are compared as 16×16 block means at nine places in the first, middle, and
-//! last frames, against the means of the encoder input itself: lossy coding noise
-//! averages out, while a wrong matrix, range, channel order, alpha mode, or a black or
-//! stale frame moves a block mean by tens of code values.
+//! The picture itself is held to what the encoder was handed in every frame and, more
+//! closely, in sampled blocks of the first, middle and last frame (`evidence`).
 
-use crate::convert::{EncoderInput, sample_ycbcra};
+pub use crate::evidence::{
+    ACTIVITY_TOLERANCE, BLOCK, BlockSample, Decoded, Evidence, FrameSignature, PictureReport,
+    PixelCheck, bias_tolerance, block_means, channel_scale, check_frames, check_pixels,
+    frame_signature, frame_tolerance, level_tolerance, pixel_tolerance, sampled_frames,
+};
+pub(crate) use crate::evidence::{block_regions, check_pixel_blocks};
 use crate::mp4box::Movie;
 use crate::settings::{
     AlphaOutput, AudioCodec, AudioSpec, Codec, Container, ExportSpec, TimecodeSpec,
 };
 use crate::timescale::VideoTiming;
-
-/// Block side for pixel checks.
-pub const BLOCK: u32 = 16;
-
-/// A block mean of normalized Y′, Cb, Cr, A.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BlockSample {
-    pub frame: u64,
-    pub x: u32,
-    pub y: u32,
-    pub mean: [f64; 4],
-    /// Standard deviation of each channel within the block: how busy the
-    /// picture is there.
-    pub spread: [f64; 4],
-}
-
-/// One of the verification blocks in full-frame, top-down coordinates.
-/// WebCodecs can convert just these pixels without changing the sampled
-/// locations used by the decoded-file check.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BlockRegion {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// The frames whose pixels are checked: first, middle, last.
-pub fn sampled_frames(frames: u64) -> Vec<u64> {
-    let mut v = vec![0, frames / 2, frames.saturating_sub(1)];
-    v.dedup();
-    v
-}
-
-/// The deduplicated 3 × 3 grid, in the same order as the block means.
-pub(crate) fn block_regions(width: u32, height: u32) -> Vec<BlockRegion> {
-    let size_x = BLOCK.min(width);
-    let size_y = BLOCK.min(height);
-    let place = |extent: u32, size: u32, i: u32| -> u32 {
-        let c = (extent - size) * i / 2;
-        (c / BLOCK * BLOCK).min(extent - size)
-    };
-    let mut out = vec![];
-    for j in 0..3 {
-        for i in 0..3 {
-            let (x, y) = (place(width, size_x, i), place(height, size_y, j));
-            if out.iter().any(|b: &BlockRegion| b.x == x && b.y == y) {
-                continue;
-            }
-            out.push(BlockRegion {
-                x,
-                y,
-                width: size_x,
-                height: size_y,
-            });
-        }
-    }
-    out
-}
-
-/// Block means at a 3 × 3 grid (block corners aligned to 16 pixels).
-pub fn block_means(input: &EncoderInput, frame: u64) -> Vec<BlockSample> {
-    block_regions(input.width, input.height)
-        .into_iter()
-        .map(|region| {
-            let (mut sum, mut squares) = ([0.0; 4], [0.0; 4]);
-            for y in region.y..region.y + region.height {
-                for x in region.x..region.x + region.width {
-                    let s = sample_ycbcra(input, x as usize, y as usize);
-                    for k in 0..4 {
-                        sum[k] += s[k];
-                        squares[k] += s[k] * s[k];
-                    }
-                }
-            }
-            let n = (region.width * region.height) as f64;
-            let mean = sum.map(|v| v / n);
-            BlockSample {
-                frame,
-                x: region.x,
-                y: region.y,
-                mean,
-                spread: std::array::from_fn(|k| {
-                    (squares[k] / n - mean[k] * mean[k]).max(0.0).sqrt()
-                }),
-            }
-        })
-        .collect()
-}
 
 /// What the export asked for and handed the encoder.
 #[derive(Clone, Debug)]
@@ -118,7 +32,7 @@ pub struct Expected {
     pub timing: VideoTiming,
     pub audio: Option<(AudioSpec, u64)>,
     pub timecode: Option<TimecodeSpec>,
-    pub blocks: Vec<BlockSample>,
+    pub evidence: Evidence,
 }
 
 impl Expected {
@@ -126,7 +40,7 @@ impl Expected {
         spec: &ExportSpec,
         timing: VideoTiming,
         audio_frames: u64,
-        blocks: Vec<BlockSample>,
+        evidence: Evidence,
     ) -> Self {
         Self {
             codec: spec.codec,
@@ -139,7 +53,7 @@ impl Expected {
             timing,
             audio: spec.audio.map(|a| (a, audio_frames)),
             timecode: spec.timecode.clone(),
-            blocks,
+            evidence,
         }
     }
 }
@@ -162,20 +76,6 @@ pub struct TimecodeReport {
     pub drop_frame: bool,
     pub frames_per_second: u8,
     pub reel: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PixelCheck {
-    pub frame: u64,
-    pub x: u32,
-    pub y: u32,
-    pub expected: [f64; 4],
-    pub decoded: [f64; 4],
-    /// Largest channel difference in code values at the codec's depth.
-    pub error_cv: f64,
-    /// The largest channel spread of the block the encoder was handed, in
-    /// code values (how busy the picture is there).
-    pub spread_cv: f64,
 }
 
 /// How loud the mixed sound got: its largest sample, and how much of it was
@@ -236,6 +136,8 @@ pub struct VerifyReport {
     pub audio: Option<AudioReport>,
     pub timecode: Option<TimecodeReport>,
     pub pixels: Vec<PixelCheck>,
+    /// What the picture checks measured over the file.
+    pub picture: PictureReport,
     /// Whether VideoToolbox reported a hardware encoder.
     pub hardware_encoder: Option<bool>,
     /// Bytes delivered (every file of a PNG sequence).
@@ -247,48 +149,6 @@ pub struct VerifyReport {
 impl VerifyReport {
     pub fn max_pixel_error_cv(&self) -> f64 {
         self.pixels.iter().map(|p| p.error_cv).fold(0.0, f64::max)
-    }
-}
-
-/// What a lossy codec may move a block's mean by for each code value of the
-/// block's own spread (its standard deviation in the encoder input), on top
-/// of [`pixel_tolerance`]. A codec at its data-rate limit codes a busy block
-/// coarsely, and its mean moves with the detail it drops: on HD noise of
-/// ±0.3 every ProRes flavour moved block means beyond the flat tolerance, by
-/// up to 0.069 of the block's spread (4444; 0.013 to 0.033 for the others;
-/// `tests/detailed_delivery.rs`), and a fixed tolerance refused the export.
-/// A flat block has no spread and keeps the tight tolerance, and a busy one
-/// is still held to a fraction of its own detail, so a file with the wrong
-/// levels (64 codes of 10-bit black), matrix or transfer still fails.
-pub const ACTIVITY_TOLERANCE: f64 = 0.15;
-
-/// Block-mean tolerance in code values at the codec's depth for a flat
-/// block: lossless PNG is exact; ProRes is within 4 CV; the long-GOP codecs
-/// within 6 CV at 8 bits (24 at 10 bits).
-pub fn pixel_tolerance(codec: Codec) -> f64 {
-    match codec {
-        Codec::Png { .. } => 0.0,
-        Codec::ProRes(_) => 4.0,
-        Codec::Hevc { ten_bit: true, .. } => 24.0,
-        Codec::H264 { .. } | Codec::Hevc { .. } | Codec::Vp9 { .. } | Codec::Vp8 { .. } => 6.0,
-    }
-}
-
-/// Code values per unit of each normalized channel (Y′, Cb, Cr, A; or R, G, B, A
-/// for RGB codecs) at the codec's depth.
-pub fn channel_scale(codec: Codec, k: usize) -> f64 {
-    let d = codec.depth() as i32;
-    if !codec.is_ycbcr() {
-        return 2f64.powi(d) - 1.0;
-    }
-    match k {
-        0 => 219.0 * 2f64.powi(d - 8),
-        1 | 2 => 224.0 * 2f64.powi(d - 8),
-        // Alpha is 8-bit in HEVC with alpha and libvpx; 16-bit in ProRes.
-        _ => match codec {
-            Codec::ProRes(_) => 65535.0,
-            _ => 255.0,
-        },
     }
 }
 
@@ -322,78 +182,6 @@ pub fn expected_pixel_format(codec: Codec, alpha: bool) -> &'static str {
             }
         }
     }
-}
-
-/// Compares sampled decoded frames with the encoder input's block means.
-pub fn check_pixels(
-    codec: Codec,
-    blocks: &[BlockSample],
-    decoded: &[(u64, EncoderInput)],
-    problems: &mut Vec<String>,
-) -> Vec<PixelCheck> {
-    let sampled = decoded
-        .iter()
-        .flat_map(|(frame, input)| block_means(input, *frame));
-    check_pixel_blocks(codec, blocks, sampled, problems)
-}
-
-/// Compares already extracted decoded block means with the encoder input.
-pub(crate) fn check_pixel_blocks(
-    codec: Codec,
-    blocks: &[BlockSample],
-    decoded: impl IntoIterator<Item = BlockSample>,
-    problems: &mut Vec<String>,
-) -> Vec<PixelCheck> {
-    let mut pixels = vec![];
-    let lossless = matches!(codec, Codec::Png { .. });
-    for got in decoded {
-        let Some(want) = blocks
-            .iter()
-            .find(|b| b.frame == got.frame && b.x == got.x && b.y == got.y)
-        else {
-            continue;
-        };
-        let error = |k: usize| (got.mean[k] - want.mean[k]).abs() * channel_scale(codec, k);
-        let spread = |k: usize| want.spread[k] * channel_scale(codec, k);
-        // Rounding of the block mean itself (lossless outputs compare exactly).
-        let allowed = |k: usize| {
-            let busy = if lossless {
-                0.0
-            } else {
-                ACTIVITY_TOLERANCE * spread(k)
-            };
-            pixel_tolerance(codec) + busy + 1e-9
-        };
-        if let Some(k) = (0..4).find(|&k| error(k) > allowed(k)) {
-            problems.push(format!(
-                "frame {} block ({}, {}) differs by {:.2} CV where {:.2} is allowed ({:?} vs {:?})",
-                got.frame,
-                got.x,
-                got.y,
-                error(k),
-                allowed(k),
-                got.mean,
-                want.mean
-            ));
-        }
-        pixels.push(PixelCheck {
-            frame: got.frame,
-            x: got.x,
-            y: got.y,
-            expected: want.mean,
-            decoded: got.mean,
-            error_cv: (0..4).map(error).fold(0.0, f64::max),
-            spread_cv: (0..4).map(spread).fold(0.0, f64::max),
-        });
-    }
-    if pixels.len() != blocks.len() {
-        problems.push(format!(
-            "checked {} of {} pixel blocks",
-            pixels.len(),
-            blocks.len()
-        ));
-    }
-    pixels
 }
 
 /// What a track's own parameter sets (H.264 or HEVC SPS VUI) say against
@@ -444,13 +232,27 @@ fn chroma_name(idc: u32) -> &'static str {
     }
 }
 
-/// Compares the probed file with the expectation. `decoded` holds the sampled frames
-/// decoded to the encoder-input format.
+/// Compares the probed file with the expectation. `decoded` holds what the file
+/// decoded to, in the encoder-input format.
 pub fn check(
     expected: &Expected,
     movie: &Movie,
-    decoded: &[(u64, EncoderInput)],
+    decoded: &Decoded,
 ) -> Result<VerifyReport, crate::Error> {
+    let (report, problems) = examine(expected, movie, decoded)?;
+    if problems.is_empty() {
+        Ok(report)
+    } else {
+        Err(crate::Error::Verify(problems.join("; ")))
+    }
+}
+
+/// [`check`], with what was measured and every problem found.
+pub fn examine(
+    expected: &Expected,
+    movie: &Movie,
+    decoded: &Decoded,
+) -> Result<(VerifyReport, Vec<String>), crate::Error> {
     let mut problems: Vec<String> = vec![];
     let mut fail = |m: String| problems.push(m);
     let Some(video) = movie.track(b"vide") else {
@@ -772,11 +574,23 @@ pub fn check(
         }
     }
     // Pixels.
-    let pixels = check_pixels(expected.codec, &expected.blocks, decoded, &mut problems);
-    if !problems.is_empty() {
-        return Err(crate::Error::Verify(problems.join("; ")));
-    }
-    Ok(VerifyReport {
+    let mut picture = PictureReport::default();
+    check_frames(
+        expected.codec,
+        &|n| expected.evidence.frames.get(usize::try_from(n).ok()?),
+        decoded.complete.then_some(expected.evidence.frames.len()),
+        &decoded.frames,
+        &mut picture,
+        &mut problems,
+    );
+    let pixels = check_pixels(
+        expected.codec,
+        &expected.evidence.blocks,
+        &decoded.sampled,
+        &mut picture,
+        &mut problems,
+    );
+    let report = VerifyReport {
         codec,
         profile,
         pixel_format,
@@ -791,115 +605,10 @@ pub fn check(
         audio,
         timecode,
         pixels,
+        picture,
         hardware_encoder: None,
         bytes: 0,
         mix: None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::convert::{ConvertParams, WorkingFrame, convert};
-    use crate::settings::{InputFormat, WorkingEncoding};
-
-    #[test]
-    fn busy_blocks_get_room_for_codec_loss_and_flat_ones_do_not() {
-        let codec = Codec::ProRes(crate::ProResProfile::Hq);
-        let block = |mean: f64, spread: f64| BlockSample {
-            frame: 0,
-            x: 0,
-            y: 0,
-            mean: [mean, 0.0, 0.0, 1.0],
-            spread: [spread, 0.0, 0.0, 0.0],
-        };
-        let code = 1.0 / channel_scale(codec, 0);
-        let problems = |want: BlockSample, got: BlockSample| {
-            let mut problems = vec![];
-            check_pixel_blocks(codec, &[want], [got], &mut problems);
-            problems
-        };
-        // A flat block: four codes, no more.
-        assert!(problems(block(0.5, 0.0), block(0.5 + 4.0 * code, 0.0)).is_empty());
-        assert_eq!(
-            problems(block(0.5, 0.0), block(0.5 + 5.0 * code, 0.0)).len(),
-            1
-        );
-        // A block of noise 100 codes wide: 4 + 15 codes of room, so the
-        // 7 codes a codec at its limit moved it by pass, and a level error
-        // (video black where full-range black was meant: 64 codes) fails.
-        let noisy = 100.0 * code;
-        assert!(problems(block(0.5, noisy), block(0.5 + 7.0 * code, noisy)).is_empty());
-        assert_eq!(
-            problems(block(0.5, noisy), block(0.5 + 64.0 * code, noisy)).len(),
-            1
-        );
-        // Lossless stays exact however busy.
-        let png = Codec::Png { sixteen_bit: false };
-        let mut found = vec![];
-        check_pixel_blocks(
-            png,
-            &[block(0.5, 0.2)],
-            [block(0.5 + 1.0 / 255.0, 0.2)],
-            &mut found,
-        );
-        assert_eq!(found.len(), 1);
-    }
-
-    #[test]
-    fn sampled_frames_are_first_middle_last() {
-        assert_eq!(sampled_frames(1), vec![0]);
-        assert_eq!(sampled_frames(2), vec![0, 1]);
-        assert_eq!(sampled_frames(48), vec![0, 24, 47]);
-    }
-
-    #[test]
-    fn block_means_cover_a_grid_and_match_flat_frames() {
-        let (w, h) = (100u32, 48u32);
-        let rgba: Vec<f32> = (0..w * h).flat_map(|_| [0.5f32, 0.25, 0.75, 1.0]).collect();
-        let input = convert(
-            &WorkingFrame {
-                width: w,
-                height: h,
-                rgba: &rgba,
-            },
-            InputFormat::V420,
-            &ConvertParams {
-                working: WorkingEncoding::Standard,
-                alpha: AlphaOutput::None,
-                tags: crate::settings::ColorTags::Rec709QuickTime,
-                dither: false,
-                frame: 0,
-            },
-        )
-        .unwrap();
-        let blocks = block_means(&input, 7);
-        assert_eq!(blocks.len(), 9);
-        assert!(
-            blocks
-                .iter()
-                .all(|b| b.x % 16 == 0 && b.y % 16 == 0 && b.x + 16 <= w && b.y + 16 <= h)
-        );
-        let first = blocks[0].mean;
-        assert!(blocks.iter().all(|b| b.mean == first && b.frame == 7));
-        // Tiny frames still sample inside the frame.
-        let tiny: Vec<f32> = (0..4 * 2).flat_map(|_| [0.0f32, 0.0, 0.0, 1.0]).collect();
-        let input = convert(
-            &WorkingFrame {
-                width: 4,
-                height: 2,
-                rgba: &tiny,
-            },
-            InputFormat::Y416,
-            &ConvertParams {
-                working: WorkingEncoding::Standard,
-                alpha: AlphaOutput::None,
-                tags: crate::settings::ColorTags::Rec709QuickTime,
-                dither: false,
-                frame: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(block_means(&input, 0).len(), 1);
-    }
+    };
+    Ok((report, problems))
 }
