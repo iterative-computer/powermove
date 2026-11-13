@@ -859,11 +859,15 @@ fn draw_layer<'d>(
                 );
                 return Ok(None);
             }
-            Some(host) => match host.prepare(scope, layer, frame)? {
+            Some(host) => match prepare_effects(scope, b, layer, frame, None)? {
                 Ok(e) => e,
                 Err(f) => {
-                    refuse(b, f);
-                    return Ok(None);
+                    if !host.bypasses_refusals() {
+                        refuse(b, f);
+                        return Ok(None);
+                    }
+                    layer_failure(b, scope.comp, layer, format!("effects bypassed: {f}"));
+                    None
                 }
             },
         }
@@ -875,8 +879,12 @@ fn draw_layer<'d>(
         {
             Ok(effects) => Some(effects),
             Err(f) => {
-                refuse(b, f);
-                return Ok(None);
+                if !b.effects.is_some_and(|h| h.bypasses_refusals()) {
+                    refuse(b, f);
+                    return Ok(None);
+                }
+                layer_failure(b, scope.comp, layer, format!("effects bypassed: {f}"));
+                None
             }
         },
         None => None,
@@ -2691,9 +2699,14 @@ fn source_plan<'d>(
             prefix,
             raster,
             grow,
-        )?;
-        let (effects, grown) = match prepared {
+        );
+        b.failures.extend(host.take_bypassed());
+        let (effects, grown) = match prepared? {
             Ok(e) => e,
+            Err(f) if host.bypasses_refusals() => {
+                layer_failure(b, scope.comp, layer, format!("effects bypassed: {f}"));
+                (None, raster)
+            }
             Err(f) => return Ok(Err(f)),
         };
         raster = grown;
@@ -2799,6 +2812,25 @@ fn source_plan<'d>(
     Ok(result?.map(|p| (p, raster)))
 }
 
+fn prepare_effects<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    frame: composite::effects::EffectFrame,
+    prefix: Option<usize>,
+) -> JsResult<Result<Option<composite::PreparedEffects>, Feature>> {
+    let host = b.effects.expect("effect host checked by caller");
+    let result = host.prepare_measured(
+        scope,
+        layer,
+        frame,
+        prefix,
+        b.text.as_deref_mut().and_then(|t| t.measure()),
+    );
+    b.failures.extend(host.take_bypassed());
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn effect_inputs<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2810,6 +2842,55 @@ fn effect_inputs<'d>(
     scale: (f64, f64),
     time: f64,
 ) -> JsResult<Result<composite::PreparedEffects, Feature>> {
+    loop {
+        let bytes = b.source_bytes;
+        let mut failed = None;
+        match effect_inputs_once(
+            scope,
+            b,
+            owner,
+            effects.clone(),
+            width,
+            height,
+            scale,
+            time,
+            &mut failed,
+        )? {
+            Ok(effects) => return Ok(Ok(effects)),
+            Err(feature) => {
+                if !b.effects.is_some_and(|h| h.bypasses_refusals()) {
+                    return Ok(Err(feature));
+                }
+                let Some(instance) = failed else {
+                    return Ok(Err(feature));
+                };
+                let Some(passes) = effects.passes.without_effect(&instance) else {
+                    return Ok(Err(feature));
+                };
+                b.source_bytes = bytes;
+                b.failures.push(crate::LayerFailure {
+                    composition: scope.comp.id().to_string_lossy(),
+                    layer: js::layer_id(owner),
+                    message: format!("effect {instance} bypassed: {feature}"),
+                });
+                effects.passes = passes;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn effect_inputs_once<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    owner: &'d Node,
+    mut effects: composite::PreparedEffects,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    time: f64,
+    failed: &mut Option<String>,
+) -> JsResult<Result<composite::PreparedEffects, Feature>> {
     use pm_fx_defs::inputs::{Space, Stage};
     let requests = effects.passes.input_requests();
     if requests.is_empty() {
@@ -2817,6 +2898,7 @@ fn effect_inputs<'d>(
     }
     let mut producers = vec![];
     for reference in requests {
+        *failed = Some(reference.effect.clone());
         let request = reference.request;
         let active_key = (scope.comp.id().to_string_lossy(), request.clone());
         let cache_key = InputPlanKey {
@@ -2895,7 +2977,13 @@ fn effect_inputs<'d>(
             producers.push(producer);
             continue;
         }
-        let owner_binding = match crate::effects::plan::owner(scope, source, at, scale)? {
+        let owner_binding = match crate::effects::plan::owner(
+            scope,
+            source,
+            at,
+            scale,
+            &mut b.text.as_deref_mut().and_then(|t| t.measure()),
+        )? {
             Ok(o) => o,
             Err(f) => return Ok(Err(f)),
         };
@@ -2948,11 +3036,12 @@ fn effect_inputs<'d>(
                 None
             };
             let nested = if request.stage == Stage::Effects && active && !source_owner {
-                let Some(host) = b.effects else {
+                if b.effects.is_none() {
                     return Ok(Err(Feature::Effects));
-                };
-                match host.prepare_prefix(
+                }
+                match prepare_effects(
                     scope,
+                    b,
                     source,
                     composite::effects::EffectFrame {
                         width,
@@ -3027,6 +3116,7 @@ fn effect_inputs<'d>(
         b.input_cache.insert(cache_key, producer.clone());
         producers.push(producer);
     }
+    *failed = None;
     if let Some(passes) = effects.passes.with_input_plans(producers) {
         effects.passes = passes;
         Ok(Ok(effects))
