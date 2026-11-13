@@ -68,6 +68,12 @@ struct Flavour {
     /// data rate; measured, with a little room).
     smooth: f64,
     patch: f64,
+    /// At the small test frame, in any frame: the decoded picture anywhere
+    /// (lines and hard edges included) may be this many codes from the
+    /// rendered frame, and the two decoders this many from each other
+    /// (measured, with a little room).
+    whole: f64,
+    between: f64,
     /// The flavours a master is made in: their decoded ramps never step
     /// back, and their error is below what a shallower sample could carry.
     master: bool,
@@ -82,6 +88,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 10,
         smooth: 8.0,
         patch: 8.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: false,
     },
     Flavour {
@@ -92,6 +100,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 10,
         smooth: 3.0,
         patch: 1.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: false,
     },
     Flavour {
@@ -102,6 +112,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 10,
         smooth: 1.5,
         patch: 1.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: false,
     },
     Flavour {
@@ -112,6 +124,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 10,
         smooth: 1.0,
         patch: 1.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: true,
     },
     Flavour {
@@ -122,6 +136,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 12,
         smooth: 2.5,
         patch: 1.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: true,
     },
     Flavour {
@@ -132,6 +148,8 @@ const FLAVOURS: [Flavour; 6] = [
         depth: 12,
         smooth: 2.0,
         patch: 1.0,
+        whole: 1e+09,
+        between: 1e+09,
         master: true,
     },
 ];
@@ -551,26 +569,34 @@ fn known(color: &str, flavour: Flavour) -> [f64; 3] {
     ]
 }
 
+/// The middle of each patch less its known codes (Y′, Cb, Cr), signed.
+fn patch_residuals(picture: &Picture, flavour: Flavour) -> Vec<[f64; 3]> {
+    // The patches are 16 × 16 at (x, 4), whatever the frame's size.
+    PATCHES
+        .iter()
+        .map(|(x, color)| {
+            let want = known(color, flavour);
+            let (mut sum, mut n) = ([0.0; 3], 0.0);
+            for y in 8..16 {
+                for px in *x as usize + 4..*x as usize + 12 {
+                    let c = picture.chroma_at(px, y);
+                    sum[0] += picture.luma[y * picture.w + px];
+                    sum[1] += c[0];
+                    sum[2] += c[1];
+                    n += 1.0;
+                }
+            }
+            std::array::from_fn(|k| sum[k] / n - want[k])
+        })
+        .collect()
+}
+
 /// How far the middle of each patch is from its known codes, at worst.
 fn patches(picture: &Picture, flavour: Flavour) -> f64 {
-    let mut worst = 0.0f64;
-    for (x, color) in PATCHES {
-        let want = known(color, flavour);
-        let (mut sum, mut n) = ([0.0; 3], 0.0);
-        for y in 8..16 {
-            for px in x as usize + 4..x as usize + 12 {
-                let c = picture.chroma_at(px, y);
-                sum[0] += picture.luma[y * picture.w + px];
-                sum[1] += c[0];
-                sum[2] += c[1];
-                n += 1.0;
-            }
-        }
-        for k in 0..3 {
-            worst = worst.max((sum[k] / n - want[k]).abs());
-        }
-    }
-    worst
+    patch_residuals(picture, flavour)
+        .iter()
+        .flatten()
+        .fold(0.0, |worst, r| worst.max(r.abs()))
 }
 
 /// What the decoded picture of one export measures against the frame the
@@ -595,21 +621,32 @@ struct Measured {
     /// Distinct codes on the shallow ramp: rendered, and decoded.
     shallow_rendered: usize,
     shallow_decoded: usize,
+    /// The middle of the moving square, in every frame, from the rendered
+    /// frame's (it is somewhere else in each).
+    mover: f64,
+    /// The shallow ramp's column means (over the rows that are ramp alone)
+    /// from the rendered frame's, root mean square, and what the rendered
+    /// ramp cut to a sample two bits shallower would measure the same way.
+    precision: f64,
+    shallower: f64,
 }
 
 impl Measured {
     fn line(&self) -> String {
         format!(
-            "decoded smooth ±{:.2} codes (rms {:.2}), whole frame ±{:.1}, decoders agree ±{:.2}; patches ±{:.2} of their known codes (rendered ±{:.2}); ramps step back at most {} codes; shallow ramp {} codes rendered, {} decoded",
+            "decoded smooth ±{:.2} codes (rms {:.2}), whole frame ±{:.1}, decoders agree ±{:.2}; patches ±{:.2} of their known codes (rendered ±{:.2}), the moving square ±{:.2} in every frame; ramps step back at most {} codes; shallow ramp {} codes rendered, {} decoded, its column means {:.2} codes rms from the rendered ({:.2} for a sample two bits shallower)",
             self.smooth,
             self.rms,
             self.whole,
             self.between,
             self.patch,
             self.rendered_patch,
+            self.mover,
             self.back,
             self.shallow_rendered,
-            self.shallow_decoded
+            self.shallow_decoded,
+            self.precision,
+            self.shallower
         )
     }
 
@@ -620,8 +657,8 @@ impl Measured {
         what: &str,
         flavour: Flavour,
         depth: u32,
-        smooth: f64,
-        patch: f64,
+        (smooth, patch): (f64, f64),
+        (whole, between): (f64, f64),
         problems: &mut Vec<String>,
     ) {
         let mut fail = |m: String| problems.push(format!("{what}: {m}"));
@@ -641,6 +678,34 @@ impl Measured {
             fail(format!(
                 "decoded patches {:.2} codes from their colours",
                 self.patch
+            ));
+        }
+        // The moving square is where it was rendered, in every frame.
+        if self.mover > patch.max(smooth) {
+            fail(format!(
+                "the moving square is {:.2} codes from the rendered frame's",
+                self.mover
+            ));
+        }
+        if self.whole > whole {
+            fail(format!(
+                "the picture is {:.1} codes from the rendered frame somewhere",
+                self.whole
+            ));
+        }
+        if self.between > between {
+            fail(format!(
+                "the decoders disagree by {:.2} codes",
+                self.between
+            ));
+        }
+        // The flavour's sample depth is delivered, not a shallower one's:
+        // averaged down the ramp's rows, the shallow ramp follows the
+        // rendered one more closely than a sample two bits shallower can.
+        if self.precision > 0.75 * self.shallower {
+            fail(format!(
+                "the shallow ramp's column means are {:.2} codes rms from the rendered ones ({:.2} for a sample two bits shallower)",
+                self.precision, self.shallower
             ));
         }
         // What the project carries into the frame: the flavour's own codes
@@ -703,10 +768,48 @@ fn measure(
             .len()
     };
     let mut squares = Vec::new();
-    for n in [0, FRAMES - 1] {
+    // The square is 12 × 10 at (8 + 4n, 24), whatever the frame's size.
+    let mover = |picture: &Picture, n: u64| -> [f64; 3] {
+        let (mut sum, mut count) = ([0.0; 3], 0.0);
+        for y in 27..31 {
+            for x in 12 + 4 * n as usize..16 + 4 * n as usize {
+                let c = picture.chroma_at(x, y);
+                sum[0] += picture.luma[y * w + x];
+                sum[1] += c[0];
+                sum[2] += c[1];
+                count += 1.0;
+            }
+        }
+        sum.map(|v| v / count)
+    };
+    // Column means of the shallow ramp over the rows that are ramp alone.
+    let columns = |picture: &Picture, cut: f64| -> Vec<f64> {
+        shallow
+            .clone()
+            .map(|x| {
+                SMOOTH
+                    .map(|y| (picture.luma[y * w + x] / cut).round() * cut)
+                    .sum::<f64>()
+                    / SMOOTH.len() as f64
+            })
+            .collect()
+    };
+    let rms = |a: &[f64], b: &[f64]| {
+        (a.iter().zip(b).map(|(p, q)| (p - q) * (p - q)).sum::<f64>() / a.len() as f64).sqrt()
+    };
+    for n in 0..FRAMES {
         let want = Picture::of(&rendered(renderer, job, n), false);
         let own = apple(path, n, rate, flavour, false);
         let other = &foreign[n as usize];
+        for decoded in [&own, other] {
+            let (got, at) = (mover(decoded, n), mover(&want, n));
+            for k in 0..3 {
+                m.mover = m.mover.max((got[k] - at[k]).abs());
+            }
+        }
+        let exact = columns(&want, 1e-9);
+        m.precision = m.precision.max(rms(&columns(&own, 1e-9), &exact));
+        m.shallower = rms(&columns(&want, 4.0), &exact);
         for decoded in [&own, other] {
             let (worst, rms) = decoded.distance(&want, SMOOTH);
             m.smooth = m.smooth.max(worst);
@@ -950,12 +1053,13 @@ fn every_flavour_from_every_project_depth_at_every_rate() {
                     m.line()
                 );
                 eprintln!("MEASURE {what}: {line}");
+                assert_eq!(visual.gamma, None, "{what}: no gama atom beside colr");
                 m.check(
                     &what,
                     flavour,
                     depth,
-                    flavour.smooth,
-                    flavour.patch,
+                    (flavour.smooth, flavour.patch),
+                    (flavour.whole, flavour.between),
                     &mut problems,
                 );
                 rows.push(Row {
@@ -1095,7 +1199,14 @@ fn the_picture_holds_at_hd_in_every_flavour() {
             "4444" => (2.0, 1.0),
             _ => (1.5, 1.0),
         };
-        m.check(&what, flavour, 32, smooth, patch, &mut problems);
+        m.check(
+            &what,
+            flavour,
+            32,
+            (smooth, patch),
+            (flavour.whole, flavour.between),
+            &mut problems,
+        );
     }
     assert!(problems.is_empty(), "{problems:#?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1154,6 +1265,7 @@ fn the_rec709_label_is_a_label_in_every_flavour() {
                 "{what}"
             );
             assert_eq!(v["color_transfer"], ffprobe_transfer, "{what}");
+            assert_eq!(visual.gamma, None, "{what}: no gama atom beside colr");
             decoded.push(apple(&path, 0, rate, flavour, false));
         }
         let (worst, _) = decoded[0].distance(&decoded[1], 0..H as usize);
@@ -1200,6 +1312,13 @@ fn alpha_is_exact_in_4444_and_xq_straight_and_premultiplied() {
                 .unwrap_or_else(|| "none".into());
             assert_eq!(visual.depth, 32, "{what}: sample entry depth");
             assert_eq!(stream(&probe, "video")["pix_fmt"], "yuva444p12le", "{what}");
+            // The format says which alpha it is, as a reader is told.
+            assert!(
+                label.contains("AlphaChannelMode")
+                    && label.to_lowercase().contains(mode)
+                    && label.to_lowercase().contains("straight") == (wire == WireAlpha::Straight),
+                "{what}: the format's alpha mode is {label}"
+            );
 
             let want = Picture::of(&rendered(&mut renderer, &job, 0), true);
             let own = apple(&path, 0, rate, flavour, true);
@@ -1416,18 +1535,16 @@ fn a_delivered_file_comes_back_and_survives_three_generations() {
             );
             files.push(path);
         }
-        let last = FRAMES - 1;
-        let pictures: Vec<[Picture; 2]> = files
+        let pictures: Vec<Vec<Picture>> = files
             .iter()
             .map(|f| {
-                [
-                    apple(f, 0, rate, flavour, false),
-                    apple(f, last, rate, flavour, false),
-                ]
+                (0..FRAMES)
+                    .map(|n| apple(f, n, rate, flavour, false))
+                    .collect()
             })
             .collect();
         let drift = |a: usize, b: usize| {
-            (0..2)
+            (0..FRAMES as usize)
                 .map(|k| pictures[a][k].distance(&pictures[b][k], 0..H as usize))
                 .fold((0.0f64, 0.0f64), |m, d| (m.0.max(d.0), m.1.max(d.1)))
         };
@@ -1443,13 +1560,28 @@ fn a_delivered_file_comes_back_and_survives_three_generations() {
                 "{what}: an untouched re-export changes the samples by {carried:.2} codes before encoding"
             ));
         }
-        // Each generation re-quantizes what the one before decoded to:
-        // drift stays within twice the flavour's own loss on a first
-        // generation, and does not grow without bound.
-        if third.1 > 2.0 * flavour.smooth || third.0 > second.0 * 2.0 + 2.0 {
+        // Each generation re-quantizes what the one before decoded to. LT,
+        // 422, HQ and 4444 code it to the same samples: every frame of
+        // generations two and three is generation one's. XQ and Proxy move
+        // a few samples (measured: ±1.5 codes, rms 0.08; ±7.75, rms 0.25),
+        // and no further in the third generation than in the second.
+        let (most, rms) = match flavour.name {
+            "422 Proxy" => (10.0, 0.4),
+            "4444 XQ" => (2.0, 0.12),
+            _ => (0.0, 0.0),
+        };
+        for (generation, drift) in [(2, second), (3, third)] {
+            if drift.0 > most || drift.1 > rms {
+                problems.push(format!(
+                    "{what}: generation {generation} is ±{:.2} (rms {:.2}) from generation 1 in some frame, where ±{most} (rms {rms}) is its loss",
+                    drift.0, drift.1
+                ));
+            }
+        }
+        if third.0 > second.0 + 2.0 {
             problems.push(format!(
-                "{what}: generation 3 drifts ±{:.2} (rms {:.2}) from generation 1",
-                third.0, third.1
+                "{what}: generation 3 drifts further (±{:.2}) than generation 2 (±{:.2})",
+                third.0, second.0
             ));
         }
     }
@@ -1507,7 +1639,45 @@ fn hdr_projects_deliver_pq_and_hlg_prores() {
                 v["side_data_list"]
             );
             assert_eq!((colr.primaries, colr.transfer, colr.matrix), cicp, "{what}");
-            assert!(visual.mdcv.is_some(), "{what}: mastering display");
+            // The mastering display a 1,000-nit HDR project states, written
+            // out by hand: P3 primaries (green, blue, red) and D65 white in
+            // steps of 0.00002, then 1,000 and 0 cd/m² in steps of 0.0001.
+            let mastering: [u8; 24] = [
+                0x33, 0xC2, 0x86, 0xC4, // green 0.265, 0.690
+                0x1D, 0x4C, 0x0B, 0xB8, // blue 0.150, 0.060
+                0x84, 0xD0, 0x3E, 0x80, // red 0.680, 0.320
+                0x3D, 0x13, 0x40, 0x42, // white 0.3127, 0.3290
+                0x00, 0x98, 0x96, 0x80, // 10,000,000 × 0.0001 cd/m²
+                0x00, 0x00, 0x00, 0x00,
+            ];
+            assert_eq!(visual.mdcv, Some(mastering), "{what}: mastering display");
+            // The composition's light level is not measured (no footage
+            // states one), so none is claimed.
+            assert_eq!(visual.clli, None, "{what}: content light level");
+            let display = v["side_data_list"]
+                .as_array()
+                .and_then(|list| {
+                    list.iter()
+                        .find(|d| d["side_data_type"] == "Mastering display metadata")
+                })
+                .unwrap_or_else(|| panic!("{what}: ffprobe reads no mastering display"));
+            assert_eq!(
+                (
+                    display["red_x"].as_str(),
+                    display["green_y"].as_str(),
+                    display["white_point_x"].as_str(),
+                    display["max_luminance"].as_str(),
+                    display["min_luminance"].as_str()
+                ),
+                (
+                    Some("34000/50000"),
+                    Some("34500/50000"),
+                    Some("15635/50000"),
+                    Some("10000000/10000"),
+                    Some("0/10000")
+                ),
+                "{what}: the mastering display as ffprobe reads it"
+            );
             assert_eq!(v["color_primaries"], "bt2020", "{what}");
             assert_eq!(v["color_transfer"], transfer, "{what}");
             assert_eq!(v["color_space"], "bt2020nc", "{what}");
@@ -1605,6 +1775,207 @@ fn detailed_picture_reaches_each_flavours_data_rate() {
                 "ProRes {}: {rate:.0} Mb/s, target {target:.0}",
                 flavour.name
             ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The best straight line through a channel's decoded patch values against
+/// their known codes: (gain, offset at the channel's middle code, what is
+/// left over at worst).
+fn fitted(residuals: &[[f64; 3]], flavour: Flavour, k: usize) -> (f64, f64, f64) {
+    let (lo, ls, co, _) = flavour.levels();
+    let middle = if k == 0 { lo + ls / 2.0 } else { co };
+    let points: Vec<(f64, f64)> = PATCHES
+        .iter()
+        .zip(residuals)
+        .map(|((_, color), r)| {
+            let want = known(color, flavour)[k];
+            (want - middle, want + r[k] - middle)
+        })
+        .collect();
+    let n = points.len() as f64;
+    let (sx, sy) = points
+        .iter()
+        .fold((0.0, 0.0), |s, p| (s.0 + p.0, s.1 + p.1));
+    let (sxx, sxy) = points
+        .iter()
+        .fold((0.0, 0.0), |s, p| (s.0 + p.0 * p.0, s.1 + p.0 * p.1));
+    let gain = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    let offset = (sy - gain * sx) / n;
+    let left = points
+        .iter()
+        .map(|p| (p.1 - offset - gain * p.0).abs())
+        .fold(0.0, f64::max);
+    (gain, offset, left)
+}
+
+/// ProRes 422 Proxy puts flat patches up to 6.7 codes from their colours.
+/// Whether that is the encoder's quantisation or a mistake in the matrix or
+/// range on the way to it shows in the sign and pattern of the error: a
+/// range mistake is a gain (0.86 or 1.17) and an offset (64 codes) common to
+/// every patch, a matrix mistake moves the saturated patches by tens of
+/// codes and leaves the greys alone. The same frame is also coded by
+/// Apple's Proxy encoder from FFmpeg's own conversion (none of this crate's
+/// colour code), and by FFmpeg's own Proxy encoder.
+#[test]
+fn the_proxy_error_on_flat_patches_is_the_encoders_quantisation() {
+    let dir = scratch("proxy");
+    let mut renderer = Renderer::headless().unwrap();
+    let rate = Rate::new(25, 1).unwrap();
+    let (proxy, hq) = (FLAVOURS[0], FLAVOURS[3]);
+    let table = |residuals: &[[f64; 3]]| -> String {
+        PATCHES
+            .iter()
+            .zip(residuals)
+            .map(|((_, color), r)| format!("{color} {:+.2} {:+.2} {:+.2}", r[0], r[1], r[2]))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let mut problems = Vec::new();
+    for (w, h) in [(W, H), (1920u32, 1080u32)] {
+        let doc = document_sized(w, h, 32, 25.0);
+        let export_as = |renderer: &mut Renderer, flavour: Flavour| {
+            let path = dir.join(format!("{}-{w}.mov", flavour.fourcc));
+            let mut s = settings(flavour, WireAlpha::None, (25, 1), 32, 0);
+            s.size = Size::new(w, h);
+            s.audio = false;
+            let job = job(&doc, s, path.clone());
+            export(renderer, &job);
+            (job, path)
+        };
+        let (job, ours) = export_as(&mut renderer, proxy);
+        let (_, master) = export_as(&mut renderer, hq);
+        // What the encoder was handed, and what each file decodes to.
+        let handed = patch_residuals(
+            &Picture::of(&rendered(&mut renderer, &job, 0), false),
+            proxy,
+        );
+        let decoded = patch_residuals(&apple(&ours, 0, rate, proxy, false), proxy);
+        let foreign = patch_residuals(&ffmpeg(&ours, (w, h), proxy, false)[0], proxy);
+        let best = patch_residuals(&apple(&master, 0, rate, hq, false), hq);
+        eprintln!(
+            "MEASURE Proxy at {w} × {h}, patch (Y′ Cb Cr) less its known codes: handed to the encoder: {}",
+            table(&handed)
+        );
+        eprintln!(
+            "MEASURE Proxy at {w} × {h}, our file by Apple's decoder: {}",
+            table(&decoded)
+        );
+        eprintln!(
+            "MEASURE Proxy at {w} × {h}, our file by FFmpeg's decoder: {}",
+            table(&foreign)
+        );
+        eprintln!(
+            "MEASURE 422 HQ at {w} × {h}, the same frame: {}",
+            table(&best)
+        );
+        for (k, name) in ["Y′", "Cb", "Cr"].into_iter().enumerate() {
+            let (gain, offset, left) = fitted(&decoded, proxy, k);
+            let mean = decoded.iter().map(|r| r[k]).sum::<f64>() / decoded.len() as f64;
+            eprintln!(
+                "MEASURE Proxy at {w} × {h}, {name} over the nine patches: gain {gain:.4}, offset {offset:+.2} codes at mid-scale, {left:.2} codes left over at worst; mean error {mean:+.2} codes"
+            );
+            // A range mistake: gain 0.855 or 1.169, offset tens of codes.
+            if (gain - 1.0).abs() > 0.01 || offset.abs() > 2.0 {
+                problems.push(format!(
+                    "{w} × {h} {name}: gain {gain:.4}, offset {offset:+.2}: the levels are off"
+                ));
+            }
+        }
+        // A matrix mistake (BT.601 for BT.709) moves the luma of the
+        // saturated patches by tens of codes: every patch's luma is right.
+        let luma = decoded.iter().fold(0.0f64, |m, r| m.max(r[0].abs()));
+        if luma > 1.0 {
+            problems.push(format!("{w} × {h}: a patch's luma is {luma:.2} codes off"));
+        }
+        // The encoder was handed the right codes.
+        let worst_handed = handed.iter().flatten().fold(0.0f64, |m, r| m.max(r.abs()));
+        if worst_handed > 0.6 {
+            problems.push(format!(
+                "{w} × {h}: the encoder was handed patches {worst_handed:.2} codes off"
+            ));
+        }
+        // The same frame through tools that share none of this crate's
+        // colour code: the working frame as 16-bit RGB, converted by FFmpeg
+        // (BT.709, video range), coded by Apple's Proxy encoder and by
+        // FFmpeg's own.
+        let plan = plan_export(&job).unwrap();
+        let read = render_frame(
+            &mut renderer,
+            &plan.document,
+            &job.composition,
+            plan.timeline.tick(0),
+            &plan.request,
+            &job.media,
+            &Unrestricted,
+            pass_key(job.seed, plan.request.output_size),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let rgb: Vec<u8> = read
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .flat_map(|c| ((f64::from(c).clamp(0.0, 1.0) * 65535.0).round() as u16).to_le_bytes())
+            .collect();
+        let raw = dir.join(format!("frame-{w}.rgb48"));
+        std::fs::write(&raw, &rgb).unwrap();
+        for (label, encoder) in [
+            (
+                "Apple's Proxy encoder from FFmpeg's conversion",
+                vec![
+                    "-c:v",
+                    "prores_videotoolbox",
+                    "-profile:v",
+                    "proxy",
+                    "-pix_fmt",
+                    "p210le",
+                ],
+            ),
+            (
+                "FFmpeg's own Proxy encoder",
+                vec![
+                    "-c:v",
+                    "prores_ks",
+                    "-profile:v",
+                    "0",
+                    "-pix_fmt",
+                    "yuv422p10le",
+                ],
+            ),
+        ] {
+            let path = dir.join(format!("{}-{w}.mov", encoder[1]));
+            let size = format!("{w}x{h}");
+            let out = Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb48le", "-s", size.as_str(), "-r", "25", "-i"])
+                .arg(&raw)
+                .args(["-vf", "scale=in_range=full:out_range=limited:out_color_matrix=bt709:flags=accurate_rnd+full_chroma_int"])
+                .args(&encoder)
+                .args(["-frames:v", "1"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            if !out.status.success() {
+                eprintln!(
+                    "MEASURE Proxy at {w} × {h}, {label}: not available here ({})",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                continue;
+            }
+            let theirs = patch_residuals(&ffmpeg(&path, (w, h), proxy, false)[0], proxy);
+            let apart = theirs
+                .iter()
+                .flatten()
+                .zip(foreign.iter().flatten())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            let worst = theirs.iter().flatten().fold(0.0f64, |m, r| m.max(r.abs()));
+            eprintln!("MEASURE Proxy at {w} × {h}, {label}: {}", table(&theirs));
+            eprintln!(
+                "MEASURE Proxy at {w} × {h}, {label}: patches ±{worst:.2} of their known codes, ±{apart:.2} from our file's (same decoder)"
+            );
         }
     }
     assert!(problems.is_empty(), "{problems:#?}");
