@@ -1650,7 +1650,9 @@ fn path(px: vec2f)->Sample {
       if(last_pdf>0.){let pl=light_pdf(light,ro,rd,light_distance)*light_selection_pdf(seen_light,ro);mis=last_pdf*last_pdf/(last_pdf*last_pdf+pl*pl);}
       s.radiance+=limit_indirect(tp*light_emit(light,ro+rd*light_distance,rd)*mis,b);return s;
     }
-    if (h.tri < 0 && tf >= BIG) {
+    // A clipped miss carries the camera's finite far distance. The analytic
+    // floor may exist beyond it; that is still a miss, never surface(-1).
+    if (h.tri < 0 && tf >= h.t) {
       if (primary) {
         if(map_count()>0u && world_row(1u).z>0.5){s.radiance+=tp*(environment(rd)+sun_seen(rd));}
         else{let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);s.bg = P.backdrop.xyz*transmission;s.void_hit = transmission;}
