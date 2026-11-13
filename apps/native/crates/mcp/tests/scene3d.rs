@@ -485,8 +485,14 @@ fn get_3d_scene_picks_the_imported_part_under_a_pixel() {
     std::fs::write(
         &path,
         pm_scene3d::import::quads_glb(&[
-            ("Body", [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]]),
-            ("Lens", [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]]),
+            (
+                "Body",
+                [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]],
+            ),
+            (
+                "Lens",
+                [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]],
+            ),
         ]),
     )
     .unwrap();
@@ -501,7 +507,10 @@ fn get_3d_scene_picks_the_imported_part_under_a_pixel() {
     let mut session = f.session();
     ok(session.call("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"asset"},"useSourceMaterials":true}})));
     let doc = f.read();
-    let (w, h) = (doc["w"].as_f64().unwrap_or(1920.), doc["h"].as_f64().unwrap_or(1080.));
+    let (w, h) = (
+        doc["w"].as_f64().unwrap_or(1920.),
+        doc["h"].as_f64().unwrap_or(1080.),
+    );
     let body = ok(session.call("get_3d_scene", json!({"pick":[w / 2., h / 2.]})));
     assert_eq!(body["pick"]["layerId"], "model");
     assert_eq!(body["pick"]["materialIndex"], 0);
@@ -518,5 +527,9 @@ fn get_3d_scene_picks_the_imported_part_under_a_pixel() {
     let before = f.read();
     assert!(ok(session.call("get_3d_scene", json!({"pick":[1., 1.]})))["pick"].is_null());
     assert_eq!(f.read(), before);
-    assert!(session.dispatch("get_3d_scene", &json!({"pick":[1.]})).is_err());
+    assert!(
+        session
+            .dispatch("get_3d_scene", &json!({"pick":[1.]}))
+            .is_err()
+    );
 }

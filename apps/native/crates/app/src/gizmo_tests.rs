@@ -15,6 +15,7 @@ use pm_kernel::{Call, Caller, HistoryCall, Request, SelectionCall};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::Arc,
 };
 
 #[derive(Default)]
@@ -1775,7 +1776,12 @@ fn the_gap_in_a_multiple_selection_moves_it_and_a_click_there_clears(cx: &mut Te
     click(&mut s, cx, [380., 200.], Modifiers::none(), 1);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
-        kernel.published(PROJECT).unwrap().selection.layers().is_empty()
+        kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .is_empty()
     });
 }
 /// A click selects the outermost group; a double-click descends one level
@@ -1832,8 +1838,14 @@ fn hovering_outlines_what_a_click_would_select(cx: &mut TestAppContext) {
         s.surface.read_with(&s.vcx, |g, _| g.hovered())
     };
     // l0 is selected by the stage.
-    assert_eq!(hover(&mut s, cx, [460., 160.], Modifiers::none()), Some("g".into()));
-    assert_eq!(hover(&mut s, cx, [460., 160.], Modifiers::command()), Some("l1".into()));
+    assert_eq!(
+        hover(&mut s, cx, [460., 160.], Modifiers::none()),
+        Some("g".into())
+    );
+    assert_eq!(
+        hover(&mut s, cx, [460., 160.], Modifiers::command()),
+        Some("l1".into())
+    );
     assert_eq!(hover(&mut s, cx, [210., 160.], Modifiers::none()), None);
     assert_eq!(hover(&mut s, cx, [600., 340.], Modifiers::none()), None);
     // The outline is drawn: four more lines than the selection alone.
@@ -1842,17 +1854,17 @@ fn hovering_outlines_what_a_click_would_select(cx: &mut TestAppContext) {
     assert_eq!(s.recorder.lines.borrow().len(), before + 4);
     // A press takes it away.
     let at = s.point_of([460., 160.]);
-    s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
     assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.hovered()), None);
-    s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
 }
 /// A double-click on an imported model picks the part under the pointer:
 /// the model alone is selected and Properties is asked to reveal that
 /// part's material slot (viewer.ts dblclick → scene3d.pickPart).
 #[gpui::test]
-fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
-    cx: &mut TestAppContext,
-) {
+fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(cx: &mut TestAppContext) {
     let mut s = stage(cx);
     let dir = std::env::temp_dir().join(pm_kernel::new_id("pm-part-pick"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1861,8 +1873,14 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
     std::fs::write(
         &path,
         pm_scene3d::import::quads_glb(&[
-            ("Body", [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]]),
-            ("Lens", [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]]),
+            (
+                "Body",
+                [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]],
+            ),
+            (
+                "Lens",
+                [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]],
+            ),
         ]),
     )
     .unwrap();
@@ -1882,7 +1900,11 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
             .wait()
             .unwrap()
             .unwrap();
-        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{:?}", ack.reply);
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
     };
     transact(
         &s,
@@ -1908,7 +1930,9 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
     );
     s.refresh(cx);
     let surface = s.surface.clone();
-    settle(cx, move |cx| surface.read_with(cx, |g, _| g.studio_active()));
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.studio_active())
+    });
     // The first click selects the model, the second picks its part.
     click(&mut s, cx, [320., 180.], Modifiers::none(), 1);
     click(&mut s, cx, [320., 180.], Modifiers::none(), 2);
@@ -1922,10 +1946,18 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
     // Further right along the middle, the lens answers with its own slot.
     for x in (330..640).step_by(10) {
         click(&mut s, cx, [x as f64, 180.], Modifiers::none(), 2);
-        if s.recorder.parts.borrow().last().is_some_and(|p| p.1 == Some(1)) {
+        if s.recorder
+            .parts
+            .borrow()
+            .last()
+            .is_some_and(|p| p.1 == Some(1))
+        {
             break;
         }
     }
-    assert_eq!(s.recorder.parts.borrow().last(), Some(&("model".to_string(), Some(1))));
+    assert_eq!(
+        s.recorder.parts.borrow().last(),
+        Some(&("model".to_string(), Some(1)))
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -996,7 +996,9 @@ impl Controller {
         if let Some(slot) = slot
             && let Some(view) = self.builtins.views.get("inspector").cloned()
         {
-            view.update(cx, |v, cx| v.reveal_semantic(format!("section:3d.part.{slot}"), cx));
+            view.update(cx, |v, cx| {
+                v.reveal_semantic(format!("section:3d.part.{slot}"), cx)
+            });
         }
     }
     pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1733,12 +1735,16 @@ impl crate::gizmo::Host for ControllerDelegate {
             .ok()
     }
     fn open_composition(&self, comp: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
     }
     fn scene3d_assets(&self, cx: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         let c = self.0.upgrade()?;
         let originals = c.read(cx).media.originals.clone();
-        Some(Arc::new(pm_scene3d::geometry::FileAssets::new(originals.into_iter().collect())))
+        Some(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            originals.into_iter().collect(),
+        )))
     }
     fn focus_part(&self, layer: &str, slot: Option<u64>, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| v.focus_part(layer, slot, cx));

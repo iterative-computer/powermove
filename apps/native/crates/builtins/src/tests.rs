@@ -4261,7 +4261,10 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
     assert_eq!(section(&p, "3d.part.0")["focused"], false);
     presenter
         .intent(
-            &mut pm_panel_inspector::Inspector::new(kernel.published("synthetic").unwrap(), Default::default()),
+            &mut pm_panel_inspector::Inspector::new(
+                kernel.published("synthetic").unwrap(),
+                Default::default(),
+            ),
             Caller::native(),
             &json!({"type":"collapse","section":"3d.part.1","collapsed":true}),
             0.,

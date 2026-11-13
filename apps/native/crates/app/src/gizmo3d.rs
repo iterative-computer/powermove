@@ -765,8 +765,9 @@ impl GizmoSurface {
                     };
                     // A locked layer isn't picked (the click goes through it).
                     let scene = s.studio.scene.clone();
-                    let unlocked =
-                        |id: String| (!scene.as_ref().is_some_and(|sc| locked(sc, &id))).then_some(id);
+                    let unlocked = |id: String| {
+                        (!scene.as_ref().is_some_and(|sc| locked(sc, &id))).then_some(id)
+                    };
                     match hit {
                         Ok(Some(layer)) => match unlocked(layer) {
                             Some(layer) if part => s.studio_part(layer, eye, at, cx),
@@ -823,9 +824,15 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     let assets = assets?;
-                    pm_panel_studio3d::viewport::pick_part(&p.snapshot, time, &layer, &ray, &*assets)
-                        .ok()
-                        .flatten()
+                    pm_panel_studio3d::viewport::pick_part(
+                        &p.snapshot,
+                        time,
+                        &layer,
+                        &ray,
+                        &*assets,
+                    )
+                    .ok()
+                    .flatten()
                 })
                 .await;
             let _ = this.update(cx, |s, cx| match picked {

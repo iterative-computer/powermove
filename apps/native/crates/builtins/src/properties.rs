@@ -86,9 +86,11 @@ impl Properties {
     /// The viewer's `focusPart` fact: a new request opens that slot's
     /// section and marks it; `null` leaves part focus.
     pub fn focus_part(&mut self, fact: &Value) {
-        let (Some(layer), Some(slot), Some(request)) =
-            (fact["layer"].as_str(), fact["slot"].as_u64(), fact["seq"].as_u64())
-        else {
+        let (Some(layer), Some(slot), Some(request)) = (
+            fact["layer"].as_str(),
+            fact["slot"].as_u64(),
+            fact["seq"].as_u64(),
+        ) else {
             self.part_focus = None;
             return;
         };
@@ -853,7 +855,9 @@ impl Properties {
                 .part_focus
                 .as_ref()
                 .is_some_and(|(l, s)| l == layer && *s == index);
-            sections.push(json!({"id":id,"title":title,"collapsed":collapsed,"focused":focused,"rows":rows}));
+            sections.push(
+                json!({"id":id,"title":title,"collapsed":collapsed,"focused":focused,"rows":rows}),
+            );
         }
         Ok(sections)
     }

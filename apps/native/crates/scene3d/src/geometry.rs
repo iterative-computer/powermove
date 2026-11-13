@@ -158,7 +158,11 @@ pub fn part_hit(
     direction: Vec3,
 ) -> Result<Option<PartHit>> {
     if !time.is_finite()
-        || !world.iter().chain(&origin).chain(&direction).all(|v| v.is_finite())
+        || !world
+            .iter()
+            .chain(&origin)
+            .chain(&direction)
+            .all(|v| v.is_finite())
         || length(direction) < 1e-12
     {
         return fail("Invalid part pick");
@@ -557,8 +561,19 @@ mod part_tests {
     /// the left (material 0) and a lens on the right (material 1).
     fn two_parts() -> Vec<u8> {
         crate::import::quads_glb(&[
-            ("Body", [[-2., -1., 0.], [-0.5, -1., 0.], [-0.5, 1., 0.], [-2., 1., 0.]]),
-            ("Lens", [[0.5, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.5, 1., 0.]]),
+            (
+                "Body",
+                [
+                    [-2., -1., 0.],
+                    [-0.5, -1., 0.],
+                    [-0.5, 1., 0.],
+                    [-2., 1., 0.],
+                ],
+            ),
+            (
+                "Lens",
+                [[0.5, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.5, 1., 0.]],
+            ),
         ])
     }
     fn assets() -> (LoadedAssets, Value, gltf::Fit) {
@@ -569,7 +584,11 @@ mod part_tests {
         let fit = m.fit;
         let record = json!({"kind":"model","name":"Camera.glb"});
         let mut assets = LoadedAssets::default();
-        assets.insert("a".into(), record.clone(), crate::import::Model::Gltf(m.clone()));
+        assets.insert(
+            "a".into(),
+            record.clone(),
+            crate::import::Model::Gltf(m.clone()),
+        );
         (assets, record, fit)
     }
     #[test]
@@ -605,7 +624,14 @@ mod part_tests {
         world[12] = 10.;
         let at = |dx: f64| {
             assets
-                .part_at("a", &record, world, 0., [x(1.2) + dx, 0., 5.], [0., 0., -1.])
+                .part_at(
+                    "a",
+                    &record,
+                    world,
+                    0.,
+                    [x(1.2) + dx, 0., 5.],
+                    [0., 0., -1.],
+                )
                 .unwrap()
                 .map(|h| h.slot)
         };
@@ -614,7 +640,14 @@ mod part_tests {
         // A changed source asks for a reload rather than answering stale.
         assert!(
             assets
-                .part_at("a", &json!({"kind":"model"}), world, 0., [0.; 3], [0., 0., -1.])
+                .part_at(
+                    "a",
+                    &json!({"kind":"model"}),
+                    world,
+                    0.,
+                    [0.; 3],
+                    [0., 0., -1.]
+                )
                 .is_err()
         );
     }

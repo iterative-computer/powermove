@@ -1063,7 +1063,13 @@ impl GizmoSurface {
                 if let Some(hit) = self.handle_at(at, frame.scale) {
                     Some(start(hit, None))
                 } else if inside_selection && self.transformable() {
-                    Some(start(Hit::Body, Some(Press { inside: true, ..press })))
+                    Some(start(
+                        Hit::Body,
+                        Some(Press {
+                            inside: true,
+                            ..press
+                        }),
+                    ))
                 } else if inside_selection {
                     None
                 } else {
@@ -2275,7 +2281,10 @@ fn resize_shape(
 }
 /// A layer's box in the composition at `time`: its transformed bounds.
 fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
-    let world = QueryMirror::new(p).queries().world_matrix(None, id, time).ok()?;
+    let world = QueryMirror::new(p)
+        .queries()
+        .world_matrix(None, id, time)
+        .ok()?;
     let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
     Some([
         transform(&world, [b.x0, b.y0]),
@@ -2299,7 +2308,13 @@ enum DoubleClick {
 fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
     let root = p.snapshot.root()?;
     let hit = crate::text_host::query(p, |q| {
-        q.pick(None, press.at[0], press.at[1], press.time, &Default::default())
+        q.pick(
+            None,
+            press.at[0],
+            press.at[1],
+            press.time,
+            &Default::default(),
+        )
     })
     .ok()?
     .layer_id?;
@@ -2315,7 +2330,12 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
     if text && selected.contains(&hit) {
         return Some(DoubleClick::Text(hit));
     }
-    let group_of = |id: &str| layers.iter().find(|l| l.id == id).and_then(|l| l.group.clone());
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.group.clone())
+    };
     let mut chain = vec![hit.clone()];
     while let Some(group) = group_of(chain.last().unwrap()) {
         chain.push(group);

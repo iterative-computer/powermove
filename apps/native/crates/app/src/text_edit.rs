@@ -1395,7 +1395,12 @@ impl GizmoSurface {
         .detach();
     }
     /// A double-click's text edit: the layer's text, all of it selected.
-    pub(super) fn edit_text_all(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn edit_text_all(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.edit_text(id, Entry::All, window, cx);
     }
     /// Return with one text layer selected edits it (Edit ▸ Edit Text).
