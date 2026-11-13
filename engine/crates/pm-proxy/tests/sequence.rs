@@ -352,7 +352,10 @@ mod real {
         // A proxy an earlier build stored for these same frames, before the
         // sequence pipeline changed (associated alpha, PQ reference white),
         // is never reused: the frames are encoded again.
-        assert_eq!(made.stored.recipe.sequence, Some(pm_proxy::SEQUENCE_PIPELINE));
+        assert_eq!(
+            made.stored.recipe.sequence,
+            Some(pm_proxy::SEQUENCE_PIPELINE)
+        );
         let earlier = ProxyStore::open(dir.path().join("earlier")).unwrap();
         let earlier_recipe = pm_proxy::ProxyRecipe {
             sequence: None,
@@ -360,8 +363,15 @@ mod real {
         };
         let staged = tempfile::NamedTempFile::new_in(earlier.root()).unwrap();
         fs::copy(&made.stored.path, staged.path()).unwrap();
-        let seeded = earlier.commit(&source_hash, &earlier_recipe, staged).unwrap();
-        assert!(earlier.lookup(&source_hash, &earlier_recipe).unwrap().is_some());
+        let seeded = earlier
+            .commit(&source_hash, &earlier_recipe, staged)
+            .unwrap();
+        assert!(
+            earlier
+                .lookup(&source_hash, &earlier_recipe)
+                .unwrap()
+                .is_some()
+        );
         let again = generate_with_disk_probe(
             GenerationRequest {
                 store: &earlier,

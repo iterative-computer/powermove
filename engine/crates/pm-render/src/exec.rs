@@ -563,7 +563,11 @@ impl Exec<'_> {
                         // and after a few such reads in a row shows its card
                         // until the file changes again.
                         let member = sequence_size.is_some();
-                        let attempts = if member && !*card_when_unreadable { 3 } else { 1 };
+                        let attempts = if member && !*card_when_unreadable {
+                            3
+                        } else {
+                            1
+                        };
                         let mut read = None;
                         for attempt in 0..attempts {
                             let before = member.then(|| crate::media::stat_stamp(path));
@@ -1626,7 +1630,10 @@ mod sequence_read_tests {
         let s = sequence();
         // Export: the first read is spoilt by a write; the second is whole.
         let mut export = Renderer::headless().unwrap();
-        let (frame, reads) = (s.frames[0].clone(), std::rc::Rc::new(std::cell::Cell::new(0)));
+        let (frame, reads) = (
+            s.frames[0].clone(),
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
         let counted = reads.clone();
         while_read(move |_| {
             counted.set(counted.get() + 1);
@@ -1642,7 +1649,10 @@ mod sequence_read_tests {
         // Viewer: the frame is a stand-in and is drawn again.
         let mut viewer = Renderer::headless().unwrap();
         viewer.set_isolate_layers(true);
-        let (frame, writes) = (s.frames[1].clone(), std::rc::Rc::new(std::cell::Cell::new(0)));
+        let (frame, writes) = (
+            s.frames[1].clone(),
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
         let counted = writes.clone();
         while_read(move |_| {
             counted.set(counted.get() + 1);
@@ -1676,13 +1686,18 @@ mod sequence_read_tests {
         }
         let (card, failures) = last.expect("the viewer kept drawing the frame again");
         assert!(failures.is_empty(), "{failures:?}");
-        assert!(card[3] > 0.99 && ![10, 250].contains(&level(card)), "its card: {card:?}");
+        assert!(
+            card[3] > 0.99 && ![10, 250].contains(&level(card)),
+            "its card: {card:?}"
+        );
         // Written once more before the export reads it (its card held only
         // for the state it was seen in).
         render(&s.frames[2], 99);
         let (_, failures) = draw(&mut Renderer::headless().unwrap(), &s, 2);
         assert!(
-            failures.iter().any(|f| f.contains("shot.0003.bmp") && f.contains("changed while it was read")),
+            failures
+                .iter()
+                .any(|f| f.contains("shot.0003.bmp") && f.contains("changed while it was read")),
             "{failures:?}"
         );
         crate::media::DURING_READ.with(|h| *h.borrow_mut() = None);
@@ -1695,7 +1710,10 @@ mod sequence_read_tests {
     fn a_decode_failing_after_good_facts_shows_the_card() {
         let s = sequence();
         let (picture, failures) = draw(&mut Renderer::headless().unwrap(), &s, 0);
-        assert!(failures.is_empty() && level(picture) > 30, "{failures:?} {picture:?}");
+        assert!(
+            failures.is_empty() && level(picture) > 30,
+            "{failures:?} {picture:?}"
+        );
         let mut viewer = Renderer::headless().unwrap();
         viewer.set_isolate_layers(true);
         crate::media::FAIL_DECODE.with(|f| f.set(true));

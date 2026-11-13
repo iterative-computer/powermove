@@ -47,7 +47,7 @@ pub fn member_stamp(path: &Path) -> MemberStamp {
 /// The member generation of `sequence`: a digest of every numbered file's
 /// stamp, from the first number to the last.
 pub fn generation(sequence: &Manifest) -> u64 {
-    generation_with(sequence, &|p| member_stamp(p))
+    generation_with(sequence, &member_stamp)
 }
 
 fn generation_with(sequence: &Manifest, stat: &dyn Fn(&Path) -> MemberStamp) -> u64 {
@@ -108,7 +108,7 @@ pub struct SequenceWatch(Arc<Inner>);
 /// The process's watch.
 pub fn global() -> &'static SequenceWatch {
     static WATCH: OnceLock<SequenceWatch> = OnceLock::new();
-    WATCH.get_or_init(|| SequenceWatch::with_stat(Arc::new(|p| member_stamp(p))))
+    WATCH.get_or_init(|| SequenceWatch::with_stat(Arc::new(member_stamp)))
 }
 
 impl SequenceWatch {
@@ -125,7 +125,12 @@ impl SequenceWatch {
     pub fn track(&self, owner: &str, files: impl IntoIterator<Item = PathBuf>) {
         let files: BTreeSet<PathBuf> = files.into_iter().collect();
         let mut state = self.0.state.lock().unwrap();
-        let known = state.snapshot.generations.keys().cloned().collect::<BTreeSet<_>>();
+        let known = state
+            .snapshot
+            .generations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let new = files.iter().any(|f| !known.contains(f));
         if files.is_empty() {
             state.tracked.remove(owner);
@@ -163,7 +168,12 @@ impl SequenceWatch {
 
     /// Hears the manifests whose files changed, on the watch's thread.
     pub fn listen(&self, listener: impl Fn(&[PathBuf]) -> bool + Send + 'static) {
-        self.0.state.lock().unwrap().listeners.push(Box::new(listener));
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .listeners
+            .push(Box::new(listener));
     }
 }
 
@@ -188,7 +198,10 @@ fn run(inner: std::sync::Weak<Inner>) {
                 *entry = (stamp, Manifest::read(file).ok().flatten());
             }
             if let Some(sequence) = &entry.1 {
-                generations.insert(file.clone(), generation_with(sequence, &|p| (watch.stat)(p)));
+                generations.insert(
+                    file.clone(),
+                    generation_with(sequence, &|p| (watch.stat)(p)),
+                );
             }
         }
         manifests.retain(|f, _| files.contains(f));
@@ -232,7 +245,10 @@ pub(crate) fn settle(owner: &str, manifest: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while global().snapshot().generations.get(manifest) != Some(&want) {
         global().rescan();
-        assert!(std::time::Instant::now() < deadline, "the watch never published");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watch never published"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -291,8 +307,14 @@ mod tests {
             std::fs::rename(dir.path().join("t"), frame(2)).unwrap();
         });
         changed("removed", &|| std::fs::remove_file(frame(1)).unwrap());
-        changed("hole filled", &|| std::fs::write(frame(3), [3u8; 32]).unwrap());
-        assert_eq!(generation(&sequence), *seen.last().unwrap(), "unchanged files");
+        changed("hole filled", &|| {
+            std::fs::write(frame(3), [3u8; 32]).unwrap()
+        });
+        assert_eq!(
+            generation(&sequence),
+            *seen.last().unwrap(),
+            "unchanged files"
+        );
     }
 
     /// The watch publishes generations and tells listeners which sequence
@@ -319,7 +341,7 @@ mod tests {
         watch.listen(move |changed| tx.send(changed.to_vec()).is_ok());
         watch.track("test", [path.clone()]);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while watch.snapshot().generations.get(&path).is_none() {
+        while !watch.snapshot().generations.contains_key(&path) {
             assert!(std::time::Instant::now() < deadline, "never published");
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -333,7 +355,10 @@ mod tests {
         for _ in 0..1000 {
             assert_eq!(watch.snapshot().generations[&path], first);
         }
-        assert!(started.elapsed() < Duration::from_millis(100), "a reader waited");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a reader waited"
+        );
         *blocked.0.lock().unwrap() = false;
         blocked.1.notify_all();
         let changed = rx.recv_timeout(Duration::from_secs(10)).unwrap();

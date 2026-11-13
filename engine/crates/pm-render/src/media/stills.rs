@@ -114,7 +114,7 @@ fn bytes_of(still: &StillImage) -> usize {
 /// A worker's answer for one request.
 enum Answer {
     /// Decoded, and charged to the allowance.
-    Decoded(Decoded),
+    Decoded(Box<Decoded>),
     /// It did not fit (the frame decodes it itself).
     Refused,
     /// Asked for in an earlier epoch: nothing is sent.
@@ -139,7 +139,11 @@ fn decode(key: &StillKey, pool: &FramePool, shared: &Shared, epoch: u64) -> Answ
                 })
                 .is_ok();
             if !admitted {
-                return if current() { Answer::Refused } else { Answer::Abandoned };
+                return if current() {
+                    Answer::Refused
+                } else {
+                    Answer::Abandoned
+                };
             }
             size
         }
@@ -195,7 +199,11 @@ fn decode(key: &StillKey, pool: &FramePool, shared: &Shared, epoch: u64) -> Answ
     };
     let Ok(decoded) = decoded else {
         give_back(reserved);
-        return if current() { Answer::Refused } else { Answer::Abandoned };
+        return if current() {
+            Answer::Refused
+        } else {
+            Answer::Abandoned
+        };
     };
     if !current() {
         give_back(reserved);
@@ -214,7 +222,7 @@ fn decode(key: &StillKey, pool: &FramePool, shared: &Shared, epoch: u64) -> Answ
         give_back(reserved);
         return Answer::Refused;
     }
-    Answer::Decoded(decoded)
+    Answer::Decoded(Box::new(decoded))
 }
 
 impl StillPrefetch {
@@ -269,7 +277,9 @@ impl StillPrefetch {
                 break;
             }
             if let Some(((still, _), _)) = self.ready.remove(&key) {
-                self.shared.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
+                self.shared
+                    .held
+                    .fetch_sub(bytes_of(&still), Ordering::AcqRel);
             }
         }
     }
@@ -285,7 +295,9 @@ impl StillPrefetch {
     pub(crate) fn clear(&mut self) {
         self.fence();
         for ((still, _), _) in std::mem::take(&mut self.ready).into_values() {
-            self.shared.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
+            self.shared
+                .held
+                .fetch_sub(bytes_of(&still), Ordering::AcqRel);
         }
     }
 
@@ -342,14 +354,15 @@ impl StillPrefetch {
                             let fence = shared.fence.lock().unwrap();
                             let still = match answer {
                                 _ if shared.epoch.load(Ordering::Acquire) != epoch => {
-                                    if let Answer::Decoded((still, _)) = answer {
+                                    if let Answer::Decoded(decoded) = answer {
+                                        let (still, _) = *decoded;
                                         shared.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
                                     }
                                     continue;
                                 }
                                 Answer::Abandoned => continue,
                                 Answer::Refused => None,
-                                Answer::Decoded(decoded) => Some(decoded),
+                                Answer::Decoded(decoded) => Some(*decoded),
                             };
                             let sent = done.send((key, still));
                             drop(fence);
@@ -396,7 +409,9 @@ impl StillPrefetch {
             return None;
         }
         let ((still, _), _) = self.ready.remove(&key)?;
-        self.shared.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
+        self.shared
+            .held
+            .fetch_sub(bytes_of(&still), Ordering::AcqRel);
         Some(still)
     }
 
@@ -709,7 +724,10 @@ mod tests {
             *prefetch.shared.gate.0.lock().unwrap() = false;
             prefetch.shared.gate.1.notify_all();
             while prefetch.held() != 0 {
-                assert!(Instant::now() < deadline, "the reservation was kept (stop {stop})");
+                assert!(
+                    Instant::now() < deadline,
+                    "the reservation was kept (stop {stop})"
+                );
                 std::thread::sleep(Duration::from_millis(1));
             }
             while !prefetch.claims.lock().unwrap().started.is_empty() {
@@ -720,7 +738,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             assert_eq!(prefetch.held(), 0, "stop {stop}");
             assert!(
-                prefetch.worker.as_ref().unwrap().answers.try_recv().is_err(),
+                prefetch
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .answers
+                    .try_recv()
+                    .is_err(),
                 "an abandoned still was sent (stop {stop})"
             );
         }

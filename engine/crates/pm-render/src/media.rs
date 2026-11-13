@@ -1452,7 +1452,10 @@ impl MediaCache {
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         #[cfg(test)]
         if FAIL_DECODE.with(|f| f.get()) {
-            return Err(MediaFailure::Failed(format!("{}: test decode failure", path.display())));
+            return Err(MediaFailure::Failed(format!(
+                "{}: test decode failure",
+                path.display()
+            )));
         }
         let ask = stills::StillAsk {
             edge,
