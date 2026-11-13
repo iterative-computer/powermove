@@ -8,8 +8,9 @@
 #[cfg(target_os = "macos")]
 fn main() {
     use gpui_macos::child_window::{
-        apply, attach, follows_policy, forget, forget_sheet, is_pending, sheet, sheet_pending,
-        show, show_pending,
+        apply, attach, follows_policy, forget, forget_sheet, forget_sheets_on,
+        hold_sheets_while_inactive, is_pending, restore_observed, sheet, sheet_pending, show,
+        show_pending, would_hold,
     };
     use objc2::{MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
@@ -128,56 +129,98 @@ fn main() {
     waiting.orderOut(None);
     assert!(!waiting.isVisible());
 
-    // A sheet asked for while the app is inactive: nothing begins, no window
-    // moves, it waits; forgotten or with its window closed, it is dropped
-    // (what waits on its answer sees it cancelled); with its window open it
-    // begins once the app is active.
-    struct Dropped(Rc<Cell<bool>>);
-    impl Drop for Dropped {
+    // SHEETS. A normal launch: a sheet asked for while the app is inactive
+    // begins at once, exactly as AppKit does (the behaviour before the lane
+    // gate existed); nothing waits and nothing is cancelled.
+    struct Flag(Rc<Cell<bool>>);
+    impl Drop for Flag {
         fn drop(&mut self) {
             self.0.set(true);
         }
     }
     let on = window(NSWindowStyleMask::Titled);
-    let asked = |sheet_window: &NSWindow| {
-        let (began, dropped) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
-        let (b, guard) = (began.clone(), Dropped(dropped.clone()));
-        let (parent, shown) = (on.clone(), sheet_window.retain());
-        let now = sheet(&on, sheet_window, move || {
-            let _keep = &guard;
-            parent.beginSheet_completionHandler(&shown, None);
-            b.set(true);
-        });
-        assert!(!now, "an inactive app begins no sheet");
-        (began, dropped)
-    };
-    let sheet_window = window(NSWindowStyleMask::Titled);
-    let (began, dropped) = asked(&sheet_window);
-    assert!(sheet_pending(&on) && !began.get() && !dropped.get());
-    assert!(on.attachedSheet().is_none() && sheet_window.sheetParent().is_none());
-    assert!(
-        !on.isVisible() && !sheet_window.isVisible(),
-        "no window moved"
-    );
-    forget_sheet(&sheet_window);
-    assert!(
-        !sheet_pending(&on) && dropped.get() && !began.get(),
-        "forgotten: dropped"
-    );
-    let (began, dropped) = asked(&sheet_window);
-    show_pending();
-    assert!(
-        !sheet_pending(&on) && dropped.get() && !began.get(),
-        "its window is not open: dropped on activation"
-    );
     on.orderBack(None);
-    let (began, _) = asked(&sheet_window);
-    assert!(on.attachedSheet().is_none(), "still waiting while inactive");
+    let sheet_window = window(NSWindowStyleMask::Titled);
+    // (began, cancelled, closure dropped)
+    let ask = |parent: &NSWindow, sheet_window: &NSWindow| {
+        let (began, cancelled, dropped) = (
+            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(false)),
+        );
+        let (b, c, guard) = (began.clone(), cancelled.clone(), Flag(dropped.clone()));
+        let (p, shown) = (parent.retain(), sheet_window.retain());
+        let now = sheet(
+            parent,
+            sheet_window,
+            move || {
+                let _keep = &guard;
+                p.beginSheet_completionHandler(&shown, None);
+                b.set(true);
+            },
+            move || c.set(true),
+        );
+        (now, began, cancelled, dropped)
+    };
+    assert!(
+        !app.isActive() && !would_hold(),
+        "a normal launch never holds"
+    );
+    let (now, began, cancelled, _) = ask(&on, &sheet_window);
+    assert!(now && began.get() && !cancelled.get(), "begins at once");
+    assert!(!sheet_pending(&on));
+    assert!(
+        on.attachedSheet()
+            .is_some_and(|s| std::ptr::eq(&*s, &*sheet_window)),
+        "on the window that asked, at once"
+    );
+    on.endSheet(&sheet_window);
+    sheet_window.orderOut(None);
+
+    // A development lane launch (the launcher's flag, in process): a sheet
+    // asked for while inactive waits, attached to nothing, no window moved.
+    hold_sheets_while_inactive(false);
+    assert!(
+        would_hold(),
+        "a lane holds while inactive; an alert answers itself"
+    );
+    let order = |w: &NSWindow| {
+        app.orderedWindows()
+            .iter()
+            .position(|x| std::ptr::eq(&*x, w))
+    };
+    let before = order(&on);
+    let (now, began, cancelled, _) = ask(&on, &sheet_window);
+    assert!(!now && !began.get() && !cancelled.get() && sheet_pending(&on));
+    assert!(on.attachedSheet().is_none() && !sheet_window.isVisible());
+    assert_eq!(order(&on), before, "no window moved");
+    // Its owner closed it before it began (OpenSheet::close, an extension's
+    // page closing its modal): the entry goes and its answer is cancelled.
+    forget_sheet(&sheet_window);
+    assert!(!sheet_pending(&on) && cancelled.get() && !began.get());
+    // The window it waits for is torn down: cancelled by parent identity.
+    let (_, began, cancelled, _) = ask(&on, &sheet_window);
+    forget_sheets_on(&on);
+    assert!(!sheet_pending(&on) && cancelled.get() && !began.get());
+    // Its window closed before activation: cancelled when the app comes
+    // forward (a dropped form's waiting task hears Cancel, never hangs).
+    let gone = window(NSWindowStyleMask::Titled);
+    let (_, began, cancelled, dropped) = ask(&gone, &sheet_window);
     show_pending();
     assert!(
-        began.get() && !sheet_pending(&on),
-        "begins once the app is active"
+        cancelled.get() && dropped.get() && !began.get() && !sheet_pending(&gone),
+        "its window is not open: cancelled on activation"
     );
+    // A window in the Dock keeps its sheet waiting, and its return wakes it
+    // (the restore observer runs the same drain while the app is active).
+    assert!(
+        restore_observed(),
+        "a restored window wakes its waiting sheets"
+    );
+    // With its window open, it begins once the app is active.
+    let (_, began, cancelled, _) = ask(&on, &sheet_window);
+    show_pending();
+    assert!(began.get() && !cancelled.get() && !sheet_pending(&on));
     assert!(
         on.attachedSheet()
             .is_some_and(|s| std::ptr::eq(&*s, &*sheet_window)),
@@ -185,6 +228,22 @@ fn main() {
     );
     on.endSheet(&sheet_window);
     on.orderOut(None);
+    // Extension modals cancel what they own when their page closes them or
+    // the host goes away.
+    let compat = include_str!("../../compat-host/src/mac.rs");
+    for owner in ["unsafe fn child_closed", "fn close_sheets"] {
+        let at = compat.find(owner).expect(owner);
+        assert!(
+            compat[at..at + 600].contains("forget_sheet("),
+            "{owner} cancels its waiting sheet"
+        );
+    }
+    // An owner-dismissed form forgets its waiting entry.
+    let sheets = include_str!("../../app/src/sheets.rs");
+    let close = sheets
+        .find("pub fn close(&self)")
+        .expect("OpenSheet::close");
+    assert!(sheets[close..close + 200].contains("forget_sheet("));
 
     // Every sheet in the app goes through that gate: no source begins one
     // directly. (The gate itself is child_window.rs.)
@@ -207,11 +266,18 @@ fn main() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
+            // An alert asks at once in a normal launch; in a lane launch in
+            // the background it answers itself first (`would_hold`).
+            if path.ends_with("app/src/alert.rs") {
+                assert!(source.contains("child_window::would_hold()"));
+                sites += source.matches("beginSheetModalForWindow").count();
+                continue;
+            }
             for (at, _) in source
                 .match_indices("beginSheet")
                 .chain(source.match_indices("beginCriticalSheet"))
             {
-                let mut end = (at + 300).min(source.len());
+                let mut end = (at + 700).min(source.len());
                 while !source.is_char_boundary(end) {
                     end -= 1;
                 }

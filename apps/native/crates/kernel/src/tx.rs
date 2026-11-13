@@ -294,6 +294,24 @@ pub enum EditCall {
         label: Option<String>,
     },
     Cancel,
+    /// `edit.mutate` whose action a realm runs: opens a lease on the entry
+    /// ([`Reply::Mutation`]). What the realm writes until it finishes or
+    /// aborts is that lease's, so an edit inside another takes back only its
+    /// own writes.
+    MutateBegin {
+        label: String,
+    },
+    /// The action returned: its last writes, then the lease ends (the
+    /// outermost one closes the entry as one step).
+    MutateFinish {
+        lease: u64,
+        ops: Vec<Op>,
+        label: Option<String>,
+    },
+    /// The action threw: reverts what the realm wrote since the lease began.
+    MutateAbort {
+        lease: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -403,6 +421,8 @@ pub enum Reply {
     },
     /// A gesture opened.
     Gesture(u64),
+    /// A realm's structural edit opened: its lease.
+    Mutation(u64),
     /// `QueryTx`.
     Ack(Option<Box<Ack>>),
     /// A throw where today throws.
@@ -557,6 +577,8 @@ struct EntryOp {
 enum LeaseKind {
     Edit,
     Gesture,
+    /// A realm-run `edit.mutate`; these nest.
+    Mutation,
 }
 
 #[derive(Clone, Debug)]
@@ -603,6 +625,11 @@ enum Scope {
 
 /// Retained acknowledgements per project.
 const MAX_ACKS: usize = 4096;
+
+/// A structural edit finished after its entry was closed under it (a
+/// `history.do` inside it threw, or the realm closed the entry itself).
+const MUTATION_CLOSED: &str =
+    "This edit was closed before it finished; its last changes were not applied";
 
 impl OpenEntry {
     /// Releases one level held by `writer` (or, if it holds none, the
@@ -1631,7 +1658,10 @@ impl Project {
         match &mut self.entry {
             Some(entry) => entry.holders.push(caller.writer),
             None => {
-                self.open(caller.writer, label, caller.origin, true);
+                // A realm's `history.begin` inside its own structural edit
+                // still reads the before snapshot.
+                let scoped = kind != LeaseKind::Mutation;
+                self.open(caller.writer, label, caller.origin, scoped);
             }
         }
         let id = self.next();
@@ -1754,7 +1784,60 @@ impl Project {
                 let notice = self.cancel_scope(Scope::Lease(lease));
                 self.ack(txid, None, notice, Reply::Bool(true))
             }
+            EditCall::MutateBegin { label } => {
+                let id = self.open_lease(caller, LeaseKind::Mutation, &label);
+                self.ack(
+                    txid,
+                    self.entry.as_ref().map(|e| e.id),
+                    None,
+                    Reply::Mutation(id),
+                )
+            }
+            EditCall::MutateFinish { lease, ops, label } => {
+                if !self.mutation(lease, caller.writer) {
+                    return self.edit_fail(txid, MUTATION_CLOSED);
+                }
+                let written = self.direct_write(caller, None, ops);
+                if let Reply::Throw(error) = written.reply {
+                    let notice = self.cancel_scope(Scope::Lease(lease));
+                    let mut ack = self.edit_fail(txid, error.to_string());
+                    ack.notice = notice;
+                    return ack;
+                }
+                let entry = self.entry.as_ref().map(|e| e.id);
+                self.end_lease(lease, label);
+                self.edit_ok(txid, entry, "")
+            }
+            EditCall::MutateAbort { lease } => {
+                if !self.mutation(lease, caller.writer) {
+                    return self.ack(txid, None, None, Reply::Bool(false));
+                }
+                let notice = self.cancel_scope(Scope::Lease(lease));
+                self.ack(txid, None, notice, Reply::Bool(true))
+            }
         }
+    }
+
+    /// Whether `owner`'s structural edit `id` is still open. An edit begun
+    /// inside it that never finished or aborted (its realm lost the reply)
+    /// is reverted first: left open it would hold the entry forever.
+    fn mutation(&mut self, id: u64, owner: Writer) -> bool {
+        let mine = |l: &Lease| l.kind == LeaseKind::Mutation && l.owner == owner;
+        let Some(entry) = &self.entry else {
+            return false;
+        };
+        let Some(at) = entry.leases.iter().position(|l| l.id == id && mine(l)) else {
+            return false;
+        };
+        let inside: Vec<u64> = entry.leases[at + 1..]
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.id)
+            .collect();
+        for id in inside.into_iter().rev() {
+            self.cancel_scope(Scope::Lease(id));
+        }
+        true
     }
 
     fn edit_apply(

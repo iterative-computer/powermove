@@ -3660,11 +3660,13 @@ impl Host {
                 });
             }
         });
-        // Only while the app is active (a sheet orders its window front).
         let (on, shown) = (self.window.clone(), sheet.window.clone());
-        gpui_macos::child_window::sheet(&self.window, &sheet.window, move || {
-            on.beginSheet_completionHandler(&shown, Some(&handler));
-        });
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &sheet.window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         sheet.window.makeFirstResponder(Some(&sheet.field));
         *self.sheet.borrow_mut() = Some(sheet);
     }
@@ -3693,9 +3695,12 @@ impl Host {
             }
         });
         let (on, shown) = (self.window.clone(), window.clone());
-        gpui_macos::child_window::sheet(&self.window, &window, move || {
-            on.beginSheet_completionHandler(&shown, Some(&handler));
-        });
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
     }
