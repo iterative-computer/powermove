@@ -29,14 +29,16 @@ fn run() -> pm_mcp::Result<()> {
     }
     let exports = value("--exports").unwrap_or_else(|| profile.join("exports"));
     let host = Arc::new(Mutex::new(Automation::new(profile.clone(), exports)?));
-    let _server = if args.iter().any(|a| a == "--listen") {
+    let server = if args.iter().any(|a| a == "--listen") {
         Some(transport::LoopbackServer::start(&profile, host.clone())?)
     } else {
         None
     };
-    transport::serve_stdio(
+    let result = transport::serve_stdio(
         std::io::stdin().lock(),
         std::io::stdout().lock(),
-        McpSession::new(host),
-    )
+        McpSession::new(host.clone()),
+    );
+    drop(server);
+    result.and_then(|()| host.lock().unwrap().close_headless())
 }

@@ -55,11 +55,13 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_studio_and_export_schemas_change_from_the_frozen_catalog() {
+fn only_studio_export_and_project_recovery_schemas_change_from_the_frozen_catalog() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
         serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json")).unwrap();
+    let projects: Value =
+        serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
@@ -73,6 +75,8 @@ fn only_studio_and_export_schemas_change_from_the_frozen_catalog() {
                     .find(|t| t["name"] == name)
                     .unwrap()
             );
+        } else if name == "open_project" {
+            assert_eq!(tool, &projects["tools"][0]);
         } else {
             assert_eq!(
                 tool,
