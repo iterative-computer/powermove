@@ -341,17 +341,30 @@ pub(crate) enum StoredCodes {
     YCbCr(pm_protocol::color::Range),
 }
 
-/// [`StoredCodes`] of `path`; `None` when the file is offline or has no
+/// What a converted copy needs of its original: how it stores its codes,
+/// its colour tags and its codec (Electron's reading depends on it).
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalFacts {
+    pub codes: StoredCodes,
+    pub color: pm_media::probe::color::ColorInfo,
+    pub codec: String,
+}
+
+/// [`OriginalFacts`] of `path`; `None` when the file is offline or has no
 /// video. Read once per file stamp.
-pub(crate) fn stored_codes(path: &Path) -> Option<StoredCodes> {
-    static CACHE: StampCache<Option<StoredCodes>> = OnceLock::new();
+pub(crate) fn original_facts(path: &Path) -> Option<OriginalFacts> {
+    static CACHE: StampCache<Option<OriginalFacts>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         let source = MediaSource::open(path).ok()?;
         let video = source.probe.video.as_ref()?;
-        Some(if video.codec.is_rgb() {
-            StoredCodes::Rgb
-        } else {
-            StoredCodes::YCbCr(video.color.interpreted.range)
+        Some(OriginalFacts {
+            codes: if video.codec.is_rgb() {
+                StoredCodes::Rgb
+            } else {
+                StoredCodes::YCbCr(video.color.interpreted.range)
+            },
+            color: video.color.clone(),
+            codec: video.codec.codec.clone(),
         })
     })
     .flatten()
@@ -780,11 +793,19 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let file = if interp.electron_color {
+    let mut file = if interp.electron_color {
         pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
     } else {
         pm_media::probe::color::frame_reading(&v.color, sequence)
     };
+    // A proxy or optimized copy reads as its original does.
+    if let Some(original) = interp.original {
+        file.primaries = original.primaries;
+        file.transfer = original.transfer;
+        if let Some(matrix) = original.matrix {
+            file.matrix = matrix;
+        }
+    }
     let mut desc = reading.color;
     if interp.transfer.is_none() {
         desc.transfer = file.transfer;

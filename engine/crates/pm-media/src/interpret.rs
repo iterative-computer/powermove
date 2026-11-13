@@ -99,6 +99,22 @@ pub struct Interpretation {
     /// Which reading of the file's timestamps the asset's stored times
     /// address: the asset's own `timing` member, not part of `interpret`.
     pub clip: crate::clip::ClipTiming,
+    /// Set when the frames come from a converted copy of the asset's
+    /// original (a proxy or optimized media): the original's own reading,
+    /// which the copy's codes hold, so the copy reads as the original does
+    /// whatever the copy's tags say.
+    pub original: Option<OriginalReading>,
+}
+
+/// The reading of a converted copy's original that the copy is read with:
+/// primaries and transfer, and the matrix when the original stores Y′CbCr
+/// (the copy of an R′G′B′ original keeps the matrix its maker encoded it
+/// with). Range and siting stay the copy's: its maker rescaled and resampled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OriginalReading {
+    pub primaries: Primaries,
+    pub transfer: Transfer,
+    pub matrix: Option<MatrixCoefficients>,
 }
 
 /// A member of `interpret` that cannot be used.

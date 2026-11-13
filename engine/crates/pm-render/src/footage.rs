@@ -12,8 +12,8 @@ use pm_gpu::Target;
 use pm_media::clip::ClipTiming;
 use pm_media::decode::service::MediaSource;
 use pm_media::interlace::{self, DeinterlaceOutput, FieldOverride, FieldPlan};
-use pm_media::interpret::Interpretation;
 use pm_media::interpret::VideoReading;
+use pm_media::interpret::{Interpretation, OriginalReading};
 use pm_media::probe::FieldInfo;
 use pm_time::{Rate, Tick};
 
@@ -63,13 +63,23 @@ pub enum CopyReading {
 ///   range and chroma siting do nothing on the original and would misread
 ///   the copy, so the copy keeps its own.
 ///
+/// The copy is read with its original's reading ([`OriginalReading`]): the
+/// file's, or Electron's for an asset that keeps a v1 project's reading
+/// (`videoColor`), so a copy tagged by another recipe or with the native
+/// reading never changes the picture. Interpret Footage choices apply on top.
+///
 /// An original that can't be read is taken as limited-range Y′CbCr, what
-/// cameras and editors write.
-pub fn for_copy(mut interp: Interpretation, original: &std::path::Path) -> CopyReading {
+/// cameras and editors write, and the copy keeps its own tags.
+pub fn for_copy(
+    mut interp: Interpretation,
+    original: &std::path::Path,
+    sequence: bool,
+) -> CopyReading {
     use crate::media::StoredCodes;
     use pm_protocol::color::Range;
+    let facts = crate::media::original_facts(original);
     if interp.matrix.is_some() || interp.range.is_some() || interp.siting.is_some() {
-        match crate::media::stored_codes(original) {
+        match facts.as_ref().map(|f| f.codes) {
             Some(StoredCodes::Rgb) => {
                 interp.matrix = None;
                 interp.range = None;
@@ -80,6 +90,19 @@ pub fn for_copy(mut interp: Interpretation, original: &std::path::Path) -> CopyR
             }
             _ => (),
         }
+    }
+    if let Some(facts) = facts {
+        use pm_media::probe::color::{electron_frame_reading, frame_reading};
+        let reading = if interp.electron_color {
+            electron_frame_reading(&facts.color, &facts.codec, sequence)
+        } else {
+            frame_reading(&facts.color, sequence)
+        };
+        interp.original = Some(OriginalReading {
+            primaries: reading.primaries,
+            transfer: reading.transfer,
+            matrix: (facts.codes != StoredCodes::Rgb).then_some(reading.matrix),
+        });
     }
     CopyReading::Copy((!interp.is_empty()).then_some(interp))
 }
