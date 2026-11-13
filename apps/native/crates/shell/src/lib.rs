@@ -43,5 +43,5 @@ pub use macos::{
 pub use native::{
     ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     document_subtitle, popover_frame, request_close, resize_from_top, send_menu_command,
-    sidebar_frame, system_accent, viewer_window, window_backdrop, zoom_limit,
+    sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop, zoom_limit,
 };

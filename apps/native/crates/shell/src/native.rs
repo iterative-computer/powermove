@@ -3259,13 +3259,7 @@ impl Host {
     /// Opt in to a clipped content layer. Standalone shell keeps its placeholder.
     pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>, pan: [f64; 2]) {
         if self.viewer_transform.is_none() {
-            let root = objc2_quartz_core::CALayer::new();
-            root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&native_color(self.tokens.colors.viewer).CGColor()));
-            unsafe {
-                let _: () = msg_send![&*self.viewer,setLayer:&*root];
-                let _: () = msg_send![&*root,addSublayer:self.layer.as_ptr() as *mut AnyObject];
-            }
+            viewer_slot::clip(&self.viewer, &self.layer, self.tokens.colors.viewer);
         }
         if self.viewer_transform != Some((dimensions, zoom, pan)) {
             // Re-place the content layer on the next composition frame.
@@ -3378,7 +3372,7 @@ impl Host {
         let moved = self.last_geometry != Some(geometry);
         if moved {
             if let Some(g) = geometry {
-                self.viewer.setHidden(false);
+                viewer_slot::show(&self.viewer, &self.layer, true);
                 self.viewer.setFrame(g.frame);
                 // Without a transform the Metal layer is the view's own backing
                 // layer and AppKit sizes it; framing it here would move it to
@@ -3407,7 +3401,7 @@ impl Host {
                     let _: () = msg_send![layer, didChangeValueForKey: &*key];
                 }
             } else {
-                self.viewer.setHidden(true);
+                viewer_slot::show(&self.viewer, &self.layer, false);
             }
             self.last_geometry = Some(geometry);
         }
@@ -5559,6 +5553,37 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
             item.setSubmenu(Some(&submenu));
         }
         menu.addItem(&item);
+    }
+}
+
+/// The viewer slot's AppKit side: a view whose picture is the engine's Metal
+/// layer, first as the view's own backing layer, then (once the app gives it
+/// a transform) under a clipping root that pans and zooms it.
+pub mod viewer_slot {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_app_kit::NSView;
+    /// Puts `content` under a clipping root in the viewer's ground colour,
+    /// as the view's layer.
+    pub fn clip(view: &NSView, content: &metal::MetalLayerRef, ground: u32) {
+        let root = objc2_quartz_core::CALayer::new();
+        root.setMasksToBounds(true);
+        root.setBackgroundColor(Some(&super::native_color(ground).CGColor()));
+        unsafe {
+            let _: () = msg_send![view, setLayer: &*root];
+            let _: () = msg_send![&*root, addSublayer: foreign_types::ForeignTypeRef::as_ptr(content) as *mut AnyObject];
+        }
+    }
+    /// Shows or hides the slot. Hiding a view hides its backing layer, and
+    /// the content layer is that layer until it is clipped: a slot hidden
+    /// before its first transform (a window that opened on Home) would keep
+    /// its picture hidden under a shown root. Showing shows the content too.
+    pub fn show(view: &NSView, content: &metal::MetalLayerRef, shown: bool) {
+        view.setHidden(!shown);
+        if shown {
+            unsafe {
+                let _: () = msg_send![foreign_types::ForeignTypeRef::as_ptr(content) as *mut AnyObject, setHidden: false];
+            }
+        }
     }
 }
 
