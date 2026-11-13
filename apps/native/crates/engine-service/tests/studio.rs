@@ -3784,7 +3784,9 @@ fn orthographic_live_text_keeps_bright_bevel_edges_free_of_dark_outliers() {
     comp["h"] = json!(1080);
     comp["studioQuality"] = pm_scene3d::quality::resolve(
         &pm_scene3d::quality::preset("final").unwrap(),
-        &json!({"minSamples":512,"maxSamples":512,"noiseThreshold":0,"caustics":false}),
+        // The reference is denoised by Open Image Denoise when this build has
+        // it; otherwise it stays as traced, not smoothed by the guided filter.
+        &json!({"minSamples":512,"maxSamples":512,"noiseThreshold":0,"caustics":false,"denoise":studio::OIDN}),
     )
     .unwrap();
     comp["layers"]
