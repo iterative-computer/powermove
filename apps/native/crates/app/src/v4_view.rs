@@ -2073,8 +2073,31 @@ impl SurfaceView {
             );
         }
         // One hover handler: the control's wash (a spring, never a snap) and
-        // the panel's own pointer events.
-        let wash = clickable;
+        // the panel's own pointer events. Only a control washes: a container
+        // that listens to clicks to keep them from its list (a row of
+        // Effect Controls) is not one.
+        // A selectable item (a media row is a `cell` with `aria-selected`)
+        // or a control by role washes; a plain container does not.
+        let props = self.publication.surface.node(id).map(|n| &n.props);
+        let control_role = props.is_some_and(|p| {
+            p.contains_key("aria-selected")
+                || p.get("role").and_then(Value::as_str).is_some_and(|r| {
+                    matches!(
+                        r,
+                        "button"
+                            | "link"
+                            | "tab"
+                            | "option"
+                            | "menuitem"
+                            | "cell"
+                            | "gridcell"
+                            | "row"
+                            | "listitem"
+                            | "treeitem"
+                    )
+                })
+        });
+        let wash = clickable && (node.component.is_some() || control_role);
         if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 if wash {
@@ -2131,7 +2154,14 @@ impl SurfaceView {
                     v.key_down(id, event, window, cx);
                 }));
         }
-        if let Some(title) = node.title.clone() {
+        // A tooltip says what is not already in view: one that repeats the
+        // text the element shows (an effect's name, a row's label) only
+        // covers its neighbours.
+        if let Some(title) = node
+            .title
+            .clone()
+            .filter(|title| title.trim() != self.shown_text(node.id, 3).trim())
+        {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
                 let (title, tokens) = (title.clone(), tokens.clone());
@@ -2701,6 +2731,23 @@ impl HeaderView {
     }
 }
 impl SurfaceView {
+    /// The words a node shows: its own text and its descendants' (to
+    /// `depth` levels), in order, without controls' values.
+    pub(crate) fn shown_text(&self, id: Id, depth: usize) -> String {
+        let Some(node) = self.prepared.node(id) else {
+            return String::new();
+        };
+        let mut words: Vec<String> = node.text.iter().map(|t| t.to_string()).collect();
+        if depth > 0 {
+            for child in &node.children {
+                let text = self.shown_text(*child, depth - 1);
+                if !text.is_empty() {
+                    words.push(text);
+                }
+            }
+        }
+        words.join(" ")
+    }
     /// A header's title: the header itself when it is only its title
     /// (Effects), else its first child that is text (words of its own, or
     /// only words inside) and not a control.

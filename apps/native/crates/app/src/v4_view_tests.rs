@@ -1012,3 +1012,42 @@ fn tab_reaches_kit_controls_and_skips_roving_segments(cx: &mut TestAppContext) {
     }
     assert_eq!(order, [Some(2), Some(4)], "Tab skips the -1 segment");
 }
+
+/// A tooltip says what is not in view: a row titled with the name it
+/// already shows has none; an icon-only control keeps its title.
+#[gpui::test]
+fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"title":"Gaussian Blur","data-pm-component":"list-item","label":"Gaussian Blur"}),
+        &["click"],
+    ));
+    ops.extend(node_ops(3, 2, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 3,
+        text: "Gaussian Blur".into(),
+    });
+    ops.extend(node_ops(
+        4,
+        1,
+        "button",
+        json!({"title":"Reset Effect","data-pm-component":"toolbar-item","label":"Reset Gaussian Blur","metadata":{"symbol":"arrow.counterclockwise"}}),
+        &["click"],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let shown = view.read_with(&vcx, |v, _| (v.shown_text(2, 3), v.shown_text(4, 3)));
+    assert_eq!(shown.0, "Gaussian Blur", "the title is in view: no tooltip");
+    assert_eq!(shown.1, "", "an icon says nothing: its title stays");
+}
