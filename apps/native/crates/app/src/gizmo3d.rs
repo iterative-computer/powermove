@@ -457,10 +457,15 @@ impl GizmoSurface {
             let hh = d * (fov.to_radians() / 2.).tan() / shot.zoom.max(1e-6);
             let hw = hh * aspect;
             let corner = |x: f64, y: f64| add(shot.target, add(mul(r, x * hw), mul(down, y * hh)));
-            let shown: Vec<_> = [corner(-1., -1.), corner(1., -1.), corner(1., 1.), corner(-1., 1.)]
-                .iter()
-                .map(|q| eye.project(*q).map(|p| p.0))
-                .collect();
+            let shown: Vec<_> = [
+                corner(-1., -1.),
+                corner(1., -1.),
+                corner(1., 1.),
+                corner(-1., 1.),
+            ]
+            .iter()
+            .map(|q| eye.project(*q).map(|p| p.0))
+            .collect();
             let at = eye.project(shot.position).map(|p| p.0);
             for k in 0..4 {
                 if let (Some(a), Some(b)) = (shown[k], shown[(k + 1) % 4]) {
@@ -472,8 +477,17 @@ impl GizmoSurface {
             }
             if let Some(a) = at {
                 let s = 6. * pt;
-                for (p, q) in [([-s, -s], [s, -s]), ([s, -s], [s, s]), ([s, s], [-s, s]), ([-s, s], [-s, -s])] {
-                    camera.push(line([a[0] + p[0], a[1] + p[1]], [a[0] + q[0], a[1] + q[1]], c));
+                for (p, q) in [
+                    ([-s, -s], [s, -s]),
+                    ([s, -s], [s, s]),
+                    ([s, s], [-s, s]),
+                    ([-s, s], [-s, -s]),
+                ] {
+                    camera.push(line(
+                        [a[0] + p[0], a[1] + p[1]],
+                        [a[0] + q[0], a[1] + q[1]],
+                        c,
+                    ));
                 }
             }
         }
@@ -518,20 +532,28 @@ impl GizmoSurface {
                     let rad = d * item.shape[2].clamp(1., 89.).to_radians().tan();
                     let rim = |k: usize| {
                         let a = k as f64 / 12. * std::f64::consts::TAU;
-                        add(target, add(mul(side, rad * a.cos()), mul(up, rad * a.sin())))
+                        add(
+                            target,
+                            add(mul(side, rad * a.cos()), mul(up, rad * a.sin())),
+                        )
                     };
                     for k in 0..12 {
-                        if let (Some((a, _)), Some((b, _))) = (eye.project(rim(k)), eye.project(rim(k + 1))) {
+                        if let (Some((a, _)), Some((b, _))) =
+                            (eye.project(rim(k)), eye.project(rim(k + 1)))
+                        {
                             selected.push(line(a, b, accent));
                         }
                     }
                     for k in [0, 6] {
-                        if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(rim(k))) {
+                        if let (Some((a, _)), Some((b, _))) =
+                            (eye.project(item.pivot), eye.project(rim(k)))
+                        {
                             selected.push(line(a, b, accent));
                         }
                     }
                 }
-                if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(target)) {
+                if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(target))
+                {
                     // Three dashes along the aim, then the ◆.
                     for k in [1., 3., 5.] {
                         let p = |f: f64| [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
@@ -543,7 +565,12 @@ impl GizmoSurface {
                         accent
                     };
                     let s = 6. * pt;
-                    let dm = [[b[0], b[1] - s], [b[0] + s, b[1]], [b[0], b[1] + s], [b[0] - s, b[1]]];
+                    let dm = [
+                        [b[0], b[1] - s],
+                        [b[0] + s, b[1]],
+                        [b[0], b[1] + s],
+                        [b[0] - s, b[1]],
+                    ];
                     for k in 0..4 {
                         selected.push(line(dm[k], dm[(k + 1) % 4], color));
                     }
@@ -560,10 +587,30 @@ impl GizmoSurface {
             }
             let g = |x: f64, y: f64| [m[0] + x * pt, m[1] + y * pt];
             let strokes: &[((f64, f64), (f64, f64))] = match kind {
-                "spot" => &[((-2., -5.), (2., -5.)), ((2., -5.), (5., 4.)), ((5., 4.), (-5., 4.)), ((-5., 4.), (-2., -5.))],
-                "point" => &[((-3., 0.), (0., -3.)), ((0., -3.), (3., 0.)), ((3., 0.), (0., 3.)), ((0., 3.), (-3., 0.))],
-                "sun" => &[((-6., 0.), (6., 0.)), ((0., -6.), (0., 6.)), ((-4., -4.), (4., 4.)), ((-4., 4.), (4., -4.))],
-                _ => &[((-5., -3.5), (5., -3.5)), ((5., -3.5), (5., 3.5)), ((5., 3.5), (-5., 3.5)), ((-5., 3.5), (-5., -3.5))],
+                "spot" => &[
+                    ((-2., -5.), (2., -5.)),
+                    ((2., -5.), (5., 4.)),
+                    ((5., 4.), (-5., 4.)),
+                    ((-5., 4.), (-2., -5.)),
+                ],
+                "point" => &[
+                    ((-3., 0.), (0., -3.)),
+                    ((0., -3.), (3., 0.)),
+                    ((3., 0.), (0., 3.)),
+                    ((0., 3.), (-3., 0.)),
+                ],
+                "sun" => &[
+                    ((-6., 0.), (6., 0.)),
+                    ((0., -6.), (0., 6.)),
+                    ((-4., -4.), (4., 4.)),
+                    ((-4., 4.), (4., -4.)),
+                ],
+                _ => &[
+                    ((-5., -3.5), (5., -3.5)),
+                    ((5., -3.5), (5., 3.5)),
+                    ((5., 3.5), (-5., 3.5)),
+                    ((-5., 3.5), (-5., -3.5)),
+                ],
             };
             for (a, b) in strokes {
                 out.push(line(g(a.0, a.1), g(b.0, b.1), ink));

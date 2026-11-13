@@ -2213,7 +2213,12 @@ fn dragging_a_lights_target_aims_it_and_undo_restores_it(cx: &mut TestAppContext
         let v = &l["d"]["data"]["light"]["p"]["targetY"];
         v.as_f64().or(v["v"].as_f64()).unwrap()
     };
-    assert!((y(&after) - y(&before)).abs() < 1.0, "{} -> {}", y(&before), y(&after));
+    assert!(
+        (y(&after) - y(&before)).abs() < 1.0,
+        "{} -> {}",
+        y(&before),
+        y(&after)
+    );
     assert!(y(&before) > 0.4, "the fixture's target is off the origin");
     undo_3d(&mut s, cx);
     assert_eq!(
@@ -2330,5 +2335,8 @@ fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext)
     s.surface.update(&mut s.vcx, |g, cx| g.redraw(cx));
     cx.run_until_parked();
     let n = s.recorder.lines.borrow().len();
-    assert!(n > 40 && n < pm_engine_service::OverlayGeometry::MAX_LINES, "{n} lines");
+    assert!(
+        n > 40 && n < pm_engine_service::OverlayGeometry::MAX_LINES,
+        "{n} lines"
+    );
 }

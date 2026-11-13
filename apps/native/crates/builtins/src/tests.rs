@@ -3642,7 +3642,11 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         let root = data::wire(&p.snapshot.root().unwrap().to_value());
         fn find(v: &Value, id: &str) -> Option<Value> {
             match v {
-                Value::Object(o) if o.get("id").and_then(Value::as_str) == Some(id) && o.contains_key("p") => Some(v.clone()),
+                Value::Object(o)
+                    if o.get("id").and_then(Value::as_str) == Some(id) && o.contains_key("p") =>
+                {
+                    Some(v.clone())
+                }
                 Value::Object(o) => o.values().find_map(|c| find(c, id)),
                 Value::Array(a) => a.iter().find_map(|c| find(c, id)),
                 _ => None,

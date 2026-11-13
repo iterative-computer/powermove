@@ -9,10 +9,11 @@
 use crate::{Result, invalid};
 use pm_kernel::Published;
 use pm_scene3d::{
-    from_model, to_model,
+    from_model,
     geometry::{AssetGeometry, NoAssets, RetainedAssets},
     navigation::{Bounds, Lens, Pose, Vec3, add, cross, dot, length, mul, normalize, sub},
     schema::{self, Role},
+    to_model,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -487,9 +488,21 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     },
                     pivot,
                     target: r.targets.get(&id).copied(),
-                    aim: Some(light_values(p, index, &data["light"]["p"], time, ["targetX", "targetY", "targetZ"])),
+                    aim: Some(light_values(
+                        p,
+                        index,
+                        &data["light"]["p"],
+                        time,
+                        ["targetX", "targetY", "targetZ"],
+                    )),
                     light: data["light"]["type"].as_str().map(str::to_owned),
-                    shape: light_values(p, index, &data["light"]["p"], time, ["width", "height", "angle"]),
+                    shape: light_values(
+                        p,
+                        index,
+                        &data["light"]["p"],
+                        time,
+                        ["width", "height", "angle"],
+                    ),
                 });
             }
             Role::Camera => {}
@@ -507,7 +520,13 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
 }
 /// A light's own channels (`light.<key>`) at the time, through the kernel's
 /// property evaluation as the light tool reads them; 0 where unset.
-fn light_values(p: &Published, index: usize, props: &serde_json::Value, time: f64, keys: [&str; 3]) -> Vec3 {
+fn light_values(
+    p: &Published,
+    index: usize,
+    props: &serde_json::Value,
+    time: f64,
+    keys: [&str; 3],
+) -> Vec3 {
     let mut mirror = pm_kernel::QueryMirror::new(p);
     let open = p.snapshot.open_comp();
     std::array::from_fn(|i| {
