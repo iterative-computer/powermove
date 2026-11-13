@@ -1952,10 +1952,18 @@ impl Engine {
     /// contributed definitions now) is kept for the frame of its key; one
     /// of a state that moved while it was drawn (after its last look, even
     /// during its last GPU work) is not kept anywhere.
-    pub(crate) fn take_settled(&mut self) -> Option<(crate::settle::Timing, Settled)> {
+    ///
+    /// `now`: the asking viewer's mastering view and resources as they are
+    /// now (`None`: it is gone). This engine's own are whichever viewer's it
+    /// drew last.
+    pub(crate) fn take_settled(
+        &mut self,
+        now: Option<(crate::color::Mastering, u64)>,
+    ) -> Option<(crate::settle::Timing, Settled)> {
         use crate::settle::Outcome;
         let done = self.settler.as_ref()?.take()?;
-        let current = matches!(done.outcome, Outcome::Drawn { .. }) && self.is_current(&done);
+        let current = matches!(done.outcome, Outcome::Drawn { .. })
+            && now.is_some_and(|now| self.is_current(&done, now));
         let end = match done.outcome {
             Outcome::Drawn { failures, exact } => {
                 if let Some(error) = self.failed.lock().unwrap().take() {
@@ -1980,17 +1988,21 @@ impl Engine {
     /// Whether a finished settled picture is of the state now: the view's
     /// tone as its mastering makes it now, the fonts the broker has now
     /// (and the ones it was drawn with), the contributed definitions.
-    fn is_current(&mut self, done: &crate::settle::Settled) -> bool {
+    fn is_current(
+        &mut self,
+        done: &crate::settle::Settled,
+        (mastering, resources): (crate::color::Mastering, u64),
+    ) -> bool {
         // A font activated while it was drawn is seen here, not only with
         // the next frame: the picture never outlives the fonts it is of.
         self.sync_fonts();
         let tone = self
             .hdr_view(&done.scene)
-            .and_then(|view| view.tone(self.mastering));
+            .and_then(|view| view.tone(mastering));
         done.key.tone == tone_id(tone)
             && done.key.fonts == self.font_generation
             && done.fonts == done.key.fonts
-            && done.key.resources == self.resources.generation
+            && done.key.resources == resources
     }
     /// A settled picture handed over that is not its viewer's picture any
     /// more: kept beside the drawn frames, for when the viewer is back at
@@ -2039,7 +2051,8 @@ impl Engine {
                 Asked::Busy => false,
             };
             let (_, end) = loop {
-                if let Some(done) = self.take_settled() {
+                let now = (self.mastering, self.resources.generation);
+                if let Some(done) = self.take_settled(Some(now)) {
                     break done;
                 }
                 std::thread::sleep(Duration::from_millis(1));
@@ -3322,7 +3335,8 @@ mod viewer_output_tests {
     }
     fn settled_end(engine: &mut Engine) -> Settled {
         loop {
-            if let Some((_, end)) = engine.take_settled() {
+            let now = (engine.mastering, engine.resources.generation);
+            if let Some((_, end)) = engine.take_settled(Some(now)) {
                 return end;
             }
             std::thread::sleep(Duration::from_millis(1));

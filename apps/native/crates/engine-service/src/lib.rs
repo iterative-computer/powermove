@@ -2271,7 +2271,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // A settled picture finished off this thread. It is shown only for
         // the stamp it was asked for: the viewer's next frame, under a new
         // stamp, presents it. Anything else keeps the preview.
-        if let Some((timing, end)) = engine.take_settled()
+        // Judged by its own viewer's view and resources now, not by the
+        // last viewer this engine drew.
+        let asking = settling
+            .as_ref()
+            .and_then(|job| state.views.get(&job.id))
+            .map(|v| (v.mastering, v.resources.generation));
+        if let Some((timing, end)) = engine.take_settled(asking)
             && let Some(job) = settling.take()
         {
             let now = trace::now();
@@ -4437,13 +4443,21 @@ mod worker_tests {
     /// settled picture is drawn off the worker in slices that leave the
     /// playing viewer's frames their room, so neither waits for the other
     /// to stop. Its preview says it is not the final picture; the settled
-    /// one says it is.
+    /// one says it is. The other is of another project (its own resources):
+    /// the settled picture is judged by its own viewer's state, not by the
+    /// last viewer the engine drew.
     #[test]
     fn a_paused_viewer_settles_while_another_plays() {
         use pm_protocol::clock::TransportState;
         let service =
             EngineService::start(pm_gpu::Gpu::new("settle-other-viewer-test").unwrap()).unwrap();
         let playing = shapes_viewer(&service, None);
+        playing
+            .resources(Arc::new(resources::ResourceSnapshot {
+                generation: 7,
+                ..Default::default()
+            }))
+            .unwrap();
         playing
             .command(TransportCommand::SetLoop {
                 range: Some(pm_protocol::common::TickRange {
@@ -4492,6 +4506,11 @@ mod worker_tests {
         assert!(
             other.presented > shown_before,
             "the playing viewer kept presenting"
+        );
+        let ends = service.shared.settle_ends.lock().unwrap().clone();
+        assert!(
+            !ends.contains(&"unkept"),
+            "a settled picture was judged by the other viewer's state: {ends:?}"
         );
     }
 
