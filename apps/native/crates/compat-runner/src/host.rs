@@ -299,8 +299,52 @@ struct Shared {
     exports: Mutex<export::Exports>,
     /// The window's effect clipboard, for every realm generation.
     effects: crate::EffectsSlot,
+    /// Every value handed to an extension in this run (see [`Self::hide`]).
+    handed: Mutex<BTreeSet<String>>,
 }
+/// What stands for a value in text the host records.
+const HIDDEN: &str = "[hidden value]";
 impl Shared {
+    /// Values now in extensions' hands: `staged` is `{id: {key: value}}`.
+    /// Shorter than four characters they are not told apart from prose.
+    fn handed(&self, staged: &Value) {
+        let mut handed = self.handed.lock().unwrap();
+        for values in staged.as_object().into_iter().flat_map(|all| all.values()) {
+            let values = values.as_object().into_iter().flat_map(|v| v.values());
+            handed.extend(
+                values
+                    .filter_map(Value::as_str)
+                    .filter(|value| value.chars().count() >= 4)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    /// `text` an extension supplied (an error, a notice) as the host records
+    /// it: any value handed to an extension is hidden, so an extension that
+    /// throws or says its own key does not publish it to Settings, other
+    /// extensions, the saved state or a trace.
+    fn hide(&self, text: &str) -> String {
+        let handed = self.handed.lock().unwrap();
+        // Longest first: a value that contains another is hidden whole.
+        let mut values: Vec<&String> = handed.iter().filter(|v| text.contains(*v)).collect();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values
+            .into_iter()
+            .fold(text.to_owned(), |text, value| text.replace(value, HIDDEN))
+    }
+    /// [`Self::hide`] for every string of a health entry.
+    fn hide_health(&self, mut health: Value) -> Value {
+        for value in health
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|h| h.values_mut())
+        {
+            if let Some(text) = value.as_str() {
+                *value = Value::String(self.hide(text));
+            }
+        }
+        health
+    }
     fn update(&self, change: impl FnOnce(&mut Published)) {
         {
             let mut published = self.published.lock().unwrap();
@@ -405,7 +449,7 @@ impl RealmEvents for Arc<Events> {
             .send(Input::Health(id.to_owned(), health.clone()));
     }
     fn toast(&self, text: &str, _: &Value) {
-        let text = text.to_owned();
+        let text = self.shared.hide(text);
         self.shared.update(|p| p.toasts.push(text));
     }
     fn request(&self, request: Value) {
@@ -721,6 +765,7 @@ impl ExtensionHost {
             wake: config.wake.clone(),
             exports: Mutex::default(),
             effects: Arc::default(),
+            handed: Mutex::default(),
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
@@ -1735,6 +1780,7 @@ impl Owner {
     }
     fn set_health(&mut self, id: &str, health: Value) {
         trace(json!({"extension": id, "health": health["state"]}));
+        let health = self.shared.hide_health(health);
         for record in &mut self.records {
             if record["id"] == id {
                 record["health"] = health.clone();
@@ -2067,6 +2113,8 @@ impl Owner {
             .as_ref()
             .map(declared_keys)
             .unwrap_or_default();
+        let values = vars_of(self.config.vars.as_ref(), id, &keys);
+        self.shared.handed(&json!({ id: values.clone() }));
         let started = StoreExtension::start(
             Arc::new(self.config.kernel.clone()),
             &self.config.project,
@@ -2075,7 +2123,7 @@ impl Owner {
             &graph,
             owner,
             views.clone(),
-            vars_of(self.config.vars.as_ref(), id, &keys),
+            values,
         );
         match started {
             Ok(extension) => {
@@ -2093,10 +2141,10 @@ impl Owner {
                 self.reopen_panels(Some(owner));
             }
             Err(error) => {
+                let error = self.shared.hide(&error.to_string());
                 for record in &mut self.records {
                     if record["id"] == id {
-                        record["health"] =
-                            json!({"state":"activation-error","error":error.to_string()});
+                        record["health"] = json!({"state":"activation-error","error":error});
                     }
                 }
             }
@@ -2262,9 +2310,9 @@ impl Owner {
     /// staged for that pass alone.
     fn load(&mut self, records: &Value, entry: &str, arguments: &str) {
         let Some(live) = &self.realm else { return };
-        let token = live
-            .host
-            .stage_vars(staged_vars(self.config.vars.as_ref(), records));
+        let staged = staged_vars(self.config.vars.as_ref(), records);
+        self.shared.handed(&staged);
+        let token = live.host.stage_vars(staged);
         self.eval(&format!(
             "__compatHost.{entry}({records}{arguments},\"{token}\")"
         ));
@@ -3647,6 +3695,76 @@ mod tests {
             }
         }
         assert_eq!(seen(2), json!([["API_KEY"], []]), "the removed value");
+        drop(host);
+        drop(actor);
+    }
+    /// An extension that puts its own value into an error or a notice does
+    /// not thereby publish it: what the host records of that text (health
+    /// in Settings and for other extensions, the saved extension entry,
+    /// toasts) has the value hidden.
+    #[test]
+    fn a_value_in_an_extensions_error_or_notice_is_hidden_in_what_the_host_records() {
+        const SECRET: &str = "sk-thrown-by-its-owner";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY');
+               api.ui.toast('Signed in with ' + value);
+               throw new Error('The service refused key ' + value + ' (401)');
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let error = loop {
+            let error = host
+                .records()
+                .iter()
+                .find(|r| r["id"] == "needs-key")
+                .and_then(|r| r["health"]["error"].as_str().map(str::to_owned));
+            if let Some(error) = error.filter(|_| host.publication().settled) {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(error, "The service refused key [hidden value] (401)");
+        thread::sleep(Duration::from_millis(100));
+        let toasts = host.take_toasts();
+        assert!(
+            toasts.contains(&"Signed in with [hidden value]".to_owned()),
+            "{toasts:?}"
+        );
+        let state = kernel.state();
+        for (what, seen) in [
+            ("records", format!("{:?}", host.records())),
+            ("toasts", format!("{toasts:?}")),
+            ("publication", format!("{:?}", host.publication())),
+            ("saved entries", format!("{:?}", state.extensions)),
+            ("registries", format!("{:?}", state.registries)),
+        ] {
+            assert!(!seen.contains(SECRET), "the value is in the {what}");
+        }
         drop(host);
         drop(actor);
     }
