@@ -1207,6 +1207,7 @@ fn corpus_render_parity() {
         let renditions = tempdir_guard(&p.name);
         let mut resolver = pm_render::MapResolver {
             paths: p.resolver.paths.clone(),
+            ..Default::default()
         };
         if video {
             // Media reached without an asset record (generated corpus clips).
