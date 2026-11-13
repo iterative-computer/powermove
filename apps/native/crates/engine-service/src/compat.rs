@@ -510,8 +510,11 @@ fn process_started() -> u128 {
 pub struct CompatStore {
     answers: Mutex<Answers>,
     sink: Mutex<Option<CompatSink>>,
-    /// Redraws the viewers when answers land.
+    /// Redraws the viewers that wait for answers when answers land.
     redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Redraws every viewer of the document when overrides start or stop
+    /// answering: each of its pictures is another one.
+    rewrapped: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Redraws again when each unavailable need's backoff ends.
     wakes: Wakes,
     /// The code the wrappers come from (`set_code`); 0 while unknown.
@@ -561,7 +564,7 @@ impl CompatStore {
         let changed = answers.producing != producing;
         answers.producing = producing;
         drop(answers);
-        if changed && let Some(redraw) = self.redraw.lock().unwrap().clone() {
+        if changed && let Some(redraw) = self.rewrapped.lock().unwrap().clone() {
             redraw();
         }
     }
@@ -577,6 +580,9 @@ impl CompatStore {
     }
     pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
         *self.redraw.lock().unwrap() = Some(redraw);
+    }
+    pub(crate) fn set_rewrapped(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
+        *self.rewrapped.lock().unwrap() = Some(redraw);
     }
     /// One frame of the open composition, in ticks (0: don't ask ahead).
     pub fn set_frame(&self, ticks: i64) {
@@ -816,10 +822,14 @@ impl CompatStore {
 #[derive(Default)]
 pub struct CompatStores {
     stores: Mutex<HashMap<u64, Arc<CompatStore>>>,
-    redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    redraw: Mutex<Option<Arc<Redrawn>>>,
 }
+/// What a document's store asks of its viewers (`doc_id`; `true`: its
+/// overrides started or stopped answering, so every picture of it is
+/// drawn again; `false`: answers landed, for the pictures waiting on them).
+pub(crate) type Redrawn = dyn Fn(u64, bool) + Send + Sync;
 impl CompatStores {
-    pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
+    pub(crate) fn set_redraw(&self, redraw: Arc<Redrawn>) {
         *self.redraw.lock().unwrap() = Some(redraw);
     }
     /// The document's store, made on first use.
@@ -831,7 +841,9 @@ impl CompatStores {
             .or_insert_with(|| {
                 let store = Arc::new(CompatStore::default());
                 if let Some(redraw) = self.redraw.lock().unwrap().clone() {
-                    store.set_redraw(redraw);
+                    let answers = redraw.clone();
+                    store.set_redraw(Arc::new(move || answers(doc_id, false)));
+                    store.set_rewrapped(Arc::new(move || redraw(doc_id, true)));
                 }
                 store
             })

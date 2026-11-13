@@ -293,6 +293,11 @@ pub struct FrameReport {
     pub scale: f64,
     /// A video layer showed its nearest decoded frame.
     pub stand_ins: bool,
+    /// The final picture of its time: a capture, a paused viewer's settled
+    /// picture, or the rendered frame on disk. Every other frame is a
+    /// preview (also one at the composition's own size and Full quality):
+    /// whoever takes a viewer's picture for the delivered one asks this.
+    pub settled: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
@@ -421,6 +426,9 @@ struct View {
     skim_rate: pm_protocol::common::PlaybackRate,
     /// The skimmer moved since the worker last looked.
     skim_moved: bool,
+    /// Override answers of its document landed since the worker last
+    /// looked.
+    answers: bool,
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
@@ -1144,14 +1152,20 @@ impl EngineService {
                 true
             })
         });
-        // Answers that land redraw every viewer, as a font change does.
+        // Answers that land redraw their document's viewers that wait for
+        // them (the worker knows which: `View::answers`); overrides that
+        // start or stop answering redraw every viewer of the document.
+        // Another document's viewers are never drawn again for them.
         let compat = Arc::new(compat::CompatStores::default());
         let redraw = Arc::downgrade(&shared);
-        compat.set_redraw(Arc::new(move || {
+        compat.set_redraw(Arc::new(move |doc_id, every| {
             if let Some(shared) = redraw.upgrade() {
                 let mut state = shared.state.lock().unwrap();
                 for v in state.views.values_mut() {
-                    v.dirty = true;
+                    if v.stamp.doc_id == doc_id {
+                        v.answers = true;
+                        v.dirty |= every;
+                    }
                 }
                 drop(state);
                 shared.wake.try_send(()).ok();
@@ -1298,6 +1312,7 @@ impl EngineService {
                 skim_input: None,
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
                 skim_moved: false,
+                answers: false,
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
@@ -1464,6 +1479,8 @@ struct Flight {
     stamp: Stamp,
     moves: u64,
     spec: FrameSpec,
+    /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
+    settled: bool,
     submission: render::Submission,
     input: Option<f64>,
     audio_host: Option<f64>,
@@ -2138,6 +2155,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     moment: f.spec.moment,
                     scale: f.spec.scale,
                     stand_ins: f.submission.stand_ins,
+                    settled: (f.settled || t.disk == 2) && !f.submission.stand_ins,
                     cache_hit: t.cache_hit,
                     gpu_ok: f.submission.command.status()
                         == metal::MTLCommandBufferStatus::Completed,
@@ -2358,12 +2376,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         let mut ids: Vec<_> = state.views.keys().copied().collect();
         ids.sort_by_key(|id| (*id <= cursor, *id));
         let mut ask = None::<SettleAsk>;
-        // Viewers whose clocks run.
-        let running: Vec<u64> = runtime
-            .iter()
-            .filter(|(_, r)| r.transport.running())
-            .map(|(id, _)| *id)
-            .collect();
         for id in ids {
             let v = state.views.get_mut(&id).unwrap();
             let r = runtime.entry(id).or_insert_with(|| {
@@ -2547,20 +2559,36 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 bump_site(line!(), "");
                 v.dirty = true;
             }
+            // Override answers landed for this viewer's document. A picture
+            // that waits for them (refused, drawn with a stand-in, or not
+            // drawn yet) is drawn again; a whole one stays as it is: its
+            // answers were all there, and drawing it again took the worker
+            // from a viewer that plays. A settled picture that waited for
+            // them is asked for now.
+            if std::mem::take(&mut v.answers) {
+                let whole = r.waiting_since.is_none()
+                    && r.stand_in.is_none()
+                    && v.status.frame.as_ref().is_some_and(|f| f.stamp == v.stamp);
+                v.dirty |= !whole;
+                if let Some((owed, at)) = r.settle_at.filter(|_| whole) {
+                    r.settle_at = Some((owed, at.min(now)));
+                }
+            }
             // The paused picture has been on screen for the settle delay:
             // its settled picture is asked for, and drawn off this thread
             // while the preview stays up. A newer picture of this viewer
-            // settles on its own; its slices leave every viewer's pictures
-            // the GPU first (`settle::gate`).
+            // settles on its own. Other viewers never put it off: its
+            // slices leave their pictures the GPU first and a playing
+            // viewer's frames their room (`settle::gate`), each held for a
+            // bounded time, so it settles in bounded time whatever they do.
             if let Some((owed, at)) = r.settle_at
                 && now >= at
             {
                 let rests = v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub;
                 if owed != v.stamp || r.transport.running() || !rests {
                     r.settle_at = None;
-                } else if v.dirty || running.iter().any(|other| *other != id) {
-                    // Its preview is being drawn again first, or another
-                    // viewer plays.
+                } else if v.dirty {
+                    // Its preview is being drawn again first.
                     r.settle_at = Some((owed, now + policy::SETTLE_IDLE_SECONDS));
                 } else if settling.is_some() || ask.is_some() {
                     // One settled picture at a time: this one is next.
@@ -3018,6 +3046,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             stamp,
                             moves,
                             spec,
+                            settled: spec.final_picture(&scene),
                             submission: s,
                             input,
                             audio_host,
@@ -4299,14 +4328,25 @@ mod worker_tests {
         stop.join().unwrap();
     }
 
-    /// A settled picture gives way to another viewer: while one viewer
-    /// plays, the paused one beside it keeps its preview, and settles once
-    /// the other has stopped.
+    /// A paused viewer settles while another plays, in bounded time: its
+    /// settled picture is drawn off the worker in slices that leave the
+    /// playing viewer's frames their room, so neither waits for the other
+    /// to stop. Its preview says it is not the final picture; the settled
+    /// one says it is.
     #[test]
-    fn a_settled_picture_waits_while_another_viewer_plays() {
+    fn a_paused_viewer_settles_while_another_plays() {
+        use pm_protocol::clock::TransportState;
         let service =
             EngineService::start(pm_gpu::Gpu::new("settle-other-viewer-test").unwrap()).unwrap();
         let playing = shapes_viewer(&service, None);
+        playing
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
         playing
             .command(TransportCommand::Play {
                 rate: pm_protocol::common::PlaybackRate::NORMAL,
@@ -4318,26 +4358,97 @@ mod worker_tests {
                 .is_some_and(|f| f.moment == Moment::Playing)
         });
         let paused = shapes_viewer(&service, None);
-        let settled = || {
+        let preview = wait_for(&paused, "the paused viewer's picture", |s| {
+            s.frame.is_some()
+        });
+        assert!(
+            !preview.frame.unwrap().settled,
+            "a preview is not the final picture"
+        );
+        let shown_before = playing.status().presented;
+        let asked = std::time::Instant::now();
+        let settled = wait_for(&paused, "its settled picture while the other plays", |s| {
+            s.frame.as_ref().is_some_and(|f| f.settled && f.scale == 4.)
+        });
+        assert!(settled.frame.unwrap().settled);
+        // Bounded: the settle delay, the picture itself, and at most a hold
+        // per slice; never "once the other stops".
+        assert!(
+            asked.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            asked.elapsed()
+        );
+        let other = playing.status();
+        assert_eq!(
+            other.clock.map(|c| c.state),
+            Some(TransportState::Playing),
+            "the other viewer played throughout"
+        );
+        assert!(
+            other.presented > shown_before,
+            "the playing viewer kept presenting"
+        );
+    }
+
+    /// Override answers landing redraw the viewers of their own document
+    /// that wait for them. A whole picture of another document (a second
+    /// project window, paused) is not drawn again for them: each redraw of
+    /// it took the worker from the viewer that plays.
+    #[test]
+    fn override_answers_redraw_only_the_viewers_that_wait_for_them() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("answers-redraw-test").unwrap()).unwrap();
+        let other = shapes_viewer(&service, None);
+        wait_for(&other, "the other project's settled picture", |s| {
+            s.frame.as_ref().is_some_and(|f| f.settled)
+        });
+        let other_doc = other.stamp().unwrap().doc_id;
+        let drawn = |doc: u64| {
             service
                 .shared
-                .settling
+                .drawn
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(viewer, ..)| *viewer == paused.id)
+                .filter(|(stamp, ..)| stamp.doc_id == doc)
                 .count()
         };
-        wait_for(&paused, "the paused viewer's picture", |s| {
-            s.frame.is_some()
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
         });
-        std::thread::sleep(Duration::from_secs_f64(3. * policy::SETTLE_IDLE_SECONDS));
-        assert_eq!(settled(), 0, "settled while the other viewer played");
-        playing.command(TransportCommand::Pause).unwrap();
-        wait_for(
-            &paused,
-            "its settled picture once the other stopped",
-            |_| settled() > 0,
+        let (store, asked) = overridden(&service, &v);
+        let time = seconds(2.);
+        v.command(TransportCommand::Seek {
+            time,
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let before = drawn(other_doc);
+        // Answered until its picture is drawn (each batch redraws).
+        wait_for(&v, "the picture its answers were waited for", |s| {
+            let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+            if !needs.is_empty() {
+                store.answer_all(
+                    1,
+                    1,
+                    needs
+                        .into_iter()
+                        .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                        .collect(),
+                );
+            }
+            s.frame.as_ref().is_some_and(|f| f.time == time)
+        });
+        assert_eq!(
+            drawn(other_doc),
+            before,
+            "another project's whole picture was drawn again for these answers"
         );
     }
 
