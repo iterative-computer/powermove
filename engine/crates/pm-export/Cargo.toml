@@ -121,6 +121,10 @@ required-features = ["engine"]
 name = "audio_onset"
 required-features = ["engine"]
 
+[[test]]
+name = "prores_delivery"
+required-features = ["engine"]
+
 [[example]]
 name = "throughput"
 required-features = ["engine"]
