@@ -545,8 +545,10 @@ fn actor_save_handoff_keeps_session_generation_and_file_lock() {
     use pm_kernel::session::{SessionSource, ShellCall, ShellReply};
     let root = std::env::temp_dir().join(pm_kernel::new_id("pm-mcp-actor-save"));
     std::fs::create_dir_all(&root).unwrap();
+    let lock_root = root.join("locks");
     let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
         journal_root: Some(root.join("journals")),
+        lock_root: Some(lock_root.clone()),
         ..Default::default()
     });
     let kernel = actor.handle();
@@ -588,16 +590,16 @@ fn actor_save_handoff_keeps_session_generation_and_file_lock() {
             ..
         }
     ));
-    assert!(
-        pm_kernel::locks::FileLock::acquire(&pm_kernel::locks::project_lock_path(&path)).is_err()
-    );
+    assert!(pm_kernel::locks::lock_project(&lock_root, &path).is_err());
     assert!(matches!(
         block_on(host.save(session.clone())).unwrap(),
         ShellReply::Saved { .. }
     ));
+    assert!(pm_kernel::locks::lock_project(&lock_root, &path).is_err());
     block_on(kernel.shell(ShellCall::Close(session.clone())))
         .unwrap()
         .unwrap();
+    drop(pm_kernel::locks::lock_project(&lock_root, &path).unwrap());
     assert!(
         block_on(host.save(session)).is_err(),
         "stale session must not save"
