@@ -34,6 +34,26 @@ pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
     (!interp.is_empty()).then_some(interp)
 }
 
+/// An asset's interpretation as it applies to a converted copy of its
+/// original (a proxy or optimized media). Interpret Footage describes the
+/// original file. A copy of a Y′CbCr original holds the original's codes, so
+/// every member applies to it as it stands. A copy of an R′G′B′ original was
+/// converted to Y′CbCr by its maker, which chose the matrix and range and
+/// tagged the copy with them: the asset's matrix, range and chroma siting do
+/// nothing on the original and would misread the copy, so the copy keeps its
+/// own. An original that can't be read is taken as Y′CbCr, what cameras and
+/// editors write.
+pub fn for_copy(mut interp: Interpretation, original: &std::path::Path) -> Option<Interpretation> {
+    if (interp.matrix.is_some() || interp.range.is_some() || interp.siting.is_some())
+        && crate::media::stores_rgb(original) == Some(true)
+    {
+        interp.matrix = None;
+        interp.range = None;
+        interp.siting = None;
+    }
+    (!interp.is_empty()).then_some(interp)
+}
+
 /// Which reading of its file's timestamps an asset's stored times address
 /// (`pm_media::clip`): the record's `timing` member.
 pub fn clip_timing(record: Option<&pm_model::Node>) -> ClipTiming {

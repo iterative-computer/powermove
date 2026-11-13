@@ -1436,6 +1436,22 @@ impl DiskFrames {
         })
     }
 
+    /// The scene the open composition's rendered frames belong to: the
+    /// viewer's own, for reading them back through a [`crate::Headless`].
+    pub fn observed_scene(&self) -> Option<Scene> {
+        let state = self.inner.state.lock().unwrap();
+        Some(state.frames.as_ref()?.source.scene.clone())
+    }
+
+    /// `scene`'s rendered frame at `time` as playback reads it (RGBA half
+    /// floats, row by row), waiting up to ten seconds for the read.
+    pub fn stored_frame(&self, scene: &Scene, time: Ticks) -> Option<Arc<Vec<u8>>> {
+        match self.read_within(scene, time, Duration::from_secs(10)) {
+            Read::Frame(_, bytes, _) => Some(bytes),
+            Read::Late(_) | Read::Absent => None,
+        }
+    }
+
     /// The media files the open composition's rendered frames are drawn
     /// from, by asset.
     pub fn rendered_from(&self) -> Option<BTreeMap<String, PathBuf>> {
@@ -1769,6 +1785,7 @@ fn fill_request(
         document: pm_model::json::to_canonical_string(&document),
         originals: source.scene.media.paths.clone(),
         proxies: Default::default(),
+        copies_of: source.scene.media.originals.clone(),
         destination: dir,
         saving_app_version: None,
         resources: crate::resources::ResourceSnapshot {
