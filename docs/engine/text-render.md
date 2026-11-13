@@ -72,6 +72,8 @@ Synthesized bold uses its stroked outline's geometric A8 coverage and the
 same mask preblend, matching Skia's path-generated strikes. CoreGraphics font
 dilation does not apply to that path. Its cache also keys the source scale,
 since fake-bold width is computed before the device transform.
+Legacy typography metrics also measure synthesized bold and italic on the
+canonical 64px path, so recorded font anchors compare the same styled bounds.
 
 Color glyphs, strokes, large or transformed glyph strikes
 retain their existing painters. `TextWeight::Exact` and level 2 retain exact
