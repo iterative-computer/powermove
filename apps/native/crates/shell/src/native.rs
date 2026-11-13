@@ -2233,6 +2233,15 @@ impl Host {
                             return event.as_ptr();
                         }
                     }
+                    // Settings › Shortcuts is taking a key: it comes from
+                    // whichever of the app's windows is key (Settings is its own).
+                    if e.r#type() == NSEventType::KeyDown && host.borrow().recording {
+                        let key = chord(e);
+                        let mut h = host.borrow_mut();
+                        h.recording = false;
+                        h.send_command("shortcuts.recorded", vec![serde_json::json!(key)]);
+                        return std::ptr::null_mut();
+                    }
                     if e.windowNumber() != window.windowNumber() {
                         return event.as_ptr();
                     }
@@ -2246,12 +2255,6 @@ impl Host {
                         return event.as_ptr();
                     }
                     let chord = chord(e);
-                    if e.r#type() == NSEventType::KeyDown && host.borrow().recording {
-                        let mut h = host.borrow_mut();
-                        h.recording = false;
-                        h.send_command("shortcuts.recorded", vec![serde_json::json!(chord)]);
-                        return std::ptr::null_mut();
-                    }
                     if e.r#type() == NSEventType::KeyDown {
                         if matches!(
                             chord.as_str(),
