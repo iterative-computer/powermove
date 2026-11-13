@@ -1,4 +1,10 @@
 /** Small original panoramas with values above 1, no external assets. */
+export function hdrAreaLightPanorama():Uint8Array<ArrayBuffer>{
+  const width=128,height=64,bytes=hdrPanorama(width,height),offset=bytes.length-width*height*4;
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++)
+    bytes.set(x>=78&&x<90&&y>=42&&y<50?[128,128,128,134]:[1,1,1,129],offset+(y*width+x)*4);
+  return bytes;
+}
 export function hdrPanorama(width = 128, height = 64): Uint8Array<ArrayBuffer> {
   const header = new TextEncoder().encode(`#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y ${height} +X ${width}\n`);
   const out = new Uint8Array(header.length + width * height * 4); out.set(header);

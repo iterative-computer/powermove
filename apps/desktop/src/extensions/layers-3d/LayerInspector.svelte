@@ -39,7 +39,7 @@
     <Row {api} label="Type"><SelectField {api} get={()=>light.type} options={LIGHT_TYPES.map(t=>({v:t.id,label:t.label}))} edit={structural('update_light','type','Light type')} label="Light type" /></Row>
     {#if light.type==='environment'}<Row {api} label="Source"><SelectField {api} get={()=>light.map ?? null} options={environmentOptions} edit={structural('update_light','map','Environment source')} onChange={(v:unknown)=>{if(v==='__import__'){void chooseEnvironment(api,layerId);return false;}}} label="Source" /></Row>{/if}
     {#each lightFields(light.type).filter(f=>!['x','y','z'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`light.${field.key}`} channel={value(light,field.key)} />{/each}
-    {#if light.type!=='environment'}<Row {api} label="Cast shadows"><ToggleField {api} get={()=>light.castShadow} edit={structural('update_light','castShadow','Cast shadows')} label="Cast shadows" /></Row>{/if}
+    <Row {api} label="Cast shadows"><ToggleField {api} get={()=>light.castShadow} edit={structural('update_light','castShadow','Cast shadows')} label="Cast shadows" /></Row>
   {:else if camera}
     <Section {api} title="Camera" />
     <Row {api} label="Projection"><SelectField {api} get={()=>camera.projection} options={[{v:'perspective',label:'Perspective'},{v:'orthographic',label:'Orthographic'}]} edit={structural('set_camera','projection','Camera projection')} label="Projection" /></Row>
