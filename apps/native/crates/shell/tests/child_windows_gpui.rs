@@ -10,15 +10,19 @@ fn main() {}
 /// GPUI's real open path, as the app opens the Agent popover: a PopUp asked to
 /// show and take focus while the app is inactive stays off screen, attached to
 /// the window that asked, through its activate path too, and never shows once
-/// that window closed. Activation is prohibited, as in the shell's smoke mode;
-/// the parent is never shown. Exits the process when done.
+/// that window closed. A sheet (a Dialog on its window, GPUI's own prompt)
+/// asked for while inactive begins on nothing and moves no window: it waits
+/// for activation and is dropped once its window closed. Activation is
+/// prohibited, as in the shell's smoke mode; the parent is never shown.
+/// Exits the process when done.
 #[cfg(target_os = "macos")]
 fn gpui_open_path() {
+    use gpui::PromptLevel;
     use gpui::{
         AppContext as _, Application, Bounds, Context, IntoElement, MacActivationPolicy, Render,
         Window, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
     };
-    use gpui_macos::child_window::{follows_policy, is_pending, show_pending};
+    use gpui_macos::child_window::{follows_policy, is_pending, sheet_pending, show_pending};
     use objc2_app_kit::{NSView, NSWindow};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::{rc::Rc, time::Duration};
@@ -75,6 +79,27 @@ fn gpui_open_path() {
                     .is_some_and(|p| std::ptr::eq(&*p, &*parent_ns)),
                 "a child of the window that asked"
             );
+            // A sheet asked for while inactive waits, attached to nothing.
+            let mut options = WindowOptions {
+                kind: WindowKind::Dialog,
+                show: true,
+                focus: true,
+                window_bounds: bounds,
+                ..Default::default()
+            };
+            options.parent = Some(parent.into());
+            let dialog = cx.open_window(options, |_, cx| cx.new(|_| Empty)).unwrap();
+            let dialog_ns = dialog.update(cx, |_, w, _| native(w)).unwrap();
+            assert!(!dialog_ns.isVisible(), "a sheet shows nothing while inactive");
+            assert!(dialog_ns.sheetParent().is_none(), "it is begun on nothing");
+            assert!(parent_ns.attachedSheet().is_none());
+            assert!(!parent_ns.isVisible(), "its window was not ordered in");
+            assert!(sheet_pending(&parent_ns), "it waits for the app to become active");
+            let answer = popup
+                .update(cx, |_, w, cx| {
+                    w.prompt(PromptLevel::Info, "Question", None, &["OK"], cx)
+                })
+                .unwrap();
             popup.update(cx, |_, w, _| w.activate()).unwrap();
             cx.spawn(async move |cx| {
                 cx.background_executor()
@@ -82,6 +107,11 @@ fn gpui_open_path() {
                     .await;
                 assert!(!popup_ns.isVisible(), "activate shows nothing while inactive");
                 assert!(is_pending(&popup_ns));
+                assert!(
+                    popup_ns.attachedSheet().is_none() && sheet_pending(&popup_ns),
+                    "GPUI's prompt waits too"
+                );
+                assert!(!dialog_ns.isVisible() && sheet_pending(&parent_ns));
                 cx.update(|cx| {
                     parent.update(cx, |_, w, _| w.remove_window()).unwrap();
                 });
@@ -93,7 +123,19 @@ fn gpui_open_path() {
                     !popup_ns.isVisible(),
                     "its window closed while it waited: it stays hidden"
                 );
-                println!("child_windows: GPUI's open and activate keep a pop-up off screen while inactive");
+                assert!(
+                    !dialog_ns.isVisible() && !sheet_pending(&parent_ns),
+                    "a sheet whose window closed is dropped"
+                );
+                assert!(
+                    !sheet_pending(&popup_ns),
+                    "the prompt on a hidden window is dropped"
+                );
+                assert!(
+                    answer.await.is_err(),
+                    "a dropped prompt is cancelled, not answered"
+                );
+                println!("child_windows: GPUI's open and activate keep a pop-up off screen while inactive, and a dialog sheet and a prompt wait for activation");
                 std::process::exit(0);
             })
             .detach();

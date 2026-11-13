@@ -39,7 +39,6 @@ export function frame(patch: Partial<TimelineFrame> = {}): TimelineFrame {
     hasComposition: true,
     mode: "Layers",
     view: "DopeSheet",
-    graphEmpty: true,
     playing: false,
     snapping: true,
     timecode: "00:00:04:15",
@@ -139,11 +138,10 @@ export const states: Record<string, () => TimelineFrame> = {
         ),
       },
     }),
-  "graph-empty": () => frame({ view: "Combined", graphEmpty: true }),
+  "graph-empty": () => frame({ view: "Combined" }),
   "graph-selected": () =>
     frame({
       view: "Graph",
-      graphEmpty: false,
       feedback: {
         graph: {
           focusedCurve: ["headline", "opacity"],

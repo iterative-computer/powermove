@@ -134,7 +134,11 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.field", "Value well height inside a row"),
     (
         "metrics.value_column",
-        "Inspector value column width shared by every row",
+        "Least width of an inspector row's value column",
+    ),
+    (
+        "metrics.label_column",
+        "Most an inspector row's label takes before its value",
     ),
     ("metrics.keyframe", "Keyframe diamond size"),
     (

@@ -1,7 +1,7 @@
 //! Every NSAlert the app shows: its copy, its buttons and their keys, and the
 //! sheet that answers with the chosen button's action. Closing or aborting a
 //! sheet answers `None`, so a dismissed alert never chooses anything.
-use objc2::{MainThreadMarker, rc::Retained};
+use objc2::{MainThreadMarker, Message, rc::Retained};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSButtonCell, NSEventModifierFlags,
     NSModalResponse, NSWindow,
@@ -139,31 +139,50 @@ impl<A: Clone + 'static> Alert<A> {
         let retained: Retained<NSAlert> = native.clone();
         let sheet = native.window();
         if self.notice {
-            NOTICES.with(|n| n.borrow_mut().push(sheet.clone()));
+            NOTICES.with(|n| n.borrow_mut().push((sheet.clone(), window.retain())));
         }
         let done = block2::RcBlock::new(move |response: NSModalResponse| {
             let _keep_alive = &retained;
-            NOTICES.with(|n| n.borrow_mut().retain(|w| !std::ptr::eq(&**w, &*sheet)));
+            NOTICES.with(|n| n.borrow_mut().retain(|(w, _)| !std::ptr::eq(&**w, &*sheet)));
             let _ = tx.try_send(chosen(&actions, response));
         });
-        native.beginSheetModalForWindow_completionHandler(window, Some(&done));
+        // Only while the app is active (a sheet orders its window front).
+        let (on, shown) = (window.retain(), native.clone());
+        gpui_macos::child_window::sheet(window, &native.window(), move || {
+            shown.beginSheetModalForWindow_completionHandler(&on, Some(&done));
+        });
         rx
     }
 }
 
 thread_local! {
-    /// Sheet windows of alerts that ask nothing (`Alert::notice`).
-    static NOTICES: std::cell::RefCell<Vec<Retained<objc2_app_kit::NSWindow>>> =
+    /// Sheet windows of alerts that ask nothing (`Alert::notice`), and the
+    /// windows they are for.
+    static NOTICES: std::cell::RefCell<Vec<(Retained<NSWindow>, Retained<NSWindow>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Ends `window`'s sheet when it is an alert that asks nothing, as if
 /// dismissed; returns whether the window is now free of sheets.
 pub fn dismiss_notice(window: &NSWindow) -> bool {
+    // A notice on it still waiting for the app to become active never shows.
+    let waiting: Vec<_> = NOTICES.with(|n| {
+        let mut n = n.borrow_mut();
+        let (on, other) = std::mem::take(&mut *n)
+            .into_iter()
+            .partition(|(sheet, parent)| {
+                std::ptr::eq(&**parent, window) && sheet.sheetParent().is_none()
+            });
+        *n = other;
+        on
+    });
+    for (notice, _) in &waiting {
+        gpui_macos::child_window::forget_sheet(notice);
+    }
     let Some(sheet) = window.attachedSheet() else {
-        return true;
+        return !gpui_macos::child_window::sheet_pending(window);
     };
-    let notice = NOTICES.with(|n| n.borrow().iter().any(|w| std::ptr::eq(&**w, &*sheet)));
+    let notice = NOTICES.with(|n| n.borrow().iter().any(|(w, _)| std::ptr::eq(&**w, &*sheet)));
     if notice {
         window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
     }
